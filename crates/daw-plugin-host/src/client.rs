@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::os::fd::AsFd;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -13,13 +14,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use daw_core::event::{Event, EventKind, ParamId};
+use daw_core::event::{Event, EventKind, EventList, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance};
 use daw_plugins::Scanner;
 
 use crate::child::HOST_ARG;
-use crate::protocol::{InstanceInfo, Reply, Request, Response, read_frame, write_frame};
+use crate::protocol::{InstanceInfo, Reply, Request, Response, blob_fits, read_frame, write_frame};
 use crate::shm::{
     self, DONE, EVENT_CAPACITY, FLAG_RESET, Layout, REQUEST, Shm, decode_event, encode_event,
     futex_wait, futex_wake, shm_dir,
@@ -159,6 +160,8 @@ struct Shared {
     pid: AtomicU32,
     late_cycles: AtomicU64,
     on_crash: Option<CrashHook>,
+    /// The last generation the crash hook was called for.
+    notified: AtomicU64,
 }
 
 impl Shared {
@@ -167,20 +170,29 @@ impl Shared {
     }
 
     /// Marks host `generation` as crashed, unless a newer host has replaced it or it already
-    /// crashed. Returns whether this call marked it.
-    fn crash(self: &Arc<Self>, generation: u64, reason: CrashReason) -> bool {
-        {
-            let mut current = self.reason();
-            if self.generation.load(Ordering::Acquire) != generation || current.is_some() {
-                return false;
-            }
-            *current = Some(reason);
-            self.crashed.store(true, Ordering::Release);
+    /// crashed. Returns whether this call marked it. Whoever marks a crash also kills the
+    /// host, so the watchdog sees it exit and calls the hook.
+    fn crash(&self, generation: u64, reason: CrashReason) -> bool {
+        let mut current = self.reason();
+        if self.generation.load(Ordering::Acquire) != generation || current.is_some() {
+            return false;
         }
-        if let Some(hook) = &self.on_crash {
+        *current = Some(reason);
+        self.crashed.store(true, Ordering::Release);
+        true
+    }
+
+    /// Calls the crash hook once for `generation`, if it crashed and is still current. Only the
+    /// watchdog calls this, so the hook never runs on a thread that holds the instance.
+    fn notify(self: &Arc<Self>, generation: u64) {
+        let current = self.generation.load(Ordering::Acquire) == generation;
+        if current
+            && self.crashed.load(Ordering::Acquire)
+            && self.notified.swap(generation, Ordering::AcqRel) != generation
+            && let Some(hook) = &self.on_crash
+        {
             hook(SandboxMonitor(self.clone()));
         }
-        true
     }
 }
 
@@ -258,7 +270,9 @@ struct RemoveOnDrop(PathBuf);
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if std::fs::remove_file(&self.0).is_err() {
+            let _ = std::fs::remove_dir(&self.0);
+        }
     }
 }
 
@@ -287,12 +301,20 @@ impl Link {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let load = |e: String| PluginError::Load(e);
 
-        let socket = RemoveOnDrop(socket_dir().join(format!(
-            "kadence-plugin-{}-{}.sock",
+        // The socket lives in a directory only we can enter, so no other user can connect to
+        // it before our host does.
+        let dir = socket_dir().join(format!(
+            "kadence-plugin-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
-        )));
-        let _ = std::fs::remove_file(&socket.0);
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| load(format!("cannot create the host socket directory: {e}")))?;
+        let dir = RemoveOnDrop(dir);
+        let socket = RemoveOnDrop(dir.0.join("host.sock"));
         let listener = UnixListener::bind(&socket.0)
             .map_err(|e| load(format!("cannot create the host socket: {e}")))?;
         listener
@@ -342,6 +364,7 @@ impl Link {
                 }
             };
             drop(socket);
+            drop(dir);
             control
                 .set_nonblocking(false)
                 .map_err(|e| load(e.to_string()))?;
@@ -500,11 +523,13 @@ fn watchdog(
             Ok(Some(status)) => {
                 if !stop.load(Ordering::Acquire) {
                     shared.crash(generation, CrashReason::Exited(status.to_string()));
+                    shared.notify(generation);
                 }
                 return;
             }
             Err(e) => {
                 shared.crash(generation, CrashReason::Lost(e.to_string()));
+                shared.notify(generation);
                 return;
             }
         }
@@ -518,7 +543,10 @@ fn watchdog(
         }
         let h = block.as_ref().expect("set above").header();
         let completed = h.completed.load(Ordering::Relaxed);
-        if h.state.load(Ordering::Acquire) == REQUEST && completed == last_completed {
+        let stalled = h.state.load(Ordering::Acquire) == REQUEST
+            && completed == last_completed
+            && h.main_busy.load(Ordering::SeqCst) == 0;
+        if stalled {
             let since = *stalled_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= hang_timeout && shared.crash(generation, CrashReason::Hung) {
                 let _ = locked(child).kill();
@@ -561,11 +589,7 @@ pub struct SandboxedInstance {
     max_frames: u32,
     /// The last state saved from or loaded into the plugin.
     state: Option<Vec<u8>>,
-    tracked: Vec<TrackedParam>,
-    /// Index into `tracked` of the next dirty param to resend after a reload; `None` when
-    /// nothing is pending.
-    resend: Option<usize>,
-    reset_pending: bool,
+    rt: Rt,
 }
 
 impl SandboxedInstance {
@@ -585,6 +609,7 @@ impl SandboxedInstance {
             pid: AtomicU32::new(0),
             late_cycles: AtomicU64::new(0),
             on_crash: config.on_crash.clone(),
+            notified: AtomicU64::new(0),
         });
         let (link, info, latency) = Link::start(&config, &shared, 1, sample_rate, max_frames)?;
         let mut instance = Self {
@@ -599,9 +624,7 @@ impl SandboxedInstance {
             sample_rate,
             max_frames,
             state: None,
-            tracked: Vec::new(),
-            resend: None,
-            reset_pending: false,
+            rt: Rt::new(),
         };
         instance.adopt(&info);
         Ok(instance)
@@ -644,14 +667,16 @@ impl SandboxedInstance {
         };
         self.link = Some(link);
         self.latency = latency;
-        let kept = std::mem::take(&mut self.tracked);
+        let kept = std::mem::take(&mut self.rt.tracked);
         self.adopt(&info);
         for t in kept.into_iter().filter(|t| t.dirty) {
-            if let Ok(i) = self.tracked.binary_search_by_key(&t.id, |p| p.id) {
-                self.tracked[i] = t;
+            if let Ok(i) = self.rt.tracked.binary_search_by_key(&t.id, |p| p.id) {
+                self.rt.tracked[i] = t;
             }
         }
-        self.resend = self.tracked.iter().any(|t| t.dirty).then_some(0);
+        // Events carried for the old host are kept; a late cycle's outputs are gone with it.
+        self.rt.late_pending = false;
+        self.rt.resend = self.rt.tracked.iter().any(|t| t.dirty).then_some(0);
         let restored = match self.state.clone() {
             Some(state) => self
                 .control(Request::LoadState, &state)
@@ -671,7 +696,7 @@ impl SandboxedInstance {
         self.ports = (&info.ports).into();
         self.params = info.params.iter().map(ParamInfo::from).collect();
         self.has_editor = info.has_editor;
-        self.tracked = self
+        self.rt.tracked = self
             .params
             .iter()
             .filter(|p| p.automatable)
@@ -681,8 +706,8 @@ impl SandboxedInstance {
                 dirty: false,
             })
             .collect();
-        self.tracked.sort_by_key(|t| t.id);
-        self.tracked.dedup_by_key(|t| t.id);
+        self.rt.tracked.sort_by_key(|t| t.id);
+        self.rt.tracked.dedup_by_key(|t| t.id);
     }
 
     fn running(&self) -> Option<&Link> {
@@ -719,18 +744,11 @@ impl SandboxedInstance {
         }
     }
 
-    fn track(&mut self, param: ParamId, value: f64) {
-        if let Ok(i) = self.tracked.binary_search_by_key(&param, |t| t.id) {
-            self.tracked[i].value = value;
-            self.tracked[i].dirty = true;
-        }
-    }
-
     fn mark_clean(&mut self) {
-        for t in &mut self.tracked {
+        for t in &mut self.rt.tracked {
             t.dirty = false;
         }
-        self.resend = None;
+        self.rt.resend = None;
     }
 
     fn silence(ctx: &mut ProcessContext, from: usize) {
@@ -747,7 +765,62 @@ enum Cycle {
     Late,
 }
 
-/// Runs frames `offset..offset + n` of `ctx` through the host. Real-time safe.
+/// What the audio path keeps between cycles. Everything is allocated up front.
+struct Rt {
+    tracked: Vec<TrackedParam>,
+    /// Index into `tracked` of the next dirty param to resend after a reload; `None` when
+    /// nothing is pending.
+    resend: Option<usize>,
+    reset_pending: bool,
+    /// Events not delivered yet (the host was busy, or a cycle's block was full). They go
+    /// first in the next cycle, at frame 0, so a note-off is late rather than lost.
+    carry: EventList,
+    /// A cycle missed its deadline. When the host finishes it, its output events are still
+    /// collected; its audio is too late to use.
+    late_pending: bool,
+}
+
+impl Rt {
+    fn new() -> Self {
+        Self {
+            tracked: Vec::new(),
+            resend: None,
+            reset_pending: false,
+            carry: EventList::with_capacity(EVENT_CAPACITY as usize),
+            late_pending: false,
+        }
+    }
+
+    fn track(&mut self, param: ParamId, value: f64) {
+        if let Ok(i) = self.tracked.binary_search_by_key(&param, |t| t.id) {
+            self.tracked[i].value = value;
+            self.tracked[i].dirty = true;
+        }
+    }
+
+    /// Keeps `e` for the next cycle. Real-time safe; drops it only if the carry is full.
+    fn carry(&mut self, mut e: Event) {
+        e.frame = 0;
+        let _ = self.carry.push(e);
+    }
+}
+
+/// Appends the host's output events, frames shifted by `offset`, to `ctx`.
+fn collect_events(shm: &Shm, ctx: &mut ProcessContext, offset: usize) {
+    let h = shm.header();
+    let cap = shm.layout().event_capacity as usize;
+    // SAFETY: the state word is DONE, so the buffers are ours.
+    let records = unsafe { shm.events_out() };
+    for i in 0..(h.events_out.load(Ordering::Relaxed) as usize).min(cap) {
+        if let Some(mut e) = decode_event(shm::record(records, i)) {
+            e.frame = e.frame.saturating_add(offset as u32);
+            let _ = ctx.events_out.push(e);
+        }
+    }
+}
+
+/// Runs frames `offset..offset + n` of `ctx` through the host. On [`Cycle::Late`] this chunk's
+/// events may not have been taken from `events`; the caller carries the rest. Real-time safe.
 #[allow(clippy::too_many_arguments)]
 fn run_cycle(
     shm: &Shm,
@@ -756,19 +829,16 @@ fn run_cycle(
     n: usize,
     last: bool,
     events: &mut std::iter::Peekable<impl Iterator<Item = Event>>,
-    resend: &mut Option<usize>,
-    tracked: &[TrackedParam],
-    reset: &mut bool,
+    rt: &mut Rt,
     timeout: Duration,
 ) -> Cycle {
     let h = shm.header();
-    if h.state.load(Ordering::Acquire) == REQUEST {
-        // Drop this chunk's events so they do not pile up into the next one.
-        while events
-            .next_if(|e| last || (e.frame as usize) < offset + n)
-            .is_some()
-        {}
+    let state = h.state.load(Ordering::Acquire);
+    if state == REQUEST {
         return Cycle::Late;
+    }
+    if std::mem::take(&mut rt.late_pending) && state == DONE {
+        collect_events(shm, ctx, offset);
     }
     let layout = shm.layout();
 
@@ -785,11 +855,21 @@ fn run_cycle(
     let records = unsafe { shm.events_in() };
     let cap = layout.event_capacity as usize;
     let mut count = 0;
-    // Parameter values to restore after a reload go first, a capacity's worth per cycle.
-    if let Some(start) = *resend {
+    // Carried events first; the carry never holds more than a block.
+    for e in rt.carry.iter() {
+        if count < cap {
+            encode_event(e, shm::record(records, count));
+            count += 1;
+        }
+    }
+    let carried = count > 0;
+    rt.carry.clear();
+    // Then parameter values to restore after a reload, at most half a block per cycle so new
+    // events still fit. They wait while carried events are being caught up.
+    if let Some(start) = rt.resend.filter(|_| !carried) {
         let mut i = start;
-        while i < tracked.len() && count < cap {
-            let t = tracked[i];
+        while i < rt.tracked.len() && count < cap / 2 {
+            let t = rt.tracked[i];
             if t.dirty {
                 let e = Event {
                     frame: 0,
@@ -803,13 +883,15 @@ fn run_cycle(
             }
             i += 1;
         }
-        *resend = (i < tracked.len()).then_some(i);
+        rt.resend = (i < rt.tracked.len()).then_some(i);
     }
     while let Some(mut e) = events.next_if(|e| last || (e.frame as usize) < offset + n) {
         if count < cap {
             e.frame = (e.frame as usize).saturating_sub(offset).min(n - 1) as u32;
             encode_event(&e, shm::record(records, count));
             count += 1;
+        } else {
+            rt.carry(e);
         }
     }
     h.events_in.store(count as u32, Ordering::Relaxed);
@@ -822,7 +904,7 @@ fn run_cycle(
     h.bpm.store(t.bpm.to_bits(), Ordering::Relaxed);
     h.sample_rate
         .store(t.sample_rate.to_bits(), Ordering::Relaxed);
-    if std::mem::take(reset) {
+    if std::mem::take(&mut rt.reset_pending) {
         h.flags.fetch_or(FLAG_RESET, Ordering::Relaxed);
     }
 
@@ -836,6 +918,7 @@ fn run_cycle(
         }
         let now = Instant::now();
         if now >= deadline {
+            rt.late_pending = true;
             return Cycle::Late;
         }
         futex_wait(&h.state, state, deadline - now);
@@ -850,14 +933,7 @@ fn run_cycle(
             out.fill(0.0);
         }
     }
-    // SAFETY: as above.
-    let records = unsafe { shm.events_out() };
-    for i in 0..(h.events_out.load(Ordering::Relaxed) as usize).min(cap) {
-        if let Some(mut e) = decode_event(shm::record(records, i)) {
-            e.frame = e.frame.saturating_add(offset as u32);
-            let _ = ctx.events_out.push(e);
-        }
-    }
+    collect_events(shm, ctx, offset);
     Cycle::Done
 }
 
@@ -925,7 +1001,7 @@ impl Node for SandboxedInstance {
         let total = ctx.frames as usize;
         for e in ctx.events_in.iter() {
             if let EventKind::ParamValue { param, value } = e.kind {
-                self.track(param, value);
+                self.rt.track(param, value);
             }
         }
         let Some(link) = self.link.as_ref() else {
@@ -956,15 +1032,16 @@ impl Node for SandboxedInstance {
                 n,
                 last,
                 &mut events,
-                &mut self.resend,
-                &self.tracked,
-                &mut self.reset_pending,
+                &mut self.rt,
                 timeout,
             ) {
                 Cycle::Done => offset += n,
                 Cycle::Late => {
                     self.shared.late_cycles.fetch_add(1, Ordering::Relaxed);
                     Self::silence(ctx, offset);
+                    for e in events.by_ref() {
+                        self.rt.carry(e);
+                    }
                     break;
                 }
             }
@@ -972,7 +1049,7 @@ impl Node for SandboxedInstance {
         // Parameter changes the plugin made (its editor, say) are restored on reload too.
         for e in ctx.events_out.iter().skip(first_out) {
             if let EventKind::ParamValue { param, value } = e.kind {
-                self.track(param, value);
+                self.rt.track(param, value);
             }
         }
     }
@@ -982,7 +1059,7 @@ impl Node for SandboxedInstance {
     }
 
     fn reset(&mut self) {
-        self.reset_pending = true;
+        self.rt.reset_pending = true;
     }
 }
 
@@ -991,19 +1068,19 @@ impl PluginInstance for SandboxedInstance {
         &self.shared.descriptor
     }
 
+    /// The list from when the plugin was loaded, refreshed after `load_state`, so it costs no
+    /// round trip to the host.
     fn params(&self) -> Vec<ParamInfo> {
-        match self.control(Request::Params, &[]) {
-            Ok((Reply::Params(params), _, _)) => params.iter().map(ParamInfo::from).collect(),
-            _ => self.params.clone(),
-        }
+        self.params.clone()
     }
 
+    /// Asks the host, which is a round trip: a UI should not poll this for every frame.
     fn param_value(&self, id: ParamId) -> f64 {
         if let Ok((Reply::Value(v), _, _)) = self.control(Request::ParamValue(id), &[]) {
             return v;
         }
-        if let Ok(i) = self.tracked.binary_search_by_key(&id, |t| t.id) {
-            return self.tracked[i].value;
+        if let Ok(i) = self.rt.tracked.binary_search_by_key(&id, |t| t.id) {
+            return self.rt.tracked[i].value;
         }
         self.params
             .iter()
@@ -1032,6 +1109,12 @@ impl PluginInstance for SandboxedInstance {
 
     /// While the host is down, the state is kept and applied on reload.
     fn load_state(&mut self, data: &[u8]) -> Result<(), PluginError> {
+        if !blob_fits(data.len()) {
+            return Err(PluginError::State(format!(
+                "the plugin state is too large to transfer ({} bytes)",
+                data.len()
+            )));
+        }
         if self.running().is_none() {
             self.state = Some(data.to_vec());
             self.mark_clean();
@@ -1041,6 +1124,10 @@ impl PluginInstance for SandboxedInstance {
         self.state = Some(data.to_vec());
         self.mark_clean();
         self.latency = latency;
+        // Loading state can change the parameter list (a different preset of a modular synth).
+        if let Ok((Reply::Params(params), _, _)) = self.control(Request::Params, &[]) {
+            self.params = params.iter().map(ParamInfo::from).collect();
+        }
         Ok(())
     }
 

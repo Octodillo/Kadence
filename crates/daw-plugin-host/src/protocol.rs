@@ -162,18 +162,23 @@ fn invalid(e: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
+/// Whether a blob of `len` bytes can be sent.
+pub fn blob_fits(len: usize) -> bool {
+    len <= MAX_FRAME
+}
+
 /// Writes one frame.
 pub fn write_frame(mut w: impl Write, msg: &impl Serialize, blob: &[u8]) -> io::Result<()> {
     let json = serde_json::to_vec(msg).map_err(invalid)?;
     if json.len() > MAX_FRAME || blob.len() > MAX_FRAME {
         return Err(invalid("message too large"));
     }
-    let mut buf = Vec::with_capacity(8 + json.len() + blob.len());
-    buf.extend_from_slice(&(json.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(blob.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&json);
-    buf.extend_from_slice(blob);
-    w.write_all(&buf)?;
+    let mut head = Vec::with_capacity(8 + json.len());
+    head.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    head.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+    head.extend_from_slice(&json);
+    w.write_all(&head)?;
+    w.write_all(blob)?;
     w.flush()
 }
 
@@ -243,10 +248,12 @@ impl FrameReader {
         if self.buf.len() < end {
             return Ok(None);
         }
-        let msg = serde_json::from_slice(&self.buf[8..8 + json_len]).map_err(invalid)?;
-        let blob = self.buf[8 + json_len..end].to_vec();
-        self.buf.drain(..end);
-        Ok(Some((msg, blob)))
+        // Move the frame out rather than copying it: state blobs can be large.
+        let rest = self.buf.split_off(end);
+        let mut frame = std::mem::replace(&mut self.buf, rest);
+        let msg = serde_json::from_slice(&frame[8..8 + json_len]).map_err(invalid)?;
+        frame.drain(..8 + json_len);
+        Ok(Some((msg, frame)))
     }
 }
 

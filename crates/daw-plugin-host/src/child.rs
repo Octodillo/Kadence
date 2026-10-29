@@ -17,7 +17,8 @@ use daw_core::time::SampleTime;
 use daw_plugins::PluginRegistry;
 
 use crate::protocol::{
-    FrameReader, InstanceInfo, Reply, Request, Response, WireParam, write_frame,
+    FrameReader, InstanceInfo, Reply, Request, Response, WireError, WireParam, blob_fits,
+    write_frame,
 };
 use crate::shm::{
     self, DONE, FLAG_RESET, MAX_CHANNELS, REQUEST, Shm, decode_event, encode_event, futex_wait,
@@ -52,6 +53,7 @@ pub fn run_host_child(
         eprintln!("daw-plugin-host: {info}");
         std::process::abort();
     }));
+    exit_with_parent();
     let stream = match UnixStream::connect(Path::new(socket)) {
         Ok(s) => s,
         Err(e) => {
@@ -80,6 +82,27 @@ pub fn run_host_child(
     })
 }
 
+/// Exits when the application goes away, even if the main thread is stuck inside the plugin
+/// and never sees the socket close. (`PR_SET_PDEATHSIG` would fire when the application thread
+/// that started us exits, which can be long before the application does.)
+fn exit_with_parent() {
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() };
+    let _ = std::thread::Builder::new()
+        .name("parent-watch".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(200));
+                // SAFETY: as above.
+                if unsafe { libc::getppid() } != parent {
+                    // SAFETY: ends the process without running exit handlers, which could
+                    // block on whatever the stuck plugin holds.
+                    unsafe { libc::_exit(1) };
+                }
+            }
+        });
+}
+
 fn lock(plugin: &SharedPlugin) -> MutexGuard<'_, Option<Box<dyn PluginInstance>>> {
     plugin.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -103,11 +126,18 @@ impl Host<'_> {
             match reader.poll::<Request>(&self.stream) {
                 Ok(Some((request, blob))) => {
                     let shutdown = matches!(request, Request::Shutdown);
-                    let (reply, blob) = if shutdown {
+                    let (mut reply, mut blob) = if shutdown {
                         (Reply::Ok, Vec::new())
                     } else {
                         self.handle(request, &blob)
                     };
+                    if !blob_fits(blob.len()) {
+                        reply = Reply::Err(WireError::State(format!(
+                            "the plugin state is too large to transfer ({} bytes)",
+                            blob.len()
+                        )));
+                        blob = Vec::new();
+                    }
                     let latency = lock(&self.plugin).as_ref().map_or(0, |p| p.latency());
                     write_frame(&self.stream, &Response { latency, reply }, &blob)?;
                     if shutdown {
@@ -129,6 +159,23 @@ impl Host<'_> {
     }
 
     fn handle(&mut self, request: Request, blob: &[u8]) -> (Reply, Vec<u8>) {
+        // Calls that can take long make audio cycles skip (output silence) rather than wait.
+        let slow = matches!(
+            request,
+            Request::SaveState | Request::LoadState | Request::OpenEditor | Request::CloseEditor
+        );
+        let busy = self.audio.as_ref().map(|a| a.shm.clone()).filter(|_| slow);
+        if let Some(shm) = &busy {
+            shm.header().main_busy.store(1, Ordering::SeqCst);
+        }
+        let result = self.handle_inner(request, blob);
+        if let Some(shm) = &busy {
+            shm.header().main_busy.store(0, Ordering::SeqCst);
+        }
+        result
+    }
+
+    fn handle_inner(&mut self, request: Request, blob: &[u8]) -> (Reply, Vec<u8>) {
         let none = Vec::new();
         let result = match request {
             Request::Instantiate {
@@ -331,8 +378,17 @@ fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: 
                 // SAFETY: as above.
                 *slot = unsafe { shm.audio_out(ch, frames) };
             }
-            let mut guard = lock(plugin);
-            match guard.as_mut() {
+            // While the main thread is in a slow call, skip the cycle instead of waiting on it.
+            let mut guard = if h.main_busy.load(Ordering::SeqCst) != 0 {
+                match plugin.try_lock() {
+                    Ok(guard) => Some(guard),
+                    Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+                    Err(std::sync::TryLockError::WouldBlock) => None,
+                }
+            } else {
+                Some(lock(plugin))
+            };
+            match guard.as_mut().and_then(|g| g.as_mut()) {
                 Some(p) => {
                     if flags & FLAG_RESET != 0 {
                         p.reset();

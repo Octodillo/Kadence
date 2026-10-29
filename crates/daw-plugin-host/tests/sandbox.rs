@@ -314,6 +314,8 @@ fn killing_the_host_mid_playback_keeps_us_running_and_reload_restores_it() {
         let crashes = crashes.clone();
         config.on_crash = Some(Arc::new(move |m| {
             assert!(m.is_crashed());
+            // Never on the thread that drives the instance.
+            assert_eq!(std::thread::current().name(), Some("plugin-watchdog"));
             crashes.fetch_add(1, Ordering::SeqCst);
         }));
     }
@@ -434,4 +436,62 @@ fn dropping_the_instance_stops_the_host() {
     // SAFETY: signal 0 only checks whether the process exists.
     let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
     assert!(!alive, "host {pid} still running");
+}
+
+#[test]
+fn events_sent_while_the_host_is_busy_arrive_late_not_never() {
+    let mut config = config();
+    config.process_timeout = Some(Duration::from_millis(20));
+    let mut plugin = instance_with(config);
+    let monitor = plugin.monitor();
+    run(&mut plugin, 64, 0.0, &[]);
+
+    signal(monitor.pid(), libc::SIGSTOP);
+    wait_for("the host to stop", Duration::from_secs(5), || {
+        stopped(monitor.pid())
+    });
+    let off = Event {
+        frame: 5,
+        kind: EventKind::NoteOff {
+            channel: 0,
+            key: 60,
+            velocity: 0.0,
+            note_id: 3,
+        },
+    };
+    let on = Event {
+        frame: 9,
+        kind: EventKind::NoteOn {
+            channel: 0,
+            key: 62,
+            velocity: 1.0,
+            note_id: 4,
+        },
+    };
+    // The first cycle times out with the note-off posted; the second finds the host still
+    // busy and carries the note-on.
+    run(&mut plugin, 64, 0.0, &[off]);
+    run(&mut plugin, 64, 0.0, &[on]);
+    assert_eq!(monitor.late_cycles(), 2);
+    signal(monitor.pid(), libc::SIGCONT);
+
+    let mut seen = Vec::new();
+    for _ in 0..50 {
+        let (_, out) = run(&mut plugin, 64, 0.0, &[]);
+        seen.extend(out);
+        if seen.len() >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let keys: Vec<_> = seen
+        .iter()
+        .filter_map(|e| match e.kind {
+            EventKind::NoteOff { key, .. } | EventKind::NoteOn { key, .. } => Some(key),
+            _ => None,
+        })
+        .collect();
+    assert!(keys.contains(&60), "the note-off came out: {seen:?}");
+    assert!(keys.contains(&62), "the note-on came out: {seen:?}");
+    assert_eq!(monitor.status(), SandboxStatus::Running);
 }

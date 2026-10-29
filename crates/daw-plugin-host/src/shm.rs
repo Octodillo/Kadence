@@ -9,6 +9,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -53,6 +54,10 @@ pub struct Header {
     pub playing: AtomicU32,
     pub events_in: AtomicU32,
     pub events_out: AtomicU32,
+    /// Set by the host while its main thread is in a slow plugin call (state, editor). Audio
+    /// cycles then output silence instead of waiting for it, and the watchdog does not count
+    /// them as a hang.
+    pub main_busy: AtomicU32,
     pub position: AtomicU64,
     /// `f64` bits.
     pub bpm: AtomicU64,
@@ -285,6 +290,7 @@ fn create_unique(dir: &Path) -> io::Result<(File, PathBuf)> {
             .read(true)
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&path)
         {
             Ok(file) => return Ok((file, path)),
