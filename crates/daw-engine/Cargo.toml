@@ -1,0 +1,21 @@
+[package]
+name = "daw-engine"
+description = "Audio graph compiler, real-time processor, transport and offline renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+daw-core.workspace = true
+thiserror.workspace = true
+hound.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
+hound.workspace = true
+
+[lints]
+workspace = true
