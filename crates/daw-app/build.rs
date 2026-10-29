@@ -18,6 +18,9 @@ const QML_FILES: &[&str] = &[
     "qml/Main.qml",
     "qml/ArrangePage.qml",
     "qml/MixPage.qml",
+    "qml/ChannelStrip.qml",
+    "qml/LevelMeter.qml",
+    "qml/GainReductionMeter.qml",
     "qml/EditPage.qml",
     "qml/SettingsPage.qml",
     "qml/AudioSettings.qml",
@@ -55,7 +58,12 @@ fn main() {
     let mut builder = CxxQtBuilder::new_qml_module(
         QmlModule::new("io.github.octodillo.daw").qml_files(QML_FILES.iter().copied()),
     )
-    .files(["src/bridge.rs", "src/ffi.rs", "src/test_helper.rs"])
+    .files([
+        "src/bridge.rs",
+        "src/mixer_bridge.rs",
+        "src/ffi.rs",
+        "src/test_helper.rs",
+    ])
     .qt_module("Gui")
     .qt_module("Widgets")
     .qt_module("Quick")

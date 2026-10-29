@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import QtQuick
+import QtQuick.Controls as QQC2
+import QtQuick.Layouts
+import org.kde.kirigami as Kirigami
+
+import io.github.octodillo.daw
+
+// One mixer channel: inserts, sends, pan, fader with meter, mute and solo.
+Item {
+    id: strip
+
+    required property int index
+    required property string name
+    required property string kind
+    required property double volumeDb
+    required property double pan
+    required property bool muted
+    required property bool soloed
+    required property bool silenced
+    required property list<string> inserts
+    required property bool insertMeters
+    required property list<string> sends
+
+    readonly property bool isMaster: kind === "master"
+    readonly property real leftPeak: Mixer.levels[index * 3] ?? 0
+    readonly property real rightPeak: Mixer.levels[index * 3 + 1] ?? 0
+    readonly property real gainReduction: Mixer.levels[index * 3 + 2] ?? -1
+
+    implicitWidth: Kirigami.Units.gridUnit * 7
+    width: implicitWidth
+
+    function dbText(db: real): string {
+        if (db <= -60) {
+            return i18nc("@label fader at silence", "−∞");
+        }
+        const rounded = Math.round(db * 10) / 10;
+        return i18nc("@label decibels", "%1 dB", (rounded > 0 ? "+" : "") + rounded.toLocaleString(Qt.locale(), "f", 1));
+    }
+
+    function panText(p: real): string {
+        const pct = Math.round(Math.abs(p) * 100);
+        if (pct === 0) {
+            return i18nc("@label pan centre", "C");
+        }
+        return p < 0 ? i18nc("@label pan left, percent", "L%1", pct) : i18nc("@label pan right, percent", "R%1", pct);
+    }
+
+    Rectangle {
+        anchors.fill: parent
+        color: strip.isMaster ? Kirigami.Theme.alternateBackgroundColor : Kirigami.Theme.backgroundColor
+    }
+    Kirigami.Separator {
+        anchors {
+            top: parent.top
+            bottom: parent.bottom
+            right: parent.right
+        }
+    }
+
+    ColumnLayout {
+        anchors {
+            fill: parent
+            margins: Kirigami.Units.smallSpacing
+            rightMargin: Kirigami.Units.smallSpacing + 1
+        }
+        spacing: Kirigami.Units.smallSpacing
+
+        // Name
+        Kirigami.Heading {
+            Layout.fillWidth: true
+            level: 5
+            text: strip.name
+            elide: Text.ElideRight
+            horizontalAlignment: Text.AlignHCenter
+            opacity: strip.silenced ? 0.6 : 1
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            font: Kirigami.Theme.smallFont
+            color: Kirigami.Theme.disabledTextColor
+            text: strip.kind === "bus" ? i18nc("@label strip type", "Bus")
+                : strip.isMaster ? i18nc("@label strip type", "Main output")
+                : i18nc("@label strip type", "Track")
+        }
+
+        // Effects and sends scroll in a box of the same height on every
+        // strip, so pan, faders and buttons line up across the mixer.
+        QQC2.ScrollView {
+            id: slots
+            Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 11
+            Layout.minimumHeight: Kirigami.Units.gridUnit * 4
+            QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
+            contentWidth: availableWidth
+
+            ColumnLayout {
+                width: slots.availableWidth
+                spacing: Kirigami.Units.smallSpacing
+
+                // Inserts
+                Kirigami.ListSectionHeader {
+                    Layout.fillWidth: true
+                    text: i18nc("@title:group effect slots", "Effects")
+                    visible: !strip.isMaster
+                }
+                Repeater {
+                    model: strip.isMaster ? [] : strip.inserts
+                    delegate: RowLayout {
+                        id: insertRow
+                        required property int index
+                        required property string modelData
+                        Layout.fillWidth: true
+                        spacing: 0
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            text: insertRow.modelData
+                            elide: Text.ElideRight
+                            leftPadding: Kirigami.Units.smallSpacing
+                        }
+                        QQC2.ToolButton {
+                            icon.name: "list-remove"
+                            display: QQC2.AbstractButton.IconOnly
+                            text: i18nc("@action:button", "Remove %1", insertRow.modelData)
+                            QQC2.ToolTip.text: text
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                            onClicked: Mixer.removeInsert(strip.index, insertRow.index)
+                        }
+                    }
+                }
+                QQC2.ToolButton {
+                    Layout.fillWidth: true
+                    visible: !strip.isMaster
+                    icon.name: "list-add"
+                    text: i18nc("@action:button", "Add Effect")
+                    onClicked: effectMenu.popup()
+                    QQC2.Menu {
+                        id: effectMenu
+                        Repeater {
+                            model: Mixer.effectNames
+                            delegate: QQC2.MenuItem {
+                                required property int index
+                                required property string modelData
+                                text: modelData
+                                onTriggered: Mixer.addInsert(strip.index, index)
+                            }
+                        }
+                    }
+                }
+                // Gain reduction of the strip's compressor.
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: strip.insertMeters
+                    QQC2.Label {
+                        text: i18nc("@label gain reduction, short", "GR")
+                        font: Kirigami.Theme.smallFont
+                        QQC2.ToolTip.text: i18nc("@info:tooltip", "Gain reduction")
+                        QQC2.ToolTip.visible: grHover.hovered
+                        HoverHandler { id: grHover }
+                    }
+                    GainReductionMeter {
+                        Layout.fillWidth: true
+                        reduction: Math.max(0, strip.gainReduction)
+                    }
+                }
+
+                // Sends
+                Kirigami.ListSectionHeader {
+                    Layout.fillWidth: true
+                    text: i18nc("@title:group", "Sends")
+                    visible: strip.sends.length > 0
+                }
+                Repeater {
+                    model: strip.sends
+                    delegate: ColumnLayout {
+                        id: sendRow
+                        required property int index
+                        required property string modelData
+                        Layout.fillWidth: true
+                        spacing: 0
+                        QQC2.Label {
+                            Layout.fillWidth: true
+                            text: sendRow.modelData
+                            elide: Text.ElideRight
+                            font: Kirigami.Theme.smallFont
+                        }
+                        QQC2.Slider {
+                            Layout.fillWidth: true
+                            from: -60
+                            to: 6
+                            value: Mixer.sendLevel(strip.index, sendRow.index)
+                            onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
+                            QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.modelData, strip.dbText(value))
+                            QQC2.ToolTip.visible: hovered || pressed
+                            Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.modelData)
+                        }
+                    }
+                }
+
+            }
+        }
+
+
+        // Pan
+        Kirigami.Separator {
+            Layout.fillWidth: true
+        }
+        // Master has no pan or mute/solo; their space stays empty so its
+        // fader lines up with the others.
+        RowLayout {
+            Layout.fillWidth: true
+            opacity: strip.isMaster ? 0 : 1
+            QQC2.Label {
+                Layout.fillWidth: true
+                text: i18nc("@label:slider", "Pan")
+                font: Kirigami.Theme.smallFont
+            }
+            QQC2.Label {
+                text: strip.panText(panSlider.value)
+                font: Kirigami.Theme.smallFont
+            }
+        }
+        QQC2.Slider {
+            id: panSlider
+            Layout.fillWidth: true
+            opacity: strip.isMaster ? 0 : 1
+            enabled: !strip.isMaster
+            Accessible.ignored: strip.isMaster
+            from: -1
+            to: 1
+            value: strip.pan
+            onMoved: Mixer.setPan(strip.index, value)
+            Accessible.name: i18nc("@label:slider", "Pan")
+            QQC2.ToolTip.text: i18nc("@info:tooltip", "Pan: %1 (double-click to centre)", strip.panText(value))
+            QQC2.ToolTip.visible: hovered || pressed
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            TapHandler {
+                onDoubleTapped: {
+                    panSlider.value = 0;
+                    Mixer.setPan(strip.index, 0);
+                }
+            }
+        }
+
+        // Fader and meter
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumHeight: Kirigami.Units.gridUnit * 6
+            spacing: Kirigami.Units.smallSpacing
+
+            QQC2.Slider {
+                id: fader
+                Layout.fillHeight: true
+                Layout.alignment: Qt.AlignHCenter
+                orientation: Qt.Vertical
+                from: -60
+                to: 6
+                value: strip.volumeDb
+                onMoved: Mixer.setVolume(strip.index, value)
+                Accessible.name: i18nc("@label:slider", "Volume")
+                QQC2.ToolTip.text: i18nc("@info:tooltip", "Volume (double-click for 0 dB)")
+                QQC2.ToolTip.visible: hovered && !pressed
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                TapHandler {
+                    onDoubleTapped: {
+                        fader.value = 0;
+                        Mixer.setVolume(strip.index, 0);
+                    }
+                }
+            }
+            LevelMeter {
+                Layout.fillHeight: true
+                leftPeak: strip.leftPeak
+                rightPeak: strip.rightPeak
+            }
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            font.features: { "tnum": 1 }
+            text: strip.dbText(fader.value)
+        }
+
+        // Mute and solo
+        RowLayout {
+            Layout.fillWidth: true
+            opacity: strip.isMaster ? 0 : 1
+            enabled: !strip.isMaster
+            spacing: Kirigami.Units.smallSpacing
+            QQC2.Button {
+                Layout.fillWidth: true
+                checkable: true
+                checked: strip.muted
+                text: i18nc("@action:button short for Mute", "M")
+                Accessible.name: i18nc("@action:button", "Mute")
+                QQC2.ToolTip.text: i18nc("@info:tooltip", "Mute")
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                onToggled: Mixer.setMuted(strip.index, checked)
+            }
+            QQC2.Button {
+                Layout.fillWidth: true
+                checkable: true
+                checked: strip.soloed
+                text: i18nc("@action:button short for Solo", "S")
+                Accessible.name: i18nc("@action:button", "Solo")
+                QQC2.ToolTip.text: i18nc("@info:tooltip", "Solo")
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                onToggled: Mixer.setSoloed(strip.index, checked)
+            }
+        }
+    }
+}

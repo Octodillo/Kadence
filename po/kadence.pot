@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-29 20:41+0000\n"
+"POT-Creation-Date: 2026-10-29 23:09+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -19,7 +19,7 @@ msgstr ""
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
 #: crates/daw-app/qml/ArrangePage.qml:6 crates/daw-app/qml/SelfTest.qml:38
-#: crates/daw-app/qml/SelfTest.qml:50
+#: crates/daw-app/qml/SelfTest.qml:64
 msgctxt "@title"
 msgid "Arrange"
 msgstr ""
@@ -105,7 +105,145 @@ msgctxt "@info milliseconds"
 msgid "%1 ms"
 msgstr ""
 
-#: crates/daw-app/qml/EditPage.qml:6 crates/daw-app/qml/SelfTest.qml:48
+#: crates/daw-app/qml/ChannelStrip.qml:36
+msgctxt "@label fader at silence"
+msgid "−∞"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:39
+#, qt-format
+msgctxt "@label decibels"
+msgid "%1 dB"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:45
+msgctxt "@label pan centre"
+msgid "C"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:47
+#, qt-format
+msgctxt "@label pan left, percent"
+msgid "L%1"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:47
+#, qt-format
+msgctxt "@label pan right, percent"
+msgid "R%1"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:84
+msgctxt "@label strip type"
+msgid "Bus"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:85
+msgctxt "@label strip type"
+msgid "Main output"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:86
+msgctxt "@label strip type"
+msgid "Track"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:106
+msgctxt "@title:group effect slots"
+msgid "Effects"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:126
+#, qt-format
+msgctxt "@action:button"
+msgid "Remove %1"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:138
+msgctxt "@action:button"
+msgid "Add Effect"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:158
+msgctxt "@label gain reduction, short"
+msgid "GR"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:160
+msgctxt "@info:tooltip"
+msgid "Gain reduction"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:173
+msgctxt "@title:group"
+msgid "Sends"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:196
+#, qt-format
+msgctxt "@info:tooltip send level to bus"
+msgid "Send to %1: %2"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:198
+#, qt-format
+msgctxt "@label:slider"
+msgid "Send to %1"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:218
+#: crates/daw-app/qml/ChannelStrip.qml:236
+msgctxt "@label:slider"
+msgid "Pan"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:237
+#, qt-format
+msgctxt "@info:tooltip"
+msgid "Pan: %1 (double-click to centre)"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:264
+msgctxt "@label:slider"
+msgid "Volume"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:265
+msgctxt "@info:tooltip"
+msgid "Volume (double-click for 0 dB)"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:298
+msgctxt "@action:button short for Mute"
+msgid "M"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:299
+msgctxt "@action:button"
+msgid "Mute"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:300
+msgctxt "@info:tooltip"
+msgid "Mute"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:309
+msgctxt "@action:button short for Solo"
+msgid "S"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:310
+msgctxt "@action:button"
+msgid "Solo"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:311
+msgctxt "@info:tooltip"
+msgid "Solo"
+msgstr ""
+
+#: crates/daw-app/qml/EditPage.qml:6 crates/daw-app/qml/SelfTest.qml:62
 msgctxt "@title"
 msgid "Edit"
 msgstr ""
@@ -118,6 +256,16 @@ msgstr ""
 #: crates/daw-app/qml/EditPage.qml:9
 msgctxt "@info:placeholder"
 msgid "Select a clip to edit its notes or audio here."
+msgstr ""
+
+#: crates/daw-app/qml/GainReductionMeter.qml:24
+msgctxt "@label"
+msgid "Gain reduction meter"
+msgstr ""
+
+#: crates/daw-app/qml/LevelMeter.qml:29
+msgctxt "@label"
+msgid "Level meter"
 msgstr ""
 
 #: crates/daw-app/qml/Main.qml:17
@@ -175,17 +323,17 @@ msgctxt "@title:window"
 msgid "Configure — Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/MixPage.qml:6 crates/daw-app/qml/SelfTest.qml:43
+#: crates/daw-app/qml/MixPage.qml:16 crates/daw-app/qml/SelfTest.qml:43
 msgctxt "@title"
 msgid "Mix"
 msgstr ""
 
-#: crates/daw-app/qml/MixPage.qml:8
+#: crates/daw-app/qml/MixPage.qml:64
 msgctxt "@info:placeholder"
 msgid "Nothing to mix yet"
 msgstr ""
 
-#: crates/daw-app/qml/MixPage.qml:9
+#: crates/daw-app/qml/MixPage.qml:65
 msgctxt "@info:placeholder"
 msgid "Each track gets a channel strip with volume, pan and effects here."
 msgstr ""
