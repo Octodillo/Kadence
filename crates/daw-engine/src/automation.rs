@@ -1,0 +1,196 @@
+//! Automation lanes: parameter curves the engine plays back while the
+//! transport runs.
+//!
+//! A lane is turned into `ParamValue` events at exact frames. Changes happen
+//! only at breakpoints and, inside a linear ramp, on a fixed grid of
+//! [`RAMP_INTERVAL`] samples counted from project start. Because the grid is
+//! absolute, a render is identical whatever block size drives it.
+
+use daw_core::event::{Event, EventKind, EventList, ParamId};
+use daw_core::time::SampleTime;
+
+/// Spacing of the value updates inside a linear ramp, in samples.
+pub const RAMP_INTERVAL: i64 = 32;
+
+/// How the value moves from one point to the next.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Curve {
+    /// Holds this point's value until the next point.
+    #[default]
+    Step,
+    /// Moves in a straight line to the next point's value.
+    Linear,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct AutomationPoint {
+    pub time: SampleTime,
+    /// Plain (not normalized) parameter value.
+    pub value: f64,
+    /// Shape of the segment that starts at this point.
+    pub curve: Curve,
+}
+
+/// Points sorted by time. Before the first point the lane holds the first
+/// value; after the last it holds the last.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AutomationLane {
+    points: Vec<AutomationPoint>,
+}
+
+impl AutomationLane {
+    /// Sorts `points` by time. Of several points at the same time, the last
+    /// one given wins.
+    pub fn new(mut points: Vec<AutomationPoint>) -> Self {
+        points.sort_by_key(|p| p.time);
+        let mut deduped: Vec<AutomationPoint> = Vec::with_capacity(points.len());
+        for p in points {
+            match deduped.last_mut() {
+                Some(last) if last.time == p.time => *last = p,
+                _ => deduped.push(p),
+            }
+        }
+        Self { points: deduped }
+    }
+
+    pub fn points(&self) -> &[AutomationPoint] {
+        &self.points
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// The value the engine plays at `t`: ramps are quantized to the
+    /// [`RAMP_INTERVAL`] grid, so this is exactly what a node receives.
+    pub fn value_at(&self, t: SampleTime) -> Option<f64> {
+        Some(self.value_in(self.segment(t.0)?, t.0))
+    }
+
+    /// The value at `t`, which lies in the segment starting at point `i`.
+    fn value_in(&self, i: usize, t: i64) -> f64 {
+        let p = &self.points[i];
+        match (p.curve, self.points.get(i + 1)) {
+            (Curve::Linear, Some(next)) if t > p.time.0 => {
+                let grid = t.div_euclid(RAMP_INTERVAL) * RAMP_INTERVAL;
+                interpolate(p, next, grid.max(p.time.0))
+            }
+            _ => p.value,
+        }
+    }
+
+    /// Index of the point whose segment holds `t`, or 0 before the first
+    /// point.
+    fn segment(&self, t: i64) -> Option<usize> {
+        if self.points.is_empty() {
+            return None;
+        }
+        Some(
+            self.points
+                .partition_point(|p| p.time.0 <= t)
+                .saturating_sub(1),
+        )
+    }
+
+    /// Pushes events for the block starting at `start` that is `frames` long:
+    /// the current value at frame 0, then every change inside the block.
+    /// RT-safe; events that don't fit are dropped.
+    pub(crate) fn emit(&self, param: ParamId, start: i64, frames: usize, out: &mut EventList) {
+        let Some(mut seg) = self.segment(start) else {
+            return;
+        };
+        let end = start + frames as i64;
+        let push = |out: &mut EventList, t: i64, value: f64| {
+            let kind = EventKind::ParamValue { param, value };
+            let _ = out.push(Event {
+                frame: (t - start) as u32,
+                kind,
+            });
+        };
+        push(out, start, self.value_in(seg, start));
+        loop {
+            let p = &self.points[seg];
+            let next = self.points.get(seg + 1);
+            // Grid updates inside a ramp, after `start` and before the next point.
+            if let (Curve::Linear, Some(n)) = (p.curve, next) {
+                let from = (start + 1).max(p.time.0 + 1);
+                let mut t = from.div_euclid(RAMP_INTERVAL) * RAMP_INTERVAL;
+                if t < from {
+                    t += RAMP_INTERVAL;
+                }
+                while t < end.min(n.time.0) {
+                    push(out, t, interpolate(p, n, t));
+                    t += RAMP_INTERVAL;
+                }
+            }
+            match next {
+                Some(n) if n.time.0 < end => {
+                    if n.time.0 > start {
+                        push(out, n.time.0, n.value);
+                    }
+                    seg += 1;
+                }
+                _ => break,
+            }
+        }
+    }
+}
+
+fn interpolate(a: &AutomationPoint, b: &AutomationPoint, t: i64) -> f64 {
+    let span = (b.time.0 - a.time.0) as f64;
+    let x = (t - a.time.0) as f64 / span;
+    a.value + (b.value - a.value) * x
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pt(t: i64, v: f64, curve: Curve) -> AutomationPoint {
+        AutomationPoint {
+            time: SampleTime(t),
+            value: v,
+            curve,
+        }
+    }
+
+    fn events(lane: &AutomationLane, start: i64, frames: usize) -> Vec<(u32, f64)> {
+        let mut out = EventList::with_capacity(256);
+        lane.emit(7, start, frames, &mut out);
+        out.iter()
+            .map(|e| match e.kind {
+                EventKind::ParamValue { param: 7, value } => (e.frame, value),
+                k => panic!("unexpected {k:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn steps_land_on_exact_frames() {
+        let lane = AutomationLane::new(vec![pt(0, 1.0, Curve::Step), pt(100, 0.5, Curve::Step)]);
+        assert_eq!(events(&lane, 64, 64), vec![(0, 1.0), (36, 0.5)]);
+        assert_eq!(events(&lane, 128, 64), vec![(0, 0.5)]);
+        assert_eq!(lane.value_at(SampleTime(-5)), Some(1.0));
+        assert_eq!(lane.value_at(SampleTime(99)), Some(1.0));
+        assert_eq!(lane.value_at(SampleTime(100)), Some(0.5));
+    }
+
+    #[test]
+    fn ramps_follow_an_absolute_grid() {
+        let lane = AutomationLane::new(vec![pt(0, 0.0, Curve::Linear), pt(128, 1.0, Curve::Step)]);
+        assert_eq!(
+            events(&lane, 0, 256),
+            vec![(0, 0.0), (32, 0.25), (64, 0.5), (96, 0.75), (128, 1.0)]
+        );
+        // A block starting mid-ramp gets the held grid value at frame 0.
+        assert_eq!(events(&lane, 40, 30), vec![(0, 0.25), (24, 0.5)]);
+    }
+
+    #[test]
+    fn duplicate_times_keep_the_last_point() {
+        let lane = AutomationLane::new(vec![pt(10, 1.0, Curve::Step), pt(10, 2.0, Curve::Step)]);
+        assert_eq!(lane.points().len(), 1);
+        assert_eq!(lane.value_at(SampleTime(10)), Some(2.0));
+        assert_eq!(AutomationLane::default().value_at(SampleTime(0)), None);
+    }
+}
