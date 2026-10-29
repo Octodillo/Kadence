@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Octodillo/daw"
 publish = false
@@ -31,6 +31,10 @@ dbg_macro = "warn"
 [profile.dev]
 # Audio code is unusable unoptimised; keep debug info but optimise a little.
 opt-level = 1
+
+[profile.dev.package."*"]
+# Dependencies (decoders, resamplers, DSP) are compiled once; build them fully optimised.
+opt-level = 3
 
 [profile.release]
 lto = "thin"
