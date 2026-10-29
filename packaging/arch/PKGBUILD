@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Maintainer: Octodillo <https://github.com/Octodillo>
+#
+# Development package built from git. `KADENCE_SOURCE` overrides where the
+# source comes from, so CI can build the checkout it is testing:
+#   KADENCE_SOURCE="git+file://$PWD#commit=$(git rev-parse HEAD)" makepkg
+
+pkgname=kadence-git
+_appid=io.github.octodillo.daw
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Digital audio workstation for KDE Plasma'
+arch=(x86_64 aarch64)
+url='https://github.com/Octodillo/Kadence'
+license=(GPL-3.0-or-later)
+depends=(
+  glibc
+  hicolor-icon-theme
+  kcolorscheme
+  kconfig
+  kcoreaddons
+  kcrash
+  ki18n
+  kiconthemes
+  kirigami
+  qqc2-desktop-style
+  qt6-base
+  qt6-declarative
+  # libjack is loaded at run time; PipeWire's is the usual one on Plasma.
+  jack
+)
+makedepends=(
+  cargo
+  clang
+  cmake
+  extra-cmake-modules
+  git
+  lld
+  ninja
+)
+optdepends=(
+  'breeze-icons: icons outside Plasma'
+)
+provides=(kadence)
+conflicts=(kadence)
+options=(!lto !debug)
+source=("kadence::${KADENCE_SOURCE:-git+$url.git}")
+sha256sums=(SKIP)
+
+pkgver() {
+  cd kadence
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd kadence
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_NET_OFFLINE=true
+  cmake -S kadence -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build
+}
+
+check() {
+  local config
+  config=$(mktemp -d)
+  XDG_CONFIG_HOME="$config" QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+    build/cargo/release/kadence --smoke-test
+  rm -rf "$config"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 kadence/LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+}

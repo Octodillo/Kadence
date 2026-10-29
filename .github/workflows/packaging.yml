@@ -1,0 +1,221 @@
+# Builds Kadence the way users get it on each Plasma distribution, installs
+# the result, and runs the smoke test from the installed files on X11,
+# Wayland and several scale factors (ci/smoke-matrix.sh).
+#
+# - Arch: the PKGBUILD, through makepkg (latest Qt and KDE Frameworks).
+# - Fedora: the RPM spec, built offline from the vendored source tarball.
+# - KDE neon: CMake install from source (latest Plasma on Ubuntu LTS).
+# - Debian 13: CMake install from source, the oldest Qt (6.8) and KDE
+#   Frameworks (6.13) we support.
+# - Flatpak: the KDE runtime manifest, built and run in its sandbox.
+name: Packaging
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - packaging/**
+      - data/**
+      - ci/**
+      - CMakeLists.txt
+      - Cargo.lock
+      - crates/**
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/packaging.yml
+  schedule:
+    # Weekly, to catch distro updates that break the build.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  arch:
+    name: Arch Linux package
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git namcap sudo \
+            weston xorg-server-xvfb xorg-xauth
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: makepkg
+        run: |
+          git config --system --add safe.directory '*'
+          cp -r packaging/arch /home/builder/pkg
+          chown -R builder /home/builder/pkg
+          cd /home/builder/pkg
+          sudo -u builder env KADENCE_SOURCE="git+file://$GITHUB_WORKSPACE#commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" \
+            makepkg --syncdeps --noconfirm
+      - name: namcap
+        run: namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-git-*.pkg.tar.zst
+      - name: Install
+        run: pacman -U --noconfirm /home/builder/pkg/kadence-git-*.pkg.tar.zst
+      - name: Smoke test (installed)
+        run: sudo -u builder env REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: /home/builder/pkg/kadence-git-*.pkg.tar.zst
+
+  fedora:
+    name: Fedora package
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install build tools
+        run: |
+          dnf -y install git cargo rpm-build rpmlint dnf-plugins-core \
+            weston xorg-x11-server-Xvfb xorg-x11-xauth
+      - uses: actions/checkout@v4
+      - name: Source tarball (vendored crates)
+        run: |
+          git config --system --add safe.directory '*'
+          packaging/make-dist.sh ~/rpmbuild/SOURCES
+      - name: rpmbuild
+        run: |
+          dnf -y builddep packaging/fedora/kadence.spec
+          rpmbuild -ba packaging/fedora/kadence.spec
+      - name: rpmlint
+        run: rpmlint packaging/fedora/kadence.spec ~/rpmbuild/RPMS/*/kadence-0*.rpm
+      - name: Install
+        run: dnf -y install ~/rpmbuild/RPMS/*/kadence-0*.rpm
+      - name: Smoke test (installed)
+        run: |
+          useradd -m tester
+          su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fedora-package
+          path: ~/rpmbuild/RPMS/*/kadence-0*.rpm
+
+  neon:
+    name: KDE neon install
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - name: Install system packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gnupg
+          curl -fsSL https://archive.neon.kde.org/public.key \
+            | gpg --dearmor -o /usr/share/keyrings/neon.gpg
+          echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
+            > /etc/apt/sources.list.d/neon.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential git cmake ninja-build clang lld pkg-config \
+            qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-wayland \
+            kf6-kirigami-dev qml6-module-org-kde-kirigami kf6-qqc2-desktop-style \
+            kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
+            kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme \
+            extra-cmake-modules libjack-jackd2-dev \
+            weston xvfb xauth
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - name: Build and install to /usr
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build
+          cmake --install build
+      - name: Smoke test (installed)
+        run: |
+          useradd -m tester
+          su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
+
+  debian:
+    name: Debian 13 install (oldest Qt and KF6)
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Install system packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl build-essential git cmake ninja-build clang lld pkg-config \
+            qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-wayland \
+            libkirigami-dev qml6-module-org-kde-kirigami qml6-module-org-kde-desktop \
+            libkf6coreaddons-dev libkf6i18n-dev libkf6crash-dev libkf6config-dev \
+            libkf6colorscheme-dev libkf6iconthemes-dev breeze-icon-theme \
+            extra-cmake-modules libjack-jackd2-dev \
+            weston xvfb xauth
+          # Debian's Rust is older than the workspace's rust-version.
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - name: Build and install to /usr
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build
+          cmake --install build
+      - name: Smoke test (installed)
+        run: |
+          useradd -m tester
+          su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
+
+  flatpak:
+    name: Flatpak (KDE runtime)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+      # flatpak-builder sandboxes each build step with bubblewrap.
+      options: --privileged
+    steps:
+      - name: Install Flatpak and the runtimes
+        run: |
+          dnf -y install flatpak flatpak-builder git python3
+          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y --noninteractive flathub \
+            org.kde.Sdk//6.11 org.kde.Platform//6.11 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+            org.freedesktop.Sdk.Extension.llvm21//25.08 \
+            org.flatpak.Builder
+      - uses: actions/checkout@v4
+      - name: Crate sources from Cargo.lock
+        run: packaging/flatpak/cargo-sources.py
+      - name: flatpak-builder
+        run: |
+          flatpak-builder --disable-rofiles-fuse --force-clean \
+            --state-dir=/tmp/flatpak-state --repo=/tmp/repo /tmp/build \
+            packaging/flatpak/io.github.octodillo.daw.yml
+          flatpak build-bundle /tmp/repo kadence.flatpak io.github.octodillo.daw
+      - name: Lint (Flathub rules)
+        # Advisory until the Flathub submission: some rules (for example the
+        # generated cargo-sources.json not being committed) only matter there.
+        continue-on-error: true
+        run: |
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
+            manifest packaging/flatpak/io.github.octodillo.daw.yml
+          flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo /tmp/repo
+      - name: Install and smoke test in the sandbox
+        run: |
+          flatpak install -y --noninteractive kadence.flatpak
+          # Audio needs libjack inside the sandbox; the runtime's comes from PipeWire.
+          flatpak run --command=sh io.github.octodillo.daw -c 'ldconfig -p | grep -F libjack.so.0'
+          # Flatpak keeps the app's config in ~/.var/app; start from a clean one.
+          rm -rf ~/.var/app/io.github.octodillo.daw
+          flatpak run \
+            --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software \
+            --env=QT_FORCE_STDERR_LOGGING=1 \
+            io.github.octodillo.daw --smoke-test 2>&1 | tee smoke.log
+          grep -q "smoke test: passed" smoke.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-bundle
+          path: kadence.flatpak
