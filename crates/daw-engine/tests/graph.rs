@@ -221,3 +221,63 @@ fn reports_running_latency() {
     run(&mut proc, 16, &EventList::with_capacity(0));
     assert_eq!(ctl.latency(), 12);
 }
+
+/// Reports `before` output channels until it is prepared, then `after`, as a
+/// plugin that renegotiates its buses on activation does.
+struct Shrinks {
+    before: u16,
+    after: u16,
+    prepared: bool,
+}
+
+impl daw_core::node::Node for Shrinks {
+    fn ports(&self) -> daw_core::node::PortLayout {
+        daw_core::node::PortLayout {
+            audio_out: if self.prepared {
+                self.after
+            } else {
+                self.before
+            },
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {
+        self.prepared = true;
+    }
+
+    fn process(&mut self, _ctx: &mut daw_core::node::ProcessContext) {}
+}
+
+#[test]
+fn checks_ports_again_after_prepare() {
+    let mut g = GraphDesc::new(0, 2);
+    let n = g.add_device(
+        "n",
+        Box::new(Shrinks {
+            before: 2,
+            after: 1,
+            prepared: false,
+        }),
+    );
+    g.connect(n, g.master());
+    assert!(CompiledGraph::validate(&g).is_ok());
+    assert!(matches!(
+        CompiledGraph::compile(g, 48_000.0, 64, 16),
+        Err(CompileError::NoSuchOutput { channel: 1, .. })
+    ));
+
+    let mut g = GraphDesc::new(0, 1);
+    g.add_device(
+        "n",
+        Box::new(Shrinks {
+            before: 1,
+            after: 65,
+            prepared: false,
+        }),
+    );
+    assert!(matches!(
+        CompiledGraph::compile(g, 48_000.0, 64, 16),
+        Err(CompileError::TooManyChannels { channels: 65, .. })
+    ));
+}

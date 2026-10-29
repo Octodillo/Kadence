@@ -161,17 +161,22 @@ impl CompiledGraph {
     }
 
     /// Validates `desc`, calls `prepare` on every node, sorts the nodes,
-    /// allocates buffers and inserts latency compensation delays.
+    /// allocates buffers and inserts latency compensation delays. A node may
+    /// change its ports in `prepare`, so the graph is validated again after.
     ///
     /// Runs off the RT thread; it allocates freely.
     pub fn compile(
-        desc: GraphDesc,
+        mut desc: GraphDesc,
         sample_rate: f64,
         max_frames: u32,
         event_capacity: usize,
     ) -> Result<Self, CompileError> {
         if sample_rate.is_nan() || sample_rate <= 0.0 || max_frames == 0 {
             return Err(CompileError::InvalidConfig);
+        }
+        Self::validate(&desc)?;
+        for entry in &mut desc.nodes {
+            entry.node.prepare(sample_rate, max_frames);
         }
         Self::validate(&desc)?;
         let order = topo_order(&desc)?;
@@ -196,10 +201,9 @@ impl CompiledGraph {
         let mut steps: Vec<Step> = order
             .iter()
             .map(|&i| {
-                let mut entry = slots[i]
+                let entry = slots[i]
                     .take()
                     .expect("each node appears once in the order");
-                entry.node.prepare(sample_rate, max_frames);
                 let ports = entry.node.ports();
                 let (n_in, n_out) = (ports.audio_in as usize, ports.audio_out as usize);
                 if let Some(old) = entry.reuse {
