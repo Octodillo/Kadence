@@ -9,16 +9,18 @@ Kirigami.Page {
     id: page
 
     property list<Kirigami.Action> transportActions
-    property alias placeholderIcon: placeholder.icon.name
-    property alias placeholderText: placeholder.text
-    property alias placeholderExplanation: placeholder.explanation
+    property string placeholderIcon
+    property string placeholderText
+    property string placeholderExplanation
 
     actions: transportActions
     padding: 0
 
     Kirigami.PlaceholderMessage {
-        id: placeholder
         anchors.centerIn: parent
         width: parent.width - Kirigami.Units.gridUnit * 4
+        icon.name: page.placeholderIcon
+        text: page.placeholderText
+        explanation: page.placeholderExplanation
     }
 }
