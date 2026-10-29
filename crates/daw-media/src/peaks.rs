@@ -157,24 +157,40 @@ fn remove_stale_temps(cache: &Path) {
     let (Some(dir), Some(name)) = (cache.parent(), cache.file_name()) else {
         return;
     };
-    let prefix = format!("{}.", name.to_string_lossy());
-    let Ok(entries) = fs::read_dir(if dir.as_os_str().is_empty() {
+    let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
     } else {
         dir
-    }) else {
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
+        // Exactly `<cache>.<pid>-<n>.tmp`; checked before any stat so big sample
+        // folders cost one name comparison per entry.
+        let ours = file_name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+            .and_then(|id| id.split_once('-'))
+            .is_some_and(|(pid, n)| {
+                !pid.is_empty()
+                    && !n.is_empty()
+                    && pid.bytes().all(|b| b.is_ascii_digit())
+                    && n.bytes().all(|b| b.is_ascii_digit())
+            });
+        if !ours {
+            continue;
+        }
         let old = entry
             .metadata()
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age.as_secs() > 3600);
-        if old && file_name.starts_with(&prefix) && file_name.ends_with(".tmp") {
+        if old {
             let _ = fs::remove_file(entry.path());
         }
     }

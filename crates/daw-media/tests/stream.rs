@@ -352,17 +352,17 @@ fn rolling_through_a_locate_reports_pending_not_underrun() {
     for cycle in 0..400 {
         let pos = 2 * RATE as i64 + (cycle * BLOCK) as i64;
         let st = r.read(SampleTime(pos), &mut [&mut l[..], &mut rr[..]]);
-        assert_ne!(st, ReadStatus::Underrun, "cycle {cycle}");
         if st == ReadStatus::Ok {
             served = true;
-        } else {
-            assert!(!served, "went back to Pending at cycle {cycle}");
+            break;
         }
+        // Until the seek is served, the gap is reported as Pending, never Underrun.
+        assert_eq!(st, ReadStatus::Pending, "cycle {cycle}");
         let deadline = start + period * (cycle as u32 + 1);
         if let Some(d) = deadline.checked_duration_since(Instant::now()) {
             std::thread::sleep(d);
         }
     }
-    assert!(served);
+    assert!(served, "the seek was never served while rolling");
     assert_eq!(r.underruns(), 0);
 }

@@ -52,7 +52,10 @@ pub enum ReadStatus {
     /// Every requested frame was real audio or legitimate silence (before the start or
     /// past the end of the file).
     Ok,
-    /// Some frames were silent because a seek is still being serviced.
+    /// Some frames were silent because a seek is still being serviced. With the
+    /// transport rolling this lasts until the fill thread catches up with the moving
+    /// position; if it persists the filler cannot keep up, which callers should treat
+    /// like starvation.
     Pending,
     /// Some frames were silent because the fill thread fell behind.
     Underrun,
@@ -498,7 +501,9 @@ impl WorkerStream {
         if self.src_eof && drained && self.segs.slots() > 0 {
             let _ = self.segs.push(Segment {
                 generation: self.generation,
-                start: self.next_frame,
+                // Never before the requested position: a seek that hits the end early
+                // must not report a shorter clip.
+                start: self.next_frame.max(self.skip_to),
                 frames: 0,
                 eof: true,
             });
@@ -556,6 +561,9 @@ impl WorkerStream {
             rs.reset();
         }
         if self.decoder.seek(src).is_err() {
+            // Reported like a decode error so the engine can tell a broken file from
+            // a clip that simply ended.
+            self.shared.failed.store(true, Ordering::Relaxed);
             self.src_eof = true;
         }
         self.next_frame = start;
