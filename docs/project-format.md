@@ -17,6 +17,10 @@ My Song/                      bundle directory
 
 - The project file is named after the bundle directory when the bundle is
   created. Opening accepts either the directory or the `.kadence` file.
+  Backups and autosaves are not bundles: read them with
+  `bundle::read_project` and save the result into a bundle.
+- A bundle directory holds exactly one `.kadence` file; creating a bundle in a
+  directory that already has one fails.
 - Saving copies the current project file into `backups/` (named with a
   zero-padded millisecond Unix timestamp, so name order is time order), keeps
   the newest 10, then writes the new file atomically: write `*.tmp`, fsync,
@@ -26,7 +30,7 @@ My Song/                      bundle directory
   the project file when a bundle is opened, the app should offer to recover it
   (`Bundle::has_newer_autosave`, `Document::recover`).
 - `AudioClip.source` paths are relative to the bundle root (for example
-  `audio/take1.wav`). Absolute paths are allowed for files left outside the
+  `audio/take1.wav`), always with `/` separators. Absolute paths are allowed for files left outside the
   bundle. `Bundle::import_audio` copies a file into `audio/` under a name that
   doesn't clash.
 

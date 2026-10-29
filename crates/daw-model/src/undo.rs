@@ -28,6 +28,10 @@ pub struct UndoStack {
     limit: usize,
     sealed: bool,
     next_seq: u64,
+    /// Position when `done` is empty. Nonzero once the oldest steps have been
+    /// dropped (by the limit or `clear`), because the project then no longer
+    /// matches the state before them.
+    base_seq: u64,
 }
 
 impl Default for UndoStack {
@@ -45,6 +49,7 @@ impl UndoStack {
             limit: limit.max(1),
             sealed: true,
             next_seq: 1,
+            base_seq: 0,
         }
     }
 
@@ -65,8 +70,10 @@ impl UndoStack {
             let seq = self.next_seq;
             self.next_seq += 1;
             self.done.push_back(Entry { seq, command });
-            if self.done.len() > self.limit {
-                self.done.pop_front();
+            if self.done.len() > self.limit
+                && let Some(dropped) = self.done.pop_front()
+            {
+                self.base_seq = dropped.seq;
             }
         }
         self.sealed = false;
@@ -140,14 +147,15 @@ impl UndoStack {
         self.undone.len()
     }
 
-    /// Identifies the current point in history; 0 when nothing is done.
+    /// Identifies the current point in history; 0 at the very start.
     /// Two equal positions mean the project is in the same state.
     pub fn position(&self) -> u64 {
-        self.done.back().map_or(0, |e| e.seq)
+        self.done.back().map_or(self.base_seq, |e| e.seq)
     }
 
     /// Forgets all history.
     pub fn clear(&mut self) {
+        self.base_seq = self.position();
         self.done.clear();
         self.undone.clear();
         self.sealed = true;

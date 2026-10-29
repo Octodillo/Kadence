@@ -53,20 +53,7 @@ impl Project {
 
     /// Every object ID in the project.
     pub fn all_ids(&self) -> impl Iterator<Item = uuid::Uuid> + '_ {
-        self.all_tracks().flat_map(|t| {
-            let clips = t.clips.iter().flat_map(|c| {
-                let notes = match &c.content {
-                    ClipContent::Midi(m) => &m.notes[..],
-                    ClipContent::Audio(_) => &[],
-                };
-                std::iter::once(c.id.0).chain(notes.iter().map(|n| n.id.0))
-            });
-            std::iter::once(t.id.0)
-                .chain(clips)
-                .chain(t.devices.iter().map(|d| d.id.0))
-                .chain(t.sends.iter().map(|s| s.id.0))
-                .chain(t.automation.iter().map(|l| l.id.0))
-        })
+        self.all_tracks().flat_map(|t| t.ids())
     }
 
     pub fn track_index(&self, id: TrackId) -> Option<usize> {
@@ -224,44 +211,7 @@ impl Project {
             if t.kind == TrackKind::Master && t.id != self.master.id {
                 return bad(format!("track {} is a second master", t.id));
             }
-            check_finite(t.volume_db, "volume")?;
-            if !(-1.0..=1.0).contains(&t.pan) {
-                return bad(format!("track {} pan out of range", t.id));
-            }
-            if !t.clips.is_sorted_by_key(|c| c.start) {
-                return bad(format!("clips on track {} are not sorted", t.id));
-            }
-            for c in &t.clips {
-                if !t.kind.accepts(&c.content) {
-                    return bad(format!("clip {} doesn't fit track {}", c.id, t.id));
-                }
-                c.check()?;
-            }
-            for d in &t.devices {
-                if d.params.values().any(|v| !v.is_finite()) {
-                    return bad(format!("device {} has a non-finite parameter", d.id));
-                }
-            }
-            for s in &t.sends {
-                check_finite(s.level_db, "send level")?;
-            }
-            let mut lane_targets = HashSet::new();
-            for l in &t.automation {
-                let ok = match l.target {
-                    AutomationTarget::Volume | AutomationTarget::Pan => true,
-                    AutomationTarget::SendLevel { send } => t.sends.iter().any(|x| x.id == send),
-                    AutomationTarget::DeviceParam { device, .. } => {
-                        t.devices.iter().any(|x| x.id == device)
-                    }
-                };
-                if !ok {
-                    return bad(format!("lane {} targets something not on its track", l.id));
-                }
-                if !lane_targets.insert(l.target) {
-                    return bad(format!("track {} has two lanes for one target", t.id));
-                }
-                check_points(&l.points)?;
-            }
+            t.check()?;
         }
         for t in self.all_tracks() {
             if let TrackOutput::Bus(b) = t.output {
@@ -280,7 +230,7 @@ impl Project {
         Ok(())
     }
 
-    fn check_target(&self, source: TrackId, target: TrackId) -> Result<(), ModelError> {
+    pub(crate) fn check_target(&self, source: TrackId, target: TrackId) -> Result<(), ModelError> {
         match self.track(target) {
             Some(t) if matches!(t.kind, TrackKind::Bus | TrackKind::Master) => Ok(()),
             Some(_) => Err(ModelError::Invalid(format!(
@@ -505,6 +455,68 @@ impl Track {
             sends: Vec::new(),
             automation: Vec::new(),
         }
+    }
+
+    /// Checks everything about the track that doesn't depend on other
+    /// tracks: value ranges, sorted clips that fit the track kind, and
+    /// automation lanes that target this track's own sends and devices.
+    pub fn check(&self) -> Result<(), ModelError> {
+        let bad = |msg: String| Err(ModelError::Invalid(msg));
+        check_finite(self.volume_db, "volume")?;
+        if !(-1.0..=1.0).contains(&self.pan) {
+            return bad(format!("track {} pan out of range", self.id));
+        }
+        if !self.clips.is_sorted_by_key(|c| c.start) {
+            return bad(format!("clips on track {} are not sorted", self.id));
+        }
+        for c in &self.clips {
+            if !self.kind.accepts(&c.content) {
+                return bad(format!("clip {} doesn't fit track {}", c.id, self.id));
+            }
+            c.check()?;
+        }
+        for d in &self.devices {
+            if d.params.values().any(|v| !v.is_finite()) {
+                return bad(format!("device {} has a non-finite parameter", d.id));
+            }
+        }
+        for s in &self.sends {
+            check_finite(s.level_db, "send level")?;
+        }
+        let mut lane_targets = HashSet::new();
+        for l in &self.automation {
+            let ok = match l.target {
+                AutomationTarget::Volume | AutomationTarget::Pan => true,
+                AutomationTarget::SendLevel { send } => self.sends.iter().any(|x| x.id == send),
+                AutomationTarget::DeviceParam { device, .. } => {
+                    self.devices.iter().any(|x| x.id == device)
+                }
+            };
+            if !ok {
+                return bad(format!("lane {} targets something not on its track", l.id));
+            }
+            if !lane_targets.insert(l.target) {
+                return bad(format!("track {} has two lanes for one target", self.id));
+            }
+            check_points(&l.points)?;
+        }
+        Ok(())
+    }
+
+    /// Every object ID in the track, including its clips' notes.
+    pub fn ids(&self) -> impl Iterator<Item = uuid::Uuid> + '_ {
+        let clips = self.clips.iter().flat_map(|c| {
+            let notes = match &c.content {
+                ClipContent::Midi(m) => &m.notes[..],
+                ClipContent::Audio(_) => &[],
+            };
+            std::iter::once(c.id.0).chain(notes.iter().map(|n| n.id.0))
+        });
+        std::iter::once(self.id.0)
+            .chain(clips)
+            .chain(self.devices.iter().map(|d| d.id.0))
+            .chain(self.sends.iter().map(|s| s.id.0))
+            .chain(self.automation.iter().map(|l| l.id.0))
     }
 
     /// Where a clip starting at `start` belongs to keep `clips` sorted.

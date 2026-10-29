@@ -149,7 +149,11 @@ impl Document {
             copy_dir_files(&old.audio_dir(), &new.audio_dir())?;
         }
         new.save(&self.project)?;
-        self.bundle = Some(new);
+        if let Some(old) = self.bundle.replace(new) {
+            // The unsaved edits it held now live in the new bundle. Failing
+            // to delete it only means a stale recovery offer later.
+            let _ = old.discard_autosave();
+        }
         self.mark_saved();
         Ok(())
     }
@@ -162,14 +166,23 @@ impl Document {
     }
 
     /// Writes an autosave if anything changed since the last save or
-    /// autosave. The app calls this on a timer. Returns whether it wrote one.
+    /// autosave, and removes it if the document is back to its saved state. The app calls this on a timer. Returns whether it wrote one.
     /// A document with no bundle yet has nowhere to autosave and returns
     /// `false`.
     pub fn autosave(&mut self) -> Result<bool, FormatError> {
         let Some(bundle) = &self.bundle else {
             return Ok(false);
         };
-        if !self.is_modified() || self.revision == self.autosaved_revision {
+        if !self.is_modified() {
+            // Undone back to the saved state: an older autosave would offer
+            // to "recover" edits the user took back.
+            if self.autosaved_revision != self.revision {
+                bundle.discard_autosave()?;
+                self.autosaved_revision = self.revision;
+            }
+            return Ok(false);
+        }
+        if self.revision == self.autosaved_revision {
             return Ok(false);
         }
         bundle.write_autosave(&self.project)?;
