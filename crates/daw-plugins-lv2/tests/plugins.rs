@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc};
+use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{Node, ProcessContext, TransportState};
 use daw_core::plugin::{PluginDescriptor, PluginFormat, PluginInstance};
@@ -86,7 +86,11 @@ fn run(
             events_in: &events_in,
             events_out: &mut events_out,
         };
+        // The workspace's `warn_debug` makes violations count (per thread)
+        // instead of aborting.
+        reset_violation_count();
         assert_no_alloc(|| p.process(&mut ctx));
+        assert_eq!(violation_count(), 0, "process allocated");
     }
     (outs, events_out.iter().copied().collect())
 }

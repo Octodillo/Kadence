@@ -22,12 +22,21 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - name: Install system packages
+        # lilv to link daw-plugins-lv2; mda-lv2 and x42-plugins are its test
+        # plugins; Xvfb lets its tests open plugin UIs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            liblilv-dev mda-lv2 x42-plugins xvfb
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
-        run: cargo nextest run --workspace --no-tests=warn
+        run: xvfb-run -a cargo nextest run --workspace --no-tests=warn
+        env:
+          DAW_REQUIRE_LV2_PLUGINS: 1
       - name: doc tests
         run: cargo test --workspace --doc
 

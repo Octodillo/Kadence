@@ -19,7 +19,7 @@ rtrb = "0.3"
 x11rb = "0.13"
 
 [dev-dependencies]
-assert_no_alloc = "1"
+assert_no_alloc.workspace = true
 tempfile = "3"
 
 [lints]
