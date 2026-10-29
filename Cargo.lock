@@ -323,7 +323,10 @@ dependencies = [
 name = "daw-midi"
 version = "0.1.0"
 dependencies = [
+ "assert_no_alloc",
  "daw-core",
+ "daw-devices",
+ "daw-engine",
  "proptest",
 ]
 
