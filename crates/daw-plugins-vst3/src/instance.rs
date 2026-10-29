@@ -146,6 +146,36 @@ impl Rt {
             max_frames,
         })
     }
+
+    /// The `process` argument for `frames` samples over these buffers and queues.
+    fn process_data(&mut self, frames: i32) -> ProcessData {
+        ProcessData {
+            processMode: ProcessModes_::kRealtime as i32,
+            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
+            numSamples: frames,
+            numInputs: self.in_buses.len() as i32,
+            numOutputs: self.out_buses.len() as i32,
+            inputs: self.in_buses.as_mut_ptr(),
+            outputs: self.out_buses.as_mut_ptr(),
+            inputParameterChanges: self
+                .in_params
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            outputParameterChanges: self
+                .out_params
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            inputEvents: self
+                .in_events
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            outputEvents: self
+                .out_events
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            processContext: &mut self.context,
+        }
+    }
 }
 
 pub struct Vst3Instance {
@@ -521,6 +551,42 @@ impl Vst3Instance {
         }
     }
 
+    /// Hands editor edits still queued for the processor over with a zero-sample `process`,
+    /// the spec's parameter flush, so a state saved while the engine is not running this
+    /// instance includes them. `&mut self` means the audio thread is not using it. Edits
+    /// flushed this way are not reported to the host as `ParamValue` events.
+    fn flush_edits(&mut self) {
+        if !self.processing {
+            return;
+        }
+        let Some(rt) = self.rt.as_deref_mut() else {
+            return;
+        };
+        loop {
+            self.handler.retry_overflow();
+            if self.edits_rx.is_empty() {
+                return;
+            }
+            rt.in_params.clear();
+            rt.out_params.clear();
+            rt.in_events.clear();
+            rt.out_events.clear();
+            while let Ok(e) = self.edits_rx.pop() {
+                rt.in_params.add(e.id, 0, e.normalized);
+            }
+            let mut data = rt.process_data(0);
+            unsafe { self.processor.process(&mut data) };
+            for q in rt.out_params.queues() {
+                if let Some((_, normalized)) = q.last() {
+                    let _ = self.to_controller_tx.push(Edit {
+                        id: q.id(),
+                        normalized,
+                    });
+                }
+            }
+        }
+    }
+
     fn handle_restart(&mut self) {
         let flags = self.handler.take_restart_flags();
         if flags == 0 {
@@ -835,32 +901,7 @@ impl Node for Vst3Instance {
         c.tempo = if t.bpm > 0.0 { t.bpm } else { 120.0 };
         c.projectTimeMusic = t.position.0 as f64 / sample_rate * c.tempo / 60.0;
 
-        let mut data = ProcessData {
-            processMode: ProcessModes_::kRealtime as i32,
-            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
-            numSamples: frames as i32,
-            numInputs: rt.in_buses.len() as i32,
-            numOutputs: rt.out_buses.len() as i32,
-            inputs: rt.in_buses.as_mut_ptr(),
-            outputs: rt.out_buses.as_mut_ptr(),
-            inputParameterChanges: rt
-                .in_params
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            outputParameterChanges: rt
-                .out_params
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            inputEvents: rt
-                .in_events
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            outputEvents: rt
-                .out_events
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            processContext: &mut rt.context,
-        };
+        let mut data = rt.process_data(frames as i32);
         unsafe { self.processor.process(&mut data) };
         rt.context.continousTimeSamples += frames as i64;
 
@@ -979,6 +1020,7 @@ impl PluginInstance for Vst3Instance {
     /// Format: magic, version, then the component and controller states as length-prefixed
     /// blobs (little endian).
     fn save_state(&mut self) -> Result<Vec<u8>, PluginError> {
+        self.flush_edits();
         let read = |get: &dyn Fn(*mut IBStream) -> i32| -> Result<Vec<u8>, PluginError> {
             let stream = ComWrapper::new(MemoryStream::default());
             let s = stream
@@ -1059,6 +1101,7 @@ impl PluginInstance for Vst3Instance {
         }
         // Values pushed before the load are stale now, in both directions: editor edits still
         // queued for the processor would otherwise overwrite the restored state.
+        self.handler.discard_overflow();
         while self.edits_rx.pop().is_ok() {}
         let mut rx = self
             .to_controller_rx
@@ -1091,6 +1134,7 @@ impl PluginInstance for Vst3Instance {
 
     fn on_main_thread(&mut self) {
         host().run_loop.pump();
+        self.handler.retry_overflow();
         self.flush_to_controller();
         self.handle_restart();
         if let Some(editor) = &mut self.editor
@@ -1173,6 +1217,13 @@ mod tests {
         unsafe { p.handler.performEdit(id, normalized) }
     }
 
+    fn main_thread(p: &mut Vst3Instance) {
+        let _pumping = crate::host::RUN_LOOP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        p.on_main_thread();
+    }
+
     /// Runs one block of ones through the plugin and returns the left output's first sample.
     fn gain_heard(p: &mut Vst3Instance) -> f32 {
         let input = [1.0f32; FRAMES as usize];
@@ -1196,11 +1247,52 @@ mod tests {
     }
 
     #[test]
+    fn save_state_includes_editor_edits_not_yet_processed() {
+        let mut p = instance();
+        editor_edit(&p, GAIN, 0.3);
+        let state = p.save_state().unwrap();
+
+        let mut q = instance();
+        q.load_state(&state).unwrap();
+        assert_eq!(gain_heard(&mut q), 0.3);
+        // The flushed edit is not applied a second time.
+        assert_eq!(gain_heard(&mut p), 0.3);
+    }
+
+    #[test]
+    fn the_last_of_many_editor_edits_wins() {
+        let edits = 3 * EDIT_QUEUE;
+        let last = |i: usize| i as f64 / edits as f64;
+
+        let mut p = instance();
+        for i in 1..=edits {
+            assert_eq!(editor_edit(&p, GAIN, last(i)), kResultOk);
+        }
+        let state = p.save_state().unwrap();
+        let mut q = instance();
+        q.load_state(&state).unwrap();
+        assert_eq!(gain_heard(&mut q), 1.0);
+
+        // And through the audio thread, with the main thread topping the queue up.
+        for i in 1..=edits {
+            editor_edit(&q, GAIN, last(edits - i));
+        }
+        for _ in 0..4 {
+            gain_heard(&mut q);
+            main_thread(&mut q);
+        }
+        assert_eq!(gain_heard(&mut q), 0.0);
+    }
+
+    #[test]
     fn load_state_discards_editor_edits_made_before_it() {
         let mut p = instance();
         let state = p.save_state().unwrap();
-        editor_edit(&p, GAIN, 0.3);
+        for _ in 0..2 * EDIT_QUEUE {
+            editor_edit(&p, GAIN, 0.3);
+        }
         p.load_state(&state).unwrap();
+        main_thread(&mut p);
         assert_eq!(
             gain_heard(&mut p),
             1.0,

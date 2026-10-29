@@ -61,6 +61,10 @@ impl Class for HostApplication {
 
 forward_run_loop!(HostApplication, self => self.run_loop);
 
+/// Held by tests that pump the shared run loop, so they do not fire each other's timers.
+#[cfg(test)]
+pub static RUN_LOOP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// The shared host context.
 pub fn host() -> &'static ComWrapper<HostApplication> {
     static HOST: OnceLock<ComWrapper<HostApplication>> = OnceLock::new();
@@ -434,17 +438,44 @@ pub struct Edit {
     pub normalized: ParamValue,
 }
 
+/// Edits on their way to `process`. When the ring is full, later edits wait in `overflow`,
+/// latest value per parameter, until the main thread moves them over. Everything in
+/// `overflow` is newer than everything in the ring, so the last edit always wins.
+struct EditQueue {
+    ring: rtrb::Producer<Edit>,
+    overflow: Vec<Edit>,
+}
+
 pub struct ComponentHandler {
-    edits: Mutex<rtrb::Producer<Edit>>,
+    edits: Mutex<EditQueue>,
     restart_flags: AtomicI32,
 }
 
 impl ComponentHandler {
     pub fn new(edits: rtrb::Producer<Edit>) -> Self {
         Self {
-            edits: Mutex::new(edits),
+            edits: Mutex::new(EditQueue {
+                ring: edits,
+                overflow: Vec::new(),
+            }),
             restart_flags: AtomicI32::new(0),
         }
+    }
+
+    /// Moves edits that did not fit into the ring as room frees up. Main thread only.
+    pub fn retry_overflow(&self) {
+        let mut q = self.edits.lock().unwrap();
+        let EditQueue { ring, overflow } = &mut *q;
+        let mut moved = 0;
+        while moved < overflow.len() && ring.push(overflow[moved]).is_ok() {
+            moved += 1;
+        }
+        overflow.drain(..moved);
+    }
+
+    /// Forgets edits waiting for room in the ring, after a state load made them stale.
+    pub fn discard_overflow(&self) {
+        self.edits.lock().unwrap().overflow.clear();
     }
 
     /// Returns and clears the flags passed to `restartComponent` since the last call.
@@ -463,10 +494,15 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn performEdit(&self, id: ParamID, normalized: ParamValue) -> tresult {
-        match self.edits.lock().unwrap().push(Edit { id, normalized }) {
-            Ok(()) => kResultOk,
-            Err(_) => kResultFalse,
+        let edit = Edit { id, normalized };
+        let mut q = self.edits.lock().unwrap();
+        if !q.overflow.is_empty() || q.ring.push(edit).is_err() {
+            match q.overflow.iter_mut().find(|e| e.id == id) {
+                Some(e) => e.normalized = normalized,
+                None => q.overflow.push(edit),
+            }
         }
+        kResultOk
     }
 
     unsafe fn endEdit(&self, _id: ParamID) -> tresult {
@@ -845,6 +881,7 @@ mod tests {
     #[test]
     fn host_context_offers_the_run_loop() {
         use vst3::Steinberg::Linux::{IRunLoopTrait, ITimerHandler};
+        let _pumping = RUN_LOOP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let run_loop = unsafe { vst3::ComRef::<FUnknown>::from_raw(host_context()) }
             .and_then(|h| h.cast::<IRunLoop>())
             .expect("IRunLoop on the host context");
