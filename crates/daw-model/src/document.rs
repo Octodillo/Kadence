@@ -48,13 +48,14 @@ impl Document {
     /// Opens a bundle (its directory or its project file).
     ///
     /// Fails with [`FormatError::AutosavePending`] if the bundle holds an
-    /// autosave newer than its project file (the app quit without saving).
+    /// autosave (saving always deletes it, so one means the app quit without
+    /// saving).
     /// Ask the user, then call [`Document::recover`] or
     /// [`Document::open_discarding_autosave`]. This way the open document
     /// always owns the bundle's autosave file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FormatError> {
         let bundle = Bundle::open(path)?;
-        if bundle.has_newer_autosave() {
+        if bundle.has_autosave() {
             return Err(FormatError::AutosavePending(bundle.autosave_file()));
         }
         Self::load(bundle)
@@ -63,8 +64,14 @@ impl Document {
     /// Opens a bundle's project file, deleting any autosave first.
     pub fn open_discarding_autosave(path: impl AsRef<Path>) -> Result<Self, FormatError> {
         let bundle = Bundle::open(path)?;
-        bundle.discard_autosave()?;
-        Self::load(bundle)
+        // Load first: if the project file is missing or broken, the autosave
+        // may be the only copy of the work.
+        let doc = Self::load(bundle)?;
+        doc.bundle
+            .as_ref()
+            .expect("just loaded")
+            .discard_autosave()?;
+        Ok(doc)
     }
 
     fn load(bundle: Bundle) -> Result<Self, FormatError> {

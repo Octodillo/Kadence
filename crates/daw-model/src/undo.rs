@@ -124,9 +124,7 @@ impl UndoStack {
     /// position, so the document reads as modified.
     fn on_error(&mut self, e: &ModelError) {
         if matches!(e, ModelError::Inconsistent(_)) {
-            self.done.clear();
-            self.undone.clear();
-            self.sealed = true;
+            self.clear();
             self.base_seq = self.next_seq;
             self.next_seq += 1;
         }

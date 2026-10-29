@@ -242,7 +242,6 @@ fn open_refuses_while_a_crash_autosave_is_pending() {
         Document::open(&autosave),
         Err(FormatError::AutosavePending(_))
     ));
-    // Only-autosave bundles report the same, not a bare NotFound.
     assert_eq!(Document::recover(&root).unwrap().project(), &crashed);
 
     let fresh = Document::open_discarding_autosave(&root).unwrap();
@@ -327,4 +326,26 @@ fn failed_rollback_clears_history_and_marks_modified() {
     assert!(doc.is_modified());
     assert!(doc.revision() > rev);
     doc.project().validate().unwrap();
+}
+
+#[test]
+fn discarding_never_destroys_the_only_copy() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Only");
+    let mut doc = Document::new(p);
+    doc.save_as(&root).unwrap();
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    doc.autosave().unwrap();
+    std::fs::remove_file(root.join("Only.kadence")).unwrap();
+
+    // Only the autosave is left: open reports it rather than NotFound.
+    assert!(matches!(
+        Document::open(&root),
+        Err(FormatError::AutosavePending(_))
+    ));
+    assert!(Document::open_discarding_autosave(&root).is_err());
+    assert!(root.join("Only.kadence.autosave").exists());
+    assert_eq!(Document::recover(&root).unwrap().project(), doc.project());
 }

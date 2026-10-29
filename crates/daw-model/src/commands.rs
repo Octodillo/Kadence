@@ -71,12 +71,16 @@ impl Command for Batch {
             match self.commands[i].apply(project) {
                 Ok(c) => changes.extend(c),
                 Err(e) => {
-                    for done in self.commands[..i].iter_mut().rev() {
-                        if let Err(e2) = done.revert(project) {
-                            return Err(rollback_failed(&e, &e2));
-                        }
-                    }
-                    return Err(e);
+                    // Best effort: undo as much as possible even if one fails.
+                    let failed = self.commands[..i]
+                        .iter_mut()
+                        .rev()
+                        .filter_map(|done| done.revert(project).err())
+                        .last();
+                    return Err(match failed {
+                        Some(e2) => rollback_failed(&e, &e2),
+                        None => e,
+                    });
                 }
             }
         }
@@ -91,12 +95,14 @@ impl Command for Batch {
                 Err(e) => {
                     // Put back what this revert already undid, so a failed
                     // undo leaves the project as it was.
-                    for undone in &mut self.commands[i + 1..] {
-                        if let Err(e2) = undone.apply(project) {
-                            return Err(rollback_failed(&e, &e2));
-                        }
-                    }
-                    return Err(e);
+                    let failed = self.commands[i + 1..]
+                        .iter_mut()
+                        .filter_map(|undone| undone.apply(project).err())
+                        .last();
+                    return Err(match failed {
+                        Some(e2) => rollback_failed(&e, &e2),
+                        None => e,
+                    });
                 }
             }
         }

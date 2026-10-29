@@ -29,7 +29,7 @@ My Song/                      bundle directory
   rename, fsync the directory. A crash never leaves a half-written project.
 - Autosave writes `<name>.kadence.autosave` the same atomic way and never
   touches the project file. Saving deletes it, and so does undoing back to the
-  saved state. If it is newer than the project file, `Document::open` fails
+  saved state. If one exists when a bundle is opened, `Document::open` fails
   with `FormatError::AutosavePending` instead of loading the older file: the
   app asks the user, then calls `Document::recover` (load the autosave) or
   `Document::open_discarding_autosave`. The open document therefore always owns

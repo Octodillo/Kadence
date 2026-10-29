@@ -185,7 +185,7 @@ impl Bundle {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| invalid("not a .kadence project file"))?;
         let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        if root.file_name().is_some_and(|n| n == BACKUPS_DIR) && is_backup_name(stem) {
+        if is_backup(&root, stem)? {
             return Err(invalid(
                 "this is a backup; open it with read_project and save it into a bundle",
             ));
@@ -292,6 +292,12 @@ impl Bundle {
 
     /// Whether an autosave exists that is newer than the project file, which
     /// means the app quit without saving. Offer to recover it.
+    /// Whether an autosave exists. Saving deletes it, so this means unsaved
+    /// changes from a session that ended without saving.
+    pub fn has_autosave(&self) -> bool {
+        self.autosave_file().is_file()
+    }
+
     pub fn has_newer_autosave(&self) -> bool {
         let modified = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
         match (
@@ -390,11 +396,23 @@ fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>, FormatErr
     Ok(files)
 }
 
-/// Whether a project file stem has the `<name>-<16-digit timestamp>` shape
-/// that [`Bundle::save`] gives backups.
-fn is_backup_name(stem: &str) -> bool {
-    stem.rsplit_once('-')
-        .is_some_and(|(_, ts)| ts.len() == 16 && ts.bytes().all(|b| b.is_ascii_digit()))
+/// Whether a project file in `dir` named `stem` is a backup: it sits in a
+/// `backups/` folder and either has the `<name>-<16-digit timestamp>` name
+/// [`Bundle::save`] gives backups or the folder belongs to a bundle.
+fn is_backup(dir: &Path, stem: &str) -> Result<bool, FormatError> {
+    if dir.file_name().is_none_or(|n| n != BACKUPS_DIR) {
+        return Ok(false);
+    }
+    let timestamped = stem
+        .rsplit_once('-')
+        .is_some_and(|(_, ts)| ts.len() == 16 && ts.bytes().all(|b| b.is_ascii_digit()));
+    if timestamped {
+        return Ok(true);
+    }
+    match dir.parent() {
+        Some(parent) => Ok(!project_files(parent)?.is_empty()),
+        None => Ok(false),
+    }
 }
 
 /// Reads any project file on its own, such as a backup or an autosave.

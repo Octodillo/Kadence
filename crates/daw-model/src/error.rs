@@ -21,7 +21,9 @@ pub enum ModelError {
     Invalid(String),
     /// A command failed and so did undoing its partial work. The project is
     /// still valid but holds part of the edit, and the undo history has been
-    /// cleared because it no longer matches. This is a bug in a command.
+    /// cleared because it no longer matches. There is no change set for the
+    /// partial edit, so refresh everything that shows the project. This is a
+    /// bug in a command.
     #[error("edit partly applied and history cleared: {0}")]
     Inconsistent(String),
 }
