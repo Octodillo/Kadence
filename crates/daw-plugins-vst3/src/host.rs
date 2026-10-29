@@ -17,7 +17,7 @@ use vst3::Steinberg::Vst::{
 };
 use vst3::Steinberg::{
     FIDString, FUnknown, IBStream, IBStream_::IStreamSeekMode_, IBStreamTrait, TUID, int32, int64,
-    kInvalidArgument, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
+    kInvalidArgument, kOutOfMemory, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
 };
 use vst3::{Class, ComWrapper, Interface};
 
@@ -310,6 +310,9 @@ impl IMessageTrait for Message {
 // ---------------------------------------------------------------------------------------------
 // Byte stream for component and controller state.
 
+/// Largest state a plugin may write, so a garbage seek cannot exhaust memory.
+const MAX_STREAM_LEN: usize = i32::MAX as usize;
+
 #[derive(Default)]
 struct StreamData {
     data: Vec<u8>,
@@ -368,11 +371,22 @@ impl IBStreamTrait for MemoryStream {
         if buffer.is_null() || num_bytes < 0 {
             return kInvalidArgument;
         }
+        if !num_written.is_null() {
+            unsafe { *num_written = 0 };
+        }
         let mut inner = self.inner.lock().unwrap();
         let src = unsafe { std::slice::from_raw_parts(buffer as *const u8, num_bytes as usize) };
         let pos = inner.pos;
-        let end = pos + src.len();
+        // `seek` accepts any position, so a buggy plugin can ask for an absurd size. Refuse it
+        // rather than panic, which would abort through the vtable thunk.
+        let Some(end) = pos.checked_add(src.len()).filter(|&e| e <= MAX_STREAM_LEN) else {
+            return kOutOfMemory;
+        };
         if inner.data.len() < end {
+            let grow = end - inner.data.len();
+            if inner.data.try_reserve(grow).is_err() {
+                return kOutOfMemory;
+            }
             inner.data.resize(end, 0);
         }
         inner.data[pos..end].copy_from_slice(src);
@@ -759,6 +773,25 @@ mod tests {
             assert_eq!(&out[..n as usize], b"ello");
         }
         assert_eq!(s.take(), b"hello");
+    }
+
+    #[test]
+    fn writing_far_past_the_end_fails_instead_of_panicking() {
+        // Called directly rather than through the vtable, where a panic would abort.
+        let s = MemoryStream::default();
+        let mut data = *b"x";
+        let mut n = 7;
+        for at in [i64::MAX - 1, 1 << 40] {
+            unsafe {
+                assert_eq!(
+                    s.seek(at, IStreamSeekMode_::kIBSeekSet as i32, ptr::null_mut()),
+                    kResultOk
+                );
+                assert_ne!(s.write(data.as_mut_ptr().cast(), 1, &mut n), kResultOk);
+            }
+            assert_eq!(n, 0);
+        }
+        assert!(s.take().is_empty());
     }
 
     #[test]
