@@ -2,9 +2,10 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
@@ -38,13 +39,21 @@ pub enum ScanError {
     TimedOut(Duration),
     #[error("the scanner sent unreadable output: {0}")]
     BadOutput(String),
+    #[error("the scanner does not support this format")]
+    Unsupported,
 }
 
 impl ScanError {
     /// Whether the failure says something about the plugin, and so belongs in the cache until the
-    /// bundle changes. A scanner that could not start or ran out of time may do better next time.
+    /// bundle changes. A scanner that could not start, or was built without the format, may do
+    /// better next time. Hangs count as the plugin's fault so that a plugin which always hangs
+    /// does not cost the full timeout on every launch; [`crate::ScanCache::forget_failures`]
+    /// retries them.
     pub fn is_plugin_fault(&self) -> bool {
-        matches!(self, Self::Crashed(_) | Self::BadOutput(_))
+        matches!(
+            self,
+            Self::Crashed(_) | Self::BadOutput(_) | Self::TimedOut(_)
+        )
     }
 }
 
@@ -120,16 +129,22 @@ impl Scanner {
             .spawn()
             .map_err(ScanError::Spawn)?;
 
-        // Read on a thread so a chatty child cannot block on a full pipe. The result comes back
-        // over a channel so that waiting for it can time out: a process the plugin started may
-        // inherit the pipe and keep it open after the scanner exits.
+        // Read on a thread so a chatty child cannot block on a full pipe. A process the plugin
+        // started may inherit the pipe and hold it open after the scanner exits, so the bytes are
+        // shared as they arrive and EOF is only waited for briefly.
         let mut stdout = child.stdout.take().expect("stdout is piped");
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let _ = stdout.read_to_end(&mut out);
-            let _ = tx.send(out);
-        });
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let (eof_tx, eof_rx) = mpsc::channel();
+        {
+            let out = Arc::clone(&out);
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n @ 1..) = stdout.read(&mut chunk) {
+                    out.lock().unwrap().extend_from_slice(&chunk[..n]);
+                }
+                let _ = eof_tx.send(());
+            });
+        }
 
         let start = Instant::now();
         let status = loop {
@@ -143,16 +158,22 @@ impl Scanner {
                 None => std::thread::sleep(Duration::from_millis(5)),
             }
         };
-        if !status.success() {
-            return Err(ScanError::Crashed(status));
+        match status.code() {
+            Some(0) => {}
+            Some(c) if i32::from(EXIT_UNSUPPORTED) == c => return Err(ScanError::Unsupported),
+            _ => return Err(ScanError::Crashed(status)),
         }
-        let remaining = self.timeout.saturating_sub(start.elapsed());
-        let out = rx
-            .recv_timeout(remaining.max(Duration::from_millis(500)))
-            .map_err(|_| ScanError::TimedOut(self.timeout))?;
+        // The scanner has exited, so everything it wrote is in the pipe; whether EOF arrives
+        // depends only on other holders of the pipe.
+        let _ = eof_rx.recv_timeout(Duration::from_millis(500));
+        let out = out.lock().unwrap();
         serde_json::from_slice(&out).map_err(|e| ScanError::BadOutput(e.to_string()))
     }
 }
+
+/// The scanner's exit code when it cannot scan at all: bad arguments, a format it was built
+/// without, or no way to set up its output. Not the plugin's fault, so not cached.
+const EXIT_UNSUPPORTED: u8 = 64;
 
 /// The child side of a scan. If `args` (without the program name) are
 /// `--scan <format> <bundle>`, scans the bundle with `registry`'s format, prints the descriptors
@@ -166,7 +187,7 @@ pub fn run_scan_child(
     let pos = args.iter().position(|a| a == SCAN_ARG)?;
     let (Some(kind), Some(bundle)) = (args.get(pos + 1), args.get(pos + 2)) else {
         eprintln!("usage: {SCAN_ARG} <clap|lv2|vst3> <bundle>");
-        return Some(ExitCode::from(2));
+        return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
     let Some(format) = kind
         .to_str()
@@ -174,36 +195,60 @@ pub fn run_scan_child(
         .and_then(|k| registry.format(&k))
     else {
         eprintln!("unsupported plugin format {kind:?}");
-        return Some(ExitCode::from(2));
+        return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
-    // Plugins may print to stdout while loading. Keep the real stdout for the result and point
-    // file descriptor 1 at stderr for the duration of the scan.
-    let Some(mut result_out) = take_stdout() else {
-        return Some(ExitCode::FAILURE);
+    // Plugins may print to stdout while loading. Point file descriptor 1 at stderr for the
+    // scan and write the result to the real stdout, which is restored afterwards.
+    let Some(redirect) = StdoutRedirect::to_stderr() else {
+        return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
     let found = format.scan(Path::new(bundle));
     let json = serde_json::to_vec(&found).expect("descriptors serialize");
-    if result_out
-        .write_all(&json)
-        .and_then(|()| result_out.flush())
-        .is_err()
-    {
-        return Some(ExitCode::FAILURE);
-    }
-    Some(ExitCode::SUCCESS)
+    let written = redirect.write_result(&json);
+    drop(redirect);
+    Some(if written.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
-/// Moves stdout to a new file descriptor, returned as a file, and makes descriptor 1 a copy of
-/// stderr.
-fn take_stdout() -> Option<std::fs::File> {
-    use std::os::fd::FromRawFd;
-    let _ = std::io::stdout().flush();
-    // SAFETY: plain descriptor duplication; `saved` is a fresh descriptor this function owns.
-    unsafe {
-        let saved = libc::dup(libc::STDOUT_FILENO);
-        if saved < 0 || libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) < 0 {
+/// Holds the real stdout while descriptor 1 points at stderr. Dropping it restores stdout.
+struct StdoutRedirect {
+    saved: OwnedFd,
+}
+
+impl StdoutRedirect {
+    fn to_stderr() -> Option<Self> {
+        let _ = std::io::stdout().flush();
+        // SAFETY: `dup` returns a fresh descriptor (or -1), which `OwnedFd` then owns and closes.
+        let saved = unsafe {
+            let fd = libc::dup(libc::STDOUT_FILENO);
+            if fd < 0 {
+                return None;
+            }
+            OwnedFd::from_raw_fd(fd)
+        };
+        // SAFETY: both descriptors are open; `dup2` only replaces descriptor 1.
+        if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
             return None;
         }
-        Some(std::fs::File::from_raw_fd(saved))
+        Some(Self { saved })
+    }
+
+    fn write_result(&self, data: &[u8]) -> std::io::Result<()> {
+        let mut out = std::fs::File::from(self.saved.try_clone()?);
+        out.write_all(data)?;
+        out.flush()
+    }
+}
+
+impl Drop for StdoutRedirect {
+    fn drop(&mut self) {
+        let _ = std::io::stdout().flush();
+        // SAFETY: `saved` is open for the lifetime of `self`; this puts it back as descriptor 1.
+        unsafe {
+            libc::dup2(self.saved.as_raw_fd(), libc::STDOUT_FILENO);
+        }
     }
 }

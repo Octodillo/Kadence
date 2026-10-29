@@ -28,19 +28,23 @@ thread_local! {
     static IN_PROCESS: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Marks the current thread as the audio thread until dropped.
-pub(crate) struct AudioThreadScope(());
+/// Marks the current thread as the audio thread until dropped. Scopes nest: dropping one
+/// restores whatever was there before it.
+pub(crate) struct AudioThreadScope {
+    was: bool,
+}
 
 impl AudioThreadScope {
     pub(crate) fn enter() -> Self {
-        IN_PROCESS.with(|f| f.set(true));
-        Self(())
+        Self {
+            was: IN_PROCESS.with(|f| f.replace(true)),
+        }
     }
 }
 
 impl Drop for AudioThreadScope {
     fn drop(&mut self) {
-        IN_PROCESS.with(|f| f.set(false));
+        IN_PROCESS.with(|f| f.set(self.was));
     }
 }
 

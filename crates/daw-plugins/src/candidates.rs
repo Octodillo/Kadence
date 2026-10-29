@@ -1,5 +1,6 @@
 //! Finding plugin bundles on disk.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use daw_core::plugin::PluginFormatKind;
@@ -19,16 +20,13 @@ pub fn bundle_extension(kind: &PluginFormatKind) -> &'static str {
 /// skips anything it cannot read.
 pub fn find_candidates(kind: &PluginFormatKind, roots: &[PathBuf]) -> Vec<PathBuf> {
     let ext = bundle_extension(kind);
-    let mut found: Vec<PathBuf> = Vec::new();
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
     for root in roots {
         let mut here = Vec::new();
         walk(root, ext, &mut here, 0);
         here.sort();
-        for bundle in here {
-            if !found.contains(&bundle) {
-                found.push(bundle);
-            }
-        }
+        found.extend(here.into_iter().filter(|b| seen.insert(b.clone())));
     }
     found
 }

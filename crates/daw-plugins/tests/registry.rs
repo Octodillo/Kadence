@@ -229,12 +229,35 @@ fn scan_child_ignores_other_arguments() {
 #[test]
 fn a_helper_process_holding_the_pipe_cannot_hang_the_scan() {
     let start = std::time::Instant::now();
-    let err = sh("sleep 10 & echo '[]'")
-        .with_timeout(Duration::from_millis(300))
+    let found = sh("sleep 10 & echo '[]'")
+        .with_timeout(Duration::from_secs(5))
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap();
+    assert!(found.is_empty());
+    assert!(start.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn a_scanner_without_the_format_is_not_a_crash() {
+    let err = sh("exit 64")
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap_err();
-    assert!(matches!(err, ScanError::TimedOut(_)), "{err}");
-    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(matches!(err, ScanError::Unsupported), "{err}");
+    assert!(!err.is_plugin_fault());
+}
+
+#[test]
+fn forgotten_failures_are_scanned_again() {
+    let dir = plugin_dir();
+    let mut registry = default_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+    registry.scan(&sh("kill -SEGV $$"), &mut cache);
+    assert_eq!(cache.len(), 1);
+    cache.forget_failures();
+    assert!(cache.is_empty());
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!((report.scanned, report.failed.len()), (1, 0));
 }
 
 #[test]

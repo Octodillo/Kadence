@@ -112,7 +112,9 @@ impl PluginRegistry {
         let mut report = ScanReport::default();
         // One slot per bundle, in search-path order, filled from the cache or a scan.
         let mut slots: Vec<(PathBuf, Option<BundleResult>)> = Vec::new();
-        let mut todo: Vec<(usize, PluginFormatKind, PathBuf)> = Vec::new();
+        // Bundles to scan, and the slot each one fills.
+        let mut jobs: Vec<(PluginFormatKind, PathBuf)> = Vec::new();
+        let mut job_slots: Vec<usize> = Vec::new();
 
         for format in &self.formats {
             let kind = format.kind();
@@ -123,19 +125,16 @@ impl PluginRegistry {
                         slots.push((bundle, Some(entry.result.clone())));
                     }
                     _ => {
-                        todo.push((slots.len(), kind.clone(), bundle.clone()));
+                        job_slots.push(slots.len());
+                        jobs.push((kind.clone(), bundle.clone()));
                         slots.push((bundle, None));
                     }
                 }
             }
         }
 
-        let jobs: Vec<_> = todo
-            .iter()
-            .map(|(_, k, b)| (k.clone(), b.clone()))
-            .collect();
         let results = scan_parallel(scanner, &jobs);
-        for ((slot, kind, bundle), result) in todo.into_iter().zip(results) {
+        for ((slot, (kind, bundle)), result) in job_slots.into_iter().zip(jobs).zip(results) {
             report.scanned += 1;
             let cacheable = result
                 .as_ref()
