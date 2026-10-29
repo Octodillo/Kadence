@@ -28,9 +28,9 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude daw-app --all-targets -- -D warnings
       - name: tests
-        run: cargo nextest run --workspace --no-tests=warn
+        run: cargo nextest run --workspace --exclude daw-app --no-tests=warn
       - name: JACK integration tests
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &
@@ -38,7 +38,7 @@ jobs:
           cargo nextest run -p daw-backend --run-ignored only
           kill %1
       - name: doc tests
-        run: cargo test --workspace --doc
+        run: cargo test --workspace --exclude daw-app --doc
 
   licenses:
     name: cargo deny (licenses, sources)
@@ -62,6 +62,8 @@ jobs:
           pacman -Syu --noconfirm --needed \
             base-devel git rustup cmake ninja clang \
             qt6-base qt6-declarative qt6-wayland kirigami qqc2-desktop-style \
+            kcoreaddons ki18n kcrash kconfig kcolorscheme kiconthemes \
+            breeze breeze-icons noto-fonts lld gettext \
             extra-cmake-modules pipewire-jack lilv \
             desktop-file-utils appstream xorg-server-xvfb
           rustup default stable
@@ -79,6 +81,19 @@ jobs:
         run: cargo nextest run --workspace --no-tests=warn
       - name: CMake install layout
         run: ci/check-install.sh
+      - name: Screenshots (Breeze light and dark, 100% and 200%)
+        run: |
+          for scheme in BreezeLight BreezeDark; do
+            for scale in 1 2; do
+              XDG_CONFIG_HOME=$(mktemp -d) QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=$scale \
+                target/debug/kadence --color-scheme $scheme \
+                --screenshot-dir screenshots/$scheme-$((scale * 100))
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
 
   neon:
     name: KDE neon (Ubuntu 24.04)
@@ -100,6 +115,9 @@ jobs:
             build-essential git cmake ninja-build clang pkg-config \
             qt6-base-dev qt6-base-dev-tools qt6-declarative-dev \
             kf6-kirigami-dev qml6-module-org-kde-kirigami kf6-qqc2-desktop-style \
+            kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
+            kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme breeze \
+            lld fonts-noto-core \
             extra-cmake-modules libjack-jackd2-dev liblilv-dev \
             desktop-file-utils appstream xvfb
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
