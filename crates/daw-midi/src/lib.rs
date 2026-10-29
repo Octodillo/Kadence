@@ -13,6 +13,8 @@
 //!   that plays a [`Sequence`](sequence::Sequence), takes live edits
 //!   without a graph rebuild, and captures input for recording.
 //! - [`record`]: turns captured input into notes and plans merging a take.
+//! - [`model`]: glue to `daw-model`: notes as [`EditNote`], edits as one
+//!   undoable command, the meter and tempo map, and compiling a track.
 //!
 //! [`Node`]: daw_core::node::Node
 
@@ -26,3 +28,4 @@ pub mod view;
 
 pub use grid::{Bar, BarBeat, Division, Feel, Grid, GridLine, LineKind, Meter, MeterPoint};
 pub use note::{EditNote, NoteData};
+pub mod model;

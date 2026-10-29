@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 daw-core.workspace = true
+daw-model = { path = "../daw-model" }
 
 [dev-dependencies]
 daw-devices = { path = "../daw-devices" }
