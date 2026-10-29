@@ -237,13 +237,9 @@ impl Lv2Instance {
     /// path plugin UIs use; it also lets the host send `patch:Set` messages.
     /// Returns false if the queue is full. Not for the audio thread.
     pub fn queue_atom(&mut self, port: u32, atom: &[u8]) -> bool {
-        let fits = self
-            .atom_in_ports
-            .iter()
-            .position(|&p| p == port)
-            .is_some_and(|i| {
-                atom.len() >= 8 && ui_atom_room(&self.atom_in[i], atom.len()) != Room::Never
-            });
+        let fits = atom_in_index(&self.atom_in_ports, port).is_some_and(|i| {
+            atom.len() >= 8 && ui_atom_room(&self.atom_in[i], atom.len()) != Room::Never
+        });
         if !fits {
             return false;
         }
@@ -258,16 +254,23 @@ impl Lv2Instance {
     fn drain_from_ui(&mut self) {
         let buf = &mut self.ui_scratch;
         while let Some((port, kind, size)) = ring::peek(&mut self.from_ui) {
-            if kind == ring::ATOM
-                && let Some(i) = self.atom_in_ports.iter().position(|&p| p == port)
-                && ui_atom_room(&self.atom_in[i], size) == Room::Later
-            {
+            let atom_port = if kind == ring::ATOM {
+                atom_in_index(&self.atom_in_ports, port)
+            } else {
+                None
+            };
+            let room = atom_port.map(|i| ui_atom_room(&self.atom_in[i], size));
+            if room == Some(Room::Later) {
                 // Leave it (and what follows) for the next block.
                 break;
             }
             let Some(m) = ring::read(&mut self.from_ui, buf) else {
                 break;
             };
+            if room == Some(Room::Never) {
+                // Could only fit by crowding out host events: dropped.
+                continue;
+            }
             let Some(len) = m.len else { continue };
             match m.kind {
                 ring::CONTROL if len == 4 => {
@@ -275,14 +278,13 @@ impl Lv2Instance {
                     self.inst.set_control_input(PortIndex(m.port as usize), v);
                 }
                 ring::ATOM if len >= 8 => {
-                    let Some(i) = self.atom_in_ports.iter().position(|&p| p == m.port) else {
+                    let Some(i) = atom_port else {
                         continue;
                     };
                     let size = u32::from_ne_bytes(buf[..4].try_into().unwrap()) as usize;
                     let ty = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
                     let body = &buf[8..len.min(8 + size)];
-                    // Room was checked above; an atom that can never fit is
-                    // dropped here (and refused by `queue_atom`).
+                    // Room was checked above.
                     atom::push_event(&mut self.atom_in[i], 0, ty, body);
                 }
                 _ => {}
@@ -464,14 +466,21 @@ impl Lv2Instance {
                         self.apply_param(param, value);
                         continue;
                     }
+                    // All pending changes share one frame, so a later value for
+                    // the same port simply replaces the earlier one.
+                    if let Some(slot) = pending[..n_pending].iter_mut().find(|(p, _)| *p == param) {
+                        slot.1 = value;
+                        continue;
+                    }
                     if n_pending == MAX_PENDING_PARAMS {
-                        // Out of room: apply the waiting ones now, in order.
-                        // They land up to a frame early, but the segment and
-                        // the MIDI already in it stay as they are.
-                        for &(p, v) in &pending[..n_pending] {
-                            self.apply_param(p, v);
+                        // More distinct ports than we can hold: run up to the
+                        // pending frame and apply them. Rare; a MIDI event
+                        // later at that same frame then plays a frame late.
+                        flush!();
+                        if at <= seg_start {
+                            self.apply_param(param, value);
+                            continue;
                         }
-                        n_pending = 0;
                     }
                     pending[n_pending] = (param, value);
                     n_pending += 1;
@@ -712,14 +721,18 @@ enum Room {
     Never,
 }
 
+fn atom_in_index(ports: &[u32], port: u32) -> Option<usize> {
+    ports.iter().position(|&p| p == port)
+}
+
 /// Whether a UI atom of `atom_len` bytes (header included) fits in `seq` now.
 /// UI atoms may fill only half of an atom input, so host MIDI, transport and
 /// reset events pushed after them always have room.
 fn ui_atom_room(seq: &LV2AtomSequence, atom_len: usize) -> Room {
     let half = (seq.capacity() + std::mem::size_of::<lv2_raw::LV2AtomSequence>()) / 2;
-    // Event header (16) plus the atom body, padded; the empty sequence is 16.
-    let needed = (16 + atom_len.saturating_sub(8)).next_multiple_of(8);
-    if 16 + needed > half {
+    let needed = atom::event_size(atom_len.saturating_sub(8));
+    let empty = std::mem::size_of::<lv2_raw::LV2AtomSequence>();
+    if empty + needed > half {
         Room::Never
     } else if seq.size() + needed > half {
         Room::Later

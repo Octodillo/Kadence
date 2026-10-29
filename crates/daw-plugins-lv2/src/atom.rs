@@ -43,6 +43,14 @@ impl Urids {
     }
 }
 
+/// Event header: time (8), size (4), type (4).
+const EVENT_HEADER: usize = 16;
+
+/// Bytes an event with a `body_len`-byte body takes in a sequence.
+pub(crate) fn event_size(body_len: usize) -> usize {
+    (EVENT_HEADER + body_len).next_multiple_of(8)
+}
+
 /// Appends an event to an atom sequence without a size limit of its own (the
 /// sequence's capacity is the limit). Returns false if it does not fit.
 pub(crate) fn push_event(
@@ -51,25 +59,24 @@ pub(crate) fn push_event(
     ty: u32,
     body: &[u8],
 ) -> bool {
-    const EVENT_HEADER: usize = 16; // time (8), size (4), type (4)
     let total = seq.capacity() + std::mem::size_of::<lv2_raw::LV2AtomSequence>();
     let used = seq.size();
-    let padded = (EVENT_HEADER + body.len()).next_multiple_of(8);
+    let padded = event_size(body.len());
     if used + padded > total {
         return false;
     }
     let base = seq.as_mut_ptr();
     // SAFETY: the write stays inside the sequence's buffer (checked above), and
     // the sequence header's size is updated to cover the new, padded event.
-    // The buffer is a Vec<u8>, so nothing here assumes its alignment.
+    // livi (and the plugin) already rely on the heap buffer being aligned
+    // for the sequence header, as malloc guarantees.
     unsafe {
         let dst = base.cast::<u8>().add(used);
         std::ptr::copy_nonoverlapping(time.to_ne_bytes().as_ptr(), dst, 8);
         std::ptr::copy_nonoverlapping((body.len() as u32).to_ne_bytes().as_ptr(), dst.add(8), 4);
         std::ptr::copy_nonoverlapping(ty.to_ne_bytes().as_ptr(), dst.add(12), 4);
         std::ptr::copy_nonoverlapping(body.as_ptr(), dst.add(EVENT_HEADER), body.len());
-        let size = std::ptr::addr_of_mut!((*base).atom.size);
-        size.write_unaligned(size.read_unaligned() + padded as u32);
+        (*base).atom.size += padded as u32;
     }
     true
 }

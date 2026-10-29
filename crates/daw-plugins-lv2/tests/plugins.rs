@@ -250,7 +250,7 @@ fn worker_and_plugin_state() {
         "midimap.lv2",
         "http://gareus.org/oss/lv2/midimap",
     );
-    let mut p = format.instantiate_lv2(&d, SR, BLOCK).unwrap();
+    let mut p = format.instantiate_lv2(&d, SR).unwrap();
     assert!(p.ports().event_out);
     let t = TransportState::default();
 
@@ -279,7 +279,7 @@ fn worker_and_plugin_state() {
     let state = p.save_state().unwrap();
     // midimap keeps the parsed map itself in its state, not the file name.
     std::fs::remove_file(&cfg).unwrap();
-    let mut q = format.instantiate_lv2(&d, SR, BLOCK).unwrap();
+    let mut q = format.instantiate_lv2(&d, SR).unwrap();
     q.load_state(&state).unwrap();
     let mut mapped = false;
     for _ in 0..50 {

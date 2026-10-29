@@ -49,15 +49,13 @@ impl Lv2Format {
 
 impl Lv2Format {
     /// Like [`PluginFormat::instantiate`], but returns the concrete type for
-    /// LV2-specific calls such as [`Lv2Instance::queue_atom`].
+    /// LV2-specific calls such as [`Lv2Instance::queue_atom`]. There is no
+    /// block size argument: plugins always get `HOST_MAX_BLOCK`.
     pub fn instantiate_lv2(
         &self,
         d: &PluginDescriptor,
         sample_rate: f64,
-        max_frames: u32,
     ) -> Result<Lv2Instance, PluginError> {
-        // Plugins always get the fixed HOST_MAX_BLOCK; see `Lv2Instance`.
-        let _ = max_frames;
         Lv2Instance::new(self.shared.clone(), d, sample_rate)
     }
 }
@@ -127,13 +125,11 @@ impl PluginFormat for Lv2Format {
         &self,
         d: &PluginDescriptor,
         sample_rate: f64,
-        max_frames: u32,
+        // Every plugin gets the fixed HOST_MAX_BLOCK, so any host block size
+        // works without re-instantiating.
+        _max_frames: u32,
     ) -> Result<Box<dyn PluginInstance>, PluginError> {
-        Ok(Box::new(self.instantiate_lv2(
-            d,
-            sample_rate,
-            max_frames,
-        )?))
+        Ok(Box::new(self.instantiate_lv2(d, sample_rate)?))
     }
 }
 
