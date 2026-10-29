@@ -2,6 +2,8 @@
 //!
 //! - Stereo in and out, multiplied by parameter 0 ("Gain", plain = normalized, 0..1).
 //! - Parameter 1 ("Peak") is read only; the processor reports the output peak through it.
+//! - Parameter 2 ("Activations") is read only; the processor reports how many times it has
+//!   been activated through it, as the count / 100.
 //! - Note events are echoed to the event output.
 //! - Reports 32 samples of latency.
 //! - Component state is the gain as a little-endian f64. The controller saves 8 bytes but
@@ -13,7 +15,7 @@
 use std::ffi::{c_char, c_void};
 use std::slice;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
@@ -23,6 +25,7 @@ const NAME: &str = "Test Gain";
 const LATENCY: u32 = 32;
 const GAIN: ParamID = 0;
 const PEAK: ParamID = 1;
+const ACTIVATIONS: ParamID = 2;
 
 fn copy_cstr(src: &str, dst: &mut [c_char]) {
     for (d, s) in dst.iter_mut().zip(src.bytes().chain(std::iter::once(0))) {
@@ -59,6 +62,7 @@ unsafe fn write_f64(stream: *mut IBStream, v: f64) -> tresult {
 
 struct Processor {
     gain: AtomicU64,
+    activations: AtomicU32,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
 }
 
@@ -147,7 +151,10 @@ impl IComponentTrait for Processor {
         kResultOk
     }
 
-    unsafe fn setActive(&self, _state: TBool) -> tresult {
+    unsafe fn setActive(&self, state: TBool) -> tresult {
+        if state != 0 {
+            self.activations.fetch_add(1, Ordering::Relaxed);
+        }
         kResultOk
     }
 
@@ -275,6 +282,12 @@ impl IAudioProcessorTrait for Processor {
             if let Some(q) = unsafe { ComRef::from_raw(out.addParameterData(&PEAK, &mut index)) } {
                 unsafe { q.addPoint(0, peak.min(1.0) as f64, &mut index) };
             }
+            let activations = self.activations.load(Ordering::Relaxed) as f64 / 100.0;
+            if let Some(q) =
+                unsafe { ComRef::from_raw(out.addParameterData(&ACTIVATIONS, &mut index)) }
+            {
+                unsafe { q.addPoint(0, activations.min(1.0), &mut index) };
+            }
         }
         kResultOk
     }
@@ -285,7 +298,7 @@ impl IAudioProcessorTrait for Processor {
 }
 
 struct Controller {
-    values: Mutex<[f64; 2]>,
+    values: Mutex<[f64; 3]>,
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
 }
 
@@ -360,7 +373,7 @@ impl IEditControllerTrait for Controller {
     }
 
     unsafe fn getParameterCount(&self) -> i32 {
-        2
+        3
     }
 
     unsafe fn getParameterInfo(&self, index: i32, info: *mut ParameterInfo) -> tresult {
@@ -368,6 +381,7 @@ impl IEditControllerTrait for Controller {
         let (title, flags) = match index as u32 {
             GAIN => ("Gain", ParameterInfo_::ParameterFlags_::kCanAutomate),
             PEAK => ("Peak", ParameterInfo_::ParameterFlags_::kIsReadOnly),
+            ACTIVATIONS => ("Activations", ParameterInfo_::ParameterFlags_::kIsReadOnly),
             _ => return kInvalidArgument,
         };
         info.id = index as ParamID;
@@ -480,11 +494,12 @@ impl IPluginFactoryTrait for Factory {
         let instance = match unsafe { *(cid as *const TUID) } {
             Processor::CID => ComWrapper::new(Processor {
                 gain: AtomicU64::new(1.0f64.to_bits()),
+                activations: AtomicU32::new(0),
                 peer: Mutex::new(None),
             })
             .to_com_ptr::<FUnknown>(),
             Controller::CID => ComWrapper::new(Controller {
-                values: Mutex::new([1.0, 0.0]),
+                values: Mutex::new([1.0, 0.0, 0.0]),
                 handler: Mutex::new(None),
             })
             .to_com_ptr::<FUnknown>(),

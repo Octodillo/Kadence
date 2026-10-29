@@ -948,10 +948,15 @@ impl Node for Vst3Instance {
         self.latency
     }
 
+    /// Runs on the audio thread, so only cycles `setProcessing`, which the spec allows there
+    /// and plugins treat as a state reset. `setActive` and the latency re-read stay on the
+    /// main thread, in `prepare` and `handle_restart`.
     fn reset(&mut self) {
-        if self.active {
-            self.deactivate();
-            self.activate();
+        if self.processing {
+            unsafe {
+                self.processor.setProcessing(0);
+                self.processor.setProcessing(1);
+            }
         }
     }
 }
