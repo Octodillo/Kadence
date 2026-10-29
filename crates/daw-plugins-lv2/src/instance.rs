@@ -22,8 +22,6 @@ const STATE_URI: &str = "urn:daw:lv2-state";
 
 /// Default atom buffer size, as in jalv and Ardour.
 const ATOM_CAPACITY: usize = 8192;
-/// Parameter changes buffered while waiting for their segment boundary.
-const MAX_PENDING_PARAMS: usize = 64;
 
 /// An instantiated LV2 plugin, usable as a graph [`Node`].
 pub struct Lv2Instance {
@@ -64,6 +62,8 @@ pub struct Lv2Instance {
     time_in: Option<usize>,
 
     params: Vec<ParamInfo>,
+    /// Parameter changes waiting for their segment boundary; preallocated.
+    pending: Vec<(ParamId, f64)>,
     latency_port: Option<usize>,
     /// (playing, bpm, position expected at the next block) last sent.
     last_transport: Option<(bool, f64, i64)>,
@@ -131,7 +131,12 @@ impl Lv2Instance {
             if time_in.is_none() && supports(p.index.0, &time_position) {
                 time_in = Some(i);
             }
-            atom_in.push(LV2AtomSequence::new(&features, atom_capacity(p.index.0)));
+            // Twice the size the plugin asks for: UI atoms may use half (see
+            // `ui_atom_room`), host events always have the rest.
+            atom_in.push(LV2AtomSequence::new(
+                &features,
+                2 * atom_capacity(p.index.0),
+            ));
             atom_in_ports.push(p.index.0 as u32);
         }
         // A plugin whose only atom input declares no event types at all still
@@ -215,6 +220,7 @@ impl Lv2Instance {
             atom_out_midi,
             midi_in,
             time_in,
+            pending: Vec::with_capacity(counts.control_inputs),
             params,
             latency_port,
             last_transport: None,
@@ -345,6 +351,9 @@ impl Lv2Instance {
     ) {
         let n = end - start;
         if n == 0 {
+            for seq in &mut self.atom_in {
+                seq.clear();
+            }
             return;
         }
         let host_in = audio_in.len().min(self.n_audio_in);
@@ -425,8 +434,11 @@ impl Lv2Instance {
         first: usize,
     ) -> usize {
         let mut next = first;
-        let mut pending = [(0 as ParamId, 0.0f64); MAX_PENDING_PARAMS];
-        let mut n_pending = 0;
+        // Taken out of `self` (no allocation) so `self` stays free to borrow;
+        // its capacity is the number of control inputs, and changes are
+        // coalesced per port, so pushes never allocate.
+        let mut pending = std::mem::take(&mut self.pending);
+        pending.clear();
         let mut pending_at = start;
         let mut seg_start = start;
         let mut last_midi: Option<usize> = None;
@@ -444,10 +456,10 @@ impl Lv2Instance {
                     seg_start = pending_at;
                     last_midi = None;
                 }
-                for &(p, v) in &pending[..n_pending] {
+                for &(p, v) in &pending {
                     self.apply_param(p, v);
                 }
-                n_pending = 0;
+                pending.clear();
             };
         }
         for ev in ctx.events_in.iter().skip(first) {
@@ -456,11 +468,14 @@ impl Lv2Instance {
                 break;
             }
             next += 1;
-            if n_pending > 0 && f >= pending_at {
+            if !pending.is_empty() && f >= pending_at {
                 flush!();
             }
             match ev.kind {
                 EventKind::ParamValue { param, value } => {
+                    if self.inst.control_input(PortIndex(param as usize)).is_none() {
+                        continue;
+                    }
                     let at = f.max(last_midi.map_or(0, |m| m + 1));
                     if at <= seg_start {
                         self.apply_param(param, value);
@@ -468,22 +483,11 @@ impl Lv2Instance {
                     }
                     // All pending changes share one frame, so a later value for
                     // the same port simply replaces the earlier one.
-                    if let Some(slot) = pending[..n_pending].iter_mut().find(|(p, _)| *p == param) {
+                    if let Some(slot) = pending.iter_mut().find(|(p, _)| *p == param) {
                         slot.1 = value;
                         continue;
                     }
-                    if n_pending == MAX_PENDING_PARAMS {
-                        // More distinct ports than we can hold: run up to the
-                        // pending frame and apply them. Rare; a MIDI event
-                        // later at that same frame then plays a frame late.
-                        flush!();
-                        if at <= seg_start {
-                            self.apply_param(param, value);
-                            continue;
-                        }
-                    }
-                    pending[n_pending] = (param, value);
-                    n_pending += 1;
+                    pending.push((param, value));
                     pending_at = at;
                 }
                 ref kind => {
@@ -500,7 +504,7 @@ impl Lv2Instance {
                 }
             }
         }
-        if n_pending > 0 && pending_at < end {
+        if !pending.is_empty() && pending_at < end {
             flush!();
         }
         self.run_segment(
@@ -511,9 +515,11 @@ impl Lv2Instance {
             end,
         );
         // Changes at or past the end take effect from the next range.
-        for &(p, v) in &pending[..n_pending] {
+        for &(p, v) in &pending {
             self.apply_param(p, v);
         }
+        pending.clear();
+        self.pending = pending;
         next
     }
 

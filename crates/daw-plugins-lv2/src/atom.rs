@@ -68,15 +68,15 @@ pub(crate) fn push_event(
     let base = seq.as_mut_ptr();
     // SAFETY: the write stays inside the sequence's buffer (checked above), and
     // the sequence header's size is updated to cover the new, padded event.
-    // livi (and the plugin) already rely on the heap buffer being aligned
-    // for the sequence header, as malloc guarantees.
+    // The size is updated without assuming the Vec<u8>'s alignment.
     unsafe {
         let dst = base.cast::<u8>().add(used);
         std::ptr::copy_nonoverlapping(time.to_ne_bytes().as_ptr(), dst, 8);
         std::ptr::copy_nonoverlapping((body.len() as u32).to_ne_bytes().as_ptr(), dst.add(8), 4);
         std::ptr::copy_nonoverlapping(ty.to_ne_bytes().as_ptr(), dst.add(12), 4);
         std::ptr::copy_nonoverlapping(body.as_ptr(), dst.add(EVENT_HEADER), body.len());
-        (*base).atom.size += padded as u32;
+        let size = std::ptr::addr_of_mut!((*base).atom.size);
+        size.write_unaligned(size.read_unaligned() + padded as u32);
     }
     true
 }
