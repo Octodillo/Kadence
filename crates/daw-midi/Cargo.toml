@@ -12,7 +12,6 @@ publish.workspace = true
 daw-core.workspace = true
 
 [dev-dependencies]
-assert_no_alloc.workspace = true
 proptest.workspace = true
 
 [lints]

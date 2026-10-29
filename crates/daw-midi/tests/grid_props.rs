@@ -57,7 +57,11 @@ proptest! {
         let s = g.snap(t, &m);
         prop_assert!(s == f || s == n);
         prop_assert_eq!(g.snap(s, &m), s);
-        prop_assert!((s.0 - t.0).abs() <= (n.0 - f.0));
+        // Nearest line, ties to the later one.
+        prop_assert!(2 * (s.0 - t.0).abs() <= n.0 - f.0);
+        if 2 * (t.0 - f.0) == n.0 - f.0 {
+            prop_assert_eq!(s, n);
+        }
         // Every downbeat is a line.
         let bar = m.bar_at(t);
         prop_assert_eq!(g.floor(bar.start, &m), bar.start);

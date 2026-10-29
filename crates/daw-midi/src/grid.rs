@@ -9,6 +9,20 @@ use std::ops::Range;
 
 use daw_core::time::{PPQ, TickTime};
 
+/// The latest tick the grid works with. Times beyond `±MAX_TICK` are
+/// clamped, which keeps all the bar arithmetic far from overflow. At 960 PPQ
+/// and 300 bpm this is still over 29,000 years.
+pub const MAX_TICK: i64 = 1 << 52;
+
+fn clamp_tick(t: TickTime) -> i64 {
+    t.0.clamp(-MAX_TICK, MAX_TICK)
+}
+
+/// Length of one `1/denominator` note in ticks, at least 1.
+pub fn beat_ticks(denominator: u8) -> i64 {
+    (4 * PPQ / denominator.max(1) as i64).max(1)
+}
+
 /// A time-signature change. Each one starts a new bar at `tick`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MeterPoint {
@@ -18,14 +32,14 @@ pub struct MeterPoint {
 }
 
 impl MeterPoint {
-    /// Length of one bar in ticks.
+    /// Length of one bar in ticks, at least 1.
     pub fn bar_ticks(&self) -> i64 {
-        self.numerator as i64 * self.beat_ticks()
+        self.numerator.max(1) as i64 * self.beat_ticks()
     }
 
     /// Length of one beat (one `1/denominator` note) in ticks.
     pub fn beat_ticks(&self) -> i64 {
-        (4 * PPQ / self.denominator as i64).max(1)
+        beat_ticks(self.denominator)
     }
 }
 
@@ -35,7 +49,8 @@ pub struct Bar {
     /// 0-based bar number; bars before tick 0 are negative.
     pub index: i64,
     pub start: TickTime,
-    /// In ticks. Shorter than a full bar when the next meter change cuts it off.
+    /// In ticks, at least 1. Shorter than a full bar when the next meter
+    /// change cuts it off.
     pub len: i64,
     pub numerator: u8,
     pub denominator: u8,
@@ -47,7 +62,7 @@ impl Bar {
     }
 
     pub fn beat_ticks(&self) -> i64 {
-        (4 * PPQ / self.denominator as i64).max(1)
+        beat_ticks(self.denominator)
     }
 }
 
@@ -60,6 +75,9 @@ pub struct BarBeat {
 }
 
 /// Time-signature changes over the timeline.
+///
+/// The model stores the meter points; this is the lookup structure built
+/// from them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Meter {
     // Sorted by tick, unique ticks; the first point is at tick 0.
@@ -86,9 +104,9 @@ impl Meter {
 
     /// Builds a meter from time-signature changes in any order. Invalid
     /// points (zero numerator, a denominator that is not a power of two up to
-    /// 64, a negative tick) are skipped. The first valid point is moved to
-    /// tick 0; with none, the meter is 4/4. A later point at the same tick
-    /// replaces an earlier one.
+    /// 64, a tick outside `0..=MAX_TICK`) are skipped. The first valid point
+    /// is moved to tick 0; with none, the meter is 4/4. A later point at the
+    /// same tick replaces an earlier one.
     pub fn new(points: impl IntoIterator<Item = MeterPoint>) -> Self {
         let mut points: Vec<MeterPoint> = points
             .into_iter()
@@ -96,7 +114,7 @@ impl Meter {
                 p.numerator > 0
                     && p.denominator.is_power_of_two()
                     && p.denominator <= 64
-                    && p.tick.0 >= 0
+                    && (0..=MAX_TICK).contains(&p.tick.0)
             })
             .collect();
         points.sort_by_key(|p| p.tick);
@@ -117,6 +135,7 @@ impl Meter {
         for (i, p) in points.iter().enumerate() {
             first_bar.push(bar);
             if let Some(next) = points.get(i + 1) {
+                // Both ticks are within 0..=MAX_TICK, so this cannot overflow.
                 let span = next.tick.0 - p.tick.0;
                 bar += (span + p.bar_ticks() - 1) / p.bar_ticks();
             }
@@ -128,18 +147,16 @@ impl Meter {
         &self.points
     }
 
-    fn segment(&self, t: TickTime) -> usize {
-        self.points
-            .partition_point(|p| p.tick <= t)
-            .saturating_sub(1)
-    }
-
-    /// The bar that contains `t`.
+    /// The bar that contains `t` (clamped to `±MAX_TICK`).
     pub fn bar_at(&self, t: TickTime) -> Bar {
-        let i = self.segment(t);
+        let t = clamp_tick(t);
+        let i = self
+            .points
+            .partition_point(|p| p.tick.0 <= t)
+            .saturating_sub(1);
         let p = self.points[i];
         let full = p.bar_ticks();
-        let n = (t.0 - p.tick.0).div_euclid(full);
+        let n = (t - p.tick.0).div_euclid(full);
         let start = p.tick.0 + n * full;
         let len = match self.points.get(i + 1) {
             Some(next) => full.min(next.tick.0 - start),
@@ -154,20 +171,23 @@ impl Meter {
         }
     }
 
-    /// Where bar `index` starts. Negative bars extend the first meter backwards.
+    /// Where bar `index` starts. Negative bars extend the first meter
+    /// backwards. Clamped to `±MAX_TICK`.
     pub fn bar_start(&self, index: i64) -> TickTime {
         let i = self
             .first_bar
             .partition_point(|&b| b <= index)
             .saturating_sub(1);
         let p = self.points[i];
-        TickTime(p.tick.0 + (index - self.first_bar[i]) * p.bar_ticks())
+        let bars = (index - self.first_bar[i]).clamp(-MAX_TICK, MAX_TICK);
+        let t = p.tick.0.saturating_add(bars.saturating_mul(p.bar_ticks()));
+        TickTime(t.clamp(-MAX_TICK, MAX_TICK))
     }
 
     /// `t` as bar, beat and tick.
     pub fn bar_beat(&self, t: TickTime) -> BarBeat {
         let bar = self.bar_at(t);
-        let into = t.0 - bar.start.0;
+        let into = clamp_tick(t) - bar.start.0;
         let beat = bar.beat_ticks();
         BarBeat {
             bar: bar.index,
@@ -229,6 +249,31 @@ impl Default for Grid {
     }
 }
 
+/// The step inside one bar, as the exact fraction `num / den` ticks so that
+/// steps that are not whole ticks (sevenths, twelfth-note triplets) do not
+/// drift across the bar. Line `k` sits at `floor(k * num / den)`.
+#[derive(Copy, Clone, Debug)]
+struct Steps {
+    bar: Bar,
+    num: i64,
+    den: i64,
+    swing: i64,
+}
+
+impl Steps {
+    /// Line `k`, or `None` outside the bar.
+    fn line(&self, k: i64) -> Option<i64> {
+        let off = if k % 2 == 1 { self.swing } else { 0 };
+        let at = k * self.num / self.den + off;
+        (k >= 0 && at < self.bar.len).then_some(self.bar.start.0 + at)
+    }
+
+    /// The index of the step that `t` falls in, ignoring swing.
+    fn index(&self, t: i64) -> i64 {
+        (t - self.bar.start.0) * self.den / self.num
+    }
+}
+
 impl Grid {
     pub fn new(division: Division) -> Self {
         Self {
@@ -258,19 +303,40 @@ impl Grid {
         self
     }
 
-    /// The step length in ticks inside `bar`, at least 1.
+    fn steps(&self, bar: Bar) -> Steps {
+        let (mut num, mut den) = match self.division {
+            Division::Bar => (bar.len, 1),
+            Division::Beat => (bar.beat_ticks(), 1),
+            Division::Note(n) => (4 * PPQ, n.max(1) as i64),
+        };
+        if !matches!(self.division, Division::Bar) {
+            match self.feel {
+                Feel::Straight => {}
+                Feel::Triplet => (num, den) = (num * 2, den * 3),
+                Feel::Dotted => (num, den) = (num * 3, den * 2),
+            }
+        }
+        // Never finer than one tick.
+        if num < den {
+            (num, den) = (1, 1);
+        }
+        let swing = if self.swing.is_finite() && !matches!(self.division, Division::Bar) {
+            (self.swing.clamp(0.0, 1.0) * num as f64 / den as f64 / 3.0).round() as i64
+        } else {
+            0
+        };
+        Steps {
+            bar,
+            num,
+            den,
+            swing,
+        }
+    }
+
+    /// The step length in ticks inside `bar` (rounded), at least 1.
     pub fn step_in(&self, bar: &Bar) -> i64 {
-        let base = match self.division {
-            Division::Bar => return bar.len.max(1),
-            Division::Beat => bar.beat_ticks(),
-            Division::Note(n) => 4 * PPQ / n.max(1) as i64,
-        };
-        let step = match self.feel {
-            Feel::Straight => base,
-            Feel::Triplet => base * 2 / 3,
-            Feel::Dotted => base * 3 / 2,
-        };
-        step.max(1)
+        let s = self.steps(*bar);
+        ((s.num + s.den / 2) / s.den).max(1)
     }
 
     /// The step length in ticks at `t`.
@@ -278,81 +344,58 @@ impl Grid {
         self.step_in(&meter.bar_at(t))
     }
 
-    fn swing_offset(&self, step: i64) -> i64 {
-        if self.swing.is_finite() && !matches!(self.division, Division::Bar) {
-            (self.swing.clamp(0.0, 1.0) * step as f64 / 3.0).round() as i64
-        } else {
-            0
-        }
-    }
-
-    /// Line `k` of `bar`, or `None` past the bar's end.
-    fn line(&self, bar: &Bar, step: i64, k: i64) -> Option<i64> {
-        let off = if k % 2 == 1 {
-            self.swing_offset(step)
-        } else {
-            0
-        };
-        let at = k * step + off;
-        (k >= 0 && at < bar.len).then_some(bar.start.0 + at)
-    }
-
-    /// The last line at or before `t`.
+    /// The last line at or before `t` (clamped to `±MAX_TICK`).
     pub fn floor(&self, t: TickTime, meter: &Meter) -> TickTime {
-        let bar = meter.bar_at(t);
-        let step = self.step_in(&bar);
-        let k = (t.0 - bar.start.0) / step;
-        // Swing can push line k past t, but never line k - 1.
-        let line = [k, k - 1]
+        let t = clamp_tick(t);
+        let s = self.steps(meter.bar_at(TickTime(t)));
+        let k = s.index(t);
+        // Line k + 1 can land on t through rounding; swing can push line k
+        // past t, but then line k - 1 is unswung and before t. Line 0 is
+        // the bar start, so one of these always exists.
+        let line = [k + 1, k, k - 1]
             .into_iter()
-            .filter_map(|k| self.line(&bar, step, k))
-            .find(|&l| l <= t.0)
-            // Line 0 is the bar start; only a tail line past the end is missing.
-            .unwrap_or_else(|| self.last_line(&bar, step));
+            .filter_map(|k| s.line(k))
+            .find(|&l| l <= t)
+            .unwrap_or(s.bar.start.0);
         TickTime(line)
     }
 
-    fn last_line(&self, bar: &Bar, step: i64) -> i64 {
-        let mut k = (bar.len - 1) / step;
-        loop {
-            if let Some(l) = self.line(bar, step, k) {
-                return l;
-            }
-            k -= 1;
-        }
-    }
-
-    /// The first line strictly after `t`.
+    /// The first line strictly after `t` (clamped to `±MAX_TICK`).
     pub fn next(&self, t: TickTime, meter: &Meter) -> TickTime {
-        let bar = meter.bar_at(t);
-        let step = self.step_in(&bar);
-        let k = (t.0 - bar.start.0) / step;
+        let t = clamp_tick(t);
+        let s = self.steps(meter.bar_at(TickTime(t)));
+        let k = s.index(t);
         [k, k + 1, k + 2]
             .into_iter()
-            .filter_map(|k| self.line(&bar, step, k))
-            .find(|&l| l > t.0)
-            .map_or(bar.end(), TickTime)
+            .filter_map(|k| s.line(k))
+            .find(|&l| l > t)
+            .map_or(s.bar.end(), TickTime)
     }
 
     /// The last line strictly before `t`.
     pub fn prev(&self, t: TickTime, meter: &Meter) -> TickTime {
-        self.floor(TickTime(t.0 - 1), meter)
+        self.floor(TickTime(clamp_tick(t) - 1), meter)
     }
 
     /// The first line at or after `t`.
     pub fn ceil(&self, t: TickTime, meter: &Meter) -> TickTime {
         let f = self.floor(t, meter);
-        if f == t { f } else { self.next(t, meter) }
+        if f.0 == clamp_tick(t) {
+            f
+        } else {
+            self.next(t, meter)
+        }
     }
 
     /// The nearest line to `t`; halfway goes to the later line.
     pub fn snap(&self, t: TickTime, meter: &Meter) -> TickTime {
         let f = self.floor(t, meter);
-        if f == t {
+        let c = clamp_tick(t);
+        if f.0 == c {
             return f;
         }
         let n = self.next(t, meter);
-        if t.0 - f.0 < n.0 - t.0 { f } else { n }
+        if c - f.0 < n.0 - c { f } else { n }
     }
 
     /// Every grid line in `range` (start inclusive, end exclusive), in order,
@@ -362,23 +405,45 @@ impl Grid {
         range: Range<TickTime>,
         meter: &'a Meter,
     ) -> impl Iterator<Item = GridLine> + 'a {
-        let mut t = self.ceil(range.start, meter);
+        let end = clamp_tick(range.end);
+        let first = self.ceil(range.start, meter).0;
+        let mut s = self.steps(meter.bar_at(TickTime(first)));
+        let mut k = s.index(first);
+        // Step back to the first line at or after `first`.
+        while k > 0 && s.line(k - 1).is_some_and(|l| l >= first) {
+            k -= 1;
+        }
+        while s.line(k).is_some_and(|l| l < first) {
+            k += 1;
+        }
         std::iter::from_fn(move || {
-            if t >= range.end {
+            let tick = match s.line(k) {
+                Some(l) => l,
+                None => {
+                    if s.bar.end().0 > MAX_TICK {
+                        return None;
+                    }
+                    s = self.steps(meter.bar_at(s.bar.end()));
+                    k = 0;
+                    s.bar.start.0
+                }
+            };
+            if tick >= end {
                 return None;
             }
-            let here = t;
-            t = self.next(t, meter);
-            let bar = meter.bar_at(here);
-            let into = here.0 - bar.start.0;
+            k += 1;
+            let into = tick - s.bar.start.0;
             let kind = if into == 0 {
                 LineKind::Bar
-            } else if into % bar.beat_ticks() == 0 {
+            } else if into % s.bar.beat_ticks() == 0 {
                 LineKind::Beat
             } else {
                 LineKind::Step
             };
-            Some(GridLine { tick: here, kind })
+            Some(GridLine {
+                tick: TickTime(tick),
+                kind,
+            })
         })
     }
 }
@@ -528,5 +593,64 @@ mod tests {
                 LineKind::Step
             ]
         );
+    }
+
+    #[test]
+    fn uneven_steps_do_not_drift() {
+        let m = Meter::default();
+        // Sevenths of a whole note: 548.57 ticks each, seven per bar.
+        let g = Grid::note(7);
+        let lines: Vec<i64> = g.lines(t(0)..t(8 * Q), &m).map(|l| l.tick.0).collect();
+        assert_eq!(lines.len(), 14);
+        assert_eq!(lines[6], 3291);
+        assert_eq!(lines[7], 4 * Q);
+        assert_eq!(g.floor(t(4 * Q - 1), &m), t(3291));
+        // Twelfth-note triplets: 213.33 ticks, eighteen per bar.
+        let g = Grid::note(12).triplet();
+        let n = g.lines(t(0)..t(4 * Q), &m).count();
+        assert_eq!(n, 18);
+        assert_eq!(g.prev(t(4 * Q), &m), t(3626));
+    }
+
+    #[test]
+    fn extreme_values_do_not_panic() {
+        let m = Meter::new([
+            MeterPoint {
+                tick: t(0),
+                numerator: 4,
+                denominator: 4,
+            },
+            MeterPoint {
+                tick: t(i64::MAX),
+                numerator: 3,
+                denominator: 4,
+            },
+            MeterPoint {
+                tick: t(MAX_TICK),
+                numerator: 3,
+                denominator: 4,
+            },
+        ]);
+        assert_eq!(m.points().len(), 2);
+        let g = Grid::note(16);
+        for x in [i64::MIN, -MAX_TICK, MAX_TICK, i64::MAX] {
+            g.floor(t(x), &m);
+            g.next(t(x), &m);
+            g.prev(t(x), &m);
+            g.snap(t(x), &m);
+            m.bar_beat(t(x));
+            assert!(g.lines(t(x)..t(i64::MAX), &m).take(3).count() <= 3);
+        }
+        m.bar_start(i64::MIN);
+        m.bar_start(i64::MAX);
+        let bad = MeterPoint {
+            tick: t(0),
+            numerator: 0,
+            denominator: 0,
+        };
+        assert_eq!(bad.beat_ticks(), 4 * Q);
+        assert_eq!(bad.bar_ticks(), 4 * Q);
+        assert_eq!(Grid::note(0).step_at(t(0), &m), 4 * Q);
+        assert_eq!(Grid::note(u16::MAX).step_at(t(0), &m), 1);
     }
 }
