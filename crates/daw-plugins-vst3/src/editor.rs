@@ -189,6 +189,10 @@ impl Editor {
             let _ = fixed_size_hints(width, height).set_normal_hints(&window.conn, id);
         }
 
+        // The plugin creates its child window on its own X connection, so ours must exist on
+        // the server before `attached`, not just sit in our output buffer.
+        window.conn.sync().map_err(|e| e.to_string())?;
+
         let frame = ComWrapper::new(PlugFrame::default());
         *frame.window.lock().unwrap() = Some(window.clone());
         unsafe {

@@ -18,6 +18,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: system packages
+        # jack-sys needs jack.pc to build; jackd2 runs the JACK integration tests.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjack-jackd2-dev jackd2
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -28,6 +31,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
         run: cargo nextest run --workspace --no-tests=warn
+      - name: JACK integration tests
+        run: |
+          jackd --no-realtime -d dummy -r 48000 -p 256 &
+          sleep 2
+          cargo nextest run -p daw-backend --run-ignored only
+          kill %1
       - name: doc tests
         run: cargo test --workspace --doc
 

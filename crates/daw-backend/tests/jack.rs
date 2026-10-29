@@ -1,0 +1,182 @@
+//! Integration tests against a running JACK server. Ignored by default; CI
+//! starts `jackd -d dummy` and runs them with `--run-ignored only`. Locally:
+//!
+//! ```sh
+//! jackd -d dummy -r 48000 -p 256 &
+//! cargo nextest run -p daw-backend --run-ignored only
+//! ```
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use daw_backend::{
+    AudioBackend, BackendConfig, BackendStats, JackBackend, PortDirection, PortFilter, PortKind,
+};
+use daw_core::event::{Event, EventKind};
+
+#[global_allocator]
+static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+
+// JACK clients in one process share the server connection; keep tests apart.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn wait(b: &JackBackend, pred: impl Fn(&BackendStats) -> bool) {
+    let end = Instant::now() + Duration::from_secs(10);
+    while !pred(&b.stats()) {
+        assert!(Instant::now() < end, "timed out: {:?}", b.stats());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn cfg(name: &str) -> BackendConfig {
+    BackendConfig {
+        client_name: name.into(),
+        auto_connect: false,
+        ..BackendConfig::default()
+    }
+}
+
+#[test]
+#[ignore = "needs a running JACK server"]
+fn runs_cycles_and_lists_ports() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(cfg("wu2-basic")).unwrap();
+    assert!(b.sample_rate() > 0.0);
+    assert!(b.buffer_size() > 0);
+
+    let mine: Vec<_> = b
+        .list_ports(&PortFilter::default())
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.is_ours)
+        .collect();
+    let names: Vec<_> = mine.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names.len(),
+        5,
+        "audio_in_1/2, audio_out_1/2, midi_in: {names:?}"
+    );
+    assert!(mine.iter().any(|p| p.name == "wu2-basic:midi_in"
+        && p.kind == PortKind::Midi
+        && p.direction == PortDirection::Input));
+
+    let frames = Arc::new(AtomicU32::new(0));
+    let f = frames.clone();
+    b.start(Box::new(move |c| {
+        f.store(c.frames, Relaxed);
+        for out in c.audio_out.iter_mut() {
+            out.fill(0.0);
+        }
+    }))
+    .unwrap();
+    wait(&b, |s| s.cycles >= 20);
+    assert_eq!(frames.load(Relaxed), b.buffer_size());
+    let s = b.stats();
+    assert!(s.realtime.is_some());
+    assert!(s.dsp_load.is_some());
+    b.stop().unwrap();
+    // Restart after stop.
+    let before = b.stats().cycles;
+    b.start(Box::new(|_| {})).unwrap();
+    wait(&b, |s| s.cycles >= before + 5);
+    b.close().unwrap();
+}
+
+#[test]
+#[ignore = "needs a running JACK server"]
+fn audio_and_midi_flow_between_two_clients() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut src = JackBackend::new();
+    src.open(BackendConfig {
+        audio_inputs: 0,
+        audio_outputs: 1,
+        midi_input: false,
+        midi_output: true,
+        ..cfg("wu2-src")
+    })
+    .unwrap();
+    let mut dst = JackBackend::new();
+    dst.open(BackendConfig {
+        audio_inputs: 1,
+        audio_outputs: 0,
+        midi_input: true,
+        ..cfg("wu2-dst")
+    })
+    .unwrap();
+
+    src.start(Box::new(|c| {
+        c.audio_out[0].fill(0.25);
+        let on = Event {
+            frame: 3,
+            kind: EventKind::NoteOn {
+                channel: 2,
+                key: 64,
+                velocity: 1.0,
+                note_id: -1,
+            },
+        };
+        c.midi_out.push(on).unwrap();
+    }))
+    .unwrap();
+
+    let audio_ok = Arc::new(AtomicU64::new(0));
+    let notes = Arc::new(AtomicU64::new(0));
+    let (a, n) = (audio_ok.clone(), notes.clone());
+    dst.start(Box::new(move |c| {
+        if c.audio_in[0].iter().all(|&x| x == 0.25) {
+            a.fetch_add(1, Relaxed);
+        }
+        for e in c.midi_in.iter() {
+            if e.frame == 3
+                && matches!(e.kind, EventKind::NoteOn { channel: 2, key: 64, velocity, .. } if velocity == 1.0)
+            {
+                n.fetch_add(1, Relaxed);
+            }
+        }
+    }))
+    .unwrap();
+
+    src.connect("wu2-src:audio_out_1", "wu2-dst:audio_in_1")
+        .unwrap();
+    src.connect("wu2-src:midi_out", "wu2-dst:midi_in").unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while audio_ok.load(Relaxed) < 10 || notes.load(Relaxed) < 10 {
+        assert!(Instant::now() < end, "audio {audio_ok:?}, notes {notes:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    src.disconnect("wu2-src:midi_out", "wu2-dst:midi_in")
+        .unwrap();
+    assert!(
+        src.connect("wu2-dst:audio_in_1", "wu2-src:audio_out_1")
+            .is_err()
+    );
+    src.close().unwrap();
+    dst.close().unwrap();
+}
+
+#[test]
+#[ignore = "needs a running JACK server"]
+fn auto_connect_reaches_physical_ports() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        auto_connect: true,
+        ..cfg("wu2-auto")
+    })
+    .unwrap();
+    let physical_in = b
+        .list_ports(&PortFilter {
+            kind: Some(PortKind::Audio),
+            direction: Some(PortDirection::Input),
+            physical_only: true,
+        })
+        .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    if let Some(first) = physical_in.first() {
+        // Try to connect again: JACK reports the existing connection.
+        assert!(b.connect("wu2-auto:audio_out_1", &first.name).is_err());
+    }
+    b.close().unwrap();
+}

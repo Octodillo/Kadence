@@ -273,8 +273,10 @@ impl PeakCache {
             let mut bytes = vec![0u8; len * 2];
             r.read_exact(&mut bytes).map_err(io)?;
             let data = bytes
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&b| i16::from_le_bytes(b))
                 .collect();
             levels.push(PeakLevel {
                 frames_per_peak,
