@@ -15,6 +15,11 @@ pub(crate) fn channel() -> (Producer<u8>, Consumer<u8>) {
     RingBuffer::new(CAPACITY)
 }
 
+/// A ring of at least `bytes` bytes (and never less than the default).
+pub(crate) fn channel_with(bytes: usize) -> (Producer<u8>, Consumer<u8>) {
+    RingBuffer::new(bytes.max(CAPACITY))
+}
+
 /// Queues one message. Returns false, dropping it, when the ring is full.
 pub(crate) fn write(p: &mut Producer<u8>, port: u32, kind: u8, body: &[u8]) -> bool {
     write_parts(p, port, kind, body, &[])

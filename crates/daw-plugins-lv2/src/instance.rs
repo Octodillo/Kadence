@@ -174,8 +174,10 @@ impl Lv2Instance {
                 Some(ParamInfo {
                     id: p.index.0 as ParamId,
                     name: p.name.clone(),
-                    min: f64::from(p.min_value.unwrap_or(0.0)),
-                    max: f64::from(p.max_value.unwrap_or(1.0)),
+                    // Unbounded ports get a range that at least holds the
+                    // default.
+                    min: f64::from(p.min_value.unwrap_or(p.default_value.min(0.0))),
+                    max: f64::from(p.max_value.unwrap_or(p.default_value.max(1.0))),
                     default: f64::from(p.default_value),
                     automatable: !lp.has_property(&not_automatic),
                 })
@@ -185,7 +187,9 @@ impl Lv2Instance {
         let counts = plugin.port_counts();
         let frames = max_frames as usize;
         let (to_dsp, from_ui) = ring::channel();
-        let (to_ui, from_dsp) = ring::channel();
+        // Room for two blocks' worth of every atom output, for the UI.
+        let out_bytes: usize = atom_out.iter().map(|s| s.capacity() + 9).sum();
+        let (to_ui, from_dsp) = ring::channel_with(2 * out_bytes);
         let ui_info = ui::UiInfo::find(&world, &plugin);
         let mut descriptor = descriptor.clone();
         descriptor.ports = (counts.audio_inputs as u16, counts.audio_outputs as u16);
@@ -395,7 +399,8 @@ impl Lv2Instance {
                     && let (Some(out), Some(kind)) =
                         (events_out.as_deref_mut(), midi::from_midi(ev.data))
                 {
-                    let frame = (start as i64 + ev.event.time_in_frames.max(0)) as u32;
+                    let time = ev.event.time_in_frames.clamp(0, (n - 1) as i64);
+                    let frame = (start as i64 + time) as u32;
                     let _ = out.push(Event { frame, kind });
                 }
                 if self.ui_active {
@@ -662,10 +667,12 @@ impl PluginInstance for Lv2Instance {
             .ui_info
             .as_ref()
             .ok_or_else(|| PluginError::Editor("plugin has no supported UI".into()))?;
-        let ends = self
+        let mut ends = self
             .ui_ends
             .take()
             .ok_or_else(|| PluginError::Editor("UI channels unavailable".into()))?;
+        // Whatever the plugin sent for an earlier editor is stale now.
+        while ring::read(&mut ends.from_dsp, &mut []).is_some() {}
         let instance = self.inst.raw().instance();
         let host = ui::HostRefs {
             features: &self.features,

@@ -324,6 +324,7 @@ impl Editor {
         ends: UiEnds,
     ) -> Result<Editor, (PluginError, UiEnds)> {
         let UiEnds { to_dsp, from_dsp } = ends;
+        let from_dsp_capacity = from_dsp.buffer().capacity();
         let controller = Box::into_raw(Box::new(Controller {
             to_dsp,
             event_transfer: host.urids.event_transfer,
@@ -341,7 +342,7 @@ impl Editor {
                     ui_resize: None,
                     external,
                     last_sent: Vec::new(),
-                    atom_buf: vec![0; ring::CAPACITY],
+                    atom_buf: vec![0; from_dsp_capacity],
                     event_transfer: host.urids.event_transfer,
                     _features: features,
                     _host_features: host.features.clone(),
