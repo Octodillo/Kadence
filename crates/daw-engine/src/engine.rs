@@ -101,7 +101,9 @@ impl EngineController {
             garbage: garbage_tx,
             transport: Transport::new(config.sample_rate),
             external: EventList::with_capacity(config.event_capacity),
-            max_frames: config.max_frames as usize,
+            // Zero would never advance through a cycle. No graph compiles
+            // with it, so the processor outputs silence.
+            max_frames: config.max_frames.max(1) as usize,
             shared: shared.clone(),
         };
         let controller = Self {

@@ -300,3 +300,21 @@ fn send_graph_refuses_a_graph_built_for_another_config() {
     run(&mut proc, 512, &EventList::with_capacity(0));
     assert_eq!(ctl.graphs_swapped(), 1);
 }
+
+#[test]
+fn zero_max_frames_does_not_hang_the_processor() {
+    let (ctl, mut proc) = EngineController::new(config(0));
+    assert!(matches!(
+        ctl.compile(GraphDesc::new(0, 1)),
+        Err(CompileError::InvalidConfig)
+    ));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = run(&mut proc, 64, &EventList::with_capacity(0));
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("process returned");
+    assert!(out.iter().all(|&v| v == 0.0));
+}
