@@ -219,7 +219,7 @@ fn recover_works_when_only_the_autosave_is_left() {
 }
 
 #[test]
-fn leftover_crash_autosave_survives_edit_and_undo() {
+fn open_refuses_while_a_crash_autosave_is_pending() {
     let (p, id) = project_with_track();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("Crash");
@@ -229,15 +229,25 @@ fn leftover_crash_autosave_survives_edit_and_undo() {
         .execute(SetTrack::new(id, TrackField::Mute(true)))
         .unwrap();
     first.autosave().unwrap();
+    let crashed = first.project().clone();
     drop(first); // the app crashes
 
-    let mut second = Document::open(&root).unwrap();
-    second
-        .execute(SetTrack::new(id, TrackField::Solo(true)))
-        .unwrap();
-    second.undo().unwrap();
-    assert!(!second.autosave().unwrap());
-    assert!(second.bundle().unwrap().autosave_file().exists());
+    // Neither path silently loads the older project file.
+    assert!(matches!(
+        Document::open(&root),
+        Err(FormatError::AutosavePending(_))
+    ));
+    let autosave = root.join("Crash.kadence.autosave");
+    assert!(matches!(
+        Document::open(&autosave),
+        Err(FormatError::AutosavePending(_))
+    ));
+    // Only-autosave bundles report the same, not a bare NotFound.
+    assert_eq!(Document::recover(&root).unwrap().project(), &crashed);
+
+    let fresh = Document::open_discarding_autosave(&root).unwrap();
+    assert!(!fresh.project().tracks[0].mute);
+    assert!(!autosave.exists());
 }
 
 #[test]
@@ -279,4 +289,42 @@ fn failed_note_edit_does_not_copy_shared_clip() {
         &snap.tracks[0],
         &doc.project().tracks[0]
     ));
+}
+
+/// Fails to apply.
+#[derive(Debug)]
+struct Refuses;
+
+impl Command for Refuses {
+    fn label(&self) -> String {
+        "Refuses".into()
+    }
+    fn apply(&mut self, _: &mut Project) -> Result<ChangeSet, ModelError> {
+        Err(ModelError::Invalid("no".into()))
+    }
+    fn revert(&mut self, _: &mut Project) -> Result<ChangeSet, ModelError> {
+        Ok(ChangeSet::new())
+    }
+}
+
+#[test]
+fn failed_rollback_clears_history_and_marks_modified() {
+    let (p, id) = project_with_track();
+    let mut doc = Document::new(p);
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    doc.save_as(dir.path().join("X")).unwrap();
+    let rev = doc.revision();
+    let err = doc
+        .execute(Batch::new(
+            "Broken",
+            vec![Box::new(StuckOnRevert), Box::new(Refuses)],
+        ))
+        .unwrap_err();
+    assert!(matches!(err, ModelError::Inconsistent(_)));
+    assert!(!doc.history().can_undo());
+    assert!(doc.is_modified());
+    assert!(doc.revision() > rev);
+    doc.project().validate().unwrap();
 }

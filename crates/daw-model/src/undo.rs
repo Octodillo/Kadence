@@ -59,7 +59,7 @@ impl UndoStack {
         project: &mut Project,
         mut command: Box<dyn Command>,
     ) -> Result<ChangeSet, ModelError> {
-        let changes = command.apply(project)?;
+        let changes = command.apply(project).inspect_err(|e| self.on_error(e))?;
         self.undone.clear();
         let merged = !self.sealed
             && self
@@ -93,6 +93,7 @@ impl UndoStack {
             }
             Err(e) => {
                 self.done.push_back(entry);
+                self.on_error(&e);
                 Err(e)
             }
         }
@@ -112,8 +113,22 @@ impl UndoStack {
             }
             Err(e) => {
                 self.undone.push(entry);
+                self.on_error(&e);
                 Err(e)
             }
+        }
+    }
+
+    /// After a command left the project partly edited, no step in the history
+    /// matches the project any more: drop it all and move to a fresh
+    /// position, so the document reads as modified.
+    fn on_error(&mut self, e: &ModelError) {
+        if matches!(e, ModelError::Inconsistent(_)) {
+            self.done.clear();
+            self.undone.clear();
+            self.sealed = true;
+            self.base_seq = self.next_seq;
+            self.next_seq += 1;
         }
     }
 

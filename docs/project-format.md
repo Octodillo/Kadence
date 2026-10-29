@@ -28,9 +28,12 @@ My Song/                      bundle directory
   the newest 10, then writes the new file atomically: write `*.tmp`, fsync,
   rename, fsync the directory. A crash never leaves a half-written project.
 - Autosave writes `<name>.kadence.autosave` the same atomic way and never
-  touches the project file. A successful save deletes it. If it is newer than
-  the project file when a bundle is opened, the app should offer to recover it
-  (`Bundle::has_newer_autosave`, `Document::recover`).
+  touches the project file. Saving deletes it, and so does undoing back to the
+  saved state. If it is newer than the project file, `Document::open` fails
+  with `FormatError::AutosavePending` instead of loading the older file: the
+  app asks the user, then calls `Document::recover` (load the autosave) or
+  `Document::open_discarding_autosave`. The open document therefore always owns
+  its bundle's autosave.
 - `AudioClip.source` paths are relative to the bundle root (for example
   `audio/take1.wav`), always with `/` separators. Absolute paths are allowed for files left outside the
   bundle. `Bundle::import_audio` copies a file into `audio/` under a name that

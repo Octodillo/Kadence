@@ -128,7 +128,7 @@ impl Bundle {
         let stem = root
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.strip_suffix(".kadence").unwrap_or(n).to_owned())
+            .map(|n| strip_suffix_ci(n, PROJECT_SUFFIX).unwrap_or(n).to_owned())
             .filter(|n| !n.is_empty())
             .ok_or_else(|| FormatError::Io {
                 path: root.clone(),
@@ -185,7 +185,7 @@ impl Bundle {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| invalid("not a .kadence project file"))?;
         let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        if is_backups_dir(&root)? {
+        if root.file_name().is_some_and(|n| n == BACKUPS_DIR) && is_backup_name(stem) {
             return Err(invalid(
                 "this is a backup; open it with read_project and save it into a bundle",
             ));
@@ -390,16 +390,11 @@ fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>, FormatErr
     Ok(files)
 }
 
-/// Whether `dir` is the `backups/` folder of a bundle, rather than a bundle
-/// that happens to be called "backups".
-fn is_backups_dir(dir: &Path) -> Result<bool, FormatError> {
-    if dir.file_name().is_none_or(|n| n != BACKUPS_DIR) {
-        return Ok(false);
-    }
-    match dir.parent() {
-        Some(parent) => Ok(!project_files(parent)?.is_empty()),
-        None => Ok(false),
-    }
+/// Whether a project file stem has the `<name>-<16-digit timestamp>` shape
+/// that [`Bundle::save`] gives backups.
+fn is_backup_name(stem: &str) -> bool {
+    stem.rsplit_once('-')
+        .is_some_and(|(_, ts)| ts.len() == 16 && ts.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Reads any project file on its own, such as a backup or an autosave.

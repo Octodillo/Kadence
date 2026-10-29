@@ -73,7 +73,7 @@ impl Command for Batch {
                 Err(e) => {
                     for done in self.commands[..i].iter_mut().rev() {
                         if let Err(e2) = done.revert(project) {
-                            rollback_failed(&e, &e2);
+                            return Err(rollback_failed(&e, &e2));
                         }
                     }
                     return Err(e);
@@ -93,7 +93,7 @@ impl Command for Batch {
                     // undo leaves the project as it was.
                     for undone in &mut self.commands[i + 1..] {
                         if let Err(e2) = undone.apply(project) {
-                            rollback_failed(&e, &e2);
+                            return Err(rollback_failed(&e, &e2));
                         }
                     }
                     return Err(e);
@@ -105,11 +105,12 @@ impl Command for Batch {
 }
 
 /// A command broke the `apply`/`revert` inverse contract while a batch was
-/// rolling back, so the project and history no longer agree. Carrying on would
-/// corrupt the document silently, so stop loudly instead.
+/// rolling back. Every command keeps the project valid, so the project is
+/// still usable, but it holds part of the batch and the history can't be
+/// trusted; the undo stack clears itself on this error.
 #[cold]
-fn rollback_failed(original: &ModelError, rollback: &ModelError) -> ! {
-    panic!("batch rollback failed ({rollback}) after: {original}");
+fn rollback_failed(original: &ModelError, rollback: &ModelError) -> ModelError {
+    ModelError::Inconsistent(format!("{original}; rolling back failed with: {rollback}"))
 }
 
 // ---------------------------------------------------------------------------
