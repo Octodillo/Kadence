@@ -18,8 +18,7 @@ use x11rb::connection::Connection;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, PropMode,
-    WindowClass,
+    AtomEnum, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, PropMode, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -105,7 +104,10 @@ impl IRunLoopTrait for PlugFrame {
     }
 
     unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
-        self.fds.lock().unwrap().retain(|(h, _)| h.as_ptr() != handler);
+        self.fds
+            .lock()
+            .unwrap()
+            .retain(|(h, _)| h.as_ptr() != handler);
         kResultTrue
     }
 
@@ -249,10 +251,28 @@ impl Editor {
                     .background_pixel(black)
                     .event_mask(EventMask::STRUCTURE_NOTIFY),
             )?;
-            conn.change_property8(PropMode::REPLACE, id, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?;
+            conn.change_property8(
+                PropMode::REPLACE,
+                id,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                title.as_bytes(),
+            )?;
             conn.change_property8(PropMode::REPLACE, id, net_wm_name, utf8, title.as_bytes())?;
-            conn.change_property8(PropMode::REPLACE, id, AtomEnum::WM_CLASS, AtomEnum::STRING, b"kadence\0Kadence\0")?;
-            conn.change_property32(PropMode::REPLACE, id, wm_protocols, AtomEnum::ATOM, &[wm_delete])?;
+            conn.change_property8(
+                PropMode::REPLACE,
+                id,
+                AtomEnum::WM_CLASS,
+                AtomEnum::STRING,
+                b"kadence\0Kadence\0",
+            )?;
+            conn.change_property32(
+                PropMode::REPLACE,
+                id,
+                wm_protocols,
+                AtomEnum::ATOM,
+                &[wm_delete],
+            )?;
             Ok(())
         })()
         .map_err(|e| e.to_string())?;

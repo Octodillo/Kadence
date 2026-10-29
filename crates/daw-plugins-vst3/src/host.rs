@@ -15,8 +15,8 @@ use vst3::Steinberg::Vst::{
     ParamValue, String128, TChar,
 };
 use vst3::Steinberg::{
-    FIDString, FUnknown, IBStream, IBStream_::IStreamSeekMode_, IBStreamTrait, TUID, int32,
-    int64, kInvalidArgument, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
+    FIDString, FUnknown, IBStream, IBStream_::IStreamSeekMode_, IBStreamTrait, TUID, int32, int64,
+    kInvalidArgument, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
 };
 use vst3::{Class, ComWrapper, Interface};
 
@@ -34,7 +34,9 @@ unsafe fn query<C: Class>(obj: ComWrapper<C>, iid: *const TUID, out: *mut *mut c
 where
     C::Interfaces: vst3::com_scrape_types::MakeHeader<C, ComWrapper<C>>,
 {
-    let unknown = obj.to_com_ptr::<FUnknown>().expect("every class is an FUnknown");
+    let unknown = obj
+        .to_com_ptr::<FUnknown>()
+        .expect("every class is an FUnknown");
     unsafe {
         let raw = unknown.as_ptr();
         ((*(*raw).vtbl).queryInterface)(raw, iid as *const TUID, out)
@@ -171,7 +173,12 @@ impl IAttributeListTrait for AttributeList {
         self.set(id, Attr::String(s))
     }
 
-    unsafe fn getString(&self, id: FIDString, string: *mut TChar, size_in_bytes: uint32) -> tresult {
+    unsafe fn getString(
+        &self,
+        id: FIDString,
+        string: *mut TChar,
+        size_in_bytes: uint32,
+    ) -> tresult {
         let capacity = size_in_bytes as usize / std::mem::size_of::<TChar>();
         if string.is_null() || capacity == 0 {
             return kInvalidArgument;
@@ -187,10 +194,19 @@ impl IAttributeListTrait for AttributeList {
             }
             _ => None,
         });
-        if found.is_some() { kResultOk } else { kResultFalse }
+        if found.is_some() {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 
-    unsafe fn setBinary(&self, id: FIDString, data: *const c_void, size_in_bytes: uint32) -> tresult {
+    unsafe fn setBinary(
+        &self,
+        id: FIDString,
+        data: *const c_void,
+        size_in_bytes: uint32,
+    ) -> tresult {
         let bytes = if data.is_null() || size_in_bytes == 0 {
             Vec::new()
         } else {
@@ -519,7 +535,12 @@ impl IParamValueQueueTrait for ParamQueue {
         kResultTrue
     }
 
-    unsafe fn addPoint(&self, sample_offset: int32, value: ParamValue, index: *mut int32) -> tresult {
+    unsafe fn addPoint(
+        &self,
+        sample_offset: int32,
+        value: ParamValue,
+        index: *mut int32,
+    ) -> tresult {
         match self.add(sample_offset, value) {
             Some(i) => {
                 if !index.is_null() {
@@ -603,7 +624,11 @@ impl IParameterChangesTrait for ParamChanges {
         self.queue_ptr(index as usize)
     }
 
-    unsafe fn addParameterData(&self, id: *const ParamID, index: *mut int32) -> *mut IParamValueQueue {
+    unsafe fn addParameterData(
+        &self,
+        id: *const ParamID,
+        index: *mut int32,
+    ) -> *mut IParamValueQueue {
         if id.is_null() {
             return ptr::null_mut();
         }
@@ -683,7 +708,11 @@ impl IEventListTrait for EventQueue {
         if e.is_null() {
             return kInvalidArgument;
         }
-        if self.push(unsafe { *e }) { kResultOk } else { kResultFalse }
+        if self.push(unsafe { *e }) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 }
 
@@ -718,7 +747,10 @@ mod tests {
         assert!(pc.add(7, 10, 0.6));
         assert!(pc.add(9, 0, 1.0));
         assert!(!pc.add(11, 0, 1.0), "only two queues");
-        let q: Vec<_> = pc.queues().map(|q| (q.id(), q.iter().collect::<Vec<_>>())).collect();
+        let q: Vec<_> = pc
+            .queues()
+            .map(|q| (q.id(), q.iter().collect::<Vec<_>>()))
+            .collect();
         assert_eq!(q, vec![(7, vec![(0, 0.1), (10, 0.6)]), (9, vec![(0, 1.0)])]);
         pc.clear();
         assert_eq!(pc.queues().count(), 0);

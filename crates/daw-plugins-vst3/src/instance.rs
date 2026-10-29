@@ -22,11 +22,15 @@ use vst3::Steinberg::Vst::{
     ProcessData, ProcessModes_, ProcessSetup, RestartFlags_, SpeakerArrangement,
     SymbolicSampleSizes_, kNoParamId,
 };
-use vst3::Steinberg::{FUnknown, IBStream, IPluginBaseTrait, IPluginFactoryTrait, TUID, kResultOk, kResultTrue};
+use vst3::Steinberg::{
+    FUnknown, IBStream, IPluginBaseTrait, IPluginFactoryTrait, TUID, kResultOk, kResultTrue,
+};
 use vst3::{ComPtr, ComWrapper, Interface};
 
 use crate::editor::Editor;
-use crate::host::{ComponentHandler, Edit, EventQueue, HostApplication, MemoryStream, ParamChanges};
+use crate::host::{
+    ComponentHandler, Edit, EventQueue, HostApplication, MemoryStream, ParamChanges,
+};
 use crate::module::{AUDIO_EFFECT_CLASS, ClassInfo, Module};
 use crate::util::{tuid_from_hex, tuid_to_hex, wstr_field};
 
@@ -206,7 +210,8 @@ fn audio_channels(component: &ComPtr<IComponent>, dir: i32) -> Vec<i32> {
         (0..count)
             .map(|i| {
                 let mut info: BusInfo = std::mem::zeroed();
-                if component.getBusInfo(MediaTypes_::kAudio as i32, dir, i, &mut info) == kResultOk {
+                if component.getBusInfo(MediaTypes_::kAudio as i32, dir, i, &mut info) == kResultOk
+                {
                     info.channelCount.max(0)
                 } else {
                     0
@@ -230,7 +235,11 @@ fn read_buses(component: &ComPtr<IComponent>) -> Buses {
 }
 
 fn channel_total(channels: &[i32]) -> u16 {
-    channels.iter().map(|&c| c as u32).sum::<u32>().min(u16::MAX as u32) as u16
+    channels
+        .iter()
+        .map(|&c| c as u32)
+        .sum::<u32>()
+        .min(u16::MAX as u32) as u16
 }
 
 /// Lists the processor classes of one module as descriptors.
@@ -254,7 +263,12 @@ pub fn scan_module(path: &Path) -> Vec<PluginDescriptor> {
         .collect()
 }
 
-fn descriptor_for(path: &Path, class: &ClassInfo, vendor: &str, ports: (u16, u16)) -> PluginDescriptor {
+fn descriptor_for(
+    path: &Path,
+    class: &ClassInfo,
+    vendor: &str,
+    ports: (u16, u16),
+) -> PluginDescriptor {
     PluginDescriptor {
         format: PluginFormatKind::Vst3,
         id: tuid_to_hex(&class.cid),
@@ -295,7 +309,9 @@ impl Vst3Instance {
         let cid = tuid_from_hex(&d.id).ok_or_else(|| load_err("bad class id"))?;
 
         let host = ComWrapper::new(HostApplication);
-        let context = host.to_com_ptr::<FUnknown>().ok_or_else(|| load_err("host"))?;
+        let context = host
+            .to_com_ptr::<FUnknown>()
+            .ok_or_else(|| load_err("host"))?;
         let (edits_tx, edits_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
         let (to_controller_tx, to_controller_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
         let handler = ComWrapper::new(ComponentHandler::new(edits_tx));
@@ -497,12 +513,16 @@ impl Vst3Instance {
     }
 
     fn to_plain(&self, id: ParamID, normalized: f64) -> f64 {
-        self.param(id).map_or(normalized, |p| p.to_plain(normalized))
+        self.param(id)
+            .map_or(normalized, |p| p.to_plain(normalized))
     }
 
     /// Applies processor-side values to the controller so editors and `param_value` follow.
     fn flush_to_controller(&self) {
-        let mut rx = self.to_controller_rx.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rx = self
+            .to_controller_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         while let Ok(e) = rx.pop() {
             unsafe { self.controller.setParamNormalized(e.id, e.normalized) };
         }
@@ -523,7 +543,8 @@ impl Vst3Instance {
             self.activate();
         }
         if flags
-            & (RestartFlags_::kParamValuesChanged as i32 | RestartFlags_::kParamTitlesChanged as i32)
+            & (RestartFlags_::kParamValuesChanged as i32
+                | RestartFlags_::kParamTitlesChanged as i32)
             != 0
         {
             self.read_params();
@@ -580,7 +601,11 @@ fn midi_to_vst_event(frame: u32, bytes: [u8; 3]) -> Option<VstEvent> {
     Some(vst_event(frame, body.0, body.1))
 }
 
-fn vst_event(frame: u32, kind: vst3::Steinberg::Vst::Event_::EventTypes, body: Event__type0) -> VstEvent {
+fn vst_event(
+    frame: u32,
+    kind: vst3::Steinberg::Vst::Event_::EventTypes,
+    body: Event__type0,
+) -> VstEvent {
     VstEvent {
         busIndex: 0,
         sampleOffset: frame as i32,
@@ -635,17 +660,29 @@ impl Node for Vst3Instance {
             self.buses = read_buses(&self.component);
 
             for (media, dir, n) in [
-                (MediaTypes_::kAudio, BusDirections_::kInput, self.buses.inputs.len()),
-                (MediaTypes_::kAudio, BusDirections_::kOutput, self.buses.outputs.len()),
+                (
+                    MediaTypes_::kAudio,
+                    BusDirections_::kInput,
+                    self.buses.inputs.len(),
+                ),
+                (
+                    MediaTypes_::kAudio,
+                    BusDirections_::kOutput,
+                    self.buses.outputs.len(),
+                ),
             ] {
                 for i in 0..n {
-                    self.component.activateBus(media as i32, dir as i32, i as i32, 1);
+                    self.component
+                        .activateBus(media as i32, dir as i32, i as i32, 1);
                 }
             }
             for dir in [BusDirections_::kInput, BusDirections_::kOutput] {
-                let n = self.component.getBusCount(MediaTypes_::kEvent as i32, dir as i32);
+                let n = self
+                    .component
+                    .getBusCount(MediaTypes_::kEvent as i32, dir as i32);
                 for i in 0..n {
-                    self.component.activateBus(MediaTypes_::kEvent as i32, dir as i32, i, 1);
+                    self.component
+                        .activateBus(MediaTypes_::kEvent as i32, dir as i32, i, 1);
                 }
             }
         }
@@ -735,7 +772,10 @@ impl Node for Vst3Instance {
                     let channel = (bytes[0] & 0x0f) as usize;
                     let (cc, normalized) = match bytes[0] & 0xf0 {
                         0xb0 => (bytes[1] as usize & 0x7f, bytes[2] as f64 / 127.0),
-                        0xd0 => (ControllerNumbers_::kAfterTouch as usize, bytes[1] as f64 / 127.0),
+                        0xd0 => (
+                            ControllerNumbers_::kAfterTouch as usize,
+                            bytes[1] as f64 / 127.0,
+                        ),
                         0xe0 => (
                             ControllerNumbers_::kPitchBend as usize,
                             (((bytes[2] as u32 & 0x7f) << 7) | (bytes[1] as u32 & 0x7f)) as f64
@@ -753,7 +793,9 @@ impl Node for Vst3Instance {
                     let normalized = self
                         .param_index
                         .get(&param)
-                        .map_or(value.clamp(0.0, 1.0), |&i| self.params[i].to_normalized(value));
+                        .map_or(value.clamp(0.0, 1.0), |&i| {
+                            self.params[i].to_normalized(value)
+                        });
                     rt.in_params.add(param, frame as i32, normalized);
                     let _ = self.to_controller_tx.push(Edit {
                         id: param,
@@ -816,8 +858,14 @@ impl Node for Vst3Instance {
                 .out_params
                 .as_com_ref()
                 .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            inputEvents: rt.in_events.as_com_ref().map_or(ptr::null_mut(), |r| r.as_ptr()),
-            outputEvents: rt.out_events.as_com_ref().map_or(ptr::null_mut(), |r| r.as_ptr()),
+            inputEvents: rt
+                .in_events
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            outputEvents: rt
+                .out_events
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
             processContext: &mut rt.context,
         };
         unsafe { self.processor.process(&mut data) };
@@ -939,7 +987,9 @@ impl PluginInstance for Vst3Instance {
                 .to_com_ptr::<IBStream>()
                 .ok_or_else(|| PluginError::State("stream".into()))?;
             if get(s.as_ptr()) != kResultOk {
-                return Err(PluginError::State("plugin refused to save its state".into()));
+                return Err(PluginError::State(
+                    "plugin refused to save its state".into(),
+                ));
             }
             Ok(stream.take())
         };
@@ -977,25 +1027,33 @@ impl PluginInstance for Vst3Instance {
         let component = blob()?.to_vec();
         let controller = blob()?.to_vec();
 
-        let write = |bytes: Vec<u8>, set: &dyn Fn(*mut IBStream) -> i32| -> Result<(), PluginError> {
-            let stream = ComWrapper::new(MemoryStream::with_data(bytes));
-            let s = stream
-                .to_com_ptr::<IBStream>()
-                .ok_or_else(|| PluginError::State("stream".into()))?;
-            if set(s.as_ptr()) != kResultOk {
-                return Err(PluginError::State("plugin rejected the state".into()));
-            }
-            Ok(())
-        };
-        write(component.clone(), &|s| unsafe { self.component.setState(s) })?;
+        let write =
+            |bytes: Vec<u8>, set: &dyn Fn(*mut IBStream) -> i32| -> Result<(), PluginError> {
+                let stream = ComWrapper::new(MemoryStream::with_data(bytes));
+                let s = stream
+                    .to_com_ptr::<IBStream>()
+                    .ok_or_else(|| PluginError::State("stream".into()))?;
+                if set(s.as_ptr()) != kResultOk {
+                    return Err(PluginError::State("plugin rejected the state".into()));
+                }
+                Ok(())
+            };
+        write(component.clone(), &|s| unsafe {
+            self.component.setState(s)
+        })?;
         if self.split {
-            write(component, &|s| unsafe { self.controller.setComponentState(s) })?;
+            write(component, &|s| unsafe {
+                self.controller.setComponentState(s)
+            })?;
             if !controller.is_empty() {
                 write(controller, &|s| unsafe { self.controller.setState(s) })?;
             }
         }
         // Values pushed before the load are stale now.
-        let mut rx = self.to_controller_rx.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rx = self
+            .to_controller_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         while rx.pop().is_ok() {}
         Ok(())
     }
@@ -1011,8 +1069,8 @@ impl PluginInstance for Vst3Instance {
         if self.editor.is_some() {
             return Ok(());
         }
-        let editor = Editor::open(&self.controller, &self.descriptor.name)
-            .map_err(PluginError::Editor)?;
+        let editor =
+            Editor::open(&self.controller, &self.descriptor.name).map_err(PluginError::Editor)?;
         self.editor = Some(editor);
         Ok(())
     }

@@ -86,7 +86,10 @@ impl Module {
             };
             if module.factory.is_none() {
                 // Dropping `module` still runs ModuleExit.
-                return Err(format!("{}: GetPluginFactory returned null", binary.display()));
+                return Err(format!(
+                    "{}: GetPluginFactory returned null",
+                    binary.display()
+                ));
             }
             Ok(module)
         }

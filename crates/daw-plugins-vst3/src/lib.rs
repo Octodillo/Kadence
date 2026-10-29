@@ -5,6 +5,10 @@
 //! split component/controller plugins, audio, note and MIDI events, parameters, state, latency
 //! and editors in a floating X11 window.
 
+// The bindings' enum types change width between platforms, so casts that are no-ops on Linux
+// are kept for clarity and portability.
+#![allow(clippy::unnecessary_cast)]
+
 mod editor;
 mod host;
 mod instance;
@@ -13,7 +17,9 @@ mod util;
 
 use std::path::{Path, PathBuf};
 
-use daw_core::plugin::{PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance};
+use daw_core::plugin::{
+    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+};
 
 pub use instance::Vst3Instance;
 
@@ -65,7 +71,10 @@ impl PluginFormat for Vst3Format {
         max_frames: u32,
     ) -> Result<Box<dyn PluginInstance>, PluginError> {
         if d.format != PluginFormatKind::Vst3 {
-            return Err(PluginError::Load(format!("{} is not a VST3 plugin", d.name)));
+            return Err(PluginError::Load(format!(
+                "{} is not a VST3 plugin",
+                d.name
+            )));
         }
         let mut instance = Vst3Instance::new(d)?;
         daw_core::node::Node::prepare(&mut instance, sample_rate, max_frames);
