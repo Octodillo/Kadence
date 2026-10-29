@@ -341,7 +341,11 @@ impl ClipReader {
             return Some(seg);
         }
         while let Ok(seg) = self.segs.pop() {
-            if seg.generation != self.generation {
+            // While a seek is pending, data that ends before the position the reader has
+            // moved on to doesn't serve it; dropping it keeps the read Pending rather
+            // than reporting an underrun (the transport may roll during a locate).
+            let behind = self.waiting && seg.start + i64::from(seg.frames) <= self.expected;
+            if seg.generation != self.generation || (behind && !seg.eof) {
                 self.discard(seg.frames as usize);
                 continue;
             }
@@ -521,7 +525,10 @@ impl WorkerStream {
         let requested = target.max(0);
         // A freshly reset resampler rings for its filter length, so start decoding a
         // little earlier and let the skip below drop the lead-in.
-        let lead = if self.resampler.is_some() { 2048 } else { 0 };
+        let lead = self
+            .resampler
+            .as_ref()
+            .map_or(0, |rs| rs.warmup_frames() as i64);
         let target = u128::from((requested - lead).max(0) as u64);
         let (src_rate, dst_rate) = (u128::from(self.src_rate), u128::from(self.dst_rate));
         // Start on a frame where source and engine grids coincide, so the resampled

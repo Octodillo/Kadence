@@ -252,7 +252,14 @@ fn resampled_seek_matches_continuous_playback() {
         let mut r = streamer.open(&path).unwrap();
         r.cue(SampleTime(start));
         wait_ready(std::slice::from_mut(&mut r));
-        std::thread::sleep(Duration::from_millis(50));
+        let t = Instant::now();
+        while r.buffered_frames() < 16_384 + 4096 {
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "fill never caught up"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let mut l = vec![0.0; 16_384];
         let mut rr = vec![0.0; 16_384];
         assert_eq!(
@@ -326,5 +333,36 @@ fn odd_rate_seek_is_ready_only_with_data_at_the_target() {
             );
         }
     }
+    assert_eq!(r.underruns(), 0);
+}
+
+#[test]
+fn rolling_through_a_locate_reports_pending_not_underrun() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), 6, 44_100, 4.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let mut r = streamer.open(&path).unwrap();
+    wait_ready(std::slice::from_mut(&mut r));
+    let mut l = vec![0.0; BLOCK];
+    let mut rr = vec![0.0; BLOCK];
+    // Locate, and keep the transport rolling at real-time pace while the seek is served.
+    let start = Instant::now();
+    let period = Duration::from_secs_f64(BLOCK as f64 / f64::from(RATE));
+    let mut served = false;
+    for cycle in 0..400 {
+        let pos = 2 * RATE as i64 + (cycle * BLOCK) as i64;
+        let st = r.read(SampleTime(pos), &mut [&mut l[..], &mut rr[..]]);
+        assert_ne!(st, ReadStatus::Underrun, "cycle {cycle}");
+        if st == ReadStatus::Ok {
+            served = true;
+        } else {
+            assert!(!served, "went back to Pending at cycle {cycle}");
+        }
+        let deadline = start + period * (cycle as u32 + 1);
+        if let Some(d) = deadline.checked_duration_since(Instant::now()) {
+            std::thread::sleep(d);
+        }
+    }
+    assert!(served);
     assert_eq!(r.underruns(), 0);
 }

@@ -151,6 +151,35 @@ impl PeakBuilder {
     }
 }
 
+/// Delete temp files a crashed save left next to `cache` (anything matching
+/// `<cache>.<pid>-<n>.tmp` older than an hour; younger ones may be in use).
+fn remove_stale_temps(cache: &Path) {
+    let (Some(dir), Some(name)) = (cache.parent(), cache.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = fs::read_dir(if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    }) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > 3600);
+        if old && file_name.starts_with(&prefix) && file_name.ends_with(".tmp") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Size and mtime of the source, used to tell whether a cache is stale.
 fn source_stamp(audio: &Path) -> Result<(u64, i64)> {
     let meta = fs::metadata(audio).map_err(|e| MediaError::io(audio, e))?;
@@ -215,6 +244,7 @@ impl PeakCache {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = path.with_extension(format!("peaks.{}-{n}.tmp", std::process::id()));
+        remove_stale_temps(path);
         let result = self
             .write_to(&tmp, (len, mtime))
             .and_then(|()| fs::rename(&tmp, path).map_err(io));
