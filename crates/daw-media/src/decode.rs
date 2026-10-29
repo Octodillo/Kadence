@@ -250,9 +250,17 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<AudioData> {
     let rate = dec.info().sample_rate;
     // The header's frame count is untrusted (truncated or corrupt files), so only use
     // it as a capped hint; the planes grow to the real decoded length.
-    const MAX_HINT: u64 = 1 << 24;
-    let hint = dec.info().frames.unwrap_or(0).min(MAX_HINT) as usize;
-    let mut planes: Vec<Vec<f32>> = (0..ch).map(|_| Vec::with_capacity(hint)).collect();
+    // Cap the total reservation (all channels), not per plane.
+    const MAX_HINT_SAMPLES: u64 = 1 << 24;
+    let hint = dec
+        .info()
+        .frames
+        .unwrap_or(0)
+        .min(MAX_HINT_SAMPLES / ch.max(1) as u64) as usize;
+    let mut data = AudioData {
+        sample_rate: rate,
+        channels: (0..ch).map(|_| Vec::with_capacity(hint)).collect(),
+    };
     let mut chunk = vec![0.0f32; 8192 * ch];
     loop {
         let n = dec.read(&mut chunk)?;
@@ -260,14 +268,9 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<AudioData> {
             break;
         }
         // Deinterleave straight into the planes; no second full-size copy.
-        for (c, plane) in planes.iter_mut().enumerate() {
-            plane.extend(chunk[..n * ch].iter().skip(c).step_by(ch));
-        }
+        data.extend_interleaved(&chunk[..n * ch]);
     }
-    Ok(AudioData {
-        sample_rate: rate,
-        channels: planes,
-    })
+    Ok(data)
 }
 
 /// Decode a whole file and resample it to `sample_rate` if needed. This is what the

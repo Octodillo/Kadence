@@ -297,3 +297,26 @@ fn repeated_cue_while_pending_still_becomes_ready() {
     );
     assert!((l[0] - expected(4, 0, target.0, RATE)).abs() < 1e-6);
 }
+
+#[test]
+fn odd_rate_seek_is_ready_only_with_data_at_the_target() {
+    let dir = tempfile::tempdir().unwrap();
+    // gcd(22_254, 48_000) = 6, so an aligned seek period would be 8000 engine frames,
+    // longer than a fill block.
+    let path = write_file(dir.path(), 2, 22_254, 2.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let mut r = streamer.open(&path).unwrap();
+    for target in [10_000i64, 31_999, 40_000] {
+        r.cue(SampleTime(target));
+        wait_ready(std::slice::from_mut(&mut r));
+        let mut l = vec![0.0; BLOCK];
+        let mut rr = vec![0.0; BLOCK];
+        assert_eq!(
+            r.read(SampleTime(target), &mut [&mut l[..], &mut rr[..]]),
+            ReadStatus::Ok,
+            "target {target}"
+        );
+        assert!(l.iter().any(|s| *s != 0.0));
+    }
+    assert_eq!(r.underruns(), 0);
+}

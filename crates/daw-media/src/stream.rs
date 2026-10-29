@@ -340,7 +340,11 @@ impl ClipReader {
             return Some(seg);
         }
         while let Ok(seg) = self.segs.pop() {
-            if seg.generation != self.generation {
+            // Stale generations, and data that ends before the requested position (a
+            // grid-aligned seek starts a little early), are dropped without counting as
+            // having arrived.
+            let ends_early = !seg.eof && seg.start + i64::from(seg.frames) <= self.expected;
+            if seg.generation != self.generation || ends_early {
                 self.discard(seg.frames as usize);
                 continue;
             }
@@ -503,18 +507,24 @@ impl WorkerStream {
     }
 
     fn seek(&mut self, target: i64) {
-        let target = target.max(0) as u64;
+        let target = u128::from(target.max(0) as u64);
+        let (src_rate, dst_rate) = (u128::from(self.src_rate), u128::from(self.dst_rate));
         // Start on a frame where source and engine grids coincide, so the resampled
-        // output lands exactly on engine frames; the reader drops the few frames before
-        // `target`. Without resampling both periods are 1.
-        let g = gcd(self.src_rate, self.dst_rate).max(1);
-        let (src_period, dst_period) = (
-            u64::from(self.src_rate / g).max(1),
-            u64::from(self.dst_rate / g).max(1),
-        );
-        let periods = target / dst_period;
-        let src = periods * src_period;
-        let start = (periods * dst_period) as i64;
+        // output lands exactly on engine frames; the reader drops the frames before
+        // `target`. Without resampling both periods are 1. For odd rate pairs the period
+        // gets long (e.g. 44101 -> 48000 is a whole second), so past a small bound fall
+        // back to the nearest source frame and accept a sub-frame offset.
+        const MAX_ALIGN: u128 = 1024;
+        let g = u128::from(gcd(self.src_rate, self.dst_rate).max(1));
+        let (src_period, dst_period) = ((src_rate / g).max(1), (dst_rate / g).max(1));
+        let (src, start) = if dst_period <= MAX_ALIGN {
+            let periods = target / dst_period;
+            (periods * src_period, periods * dst_period)
+        } else {
+            (target * src_rate / dst_rate.max(1), target)
+        };
+        let src = u64::try_from(src).unwrap_or(u64::MAX);
+        let start = i64::try_from(start).unwrap_or(i64::MAX);
         self.pending.clear();
         self.pending_pos = 0;
         self.eof_sent = false;

@@ -195,8 +195,8 @@ impl PeakCache {
             return Ok(cache);
         }
         let cache = Self::build(audio)?;
-        // Saving is best-effort: a read-only sample library still gets its waveform,
-        // it is just rebuilt next time.
+        // Saving is best-effort: a read-only sample library or a full disk still gets its
+        // waveform, it is just rebuilt next time. Use `save_for` to see the error.
         let _ = cache.save(&cache_path, stamp);
         Ok(cache)
     }
@@ -211,7 +211,19 @@ impl PeakCache {
         let io = |e| MediaError::io(path, e);
         // Write to a temp name and rename so readers never see a half-written cache.
         let tmp = path.with_extension("peaks.tmp");
-        let mut w = BufWriter::new(fs::File::create(&tmp).map_err(io)?);
+        let result = self
+            .write_to(&tmp, (len, mtime))
+            .and_then(|()| fs::rename(&tmp, path).map_err(io));
+        if result.is_err() {
+            // Don't leave a partial temp file next to the user's audio.
+            let _ = fs::remove_file(&tmp);
+        }
+        result
+    }
+
+    fn write_to(&self, tmp: &Path, (len, mtime): (u64, i64)) -> Result<()> {
+        let io = |e| MediaError::io(tmp, e);
+        let mut w = BufWriter::new(fs::File::create(tmp).map_err(io)?);
         let mut put = |b: &[u8]| w.write_all(b).map_err(io);
         put(MAGIC)?;
         put(&VERSION.to_le_bytes())?;
@@ -230,8 +242,7 @@ impl PeakCache {
         w.into_inner()
             .map_err(|e| io(e.into_error()))?
             .sync_all()
-            .map_err(io)?;
-        fs::rename(&tmp, path).map_err(io)
+            .map_err(io)
     }
 
     fn load(path: &Path, stamp: (u64, i64)) -> Result<Self> {

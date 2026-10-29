@@ -82,6 +82,6 @@ fn failed_peak_save_does_not_fail_the_take() {
     drop(input);
     let stats = rec.finish().unwrap();
     assert_eq!(stats.frames, 1000);
-    assert!(!stats.peaks_saved);
+    assert!(stats.peaks_error.is_some());
     assert_eq!(decode_file(&path).unwrap().frames(), 1000);
 }
