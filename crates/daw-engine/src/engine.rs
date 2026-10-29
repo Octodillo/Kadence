@@ -322,10 +322,10 @@ impl EngineProcessor {
     }
 
     fn retire(&mut self) {
-        if let Some(g) = self.retired.take() {
-            if let Err(g) = self.garbage.retire(g) {
-                self.retired = Some(g);
-            }
+        if let Some(g) = self.retired.take()
+            && let Err(g) = self.garbage.retire(g)
+        {
+            self.retired = Some(g);
         }
     }
 }
