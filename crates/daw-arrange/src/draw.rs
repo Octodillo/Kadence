@@ -238,7 +238,9 @@ fn draw_clip(s: &mut Scene, a: &mut Arrange, env: &Env, row: usize, clip: &Clip,
             let nh = (body.h / span).max(1.0);
             for n in &m.notes {
                 let x0 = a.view.tick_to_x(TickTime(clip.start.0 + n.start.0));
-                let x1 = a.view.tick_to_x(TickTime(clip.start.0 + n.start.0 + n.length.0));
+                let x1 = a
+                    .view
+                    .tick_to_x(TickTime(clip.start.0 + n.start.0 + n.length.0));
                 if x1 < 0.0 || x0 > a.width {
                     continue;
                 }
@@ -288,7 +290,12 @@ fn waveform(
     for ch in 0..channels {
         cache.query(ch, f0, f1, drawn.max(1), &mut columns);
         s.push(Prim::Wave {
-            r: Rect::new(x0, body.y + ch as f64 * lane_h, columns.len() as f64, lane_h),
+            r: Rect::new(
+                x0,
+                body.y + ch as f64 * lane_h,
+                columns.len() as f64,
+                lane_h,
+            ),
             columns: std::mem::take(&mut columns),
             color: ink,
         });
@@ -300,4 +307,3 @@ impl Scene {
         self.push(Prim::PopClip);
     }
 }
-

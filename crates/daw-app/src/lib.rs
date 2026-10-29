@@ -5,11 +5,12 @@
 //! Rust `QObject` (see [`bridge`]). Qt types stay inside this crate so a
 //! second, non-Qt front end can reuse the same engine API ([`engine`]).
 
+pub mod arrange_view;
 pub mod bridge;
 mod demo;
 pub mod engine;
 mod ffi;
-pub mod items;
+mod paint;
 pub mod project;
 pub mod settings;
 pub mod state;

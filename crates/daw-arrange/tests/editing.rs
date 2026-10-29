@@ -65,7 +65,8 @@ impl Rig {
     fn midi(&mut self, start: i64, len: i64, notes: &[(i64, u8)]) -> ClipId {
         let mut m = MidiClip::default();
         for &(at, key) in notes {
-            m.notes.push(Note::new(TickTime(at), TickTime(BEAT), key, 0.8));
+            m.notes
+                .push(Note::new(TickTime(at), TickTime(BEAT), key, 0.8));
         }
         let c = Clip::new("midi", TickTime(start), TickTime(len), ClipContent::Midi(m));
         let id = c.id;
@@ -230,7 +231,11 @@ fn rubber_band_selects_and_delete_removes() {
     let b = r.audio(1, 2 * BAR, BAR, 0);
     let c = r.audio(1, 6 * BAR, BAR, 0);
     // From an empty spot in track 0 to past `b`.
-    r.drag((r.x(BAR + BEAT), r.y(0)), (r.x(3 * BAR - BEAT), r.y(1)), false);
+    r.drag(
+        (r.x(BAR + BEAT), r.y(0)),
+        (r.x(3 * BAR - BEAT), r.y(1)),
+        false,
+    );
     assert_eq!(
         r.arrange.selection,
         [b].into_iter().collect(),
@@ -289,15 +294,17 @@ fn split_and_duplicate() {
 fn double_click_on_instrument_lane_makes_a_bar_long_clip() {
     let mut r = Rig::new();
     let (x, y) = (r.x(BAR + BEAT), r.y(2));
-    let out = r
-        .arrange
-        .double_click(&mut r.doc, Pointer::left(x, y));
+    let out = r.arrange.double_click(&mut r.doc, Pointer::left(x, y));
     assert!(out.document);
     let c = &r.doc.project().tracks[2].clips[0];
     assert_eq!((c.start, c.length), (TickTime(BAR), TickTime(BAR)));
     // Not on an audio track.
     let y0 = r.y(0);
-    assert!(!r.arrange.double_click(&mut r.doc, Pointer::left(x, y0)).document);
+    assert!(
+        !r.arrange
+            .double_click(&mut r.doc, Pointer::left(x, y0))
+            .document
+    );
 }
 
 #[test]
@@ -352,7 +359,8 @@ fn escape_cancels_a_drag() {
         loop_range: None,
     };
     r.arrange.press(&mut r.doc, Pointer::left(x, y));
-    r.arrange.motion(&mut r.doc, &env, Pointer::left(x + 200.0, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 200.0, y));
     assert_ne!(r.clip(id).1.start, TickTime(BAR));
     r.arrange.cancel(&mut r.doc);
     assert_eq!(r.clip(id).1.start, TickTime(BAR));
@@ -387,8 +395,12 @@ fn big_project_scene_is_cheap() {
         for j in 0..50 {
             let mut m = MidiClip::default();
             for k in 0..16 {
-                m.notes
-                    .push(Note::new(TickTime(k * BEAT / 4), TickTime(BEAT / 4), 60 + (k % 12) as u8, 0.7));
+                m.notes.push(Note::new(
+                    TickTime(k * BEAT / 4),
+                    TickTime(BEAT / 4),
+                    60 + (k % 12) as u8,
+                    0.7,
+                ));
             }
             t.clips.push(std::sync::Arc::new(Clip::new(
                 format!("c{j}"),
@@ -430,4 +442,56 @@ fn big_project_scene_is_cheap() {
         .count();
     // About 12 tracks by 10 bars are on screen.
     assert!((100..=200).contains(&clips), "{clips} clips drawn");
+}
+
+#[test]
+fn waveforms_draw_for_clips_anywhere() {
+    use daw_media::{AudioData, WavFormat, write_wav};
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("tone.wav");
+    let data = AudioData {
+        sample_rate: 48_000,
+        channels: vec![
+            (0..96_000)
+                .map(|i| ((i as f32) * 0.05).sin() * 0.5)
+                .collect(),
+        ],
+    };
+    write_wav(&file, &data, WavFormat::Float32).unwrap();
+    let mut r = Rig::new();
+    r.arrange.resize(r.doc.project(), 576.0, 560.0);
+    for start in [0, BAR, 3 * BAR, 4 * BAR] {
+        let c = Clip::new(
+            "tone",
+            TickTime(start),
+            TickTime(BAR),
+            ClipContent::Audio(AudioClip {
+                source: file.clone(),
+                offset: SampleTime(0),
+                gain_db: 0.0,
+            }),
+        );
+        r.doc.execute(AddClip::new(r.tracks[0], c)).unwrap();
+    }
+    let tempo = r.tempo.clone();
+    let env = Env {
+        tempo: &tempo,
+        sample_rate: 48_000.0,
+        root: None,
+        playhead: TickTime(0),
+        loop_range: None,
+    };
+    r.arrange.scene(r.doc.project(), &env);
+    r.arrange.peaks.wait();
+    let scene = r.arrange.scene(r.doc.project(), &env);
+    let waves: Vec<_> = scene
+        .prims
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Wave { r, columns, .. } => Some((r.x, columns.len())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(waves.len(), 4, "{waves:?}");
+    assert!(waves.iter().all(|&(_, n)| n > 40), "{waves:?}");
 }

@@ -3,9 +3,7 @@
 use std::mem;
 
 use daw_core::time::{SampleTime, TickTime};
-use daw_model::{
-    Change, ChangeSet, ClipContent, ClipId, Command, ModelError, Project, TrackId,
-};
+use daw_model::{Change, ChangeSet, ClipContent, ClipId, Command, ModelError, Project, TrackId};
 
 /// Several commands that undo as one step and that merge with the next group
 /// of the same kind on the same clips, so a drag of a whole selection is one
@@ -81,6 +79,9 @@ impl Command for Group {
     }
 }
 
+/// A clip's start, length and (for audio) file offset.
+type Extent = (TickTime, TickTime, Option<SampleTime>);
+
 /// Moves a clip's left edge, its right edge or both, keeping its content
 /// where it is on the timeline: an audio clip's file offset and a MIDI clip's
 /// notes shift to match. Consecutive trims of the same clip (a drag) merge.
@@ -91,7 +92,7 @@ pub struct TrimClip {
     pub length: TickTime,
     /// The new file offset, for audio clips.
     pub offset: Option<SampleTime>,
-    old: Option<(TickTime, TickTime, Option<SampleTime>)>,
+    old: Option<Extent>,
 }
 
 impl TrimClip {
@@ -112,7 +113,7 @@ impl TrimClip {
         start: TickTime,
         length: TickTime,
         offset: Option<SampleTime>,
-    ) -> Result<(TrackId, (TickTime, TickTime, Option<SampleTime>)), ModelError> {
+    ) -> Result<(TrackId, Extent), ModelError> {
         let (track, index) = project
             .clip_location(id)
             .ok_or(ModelError::ClipNotFound(id))?;

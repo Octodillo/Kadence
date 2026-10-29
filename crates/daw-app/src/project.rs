@@ -3,6 +3,7 @@
 
 use std::pin::Pin;
 
+use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QString, QUrl};
 use daw_core::time::{PPQ, TickTime};
 use daw_model::commands::{AddTrack, RemoveTrack, SetTrack, TrackField};
@@ -191,10 +192,9 @@ impl qobject::Project {
             let h = s.doc.history();
             let meter = s.arrange.meter(p);
             let bb = meter.bar_beat(playhead);
-            let secs = s
-                .engine
-                .session()
-                .map_or(0.0, |x| x.ticks_to_samples(playhead).0 as f64 / x.sample_rate());
+            let secs = s.engine.session().map_or(0.0, |x| {
+                x.ticks_to_samples(playhead).0 as f64 / x.sample_rate()
+            });
             let selected = s
                 .arrange
                 .selected_track
@@ -254,15 +254,19 @@ impl qobject::Project {
         this.as_mut().set_saved_before(saved);
         this.as_mut().set_can_undo(can_undo);
         this.as_mut().set_can_redo(can_redo);
-        this.as_mut().set_undo_text(QString::from(undo_text.as_str()));
-        this.as_mut().set_redo_text(QString::from(redo_text.as_str()));
+        this.as_mut()
+            .set_undo_text(QString::from(undo_text.as_str()));
+        this.as_mut()
+            .set_redo_text(QString::from(redo_text.as_str()));
         this.as_mut().set_playing(playing);
         this.as_mut().set_looping(looping);
-        this.as_mut().set_position_text(QString::from(position.as_str()));
+        this.as_mut()
+            .set_position_text(QString::from(position.as_str()));
         this.as_mut().set_time_text(QString::from(time.as_str()));
         this.as_mut().set_has_selection(has_selection);
         this.as_mut().set_selected_track(selected);
-        this.as_mut().set_status_text(QString::from(status.as_str()));
+        this.as_mut()
+            .set_status_text(QString::from(status.as_str()));
         // Last, so QML that reacts to it sees the other values already.
         this.set_revision((rev % i32::MAX as u64) as i32);
     }
@@ -516,8 +520,11 @@ impl qobject::Project {
 
     fn arrange_command(
         self: Pin<&mut Self>,
-        f: impl FnOnce(&mut daw_arrange::Arrange, &mut daw_model::Document, &daw_arrange::Env)
-            -> daw_arrange::Outcome,
+        f: impl FnOnce(
+            &mut daw_arrange::Arrange,
+            &mut daw_model::Document,
+            &daw_arrange::Env,
+        ) -> daw_arrange::Outcome,
     ) {
         self.edit(|s| {
             let out = s.with_arrange(f);

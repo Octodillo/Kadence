@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "daw-app/src/cpp/scenepainter.h"
-#include "daw-app/src/items/paint.cxx.h"
+#include "daw-app/src/paint.cxx.h"
 
 #include <QFontMetricsF>
 #include <QGuiApplication>

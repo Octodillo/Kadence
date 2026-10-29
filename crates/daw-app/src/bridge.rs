@@ -9,8 +9,8 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList};
 
 use crate::engine::{AudioConfig, EngineStatus};
-use crate::state;
 use crate::settings::{self, KConfigStore};
+use crate::state;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -120,7 +120,8 @@ impl cxx_qt::Initialize for qobject::Engine {
             names.append(QString::from(device.name.as_str()));
         }
         self.as_mut().rust_mut().device_ids = devices.into_iter().map(|d| d.id).collect();
-        self.as_mut().set_backend_name(QString::from(backend.as_str()));
+        self.as_mut()
+            .set_backend_name(QString::from(backend.as_str()));
         self.as_mut().set_device_names(names);
         self.as_mut().set_sample_rates(to_qlist(&rates));
         self.as_mut().set_buffer_sizes(to_qlist(&sizes));

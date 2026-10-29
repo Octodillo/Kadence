@@ -30,6 +30,7 @@ mod ffi {
     unsafe extern "C++" {
         include!("daw-app/src/cpp/scenepainter.h");
         include!("cxx-qt-lib/qpainter.h");
+        #[namespace = ""]
         type QPainter = cxx_qt_lib::QPainter;
 
         #[cxx_name = "paintScene"]
@@ -113,7 +114,8 @@ pub fn op(p: Prim, texts: &mut Vec<String>, waves: &mut Vec<f32>) -> PaintOp {
             }
         }
         Prim::Wave { r, columns, color } => {
-            let start = waves.len() as u32;
+            // Counted in (min, max) pairs.
+            let start = (waves.len() / 2) as u32;
             for (lo, hi) in &columns {
                 waves.push(*lo);
                 waves.push(*hi);

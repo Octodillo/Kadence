@@ -61,8 +61,8 @@ fn main() {
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",
-        "src/items/arrange_view.rs",
-        "src/items/paint.rs",
+        "src/arrange_view.rs",
+        "src/paint.rs",
     ])
     .qt_module("Gui")
     .qt_module("Widgets")

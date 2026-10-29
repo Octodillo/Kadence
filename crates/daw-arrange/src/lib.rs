@@ -198,7 +198,10 @@ impl Outcome {
 #[derive(Clone, Debug)]
 enum Drag {
     /// Pressed but not moved past the threshold yet.
-    Pending { start: Pointer, hit: Hit },
+    Pending {
+        start: Pointer,
+        hit: Hit,
+    },
     Move {
         /// Tick and row under the pointer at the press.
         tick: TickTime,
@@ -312,7 +315,12 @@ impl Arrange {
     pub fn clip_rect(&self, row: usize, clip: &Clip) -> Rect {
         let x0 = self.view.tick_to_x(clip.start);
         let x1 = self.view.tick_to_x(TickTime(clip.start.0 + clip.length.0));
-        Rect::new(x0, self.row_y(row) + 1.0, (x1 - x0).max(1.0), self.track_height - 2.0)
+        Rect::new(
+            x0,
+            self.row_y(row) + 1.0,
+            (x1 - x0).max(1.0),
+            self.track_height - 2.0,
+        )
     }
 
     /// What is under `(x, y)`.
@@ -361,7 +369,9 @@ impl Arrange {
         }
         match self.hit(project, x, y) {
             Hit::Ruler(_) => Cursor::Pointing,
-            Hit::Clip { zone: Zone::Body, .. } => Cursor::Move,
+            Hit::Clip {
+                zone: Zone::Body, ..
+            } => Cursor::Move,
             Hit::Clip { .. } => Cursor::ResizeHorizontal,
             _ => Cursor::Arrow,
         }
@@ -475,7 +485,9 @@ impl Arrange {
         match hit {
             Hit::Ruler(t) => {
                 if p.shift {
-                    let t = self.snap.apply(t, self.view.px_per_tick(), &self.meter(project));
+                    let t = self
+                        .snap
+                        .apply(t, self.view.px_per_tick(), &self.meter(project));
                     self.drag = Some(Drag::Loop { from: t });
                     Outcome::view()
                 } else {
@@ -580,7 +592,7 @@ impl Arrange {
 
     pub fn release(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
         let drag = self.drag.take();
-        let out = match drag {
+        match drag {
             Some(Drag::Pending { hit, start }) => match hit {
                 // A click (no drag) on a clip selects only it.
                 Hit::Clip { clip, .. } if !start.shift && !start.ctrl => {
@@ -606,8 +618,7 @@ impl Arrange {
             },
             Some(Drag::Loop { .. }) => Outcome::view(),
             None => Outcome::default(),
-        };
-        out
+        }
     }
 
     /// Drops the drag in progress (Escape, or the pointer was taken away).
@@ -748,7 +759,11 @@ impl Arrange {
         // takes it.
         let target_row = self
             .row_at(p.y, rows)
-            .unwrap_or(if p.y < self.ruler_height { 0 } else { rows.saturating_sub(1) });
+            .unwrap_or(if p.y < self.ruler_height {
+                0
+            } else {
+                rows.saturating_sub(1)
+            });
         let mut drow = target_row as i64 - row as i64;
         let fits = |d: i64| {
             clips.iter().all(|&(id, r, _)| {
@@ -813,21 +828,24 @@ impl Arrange {
         let end = start.0 + length.0;
         let cmd = match zone {
             Zone::End => {
-                let mut new_end = snap(TickTime(end + moved.0)).0.max(start.0 + MIN_CLIP_TICKS);
+                let mut new_end = snap(TickTime(end + moved.0))
+                    .0
+                    .max(start.0 + MIN_CLIP_TICKS);
                 if let Some(limit) = file_end {
                     new_end = new_end.min(limit.max(start.0 + MIN_CLIP_TICKS));
                 }
                 TrimClip::new(id, start, TickTime(new_end - start.0), offset)
             }
             Zone::Start | Zone::Body => {
-                let mut new_start = snap(TickTime(start.0 + moved.0)).0.min(end - MIN_CLIP_TICKS);
+                let mut new_start = snap(TickTime(start.0 + moved.0))
+                    .0
+                    .min(end - MIN_CLIP_TICKS);
                 new_start = new_start.max(0);
                 let new_offset = match offset {
                     Some(o) => {
                         // Can't start before the beginning of the file.
-                        let earliest = env.samples_to_ticks(SampleTime(
-                            env.ticks_to_samples(start).0 - o.0,
-                        ));
+                        let earliest =
+                            env.samples_to_ticks(SampleTime(env.ticks_to_samples(start).0 - o.0));
                         new_start = new_start.max(earliest.0);
                         let shift = env.ticks_to_samples(TickTime(new_start)).0
                             - env.ticks_to_samples(start).0;
@@ -845,7 +863,12 @@ impl Arrange {
                         None
                     }
                 };
-                TrimClip::new(id, TickTime(new_start), TickTime(end - new_start), new_offset)
+                TrimClip::new(
+                    id,
+                    TickTime(new_start),
+                    TickTime(end - new_start),
+                    new_offset,
+                )
             }
         };
         let r = doc.execute(cmd).map(|_| ());
@@ -1008,7 +1031,10 @@ impl Arrange {
                     items.push(Box::new(daw_model::commands::RemoveNotes::new(c.id, moved)));
                 }
             }
-            items.push(Box::new(SetClip::new(c.id, ClipField::Length(TickTime(left_len)))));
+            items.push(Box::new(SetClip::new(
+                c.id,
+                ClipField::Length(TickTime(left_len)),
+            )));
             right_ids.push(right.id);
             items.push(Box::new(AddClip::new(*track, right)));
         }
@@ -1042,8 +1068,7 @@ impl Arrange {
         let items: Vec<Box<dyn Command>> = sel
             .iter()
             .map(|(t, c)| {
-                Box::new(MoveClip::new(c.id, t.id, TickTime(c.start.0 + delta)))
-                    as Box<dyn Command>
+                Box::new(MoveClip::new(c.id, t.id, TickTime(c.start.0 + delta))) as Box<dyn Command>
             })
             .collect();
         let key = sel.iter().map(|(_, c)| c.id).collect();
@@ -1115,7 +1140,8 @@ impl Arrange {
     /// The tick a drop at view `x` lands on, snapped.
     pub fn drop_tick(&self, project: &Project, x: f64) -> TickTime {
         let t = self.view.x_to_tick(x).max(TickTime(0));
-        self.snap.apply(t, self.view.px_per_tick(), &self.meter(project))
+        self.snap
+            .apply(t, self.view.px_per_tick(), &self.meter(project))
     }
 
     /// The track a drop at view `y` lands on.

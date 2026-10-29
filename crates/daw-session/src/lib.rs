@@ -25,11 +25,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use daw_core::meter::PeakMeter;
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 use daw_engine::{
-    EngineConfig, EngineController, EngineError, EngineProcessor, LoopRange, NodeId,
+    EngineConfig, EngineController, EngineError, EngineProcessor, LoopRange, NodeKey, NodeMeter,
 };
-use daw_model::{ClipId, DeviceId, ProjectSnapshot, SendId, TrackId};
+use daw_model::{ClipId, DeviceId, ProjectSnapshot, TrackId};
 
 pub use build::effective_mutes;
 pub use media::{MEMORY_LIMIT_SECONDS, MediaPool};
@@ -61,19 +62,17 @@ pub enum SessionError {
     Engine(#[from] EngineError),
 }
 
-/// Where each model object ended up in the running graph, and what was last
-/// sent to it.
+/// What the running graph was built from, and what was last sent to it.
 #[derive(Default)]
 pub(crate) struct Built {
     pub structure: build::Structure,
-    pub strips: HashMap<TrackId, NodeId>,
-    pub sends: HashMap<SendId, NodeId>,
-    pub devices: HashMap<DeviceId, NodeId>,
     pub players: HashMap<TrackId, PlayerHandle>,
     /// Last value sent per (node, param), so unchanged values aren't resent.
-    pub params: HashMap<(NodeId, u32), f64>,
+    pub params: HashMap<(NodeKey, u32), f64>,
     /// The clips each player was last given, to spot clip edits.
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
+    /// Gain reduction meters of devices that have one.
+    pub device_meters: HashMap<DeviceId, Arc<PeakMeter>>,
 }
 
 /// The engine as the model sees it. See the crate docs.
@@ -87,6 +86,8 @@ pub struct Session {
     loop_ticks: Option<(TickTime, TickTime)>,
     built: Option<Built>,
     warnings: Vec<String>,
+    /// The project's master track, as of the last sync.
+    master: Option<TrackId>,
     /// What the transport was last told, so the UI doesn't wait a period
     /// for the audio thread to confirm.
     playing: bool,
@@ -109,6 +110,7 @@ impl Session {
             built: None,
             warnings: Vec::new(),
             playing: false,
+            master: None,
         };
         (session, processor)
     }
@@ -152,35 +154,36 @@ impl Session {
     pub fn sync(&mut self, snapshot: &ProjectSnapshot) -> Result<(), SessionError> {
         self.collect_garbage();
         self.warnings.clear();
+        self.master = Some(snapshot.master.id);
         let tempo_changed = self.tempo_data.as_ref() != Some(&snapshot.tempo);
         if tempo_changed {
             self.tempo = tempo_map(&snapshot.tempo);
             self.tempo_data = Some(snapshot.tempo.clone());
-            self.controller
-                .set_bpm(self.tempo.bpm_at(TickTime(0)))?;
+            self.controller.set_bpm(self.tempo.bpm_at(TickTime(0)))?;
             self.apply_loop()?;
         }
         let structure = build::Structure::of(snapshot);
-        let rebuild = self.built.as_ref().is_none_or(|b| b.structure != structure);
+        // Automation is in samples, so a tempo change re-times it.
+        let rebuild = self.built.as_ref().is_none_or(|b| {
+            b.structure != structure || (tempo_changed && structure.has_automation())
+        });
         if rebuild {
-            let (desc, built) = build::graph(self, snapshot, structure);
-            self.controller.set_graph(desc)?;
+            let old = self.built.take().unwrap_or_default();
+            let (desc, built) = build::graph(self, snapshot, structure, old);
             self.built = Some(built);
-            self.send_params(snapshot)?;
-        } else {
-            self.send_params(snapshot)?;
-            self.send_clips(snapshot, tempo_changed);
+            self.controller.set_graph(desc)?;
         }
+        self.send_params(snapshot)?;
+        self.send_clips(snapshot, tempo_changed);
         Ok(())
     }
 
     fn send_params(&mut self, snapshot: &ProjectSnapshot) -> Result<(), SessionError> {
         let built = self.built.as_mut().expect("built before params");
-        let wanted = build::params(snapshot, built);
-        for ((node, param), value) in wanted {
-            if built.params.get(&(node, param)) != Some(&value) {
-                self.controller.set_param(node, param, value)?;
-                built.params.insert((node, param), value);
+        for ((key, param), value) in build::params(snapshot) {
+            if built.params.get(&(key, param)) != Some(&value) {
+                self.controller.set_param_by_key(key, param, value)?;
+                built.params.insert((key, param), value);
             }
         }
         Ok(())
@@ -286,13 +289,30 @@ impl Session {
         self.tempo.samples_to_ticks(s, self.sample_rate())
     }
 
-    /// The running graph node for a track's strip, for meters and tests.
-    pub fn strip_node(&self, track: TrackId) -> Option<NodeId> {
-        self.built.as_ref()?.strips.get(&track).copied()
+    /// The peak meter on a track's strip (the master's included), for the
+    /// mixer and track headers.
+    pub fn track_meter(&self, track: TrackId) -> Option<Arc<NodeMeter>> {
+        self.controller.meter(self.strip_key(track)?)
     }
 
-    pub fn device_node(&self, device: DeviceId) -> Option<NodeId> {
-        self.built.as_ref()?.devices.get(&device).copied()
+    /// A device's gain reduction meter, if it has one (the compressor).
+    pub fn device_meter(&self, device: DeviceId) -> Option<Arc<PeakMeter>> {
+        self.built.as_ref()?.device_meters.get(&device).cloned()
+    }
+
+    /// The engine node key for a track's strip, for direct engine access.
+    pub fn strip_key(&self, track: TrackId) -> Option<NodeKey> {
+        let master = self.master?;
+        Some(if track == master {
+            NodeKey::MASTER
+        } else {
+            NodeKey(track.0.as_u128())
+        })
+    }
+
+    /// The engine node key for a device.
+    pub fn device_key(device: DeviceId) -> NodeKey {
+        build::device_key(device)
     }
 
     /// Whether a clip is currently given to a player (for tests).

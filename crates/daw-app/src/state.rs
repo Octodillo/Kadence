@@ -98,9 +98,7 @@ impl AppState {
     }
 
     pub fn playhead(&self) -> TickTime {
-        self.engine
-            .session()
-            .map_or(TickTime(0), |s| s.position())
+        self.engine.session().map_or(TickTime(0), |s| s.position())
     }
 
     pub fn loop_range(&self) -> Option<(TickTime, TickTime)> {
@@ -108,9 +106,7 @@ impl AppState {
     }
 
     pub fn sample_rate(&self) -> f64 {
-        self.engine
-            .session()
-            .map_or(48_000.0, |s| s.sample_rate())
+        self.engine.session().map_or(48_000.0, |s| s.sample_rate())
     }
 
     /// Calls `f` with the arrange view, the document and an [`Env`].
@@ -191,7 +187,10 @@ impl AppState {
         track: Option<daw_model::TrackId>,
         at: TickTime,
     ) -> Result<(), String> {
-        let info = Decoder::open(file).map_err(|e| e.to_string())?.info().clone();
+        let info = Decoder::open(file)
+            .map_err(|e| e.to_string())?
+            .info()
+            .clone();
         let frames = info
             .frames
             .ok_or_else(|| format!("{} has no known length", file.display()))?;

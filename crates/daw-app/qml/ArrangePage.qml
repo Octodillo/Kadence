@@ -162,7 +162,10 @@ Kirigami.Page {
             // Track headers, scrolled with the timeline.
             ColumnLayout {
                 Layout.fillHeight: true
+                // A child that fills makes a layout fill too; pin the width.
+                Layout.fillWidth: false
                 Layout.preferredWidth: Kirigami.Units.gridUnit * 12
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 12
                 spacing: 0
 
                 Rectangle {

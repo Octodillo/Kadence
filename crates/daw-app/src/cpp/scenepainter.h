@@ -9,7 +9,7 @@ namespace kadence {
 
 struct PaintOp;
 
-// Paints a flattened daw_arrange::Scene (see items/paint.rs).
+// Paints a flattened daw_arrange::Scene (see paint.rs).
 void paintScene(QPainter &painter,
                 rust::Slice<const PaintOp> ops,
                 rust::Slice<const rust::String> texts,

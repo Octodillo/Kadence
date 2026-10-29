@@ -53,9 +53,9 @@ Item {
         },
         () => {
             check(TestHelper.loadDemoProject(), "load demo project");
-            check(Project.trackCount === 3, "demo has three tracks");
         },
         () => {
+            check(Project.trackCount === 3, "demo has three tracks");
             // Peaks load in the background; give them a step, then shoot.
             window.pageStack.currentItem.view.refresh();
             shoot(window.title, "arrange-demo");

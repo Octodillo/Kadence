@@ -72,8 +72,9 @@ impl Snap {
     /// The grid edits snap to at this zoom, if any.
     pub fn grid(&self, px_per_tick: f64) -> Option<Grid> {
         match self {
-            Snap::Adaptive => adaptive_grid(px_per_tick, MIN_LINE_SPACING)
-                .or(Some(Grid::new(Division::Bar))),
+            Snap::Adaptive => {
+                adaptive_grid(px_per_tick, MIN_LINE_SPACING).or(Some(Grid::new(Division::Bar)))
+            }
             Snap::Fixed(g) => Some(*g),
             Snap::Off => None,
         }

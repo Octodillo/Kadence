@@ -1,4 +1,4 @@
-//! `ArrangeView`: the painted timeline. Input from QML handlers goes to
+//! `ArrangeView`: the painted timeline, a custom QQuickPaintedItem. Input from QML handlers goes to
 //! `daw_arrange::Arrange`; the display list it returns is flattened for the
 //! C++ painter in `cpp/scenepainter.cpp`.
 //!
@@ -12,7 +12,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QString, QUrl};
 use daw_arrange::{Button, Cursor, Hit, Pointer, Rgba, Scene};
 
-use super::paint::{self, PaintOp};
+use crate::paint::{self, PaintOp};
 use crate::state;
 
 #[cxx_qt::bridge]
