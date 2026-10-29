@@ -9,13 +9,15 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-default = ["clap"]
+default = ["clap", "vst3"]
 # Each format crate is optional so the scanner binary can be built with any subset.
 clap = ["dep:daw-plugins-clap"]
+vst3 = ["dep:daw-plugins-vst3"]
 
 [dependencies]
 daw-core.workspace = true
 daw-plugins-clap = { path = "../daw-plugins-clap", optional = true }
+daw-plugins-vst3 = { path = "../daw-plugins-vst3", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

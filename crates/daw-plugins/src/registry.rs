@@ -37,6 +37,8 @@ pub fn default_registry() -> PluginRegistry {
     let mut registry = PluginRegistry::new();
     #[cfg(feature = "clap")]
     registry.register(daw_plugins_clap::format());
+    #[cfg(feature = "vst3")]
+    registry.register(daw_plugins_vst3::format());
     registry
 }
 
