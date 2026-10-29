@@ -119,3 +119,24 @@ fn denormals() {
     let events = [(0, note_on(60, 1.0)), (2000, note_off(60))];
     check_denormals(&mut sampler, &[], &events, 1.0);
 }
+
+#[test]
+fn loads_samples_from_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hit.wav");
+    let data = daw_media::AudioData {
+        sample_rate: 44_100,
+        channels: vec![vec![0.5; 441], vec![-0.5; 441]],
+    };
+    daw_media::write_wav(&path, &data, daw_media::WavFormat::Float32).unwrap();
+
+    let native = SampleBuffer::load(&path).unwrap();
+    assert_eq!(native.sample_rate, 44_100.0);
+    assert_eq!(native.channels, data.channels);
+
+    let resampled = SampleBuffer::load_resampled(&path, 48_000).unwrap();
+    assert_eq!(resampled.sample_rate, 48_000.0);
+    assert!((resampled.len() as i64 - 480).abs() <= 1);
+
+    assert!(SampleBuffer::load(dir.path().join("missing.wav")).is_err());
+}

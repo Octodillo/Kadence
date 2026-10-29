@@ -222,8 +222,10 @@ version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
  "daw-core",
+ "daw-media",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
