@@ -1057,7 +1057,9 @@ impl PluginInstance for Vst3Instance {
                 log::warn!("vst3 {}: controller setState: {e}", self.descriptor.name);
             }
         }
-        // Values pushed before the load are stale now.
+        // Values pushed before the load are stale now, in both directions: editor edits still
+        // queued for the processor would otherwise overwrite the restored state.
+        while self.edits_rx.pop().is_ok() {}
         let mut rx = self
             .to_controller_rx
             .lock()
@@ -1121,6 +1123,90 @@ impl Drop for Vst3Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daw_core::event::EventList;
+    use daw_core::node::TransportState;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+    use vst3::Steinberg::Vst::IComponentHandlerTrait;
+
+    const FRAMES: u32 = 16;
+    const GAIN: ParamID = 0;
+
+    /// The `testgain` example wrapped in a bundle, as `tests/vst3.rs` does.
+    fn testgain() -> PluginDescriptor {
+        static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
+        let bundle = BUNDLE.get_or_init(|| {
+            let profile_dir = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .and_then(Path::parent)
+                .unwrap()
+                .to_path_buf();
+            let so = profile_dir.join("examples/libtestgain.so");
+            if !so.exists() {
+                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+                let status = std::process::Command::new(cargo)
+                    .args(["build", "-p", "daw-plugins-vst3", "--example", "testgain"])
+                    .status()
+                    .expect("run cargo to build the test plugin");
+                assert!(status.success(), "building the testgain example failed");
+            }
+            let root = std::env::temp_dir().join(format!("daw-vst3-unit-{}", std::process::id()));
+            let bin = root
+                .join("TestGain.vst3/Contents")
+                .join(format!("{}-linux", std::env::consts::ARCH));
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::copy(&so, bin.join("TestGain.so")).unwrap();
+            root.join("TestGain.vst3")
+        });
+        scan_module(bundle).pop().unwrap()
+    }
+
+    fn instance() -> Vst3Instance {
+        let mut p = Vst3Instance::new(&testgain()).unwrap();
+        p.prepare(48_000.0, FRAMES);
+        p
+    }
+
+    /// What the plugin's editor does when the user moves a control.
+    fn editor_edit(p: &Vst3Instance, id: ParamID, normalized: f64) -> i32 {
+        unsafe { p.handler.performEdit(id, normalized) }
+    }
+
+    /// Runs one block of ones through the plugin and returns the left output's first sample.
+    fn gain_heard(p: &mut Vst3Instance) -> f32 {
+        let input = [1.0f32; FRAMES as usize];
+        let mut outs = [[0.0f32; FRAMES as usize]; 2];
+        let events_in = EventList::with_capacity(8);
+        let mut events_out = EventList::with_capacity(64);
+        let transport = TransportState::default();
+        let audio_in: [&[f32]; 2] = [&input, &input];
+        let [l, r] = &mut outs;
+        let mut audio_out: [&mut [f32]; 2] = [l, r];
+        let mut ctx = ProcessContext {
+            frames: FRAMES,
+            transport: &transport,
+            audio_in: &audio_in,
+            audio_out: &mut audio_out,
+            events_in: &events_in,
+            events_out: &mut events_out,
+        };
+        p.process(&mut ctx);
+        outs[0][0]
+    }
+
+    #[test]
+    fn load_state_discards_editor_edits_made_before_it() {
+        let mut p = instance();
+        let state = p.save_state().unwrap();
+        editor_edit(&p, GAIN, 0.3);
+        p.load_state(&state).unwrap();
+        assert_eq!(
+            gain_heard(&mut p),
+            1.0,
+            "the stale edit overrode the loaded state"
+        );
+    }
 
     #[test]
     fn midi_notes_and_pressure_convert() {
