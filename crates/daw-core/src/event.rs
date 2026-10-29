@@ -35,32 +35,41 @@ pub struct Event {
     pub kind: EventKind,
 }
 
-/// A fixed-capacity list of events, kept sorted by frame.
+/// A fixed-capacity list of events kept sorted by frame.
 ///
-/// Allocate it off the audio thread with [`EventList::with_capacity`]; after
-/// that, [`push`](Self::push) and [`clear`](Self::clear) never allocate.
-/// This is a straightforward implementation so other units can use it now;
-/// WU1 owns and hardens it.
+/// All storage is allocated by [`EventList::with_capacity`]; `push`, `clear` and
+/// iteration never allocate, so the list is safe to use from `Node::process`.
+/// Events with equal frames keep their insertion order.
 #[derive(Clone, Debug, Default)]
 pub struct EventList {
     events: Vec<Event>,
+    // `Vec::with_capacity` may round up, so the logical limit is tracked separately.
+    capacity: usize,
 }
 
 impl EventList {
     pub fn with_capacity(n: usize) -> Self {
         Self {
             events: Vec::with_capacity(n),
+            capacity: n,
         }
     }
 
-    /// Inserts after any events at the same or an earlier frame, so events
-    /// at equal frames keep their push order. Gives the event back when full.
+    /// Inserts `e` after every event whose frame is `<= e.frame`.
+    ///
+    /// Returns the event back when the list is full. Never allocates.
     pub fn push(&mut self, e: Event) -> Result<(), Event> {
-        if self.events.len() == self.events.capacity() {
+        if self.events.len() >= self.capacity {
             return Err(e);
         }
-        let at = self.events.partition_point(|x| x.frame <= e.frame);
-        self.events.insert(at, e);
+        // Events almost always arrive in order, so check the tail before searching.
+        match self.events.last() {
+            Some(last) if last.frame > e.frame => {
+                let at = self.events.partition_point(|x| x.frame <= e.frame);
+                self.events.insert(at, e);
+            }
+            _ => self.events.push(e),
+        }
         Ok(())
     }
 
@@ -68,7 +77,7 @@ impl EventList {
         self.events.clear();
     }
 
-    /// Events in frame order.
+    /// Iterates the events sorted by frame.
     pub fn iter(&self) -> impl Iterator<Item = &Event> {
         self.events.iter()
     }
@@ -80,43 +89,92 @@ impl EventList {
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.events.len() >= self.capacity
+    }
+
+    /// The events sorted by frame.
+    pub fn as_slice(&self) -> &[Event] {
+        &self.events
+    }
+}
+
+impl<'a> IntoIterator for &'a EventList {
+    type Item = &'a Event;
+    type IntoIter = std::slice::Iter<'a, Event>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.iter()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn midi(frame: u32, key: u8) -> Event {
+    fn ev(frame: u32, tag: u8) -> Event {
         Event {
             frame,
-            kind: EventKind::Midi([0x90, key, 100]),
+            kind: EventKind::Midi([tag, 0, 0]),
         }
     }
 
-    #[test]
-    fn keeps_frame_order_and_push_order() {
-        let mut list = EventList::with_capacity(8);
-        for e in [midi(10, 1), midi(0, 2), midi(10, 3), midi(5, 4)] {
-            list.push(e).unwrap();
-        }
-        let keys: Vec<u8> = list
-            .iter()
+    fn tags(list: &EventList) -> Vec<(u32, u8)> {
+        list.iter()
             .map(|e| match e.kind {
-                EventKind::Midi(data) => data[1],
+                EventKind::Midi([t, ..]) => (e.frame, t),
                 _ => unreachable!(),
             })
-            .collect();
-        assert_eq!(keys, [2, 4, 1, 3]);
+            .collect()
     }
 
     #[test]
-    fn gives_the_event_back_when_full() {
-        let mut list = EventList::with_capacity(2);
-        let capacity = list.events.capacity();
-        for i in 0..capacity {
-            list.push(midi(i as u32, 0)).unwrap();
+    fn keeps_events_sorted_and_stable() {
+        let mut list = EventList::with_capacity(8);
+        for (f, t) in [(5, 0), (1, 1), (5, 2), (0, 3), (1, 4), (9, 5)] {
+            list.push(ev(f, t)).unwrap();
         }
-        assert_eq!(list.push(midi(0, 9)), Err(midi(0, 9)));
-        assert_eq!(list.events.capacity(), capacity);
+        assert_eq!(
+            tags(&list),
+            [(0, 3), (1, 1), (1, 4), (5, 0), (5, 2), (9, 5)]
+        );
+    }
+
+    #[test]
+    fn rejects_when_full() {
+        let mut list = EventList::with_capacity(2);
+        list.push(ev(0, 0)).unwrap();
+        list.push(ev(1, 1)).unwrap();
+        assert!(list.is_full());
+        assert_eq!(list.push(ev(2, 2)), Err(ev(2, 2)));
+        assert_eq!(list.len(), 2);
+        list.clear();
+        assert!(list.is_empty());
+        list.push(ev(2, 2)).unwrap();
+    }
+
+    #[test]
+    fn zero_capacity_rejects_everything() {
+        let mut list = EventList::with_capacity(0);
+        assert!(list.push(ev(0, 0)).is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn matches_stable_sort(frames in proptest::collection::vec(0u32..64, 0..200)) {
+            let mut list = EventList::with_capacity(frames.len());
+            let mut expected = Vec::new();
+            for (i, &f) in frames.iter().enumerate() {
+                list.push(ev(f, i as u8)).unwrap();
+                expected.push((f, i as u8));
+            }
+            expected.sort_by_key(|&(f, _)| f);
+            proptest::prop_assert_eq!(tags(&list), expected);
+        }
     }
 }

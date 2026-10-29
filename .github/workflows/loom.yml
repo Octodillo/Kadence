@@ -1,0 +1,28 @@
+name: Loom
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/daw-core/**"
+      - ".github/workflows/loom.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  loom:
+    name: loom model checks (daw-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: loom
+      - name: loom
+        run: cargo test -p daw-core --release --test loom
+        env:
+          RUSTFLAGS: --cfg loom -D warnings
+          LOOM_MAX_PREEMPTIONS: 3
