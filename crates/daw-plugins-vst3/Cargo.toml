@@ -1,0 +1,30 @@
+[package]
+name = "daw-plugins-vst3"
+description = "VST3 plugin hosting for the DAW"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+daw-core.workspace = true
+vst3 = "0.3"
+libloading = "0.8"
+rtrb = "0.3"
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+libc = "0.2"
+log = "0.4"
+
+[dev-dependencies]
+assert_no_alloc = "1.1"
+tempfile = "3"
+
+# A tiny VST3 plugin used by the tests. `cargo test` builds examples before running tests.
+[[example]]
+name = "testgain"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
