@@ -78,13 +78,41 @@ impl SharedStats {
 }
 
 /// Whether the calling thread has a real-time scheduling policy. Does not
-/// allocate, so it is safe on the process thread.
+/// allocate or lock, so it is safe on the process thread.
 pub(crate) fn current_thread_is_realtime() -> bool {
-    // SAFETY: plain libc query on the current thread with valid out-pointers.
-    unsafe {
-        let mut policy = 0;
-        let mut param: libc::sched_param = std::mem::zeroed();
-        libc::pthread_getschedparam(libc::pthread_self(), &mut policy, &mut param) == 0
-            && (policy == libc::SCHED_FIFO || policy == libc::SCHED_RR)
+    // Ask the kernel, not `pthread_getschedparam`: glibc caches the policy on
+    // its first call and never sees rtkit or the portal promoting the thread
+    // from outside. One syscall.
+    // SAFETY: plain libc query on the current thread.
+    let policy = unsafe { libc::sched_getscheduler(0) };
+    // Mask SCHED_RESET_ON_FORK, which rtkit sets alongside the policy.
+    let policy = policy & !libc::SCHED_RESET_ON_FORK;
+    policy == libc::SCHED_FIFO || policy == libc::SCHED_RR
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// rtkit and the portal promote the thread from outside, by TID, after
+    /// the first check. The check must see that, so it cannot rely on a
+    /// value glibc cached on the first call.
+    #[test]
+    fn sees_policy_changed_by_tid_after_first_check() {
+        std::thread::spawn(|| {
+            assert!(!current_thread_is_realtime());
+            // SAFETY: plain libc calls on the current thread.
+            let promoted = unsafe {
+                let param = libc::sched_param { sched_priority: 1 };
+                libc::sched_setscheduler(libc::gettid(), libc::SCHED_FIFO, &param) == 0
+            };
+            if !promoted {
+                eprintln!("skipped: no permission to set SCHED_FIFO");
+                return;
+            }
+            assert!(current_thread_is_realtime());
+        })
+        .join()
+        .unwrap();
     }
 }
