@@ -76,17 +76,31 @@ impl PeakBuilder {
 
     pub fn push_interleaved(&mut self, samples: &[f32]) {
         let ch = self.channels;
-        for frame in samples.chunks_exact(ch) {
-            for (a, &s) in self.acc.iter_mut().zip(frame) {
-                a[0] = a[0].min(s);
-                a[1] = a[1].max(s);
+        let frames = samples.len() / ch;
+        let mut at = 0;
+        // Work a whole peak's run per channel at a time; much faster than frame by frame.
+        while at < frames {
+            let take = ((BASE_FRAMES_PER_PEAK - self.in_peak) as usize).min(frames - at);
+            let run = &samples[at * ch..(at + take) * ch];
+            for (c, a) in self.acc.iter_mut().enumerate() {
+                let (mut lo, mut hi) = (a[0], a[1]);
+                for s in run.iter().skip(c).step_by(ch) {
+                    if *s < lo {
+                        lo = *s;
+                    }
+                    if *s > hi {
+                        hi = *s;
+                    }
+                }
+                *a = [lo, hi];
             }
-            self.in_peak += 1;
+            self.in_peak += take as u32;
+            at += take;
             if self.in_peak == BASE_FRAMES_PER_PEAK {
                 self.emit();
             }
         }
-        self.frames += (samples.len() / ch) as u64;
+        self.frames += frames as u64;
     }
 
     fn emit(&mut self) {

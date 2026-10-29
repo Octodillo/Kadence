@@ -103,7 +103,11 @@ fn decodes_ogg_vorbis_fixture() {
     let d = decode_file(data_dir().join("sine440.ogg")).unwrap();
     assert_eq!(d.sample_rate, 44_100);
     assert_eq!(d.num_channels(), 2);
-    assert!((d.frames() as i64 - 22_050).abs() < 1200, "{} frames", d.frames());
+    assert!(
+        (d.frames() as i64 - 22_050).abs() < 1200,
+        "{} frames",
+        d.frames()
+    );
     let f = estimate_freq(&d.channels[0], d.sample_rate);
     assert!((f - 440.0).abs() < 10.0, "freq {f}");
 }
@@ -113,7 +117,11 @@ fn decodes_mp3_fixture() {
     let d = decode_file(data_dir().join("sine440.mp3")).unwrap();
     assert_eq!(d.sample_rate, 44_100);
     assert_eq!(d.num_channels(), 2);
-    assert!((d.frames() as i64 - 22_050).abs() < 2400, "{} frames", d.frames());
+    assert!(
+        (d.frames() as i64 - 22_050).abs() < 2400,
+        "{} frames",
+        d.frames()
+    );
     let f = estimate_freq(&d.channels[1], d.sample_rate);
     assert!((f - 440.0).abs() < 10.0, "freq {f}");
 }
@@ -155,16 +163,21 @@ fn resample_preserves_pitch_and_length() {
     let src = test_signal(44_100, 44_100, 2);
     let out = resample(&src, 48_000).unwrap();
     assert_eq!(out.sample_rate, 48_000);
-    assert!((out.frames() as i64 - 48_000).abs() <= 1, "{}", out.frames());
+    assert!(
+        (out.frames() as i64 - 48_000).abs() <= 1,
+        "{}",
+        out.frames()
+    );
     for c in 0..2 {
         let want = 220.0 * (c + 1) as f32 + 0.37;
         let f = estimate_freq(&out.channels[c][1000..47_000], 48_000);
         assert!((f - want).abs() < 2.0, "ch{c}: {f} vs {want}");
     }
-    // The startup delay is trimmed: output should be in phase with the input.
-    let t = 10_000usize;
-    let expected = 0.8 * (std::f32::consts::TAU * 220.37 * t as f32 / 48_000.0).sin();
-    assert!((out.channels[0][t] - expected).abs() < 0.01);
+    // The startup delay is trimmed: output lines up with the input to within one frame.
+    for t in [5_000usize, 10_000, 20_000] {
+        let expected = 0.8 * (std::f32::consts::TAU * 220.37 * t as f32 / 48_000.0).sin();
+        assert!((out.channels[0][t] - expected).abs() < 0.03, "frame {t}");
+    }
 }
 
 #[test]

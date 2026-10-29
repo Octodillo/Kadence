@@ -244,7 +244,11 @@ impl ClipReader {
             .seek_generation
             .store(self.generation, Ordering::Release);
         self.expected = position.0;
-        self.current = None;
+        // The rest of a half-read segment is still in the ring; drop it or every later
+        // segment would be misaligned.
+        if let Some(seg) = self.current.take() {
+            self.discard(seg.frames as usize);
+        }
         self.eof_at = None;
         self.waiting = true;
     }
@@ -272,6 +276,17 @@ impl ClipReader {
                 break;
             }
             let Some(mut seg) = self.next_segment() else {
+                if let Some(end) = self.eof_at {
+                    // Just reached the end marker. Anything before it with no data is a
+                    // hole (should not happen); the check above handles the rest.
+                    if p < end {
+                        let k = ((end - p) as usize).min(n - i);
+                        silence(out, i, k);
+                        i += k;
+                        status = ReadStatus::Underrun;
+                    }
+                    continue;
+                }
                 silence(out, i, n - i);
                 if self.waiting {
                     status = ReadStatus::Pending;
@@ -451,7 +466,10 @@ impl WorkerStream {
                 eof: false,
             });
             self.next_frame += k as i64;
-        } else if self.src_eof {
+        }
+        // Announce the end straight after the last data so readers never see a gap there.
+        let drained = self.pending_pos >= self.pending.len();
+        if self.src_eof && drained && self.segs.slots() > 0 {
             let _ = self.segs.push(Segment {
                 generation: self.generation,
                 start: self.next_frame,
