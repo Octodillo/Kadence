@@ -1,14 +1,22 @@
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use daw_core::event::{Event, EventList};
-use daw_core::node::{Node, ProcessContext, TransportState};
+use daw_core::event::{Event, EventList, ParamId};
+use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 
+use crate::automation::AutomationLane;
 use crate::delay::DelayLine;
-use crate::graph::{GraphDesc, NodeId, NodeKind};
+use crate::graph::{GraphDesc, LiveNode, LiveNodes, NodeId, NodeKey, NodeKind};
+use crate::meter::NodeMeter;
 
 /// Most audio channels one node may have on either side.
 pub const MAX_CHANNELS: usize = 64;
+
+/// Source of graph generations, unique across every engine in the process,
+/// so a graph can never adopt nodes from another engine's graph.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Parameter changes queued for one node between two cycles.
 const PARAM_QUEUE: usize = 64;
@@ -31,6 +39,10 @@ pub enum CompileError {
     TooManyChannels { node: NodeId, channels: u16 },
     #[error("sample rate and block size must be positive")]
     InvalidConfig,
+    #[error("two nodes have the key {0:?}")]
+    DuplicateKey(NodeKey),
+    #[error("the graph reuses nodes from a graph that is no longer the latest sent")]
+    StaleGraph,
 }
 
 /// One summing input of a step: a source channel, optionally through a
@@ -45,6 +57,11 @@ struct Source {
 pub(crate) struct Step {
     id: NodeId,
     kind: NodeKind,
+    name: String,
+    key: Option<NodeKey>,
+    ports: PortLayout,
+    meter: Option<Arc<NodeMeter>>,
+    automation: Vec<(ParamId, Arc<AutomationLane>)>,
     node: Box<dyn Node>,
     n_in: usize,
     n_out: usize,
@@ -71,6 +88,13 @@ pub struct CompiledGraph {
     max_frames: usize,
     sample_rate: f64,
     latency: u32,
+    /// `(step in the previous graph, step here)` of every reused node.
+    transfers: Vec<(usize, usize)>,
+    /// Generation of the graph the transfers refer to.
+    pub(crate) base: u64,
+    pub(crate) generation: u64,
+    /// This graph's keyed nodes, for building the next graph.
+    pub(crate) live: Arc<LiveNodes>,
 }
 
 impl CompiledGraph {
@@ -122,6 +146,17 @@ impl CompiledGraph {
                 return Err(CompileError::NoEventInput(id));
             }
         }
+        let mut keys = HashSet::new();
+        for (i, entry) in desc.nodes.iter().enumerate() {
+            if let Some(k) = entry.key
+                && !keys.insert(k)
+            {
+                return Err(CompileError::DuplicateKey(k));
+            }
+            if !entry.automation.is_empty() && !ports[i].event_in {
+                return Err(CompileError::NoEventInput(NodeId(i as u32)));
+            }
+        }
         topo_order(desc).map(|_| ())
     }
 
@@ -153,8 +188,10 @@ impl CompiledGraph {
             event_edges,
             external_events,
             master,
+            live,
             ..
         } = desc;
+        let mut transfers = Vec::new();
         let mut slots: Vec<Option<_>> = nodes.into_iter().map(Some).collect();
         let mut steps: Vec<Step> = order
             .iter()
@@ -165,9 +202,17 @@ impl CompiledGraph {
                 entry.node.prepare(sample_rate, max_frames);
                 let ports = entry.node.ports();
                 let (n_in, n_out) = (ports.audio_in as usize, ports.audio_out as usize);
+                if let Some(old) = entry.reuse {
+                    transfers.push((old, index[i]));
+                }
                 Step {
                     id: NodeId(i as u32),
                     kind: entry.kind,
+                    name: entry.name,
+                    key: entry.key,
+                    ports: ports.clone(),
+                    meter: entry.meter,
+                    automation: entry.automation,
                     latency: entry.node.latency(),
                     node: entry.node,
                     n_in,
@@ -229,6 +274,8 @@ impl CompiledGraph {
         }
 
         let master = index[master.0 as usize];
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let live_nodes = Arc::new(live_nodes(&steps, generation));
         Ok(Self {
             latency: out_latency[master],
             steps,
@@ -237,7 +284,28 @@ impl CompiledGraph {
             master,
             max_frames: mf,
             sample_rate,
+            transfers,
+            base: live.generation,
+            generation,
+            live: live_nodes,
         })
+    }
+
+    /// Moves every reused node out of `old` into this graph, leaving the
+    /// placeholders behind. Swapping boxes neither allocates nor frees.
+    /// Does nothing unless `old` is the graph this one was built against.
+    pub(crate) fn adopt(&mut self, old: &mut CompiledGraph) {
+        if old.generation != self.base {
+            return;
+        }
+        for &(from, to) in &self.transfers {
+            std::mem::swap(&mut self.steps[to].node, &mut old.steps[from].node);
+        }
+    }
+
+    /// Whether [`adopt`](Self::adopt) has nodes to take over.
+    pub fn reuses_nodes(&self) -> bool {
+        !self.transfers.is_empty()
     }
 
     /// Samples from the earliest input to the master output.
@@ -325,6 +393,9 @@ impl CompiledGraph {
                         Some(src) => out[..frames].copy_from_slice(src),
                         None => out[..frames].fill(0.0),
                     }
+                    if let Some(meter) = &step.meter {
+                        meter.update(ch, &out[..frames]);
+                    }
                 }
                 continue;
             }
@@ -352,6 +423,11 @@ impl CompiledGraph {
                 let _ = step.events_in.push(*e);
             }
             step.params.clear();
+            if transport.playing {
+                for (param, lane) in &step.automation {
+                    lane.emit(*param, transport.position.0, frames, &mut step.events_in);
+                }
+            }
             if step.external_events {
                 for e in external.iter() {
                     let _ = step.events_in.push(*e);
@@ -383,8 +459,34 @@ impl CompiledGraph {
                 events_out: &mut step.events_out,
             };
             step.node.process(&mut ctx);
+            if let Some(meter) = &step.meter {
+                for (ch, out) in step.outputs.chunks_exact(mf).enumerate() {
+                    meter.update(ch, &out[..frames]);
+                }
+            }
         }
     }
+}
+
+/// The keyed nodes of `steps`.
+fn live_nodes(steps: &[Step], generation: u64) -> LiveNodes {
+    let nodes: HashMap<_, _> = steps
+        .iter()
+        .enumerate()
+        .filter_map(|(step, s)| {
+            let live = LiveNode {
+                id: s.id,
+                step,
+                kind: s.kind,
+                name: s.name.clone(),
+                ports: s.ports.clone(),
+                latency: s.latency,
+                meter: s.meter.clone(),
+            };
+            Some((s.key?, live))
+        })
+        .collect();
+    LiveNodes { generation, nodes }
 }
 
 /// Kahn's algorithm over audio and event edges. Ties go to the lowest
