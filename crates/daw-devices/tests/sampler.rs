@@ -125,6 +125,29 @@ fn voices_are_bounded() {
     assert_eq!(sampler.active_voices(), 32);
 }
 
+/// Stealing a sounding voice fades it out rather than cutting it mid-cycle.
+#[test]
+fn stealing_does_not_click() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(sine(100.0, 0.05, s.sample_rate, 48000), s.sample_rate);
+    let events: Vec<_> = (0..40).map(|i| (i * 100, note_on(60, 1.0))).collect();
+    let r = render(&mut sampler, 6000, &[], &events, s);
+    let step = |x: &[f32]| {
+        x.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    };
+    let x = &r.channels[0];
+    // Every voice plays the same quiet sine, offset in time; 32 of them sum to a
+    // smooth signal whose largest step comes just before the first steal.
+    let before = step(&x[..3200]);
+    let after = step(&x[3200..]);
+    assert!(
+        after < before * 1.5,
+        "step {after} after stealing vs {before}"
+    );
+}
+
 #[test]
 fn silence() {
     check_silence(&mut sampler_with(vec![0.5; 100], 48000.0));

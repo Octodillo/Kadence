@@ -1,6 +1,8 @@
 //! Sampler: plays in-memory sample buffers, either one-shot (drum style,
 //! unpitched, ignores note-off) or key-mapped (pitched from a root key, with
-//! a release on note-off). Zones choose a sample by key and velocity.
+//! a release on note-off). Zones choose a sample by key and velocity. When
+//! every voice is busy the quietest releasing voice (else the oldest) is
+//! stolen; it fades out over a few milliseconds instead of cutting off.
 
 use std::sync::Arc;
 
@@ -64,6 +66,11 @@ static PARAMS: &[ParamSpec] = &[
 ];
 
 const VOICES: usize = 32;
+/// Extra voices so stolen voices can fade out while their replacement starts.
+const SPARE_VOICES: usize = 8;
+const POOL: usize = VOICES + SPARE_VOICES;
+/// Fade-out time for a stolen voice.
+const STEAL_FADE_MS: f64 = 3.0;
 
 /// Decoded audio held in memory. Mono or stereo; extra channels are ignored.
 #[derive(Clone, Debug)]
@@ -158,6 +165,9 @@ impl Zone {
 #[derive(Clone, Copy, Default)]
 struct Voice {
     active: bool,
+    /// Being faded out after a steal; doesn't count towards the voice limit.
+    stolen: bool,
+    fade: f32,
     zone: usize,
     key: u8,
     id: NoteId,
@@ -171,8 +181,9 @@ struct Voice {
 pub struct Sampler {
     params: ParamStore,
     zones: Vec<Zone>,
-    voices: [Voice; VOICES],
+    voices: [Voice; POOL],
     sample_rate: f64,
+    fade_step: f32,
     clock: u64,
 }
 
@@ -207,15 +218,16 @@ impl Sampler {
         Self {
             params: ParamStore::new(PARAMS),
             zones: Vec::new(),
-            voices: [Voice::default(); VOICES],
+            voices: [Voice::default(); POOL],
             sample_rate: 48000.0,
+            fade_step: (1000.0 / (STEAL_FADE_MS * 48000.0)) as f32,
             clock: 0,
         }
     }
 
     /// Replace the zone map. Call off the real-time thread; stops all voices.
     pub fn set_zones(&mut self, zones: Vec<Zone>) {
-        self.voices = [Voice::default(); VOICES];
+        self.voices = [Voice::default(); POOL];
         self.zones = zones;
     }
 
@@ -223,8 +235,9 @@ impl Sampler {
         &self.zones
     }
 
+    /// Voices currently sounding, not counting stolen ones fading out.
     pub fn active_voices(&self) -> usize {
-        self.voices.iter().filter(|v| v.active).count()
+        self.voices.iter().filter(|v| v.active && !v.stolen).count()
     }
 
     fn one_shot(&self) -> bool {
@@ -258,25 +271,28 @@ impl Sampler {
         let gain = db_to_gain(self.params.get(GAIN) + zone.gain_db as f64) as f32
             * (1.0 - sens + sens * velocity);
 
-        // Prefer a free voice, then the oldest one.
-        let slot = self
-            .voices
-            .iter()
-            .position(|v| !v.active)
-            .unwrap_or_else(|| {
-                let (i, _) = self
-                    .voices
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, v)| v.age)
-                    .expect("voices");
-                i
-            });
+        if self.active_voices() >= VOICES {
+            self.steal();
+        }
+        let slot = match self.voices.iter().position(|v| !v.active) {
+            Some(i) => i,
+            // Every spare is still fading: cut the quietest fade short.
+            None => self
+                .voices
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.stolen)
+                .min_by(|(_, a), (_, b)| a.fade.total_cmp(&b.fade))
+                .map(|(i, _)| i)
+                .expect("a stolen voice exists when the pool is full"),
+        };
         self.clock += 1;
         let (a, r) = (self.params.get(ATTACK), self.params.get(RELEASE));
         let v = &mut self.voices[slot];
         *v = Voice {
             active: true,
+            stolen: false,
+            fade: 1.0,
             zone: zone_index,
             key,
             id,
@@ -290,6 +306,31 @@ impl Sampler {
         v.env.gate_on();
     }
 
+    /// Start fading out the quietest releasing voice, else the oldest one.
+    fn steal(&mut self) {
+        let victim = self
+            .voices
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.active && !v.stolen)
+            .min_by(|(_, a), (_, b)| {
+                b.env
+                    .is_releasing()
+                    .cmp(&a.env.is_releasing())
+                    .then(if a.env.is_releasing() {
+                        (a.env.level() * a.gain).total_cmp(&(b.env.level() * b.gain))
+                    } else {
+                        a.age.cmp(&b.age)
+                    })
+            })
+            .map(|(i, _)| i);
+        if let Some(i) = victim {
+            let v = &mut self.voices[i];
+            v.stolen = true;
+            v.fade = 1.0;
+        }
+    }
+
     fn note_off(&mut self, key: u8, id: NoteId) {
         if self.one_shot() {
             return;
@@ -297,7 +338,7 @@ impl Sampler {
         for v in self
             .voices
             .iter_mut()
-            .filter(|v| v.active && !v.env.is_releasing())
+            .filter(|v| v.active && !v.stolen && !v.env.is_releasing())
         {
             // Match by id when both sides have one, otherwise by key, so an
             // id-less (raw MIDI) note still ends on an off that has an id.
@@ -329,17 +370,30 @@ impl Segmented for Sampler {
     }
 
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
+        let fade_step = self.fade_step;
         for i in start..end {
             let (mut l, mut r) = (0.0, 0.0);
             for v in self.voices.iter_mut().filter(|v| v.active) {
                 let sample = &self.zones[v.zone].sample;
                 if v.pos >= sample.len() as f64 {
                     v.active = false;
+                    v.stolen = false;
                     continue;
                 }
-                let g = v.env.tick() * v.gain;
+                let mut g = v.env.tick() * v.gain;
+                if v.stolen {
+                    v.fade -= fade_step;
+                    if v.fade <= 0.0 {
+                        v.active = false;
+                        v.stolen = false;
+                        v.env.kill();
+                        continue;
+                    }
+                    g *= v.fade;
+                }
                 if !v.env.is_active() {
                     v.active = false;
+                    v.stolen = false;
                     continue;
                 }
                 let left = &sample.channels[0];
@@ -365,6 +419,7 @@ impl Node for Sampler {
 
     fn prepare(&mut self, sample_rate: f64, _max_frames: u32) {
         self.sample_rate = sample_rate;
+        self.fade_step = (1000.0 / (STEAL_FADE_MS * sample_rate)) as f32;
         self.reset();
     }
 
@@ -375,6 +430,7 @@ impl Node for Sampler {
     fn reset(&mut self) {
         for v in &mut self.voices {
             v.active = false;
+            v.stolen = false;
             v.env.kill();
         }
     }
@@ -389,6 +445,34 @@ mod tests {
         let d = [0.0, 1.0, 4.0, 9.0, 16.0];
         assert_eq!(hermite(&d, 2.0), 4.0);
         assert!((hermite(&d, 2.5) - 6.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn steals_releasing_voices_before_the_oldest_held_one() {
+        let mut s = Sampler::new();
+        s.set_zones(vec![Zone::full(Arc::new(SampleBuffer::mono(
+            vec![0.5; 48000],
+            48000.0,
+        )))]);
+        for k in 0..VOICES as u8 {
+            s.note_on(k, 1.0, -1);
+        }
+        s.note_off(5, -1);
+        s.note_on(100, 1.0, -1);
+        let held = |s: &Sampler| -> Vec<u8> {
+            s.voices
+                .iter()
+                .filter(|v| v.active && !v.stolen)
+                .map(|v| v.key)
+                .collect()
+        };
+        assert_eq!(s.active_voices(), VOICES);
+        assert!(!held(&s).contains(&5));
+        assert!(held(&s).contains(&0));
+        // No releasing voices left: the oldest (0) goes next.
+        s.note_on(101, 1.0, -1);
+        assert!(!held(&s).contains(&0));
+        assert!(held(&s).contains(&101));
     }
 
     #[test]
