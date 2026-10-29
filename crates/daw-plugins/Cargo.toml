@@ -18,6 +18,7 @@ vst3 = ["dep:daw-plugins-vst3"]
 daw-core.workspace = true
 daw-plugins-clap = { path = "../daw-plugins-clap", optional = true }
 daw-plugins-vst3 = { path = "../daw-plugins-vst3", optional = true }
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

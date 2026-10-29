@@ -3,11 +3,12 @@
 use clack_host::events::event_types::{
     MidiEvent, NoteOffEvent, NoteOnEvent, ParamValueEvent, TransportEvent, TransportFlags,
 };
+use clack_host::events::io::{OutputEventBuffer, TryPushError};
 use clack_host::events::spaces::CoreEventSpace;
 use clack_host::events::{EventFlags, EventHeader, Match, Pckn, UnknownEvent};
 use clack_host::prelude::*;
 use clack_host::utils::{BeatTime, SecondsTime};
-use daw_core::event::{Event, EventKind, NoteId};
+use daw_core::event::{Event, EventKind, EventList, NoteId};
 use daw_core::node::TransportState;
 
 /// Pushes the CLAP form of `e`, at `frame`, into `out`. Notes become MIDI when the plugin's note
@@ -24,7 +25,12 @@ pub(crate) fn push_clap(out: &mut EventBuffer, e: &Event, frame: u32, notes_as_m
                 out.push(&MidiEvent::new(
                     frame,
                     0,
-                    [0x90 | (channel & 0x0f), key & 0x7f, midi_velocity(velocity)],
+                    // Velocity 0 would turn a quiet note on into a note off.
+                    [
+                        0x90 | (channel & 0x0f),
+                        key & 0x7f,
+                        midi_velocity(velocity).max(1),
+                    ],
                 ));
             } else {
                 out.push(&NoteOnEvent::new(
@@ -98,6 +104,22 @@ pub(crate) fn from_clap(e: &UnknownEvent, frame_offset: u32) -> Option<Event> {
     Some(Event { frame, kind })
 }
 
+/// Receives a plugin's output events and converts them into a fixed-capacity [`EventList`].
+/// Events the list cannot hold, and kinds `daw_core` has no form for, are dropped.
+pub(crate) struct Sink<'a> {
+    pub(crate) out: &'a mut EventList,
+    pub(crate) frame_offset: u32,
+}
+
+impl OutputEventBuffer for Sink<'_> {
+    fn try_push(&mut self, event: &UnknownEvent) -> Result<(), TryPushError> {
+        match from_clap(event, self.frame_offset) {
+            Some(e) => self.out.push(e).map_err(|_| TryPushError::new()),
+            None => Ok(()),
+        }
+    }
+}
+
 /// CLAP transport for a block starting `offset` frames after the context's position.
 pub(crate) fn transport(t: &TransportState, offset: u32) -> TransportEvent {
     let mut flags = TransportFlags::HAS_SECONDS_TIMELINE;
@@ -152,4 +174,28 @@ fn midi_velocity(v: f32) -> u8 {
 
 fn to_u8(v: i16) -> u8 {
     u8::try_from(v).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_notes_sent_as_midi_stay_note_ons() {
+        let mut buf = EventBuffer::with_capacity(1);
+        let on = Event {
+            frame: 0,
+            kind: EventKind::NoteOn {
+                channel: 2,
+                key: 60,
+                velocity: 0.001,
+                note_id: -1,
+            },
+        };
+        push_clap(&mut buf, &on, 0, true);
+        let Some(CoreEventSpace::Midi(m)) = buf.get(0).and_then(|e| e.as_core_event()) else {
+            panic!("expected a MIDI event");
+        };
+        assert_eq!(m.data(), [0x92, 60, 1]);
+    }
 }

@@ -269,3 +269,43 @@ fn instantiate_rejects_bad_descriptors() {
     d.path = PathBuf::from("/nonexistent/plugin.clap");
     assert!(ClapFormat.instantiate(&d, SR, MAX).is_err());
 }
+
+#[test]
+fn a_flood_of_output_events_is_dropped_without_allocating() {
+    let mut plugin = instance();
+    let frames = 64;
+    let input = vec![0.0; frames];
+    let mut left = vec![0.0; frames];
+    let mut right = vec![0.0; frames];
+    let mut events_in = EventList::with_capacity(100);
+    for key in 0..100u8 {
+        events_in
+            .push(Event {
+                frame: u32::from(key % 64),
+                kind: EventKind::NoteOn {
+                    channel: 0,
+                    key,
+                    velocity: 1.0,
+                    note_id: -1,
+                },
+            })
+            .unwrap();
+    }
+    // Each note on comes back as a note on and a param event: 200 events into room for 8.
+    let mut events_out = EventList::with_capacity(8);
+    let transport = TransportState::default();
+    let audio_in = [&input[..], &input[..]];
+    let mut audio_out = [&mut left[..], &mut right[..]];
+    let mut ctx = ProcessContext {
+        frames: 64,
+        transport: &transport,
+        audio_in: &audio_in,
+        audio_out: &mut audio_out,
+        events_in: &events_in,
+        events_out: &mut events_out,
+    };
+    plugin.process(&mut ctx); // warm up: starts processing
+    ctx.events_out.clear();
+    assert_no_alloc(|| plugin.process(&mut ctx));
+    assert_eq!(ctx.events_out.len(), 8);
+}

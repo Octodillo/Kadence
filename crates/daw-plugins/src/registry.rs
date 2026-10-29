@@ -1,6 +1,6 @@
 //! The registry of formats and known plugins.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -11,6 +11,9 @@ use daw_core::plugin::{
 use crate::cache::{CacheEntry, ScanCache, modified_time};
 use crate::candidates::find_candidates;
 use crate::scanner::Scanner;
+
+/// The plugins in one bundle, or why its scan failed.
+type BundleResult = Result<Vec<PluginDescriptor>, String>;
 
 /// What a [`PluginRegistry::scan`] did.
 #[derive(Debug, Default)]
@@ -107,8 +110,11 @@ impl PluginRegistry {
     /// at a time, and their results stored in `cache`.
     pub fn scan(&mut self, scanner: &Scanner, cache: &mut ScanCache) -> ScanReport {
         let mut report = ScanReport::default();
-        let mut todo: Vec<(PluginFormatKind, PathBuf)> = Vec::new();
-        let mut plugins = Vec::new();
+        // One slot per bundle, in search-path order, filled from the cache or a scan.
+        let mut slots: Vec<(PathBuf, Option<BundleResult>)> = Vec::new();
+        // Bundles to scan, and the slot each one fills.
+        let mut jobs: Vec<(PluginFormatKind, PathBuf)> = Vec::new();
+        let mut job_slots: Vec<usize> = Vec::new();
 
         for format in &self.formats {
             let kind = format.kind();
@@ -116,43 +122,49 @@ impl PluginRegistry {
                 match cache.get(&bundle) {
                     Some(entry) if entry.format == kind => {
                         report.cached += 1;
-                        match &entry.result {
-                            Ok(found) => plugins.extend(found.iter().cloned()),
-                            Err(e) => report.failed.push((bundle, e.clone())),
-                        }
+                        slots.push((bundle, Some(entry.result.clone())));
                     }
-                    _ => todo.push((kind.clone(), bundle)),
+                    _ => {
+                        job_slots.push(slots.len());
+                        jobs.push((kind.clone(), bundle.clone()));
+                        slots.push((bundle, None));
+                    }
                 }
             }
         }
 
-        let results = scan_parallel(scanner, &todo);
-        for ((kind, bundle), result) in todo.into_iter().zip(results) {
+        let results = scan_parallel(scanner, &jobs);
+        for ((slot, (kind, bundle)), result) in job_slots.into_iter().zip(jobs).zip(results) {
             report.scanned += 1;
+            let cacheable = result
+                .as_ref()
+                .map_or_else(|e| e.is_plugin_fault(), |_| true);
             let result = result.map_err(|e| e.to_string());
-            match &result {
-                Ok(found) => plugins.extend(found.iter().cloned()),
-                Err(e) => report.failed.push((bundle.clone(), e.clone())),
-            }
-            if let Some(mtime_ns) = modified_time(&bundle) {
+            if cacheable && let Some(mtime_ns) = modified_time(&bundle) {
                 cache.insert(
                     bundle,
                     CacheEntry {
                         format: kind,
                         mtime_ns,
-                        result,
+                        result: result.clone(),
                     },
                 );
             }
+            slots[slot].1 = Some(result);
         }
         cache.prune();
 
-        plugins.sort_by(|a, b| {
-            a.name
-                .to_lowercase()
-                .cmp(&b.name.to_lowercase())
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        let mut plugins = Vec::new();
+        for (bundle, result) in slots {
+            match result.expect("every slot is filled") {
+                Ok(found) => plugins.extend(found),
+                Err(e) => report.failed.push((bundle, e)),
+            }
+        }
+        // The same plugin can sit in several search paths; the first path wins.
+        let mut seen = HashSet::new();
+        plugins.retain(|p| seen.insert((p.format.clone(), p.id.clone())));
+        plugins.sort_by_cached_key(|p| (p.name.to_lowercase(), p.id.clone()));
         self.plugins = plugins;
         report
     }

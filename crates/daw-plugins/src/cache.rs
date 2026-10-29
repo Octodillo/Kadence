@@ -65,6 +65,12 @@ impl ScanCache {
         self.entries.insert(bundle, entry);
     }
 
+    /// Drops cached failures so the next scan tries those bundles again, for a "rescan failed
+    /// plugins" action.
+    pub fn forget_failures(&mut self) {
+        self.entries.retain(|_, e| e.result.is_ok());
+    }
+
     /// Drops entries for bundles that no longer exist.
     pub fn prune(&mut self) {
         self.entries.retain(|path, _| path.exists());
