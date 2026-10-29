@@ -320,6 +320,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "daw-midi"
+version = "0.1.0"
+dependencies = [
+ "daw-core",
+ "proptest",
+]
+
+[[package]]
 name = "daw-plugin-host"
 version = "0.1.0"
 dependencies = [
