@@ -80,12 +80,36 @@ impl SampleBuffer {
         }
     }
 
+    /// Decode an audio file (WAV, AIFF, FLAC, OGG Vorbis, MP3) at its own rate. The
+    /// sampler corrects for the rate difference when it plays. Not real-time safe.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, daw_media::MediaError> {
+        daw_media::decode_file(path).map(Self::from)
+    }
+
+    /// Decode an audio file and resample it to `sample_rate` up front, which avoids
+    /// the sampler's interpolation for unpitched one-shots. Not real-time safe.
+    pub fn load_resampled(
+        path: impl AsRef<std::path::Path>,
+        sample_rate: u32,
+    ) -> Result<Self, daw_media::MediaError> {
+        daw_media::load_file(path, sample_rate).map(Self::from)
+    }
+
     pub fn len(&self) -> usize {
         self.channels.iter().map(Vec::len).min().unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl From<daw_media::AudioData> for SampleBuffer {
+    fn from(data: daw_media::AudioData) -> Self {
+        Self {
+            channels: data.channels,
+            sample_rate: f64::from(data.sample_rate),
+        }
     }
 }
 
