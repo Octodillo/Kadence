@@ -34,7 +34,7 @@ pub struct RecordingStats {
     pub peaks: PeakCache,
     /// Why `<file>.peaks` could not be written, if it wasn't. The cache is then rebuilt
     /// on the next load; the recording itself is fine.
-    pub peaks_error: Option<String>,
+    pub peaks_error: Option<Arc<MediaError>>,
 }
 
 /// The RT side of a recording. [`write`](Self::write) never blocks or allocates.
@@ -190,7 +190,7 @@ fn writer_loop(
     writer.finalize()?;
     let peaks = peaks.finish();
     // The WAV is complete; a failed peak save must not turn the take into an error.
-    let peaks_error = peaks.save_for(&path).err().map(|e| e.to_string());
+    let peaks_error = peaks.save_for(&path).err().map(Arc::new);
     Ok(RecordingStats {
         peaks_error,
         path,

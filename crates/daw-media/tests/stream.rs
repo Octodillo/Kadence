@@ -253,8 +253,8 @@ fn resampled_seek_matches_continuous_playback() {
         r.cue(SampleTime(start));
         wait_ready(std::slice::from_mut(&mut r));
         std::thread::sleep(Duration::from_millis(50));
-        let mut l = vec![0.0; 4096];
-        let mut rr = vec![0.0; 4096];
+        let mut l = vec![0.0; 16_384];
+        let mut rr = vec![0.0; 16_384];
         assert_eq!(
             r.read(SampleTime(start), &mut [&mut l[..], &mut rr[..]]),
             ReadStatus::Ok
@@ -262,11 +262,11 @@ fn resampled_seek_matches_continuous_playback() {
         l
     };
     let continuous = read_from(0);
-    for start in [7i64, 161, 1234] {
+    for start in [7i64, 161, 1234, 9001] {
         let seeked = read_from(start);
-        // Away from the resampler's restart transient, the seeked stream must line up
-        // sample for sample with continuous playback (no fractional-frame shift).
-        for i in 1000..(4096 - start as usize) {
+        // From the very first frame, the seeked stream must line up sample for sample
+        // with continuous playback: no restart transient, no fractional-frame shift.
+        for i in 0..(16_384 - start as usize) {
             let d = (seeked[i] - continuous[i + start as usize]).abs();
             assert!(d < 1e-3, "start {start} frame {i}: diff {d}");
         }
@@ -316,7 +316,15 @@ fn odd_rate_seek_is_ready_only_with_data_at_the_target() {
             ReadStatus::Ok,
             "target {target}"
         );
-        assert!(l.iter().any(|s| *s != 0.0));
+        // Values match the file at the target. The odd ratio leaves a sub-frame offset,
+        // so allow about one frame of slope.
+        for (f, s) in l.iter().enumerate() {
+            let want = expected(2, 0, target + f as i64, RATE);
+            assert!(
+                (s - want).abs() < 0.02,
+                "target {target} frame {f}: {s} vs {want}"
+            );
+        }
     }
     assert_eq!(r.underruns(), 0);
 }

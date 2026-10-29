@@ -108,11 +108,19 @@ fn unwritable_cache_still_returns_peaks() {
     let dir = tempfile::tempdir().unwrap();
     let audio = dir.path().join("ro.wav");
     write_wav(&audio, &test_signal(48_000, 5_000, 1), WavFormat::Pcm16).unwrap();
-    // A directory where the temp file goes makes the save fail, even when running as root.
-    std::fs::create_dir(dir.path().join("ro.wav.peaks.tmp")).unwrap();
+    // A non-empty directory where the cache goes makes the save fail, even as root.
+    let blocker = PeakCache::path_for(&audio);
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("keep"), b"x").unwrap();
     let cache = PeakCache::load_or_build(&audio).unwrap();
     assert_eq!(cache.frames, 5_000);
-    assert!(!PeakCache::path_for(&audio).exists());
+    // The failed save cleaned up after itself.
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
 #[test]

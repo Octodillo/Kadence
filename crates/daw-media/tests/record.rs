@@ -76,7 +76,9 @@ fn file_is_playable_before_finish() {
 fn failed_peak_save_does_not_fail_the_take() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("take.wav");
-    std::fs::create_dir(dir.path().join("take.wav.peaks.tmp")).unwrap();
+    let blocker = dir.path().join("take.wav.peaks");
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("keep"), b"x").unwrap();
     let (rec, mut input) = Recorder::start(&path, 1, 48_000, WavFormat::Pcm16, 1.0).unwrap();
     input.write(&[&[0.1f32; 1000][..]]);
     drop(input);

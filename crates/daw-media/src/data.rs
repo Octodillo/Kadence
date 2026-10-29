@@ -63,6 +63,13 @@ impl AudioData {
         if ch == 0 {
             return;
         }
+        if ch == 1 {
+            self.channels[0].extend_from_slice(samples);
+            return;
+        }
+        for plane in &mut self.channels {
+            plane.reserve(samples.len() / ch);
+        }
         for frame in samples.chunks_exact(ch) {
             for (plane, s) in self.channels.iter_mut().zip(frame) {
                 plane.push(*s);

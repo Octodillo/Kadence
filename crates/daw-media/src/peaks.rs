@@ -210,7 +210,11 @@ impl PeakCache {
     fn save(&self, path: &Path, (len, mtime): (u64, i64)) -> Result<()> {
         let io = |e| MediaError::io(path, e);
         // Write to a temp name and rename so readers never see a half-written cache.
-        let tmp = path.with_extension("peaks.tmp");
+        // A unique temp name, so two savers of the same cache (say the recorder and the
+        // UI) never truncate, rename or delete each other's file.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("peaks.{}-{n}.tmp", std::process::id()));
         let result = self
             .write_to(&tmp, (len, mtime))
             .and_then(|()| fs::rename(&tmp, path).map_err(io));

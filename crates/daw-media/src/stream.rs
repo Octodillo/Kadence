@@ -141,6 +141,7 @@ impl DiskStreamer {
             dst_rate: rate,
             generation: 0,
             next_frame: 0,
+            skip_to: 0,
             pending: Vec::new(),
             pending_pos: 0,
             scratch: vec![0.0; self.config.block_frames * ch],
@@ -340,11 +341,7 @@ impl ClipReader {
             return Some(seg);
         }
         while let Ok(seg) = self.segs.pop() {
-            // Stale generations, and data that ends before the requested position (a
-            // grid-aligned seek starts a little early), are dropped without counting as
-            // having arrived.
-            let ends_early = !seg.eof && seg.start + i64::from(seg.frames) <= self.expected;
-            if seg.generation != self.generation || ends_early {
+            if seg.generation != self.generation {
                 self.discard(seg.frames as usize);
                 continue;
             }
@@ -426,6 +423,8 @@ struct WorkerStream {
     dst_rate: u32,
     generation: u64,
     next_frame: i64,
+    /// First frame to push after a seek; earlier decoded frames are dropped.
+    skip_to: i64,
     /// Decoded (and resampled) interleaved frames not yet pushed.
     pending: Vec<f32>,
     pending_pos: usize,
@@ -452,7 +451,19 @@ impl WorkerStream {
             return false;
         }
         let want = block_frames.min(room);
-        while (self.pending.len() - self.pending_pos) / ch < want && !self.src_eof {
+        loop {
+            let avail = (self.pending.len() - self.pending_pos) / ch;
+            // A grid-aligned seek starts a little before the target: drop those frames
+            // here so every pushed segment starts at or after the requested position.
+            if self.next_frame < self.skip_to && avail > 0 {
+                let k = ((self.skip_to - self.next_frame) as usize).min(avail);
+                self.pending_pos += k * ch;
+                self.next_frame += k as i64;
+                continue;
+            }
+            if avail >= want || self.src_eof {
+                break;
+            }
             if let Err(()) = self.decode_more() {
                 self.shared.failed.store(true, Ordering::Relaxed);
                 self.src_eof = true;
@@ -507,7 +518,11 @@ impl WorkerStream {
     }
 
     fn seek(&mut self, target: i64) {
-        let target = u128::from(target.max(0) as u64);
+        let requested = target.max(0);
+        // A freshly reset resampler rings for its filter length, so start decoding a
+        // little earlier and let the skip below drop the lead-in.
+        let lead = if self.resampler.is_some() { 2048 } else { 0 };
+        let target = u128::from((requested - lead).max(0) as u64);
         let (src_rate, dst_rate) = (u128::from(self.src_rate), u128::from(self.dst_rate));
         // Start on a frame where source and engine grids coincide, so the resampled
         // output lands exactly on engine frames; the reader drops the frames before
@@ -521,7 +536,8 @@ impl WorkerStream {
             let periods = target / dst_period;
             (periods * src_period, periods * dst_period)
         } else {
-            (target * src_rate / dst_rate.max(1), target)
+            // Nearest source frame (rounded, not floored).
+            ((target * src_rate + dst_rate / 2) / dst_rate.max(1), target)
         };
         let src = u64::try_from(src).unwrap_or(u64::MAX);
         let start = i64::try_from(start).unwrap_or(i64::MAX);
@@ -536,6 +552,7 @@ impl WorkerStream {
             self.src_eof = true;
         }
         self.next_frame = start;
+        self.skip_to = requested;
     }
 }
 
