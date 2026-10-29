@@ -135,7 +135,8 @@ pub enum BackendError {
 /// Lifecycle: [`open`](Self::open) registers ports, [`start`](Self::start)
 /// begins calling the process callback, [`stop`](Self::stop) ends it and
 /// drops the callback on the calling thread. `stop` then `start` again is
-/// allowed. Dropping a backend stops and closes it.
+/// allowed, and keeps the connections made while open, including ones made
+/// before the first `start`. Dropping a backend stops and closes it.
 pub trait AudioBackend: Send {
     /// A short human-readable name, for settings pages ("JACK", "Dummy").
     fn name(&self) -> &'static str;

@@ -27,6 +27,14 @@ pub struct JackBackend {
     state: State,
     cfg: Option<BackendConfig>,
     shared: Arc<SharedStats>,
+    /// Connections to make on the next `start`. Deactivating a JACK client
+    /// drops all of its connections, and JACK refuses to connect an inactive
+    /// client's ports, so while stopped they are kept here: `stop` saves the
+    /// live ones and `connect`/`disconnect` edit the list.
+    links: Vec<(String, String)>,
+    /// Auto-connect has run since `open`. Later starts restore `links`
+    /// instead, so ports the user unplugged stay unplugged.
+    auto_connected: bool,
 }
 
 #[derive(Default)]
@@ -55,6 +63,57 @@ impl JackBackend {
             State::Open(c, _) => Ok(c),
             State::Running(a) => Ok(a.as_client()),
         }
+    }
+
+    /// Full names of our ports, each with whether it is an output.
+    fn our_ports(client: &Client, cfg: &BackendConfig) -> Vec<(String, bool)> {
+        let me = client.name();
+        let mut v = Vec::new();
+        v.extend((1..=cfg.audio_inputs).map(|i| (format!("{me}:audio_in_{i}"), false)));
+        v.extend((1..=cfg.audio_outputs).map(|i| (format!("{me}:audio_out_{i}"), true)));
+        if cfg.midi_input {
+            v.push((format!("{me}:midi_in"), false));
+        }
+        if cfg.midi_output {
+            v.push((format!("{me}:midi_out"), true));
+        }
+        v
+    }
+
+    /// Every live connection of our ports, as (output, input) pairs.
+    fn live_links(client: &Client, cfg: &BackendConfig) -> Vec<(String, String)> {
+        let mut links = Vec::new();
+        for (name, is_output) in Self::our_ports(client, cfg) {
+            let Some(port) = client.port_by_name(&name) else {
+                continue;
+            };
+            for other in port.get_connections() {
+                links.push(if is_output {
+                    (name.clone(), other)
+                } else {
+                    (other, name.clone())
+                });
+            }
+        }
+        links
+    }
+
+    /// Checks what JACK would check on connect, for a client that cannot
+    /// connect yet because it is inactive.
+    fn check_link(client: &Client, from: &str, to: &str) -> Result<(), String> {
+        let port = |name| {
+            client
+                .port_by_name(name)
+                .ok_or_else(|| format!("no port named {name}"))
+        };
+        let (a, b) = (port(from)?, port(to)?);
+        if !a.flags().contains(PortFlags::IS_OUTPUT) || !b.flags().contains(PortFlags::IS_INPUT) {
+            return Err("must connect an output to an input".into());
+        }
+        if a.port_type().ok() != b.port_type().ok() {
+            return Err("port types differ".into());
+        }
+        Ok(())
     }
 
     fn auto_connect(&self, client: &Client, cfg: &BackendConfig) {
@@ -174,6 +233,8 @@ impl AudioBackend for JackBackend {
         self.shared.buffer_size.store(client.buffer_size(), Relaxed);
         self.state = State::Open(client, ports);
         self.cfg = Some(cfg);
+        self.links.clear();
+        self.auto_connected = false;
         Ok(())
     }
 
@@ -203,8 +264,14 @@ impl AudioBackend for JackBackend {
         let active = client
             .activate_async(notifications, processor)
             .map_err(|e| BackendError::Other(format!("could not activate the JACK client: {e}")))?;
-        if cfg.auto_connect {
+        if cfg.auto_connect && !self.auto_connected {
             self.auto_connect(active.as_client(), &cfg);
+            self.auto_connected = true;
+        }
+        for (from, to) in std::mem::take(&mut self.links) {
+            if let Err(e) = active.as_client().connect_ports_by_name(&from, &to) {
+                log::warn!("could not restore connection {from} -> {to}: {e}");
+            }
         }
         self.state = State::Running(active);
         Ok(())
@@ -213,6 +280,9 @@ impl AudioBackend for JackBackend {
     fn stop(&mut self) -> Result<(), BackendError> {
         match std::mem::take(&mut self.state) {
             State::Running(active) => {
+                if let Some(cfg) = &self.cfg {
+                    self.links = Self::live_links(active.as_client(), cfg);
+                }
                 let (client, _, processor) = active
                     .deactivate()
                     .map_err(|e| BackendError::Other(format!("could not deactivate: {e}")))?;
@@ -228,6 +298,7 @@ impl AudioBackend for JackBackend {
         self.stop()?;
         self.state = State::Closed;
         self.cfg = None;
+        self.links.clear();
         Ok(())
     }
 
@@ -285,23 +356,51 @@ impl AudioBackend for JackBackend {
     }
 
     fn connect(&mut self, from: &str, to: &str) -> Result<(), BackendError> {
-        self.client()?
-            .connect_ports_by_name(from, to)
-            .map_err(|e| BackendError::Connection {
-                from: from.into(),
-                to: to.into(),
-                reason: e.to_string(),
-            })
+        let err = |reason: String| BackendError::Connection {
+            from: from.into(),
+            to: to.into(),
+            reason,
+        };
+        match &self.state {
+            State::Closed => Err(BackendError::NotOpen),
+            State::Open(client, _) => {
+                Self::check_link(client, from, to).map_err(err)?;
+                let link = (from.to_owned(), to.to_owned());
+                if self.links.contains(&link) {
+                    return Err(err("already connected".into()));
+                }
+                self.links.push(link);
+                Ok(())
+            }
+            State::Running(a) => a
+                .as_client()
+                .connect_ports_by_name(from, to)
+                .map_err(|e| err(e.to_string())),
+        }
     }
 
     fn disconnect(&mut self, from: &str, to: &str) -> Result<(), BackendError> {
-        self.client()?
-            .disconnect_ports_by_name(from, to)
-            .map_err(|e| BackendError::Connection {
-                from: from.into(),
-                to: to.into(),
-                reason: e.to_string(),
-            })
+        let err = |reason: String| BackendError::Connection {
+            from: from.into(),
+            to: to.into(),
+            reason,
+        };
+        match &self.state {
+            State::Closed => Err(BackendError::NotOpen),
+            State::Open(..) => {
+                let before = self.links.len();
+                self.links
+                    .retain(|(a, b)| (a.as_str(), b.as_str()) != (from, to));
+                if self.links.len() == before {
+                    return Err(err("not connected".into()));
+                }
+                Ok(())
+            }
+            State::Running(a) => a
+                .as_client()
+                .disconnect_ports_by_name(from, to)
+                .map_err(|e| err(e.to_string())),
+        }
     }
 
     fn stats(&self) -> BackendStats {

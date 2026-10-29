@@ -180,3 +180,72 @@ fn auto_connect_reaches_physical_ports() {
     }
     b.close().unwrap();
 }
+
+/// The connections of one port, read through a separate client the way a
+/// patchbay sees them.
+fn connections_of(port: &str) -> Vec<String> {
+    let (probe, _) = jack::Client::new("wu2-probe", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let mut v = probe.port_by_name(port).unwrap().get_connections();
+    v.sort();
+    v
+}
+
+#[test]
+#[ignore = "needs a running JACK server"]
+fn connections_survive_stop_and_start() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 1,
+        audio_outputs: 2,
+        midi_input: false,
+        ..cfg("wu2-keep")
+    })
+    .unwrap();
+    // Before start: restoring saved routing must work on an inactive client.
+    b.connect("wu2-keep:audio_out_1", "system:playback_2")
+        .unwrap();
+    // Bad connections are still refused before start.
+    assert!(
+        b.connect("system:playback_2", "wu2-keep:audio_out_1")
+            .is_err()
+    );
+    assert!(b.connect("wu2-keep:audio_out_1", "nobody:nothing").is_err());
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-keep:audio_out_1"),
+        ["system:playback_2"]
+    );
+
+    // A connection made in a patchbay, and one made through us.
+    {
+        let (other, _) =
+            jack::Client::new("wu2-patchbay", jack::ClientOptions::NO_START_SERVER).unwrap();
+        other
+            .connect_ports_by_name("system:capture_1", "wu2-keep:audio_in_1")
+            .unwrap();
+    }
+    b.connect("wu2-keep:audio_out_2", "system:playback_1")
+        .unwrap();
+
+    b.stop().unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-keep:audio_out_1"),
+        ["system:playback_2"]
+    );
+    assert_eq!(
+        connections_of("wu2-keep:audio_out_2"),
+        ["system:playback_1"]
+    );
+    assert_eq!(connections_of("wu2-keep:audio_in_1"), ["system:capture_1"]);
+
+    // A disconnect while stopped stays disconnected after start.
+    b.stop().unwrap();
+    b.disconnect("wu2-keep:audio_out_2", "system:playback_1")
+        .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(connections_of("wu2-keep:audio_out_2").is_empty());
+    assert_eq!(b.stats().rt_alloc_violations, 0);
+    b.close().unwrap();
+}
