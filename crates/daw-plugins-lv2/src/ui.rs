@@ -614,10 +614,10 @@ impl Editor {
         }
         if let Some(idle) = self.idle {
             // SAFETY: the UI's own idle interface.
-            if let Some(f) = unsafe { (*idle).idle } {
-                if unsafe { f(self.handle) } != 0 {
-                    return false;
-                }
+            if let Some(f) = unsafe { (*idle).idle }
+                && unsafe { f(self.handle) } != 0
+            {
+                return false;
             }
         }
         if let Some(w) = self.external {

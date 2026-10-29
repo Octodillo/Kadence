@@ -4,7 +4,8 @@
 //! - Parameter 1 ("Peak") is read only; the processor reports the output peak through it.
 //! - Note events are echoed to the event output.
 //! - Reports 32 samples of latency.
-//! - Component state is the gain as a little-endian f64.
+//! - Component state is the gain as a little-endian f64. The controller saves 8 bytes but
+//!   answers kNotImplemented when asked to load them.
 //! - MIDI CC 7 is mapped to the gain.
 
 #![allow(non_snake_case, clippy::unnecessary_cast)]
@@ -348,12 +349,14 @@ impl IEditControllerTrait for Controller {
         }
     }
 
+    // Like JUCE-built plugins, the controller saves something but refuses to load it; the
+    // host must still treat the restore as a success.
     unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
-        kResultOk
+        kNotImplemented
     }
 
-    unsafe fn getState(&self, _state: *mut IBStream) -> tresult {
-        kResultOk
+    unsafe fn getState(&self, state: *mut IBStream) -> tresult {
+        unsafe { write_f64(state, 0.0) }
     }
 
     unsafe fn getParameterCount(&self) -> i32 {

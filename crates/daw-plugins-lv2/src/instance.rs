@@ -353,13 +353,13 @@ impl Lv2Instance {
         for (j, seq) in self.atom_out.iter().enumerate() {
             for ev in seq.iter() {
                 let ty = ev.event.body.type_;
-                if ty == self.urids.midi_event && self.atom_out_midi[j] {
-                    if let (Some(out), Some(kind)) =
+                if ty == self.urids.midi_event
+                    && self.atom_out_midi[j]
+                    && let (Some(out), Some(kind)) =
                         (events_out.as_deref_mut(), midi::from_midi(ev.data))
-                    {
-                        let frame = (start as i64 + ev.event.time_in_frames.max(0)) as u32;
-                        let _ = out.push(Event { frame, kind });
-                    }
+                {
+                    let frame = (start as i64 + ev.event.time_in_frames.max(0)) as u32;
+                    let _ = out.push(Event { frame, kind });
                 }
                 if self.ui_active {
                     let mut buf = [0u8; MAX_UI_ATOM];
@@ -426,13 +426,13 @@ impl Node for Lv2Instance {
             max_frames,
         ) {
             Ok(mut fresh) => {
-                if let Ok(state) = state {
-                    if let Err(e) = fresh.load_state(&state) {
-                        log::warn!(
-                            "{}: state lost on re-instantiation: {e}",
-                            self.descriptor.id
-                        );
-                    }
+                if let Ok(state) = state
+                    && let Err(e) = fresh.load_state(&state)
+                {
+                    log::warn!(
+                        "{}: state lost on re-instantiation: {e}",
+                        self.descriptor.id
+                    );
                 }
                 *self = fresh;
             }
