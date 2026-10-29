@@ -12,7 +12,7 @@
       plays back multitrack audio and MIDI, hosts CLAP, LV2 and VST3 plugins,
       and talks to PipeWire or JACK.
     </p>
-    <p>Kadence is a working name and the application is in early development.</p>
+    <p>Kadence is in early development.</p>
   </description>
   <developer id="io.github.octodillo">
     <name>Octodillo</name>
