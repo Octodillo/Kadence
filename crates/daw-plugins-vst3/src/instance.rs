@@ -46,26 +46,59 @@ const MIDI_CONTROLLERS: usize = 130;
 const STATE_MAGIC: &[u8; 8] = b"KDNVST3\0";
 const STATE_VERSION: u32 = 1;
 
+/// Points sampled along a continuous parameter's curve. Enough for linear interpolation
+/// between them to follow log and skewed curves to well under a percent.
+const CURVE_POINTS: usize = 129;
+
 #[derive(Clone, Debug)]
 struct Param {
     info: ParamInfo,
-    /// Plain value range, used for real-time plain/normalized conversion.
-    min: f64,
-    max: f64,
+    /// Plain values at evenly spaced normalized values, from the plugin's
+    /// `normalizedParamToPlain`. Sampled off the real-time thread so `process` converts both
+    /// ways without calling into the controller. Always at least two points.
+    curve: Box<[f64]>,
 }
 
 impl Param {
-    fn to_normalized(&self, plain: f64) -> f64 {
-        let span = self.max - self.min;
-        if span.abs() < f64::EPSILON {
-            0.0
-        } else {
-            ((plain - self.min) / span).clamp(0.0, 1.0)
-        }
+    /// Samples `plain` (normalized to plain) at one point per step for a discrete parameter
+    /// with up to `CURVE_POINTS` steps, else at `CURVE_POINTS` points.
+    fn sampled(info: ParamInfo, step_count: i32, plain: impl Fn(f64) -> f64) -> Param {
+        let points = match usize::try_from(step_count) {
+            Ok(steps) if (1..CURVE_POINTS).contains(&steps) => steps + 1,
+            _ => CURVE_POINTS,
+        };
+        let last = (points - 1) as f64;
+        let curve = (0..points).map(|i| plain(i as f64 / last)).collect();
+        Param { info, curve }
     }
 
     fn to_plain(&self, normalized: f64) -> f64 {
-        self.min + normalized * (self.max - self.min)
+        let c = &self.curve;
+        let x = normalized.clamp(0.0, 1.0) * (c.len() - 1) as f64;
+        let i = (x as usize).min(c.len() - 2);
+        c[i] + (x - i as f64) * (c[i + 1] - c[i])
+    }
+
+    /// Inverts the sampled curve, assuming the plugin's curve is monotonic.
+    fn to_normalized(&self, plain: f64) -> f64 {
+        let c = &self.curve;
+        let last = c.len() - 1;
+        let rising = c[last] >= c[0];
+        // The first point at or past `plain`, in the curve's direction.
+        let i = c.partition_point(|&v| if rising { v < plain } else { v > plain });
+        if i == 0 {
+            return 0.0;
+        }
+        if i > last {
+            return 1.0;
+        }
+        let (a, b) = (c[i - 1], c[i]);
+        let t = if b == a {
+            0.0
+        } else {
+            ((plain - a) / (b - a)).clamp(0.0, 1.0)
+        };
+        ((i - 1) as f64 + t) / last as f64
     }
 }
 
@@ -454,26 +487,27 @@ impl Vst3Instance {
                 if self.controller.getParameterInfo(i, &mut info) != kResultOk {
                     continue;
                 }
-                let min = self.controller.normalizedParamToPlain(info.id, 0.0);
-                let max = self.controller.normalizedParamToPlain(info.id, 1.0);
                 let default = self
                     .controller
                     .normalizedParamToPlain(info.id, info.defaultNormalizedValue);
                 let flags = info.flags;
                 let automatable = flags & ParameterFlags_::kCanAutomate as i32 != 0
                     && flags & ParameterFlags_::kIsReadOnly as i32 == 0;
-                params.push(Param {
-                    info: ParamInfo {
+                let mut param = Param::sampled(
+                    ParamInfo {
                         id: info.id,
                         name: wstr_field(&info.title),
-                        min,
-                        max,
+                        min: 0.0,
+                        max: 0.0,
                         default,
                         automatable,
                     },
-                    min,
-                    max,
-                });
+                    info.stepCount,
+                    |n| self.controller.normalizedParamToPlain(info.id, n),
+                );
+                param.info.min = param.to_plain(0.0);
+                param.info.max = param.to_plain(1.0);
+                params.push(param);
             }
         }
         self.param_index = params
@@ -1314,22 +1348,45 @@ mod tests {
         assert!(midi_to_vst_event(0, [0xb0, 1, 2]).is_none());
     }
 
+    fn info() -> ParamInfo {
+        ParamInfo {
+            id: 0,
+            name: String::new(),
+            min: 0.0,
+            max: 0.0,
+            default: 0.0,
+            automatable: true,
+        }
+    }
+
     #[test]
     fn plain_values_map_linearly() {
-        let p = Param {
-            info: ParamInfo {
-                id: 0,
-                name: String::new(),
-                min: -12.0,
-                max: 12.0,
-                default: 0.0,
-                automatable: true,
-            },
-            min: -12.0,
-            max: 12.0,
-        };
+        let p = Param::sampled(info(), 0, |n| -12.0 + 24.0 * n);
         assert_eq!(p.to_normalized(0.0), 0.5);
         assert_eq!(p.to_plain(0.25), -6.0);
         assert_eq!(p.to_normalized(100.0), 1.0);
+        assert_eq!(p.to_normalized(-100.0), 0.0);
+    }
+
+    #[test]
+    fn plain_values_follow_the_plugins_curve() {
+        // A 20 Hz to 20 kHz cutoff on a log scale.
+        let p = Param::sampled(info(), 0, |n| 20.0 * 1000f64.powf(n));
+        let expected = 50f64.ln() / 1000f64.ln();
+        assert!((p.to_normalized(1000.0) - expected).abs() < 1e-3);
+        assert!((p.to_plain(0.5) / 1000f64.sqrt() / 20.0 - 1.0).abs() < 1e-3);
+        assert_eq!((p.to_plain(0.0), p.to_plain(1.0)), (20.0, 20_000.0));
+        for n in [0.0, 0.1, 0.37, 0.9, 1.0] {
+            assert!((p.to_normalized(p.to_plain(n)) - n).abs() < 1e-9);
+        }
+
+        // Falling curves work too.
+        let p = Param::sampled(info(), 0, |n| 1.0 - n * n);
+        assert!((p.to_normalized(0.75) - 0.5).abs() < 1e-3);
+
+        // Discrete parameters map each step onto the plugin's normalized value for it.
+        let p = Param::sampled(info(), 3, |n| (n * 4.0).floor().min(3.0));
+        assert_eq!(p.to_normalized(2.0), 2.0 / 3.0);
+        assert_eq!(p.to_plain(1.0 / 3.0), 1.0);
     }
 }
