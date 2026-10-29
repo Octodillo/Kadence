@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>io.github.octodillo.daw</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Kadence</name>
+  <summary>Record, arrange and mix music</summary>
+  <description>
+    <p>
+      Kadence is a digital audio workstation for KDE Plasma. It records and
+      plays back multitrack audio and MIDI, hosts CLAP, LV2 and VST3 plugins,
+      and talks to PipeWire or JACK.
+    </p>
+    <p>Kadence is in early development.</p>
+  </description>
+  <developer id="io.github.octodillo">
+    <name>Octodillo</name>
+  </developer>
+  <launchable type="desktop-id">io.github.octodillo.daw.desktop</launchable>
+  <url type="homepage">https://github.com/Octodillo/daw</url>
+  <url type="bugtracker">https://github.com/Octodillo/daw/issues</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+  </categories>
+  <provides>
+    <binary>kadence</binary>
+    <mediatype>application/x-kadence-project</mediatype>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-10-29" type="development"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
