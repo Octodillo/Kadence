@@ -5,9 +5,10 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::ptr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, OnceLock};
 
+use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{
     Event, IAttributeList, IAttributeListTrait, IComponentHandler, IComponentHandlerTrait,
     IEventList, IEventListTrait, IHostApplication, IHostApplicationTrait, IMessage, IMessageTrait,
@@ -20,6 +21,7 @@ use vst3::Steinberg::{
 };
 use vst3::{Class, ComWrapper, Interface};
 
+use crate::runloop::{RunLoop, forward_run_loop};
 use crate::util::copy_wstr;
 
 /// Name reported to plugins through `IHostApplication::getName`.
@@ -46,10 +48,30 @@ where
 // ---------------------------------------------------------------------------------------------
 // Host context
 
-pub struct HostApplication;
+/// The host context every plugin is initialized with. It also carries the process-wide run
+/// loop, which VSTGUI (SDK 3.7 and later) looks up on the host context.
+#[derive(Default)]
+pub struct HostApplication {
+    pub run_loop: RunLoop,
+}
 
 impl Class for HostApplication {
-    type Interfaces = (IHostApplication,);
+    type Interfaces = (IHostApplication, IRunLoop);
+}
+
+forward_run_loop!(HostApplication, self => self.run_loop);
+
+/// The shared host context.
+pub fn host() -> &'static ComWrapper<HostApplication> {
+    static HOST: OnceLock<ComWrapper<HostApplication>> = OnceLock::new();
+    HOST.get_or_init(|| ComWrapper::new(HostApplication::default()))
+}
+
+/// The host context as the `FUnknown*` that `initialize` and `setHostContext` take.
+pub fn host_context() -> *mut FUnknown {
+    host()
+        .as_com_ref::<FUnknown>()
+        .map_or(ptr::null_mut(), |r| r.as_ptr())
 }
 
 impl IHostApplicationTrait for HostApplication {
@@ -758,7 +780,7 @@ mod tests {
 
     #[test]
     fn host_creates_messages_with_attributes() {
-        let host = ComWrapper::new(HostApplication);
+        let host = host();
         let mut cid: TUID = unsafe { std::mem::transmute(IMessage::IID) };
         let mut iid = cid;
         let mut obj = ptr::null_mut();
@@ -773,5 +795,35 @@ mod tests {
             assert_eq!(attrs.getFloat(c"x".as_ptr(), &mut v), kResultOk);
             assert_eq!(v, 2.5);
         }
+    }
+
+    struct CountingTimer(std::sync::atomic::AtomicU32);
+
+    impl Class for CountingTimer {
+        type Interfaces = (vst3::Steinberg::Linux::ITimerHandler,);
+    }
+
+    impl vst3::Steinberg::Linux::ITimerHandlerTrait for CountingTimer {
+        unsafe fn onTimer(&self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn host_context_offers_the_run_loop() {
+        use vst3::Steinberg::Linux::{IRunLoopTrait, ITimerHandler};
+        let run_loop = unsafe { vst3::ComRef::<FUnknown>::from_raw(host_context()) }
+            .and_then(|h| h.cast::<IRunLoop>())
+            .expect("IRunLoop on the host context");
+        let timer = ComWrapper::new(CountingTimer(Default::default()));
+        let handler = timer.as_com_ref::<ITimerHandler>().unwrap().as_ptr();
+        unsafe {
+            assert_eq!(run_loop.registerTimer(handler, 1), kResultTrue);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            host().run_loop.pump();
+            assert_eq!(run_loop.unregisterTimer(handler), kResultTrue);
+        }
+        host().run_loop.pump();
+        assert_eq!(timer.0.load(Ordering::Relaxed), 1);
     }
 }

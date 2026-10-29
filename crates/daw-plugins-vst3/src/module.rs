@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use libloading::os::unix::Library;
 use vst3::ComPtr;
 use vst3::Steinberg::{
-    IPluginFactory, IPluginFactory2, IPluginFactory2Trait, IPluginFactoryTrait, PClassInfo,
-    PClassInfo2, TUID, kResultOk,
+    IPluginFactory, IPluginFactory2, IPluginFactory2Trait, IPluginFactory3, IPluginFactory3Trait,
+    IPluginFactoryTrait, PClassInfo, PClassInfo2, TUID, kResultOk,
 };
 
 use crate::util::cstr_field;
@@ -84,12 +84,17 @@ impl Module {
                 factory,
                 library: Some(library),
             };
-            if module.factory.is_none() {
+            let Some(factory) = &module.factory else {
                 // Dropping `module` still runs ModuleExit.
                 return Err(format!(
                     "{}: GetPluginFactory returned null",
                     binary.display()
                 ));
+            };
+            // Plugins built with SDK 3.7+ pick up the host's run loop (among other things)
+            // from here, before any class is created.
+            if let Some(f3) = factory.cast::<IPluginFactory3>() {
+                f3.setHostContext(crate::host::host_context());
             }
             Ok(module)
         }

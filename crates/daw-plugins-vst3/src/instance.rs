@@ -23,13 +23,13 @@ use vst3::Steinberg::Vst::{
     SymbolicSampleSizes_, kNoParamId,
 };
 use vst3::Steinberg::{
-    FUnknown, IBStream, IPluginBaseTrait, IPluginFactoryTrait, TUID, kResultOk, kResultTrue,
+    IBStream, IPluginBaseTrait, IPluginFactoryTrait, TUID, kResultOk, kResultTrue,
 };
 use vst3::{ComPtr, ComWrapper, Interface};
 
 use crate::editor::Editor;
 use crate::host::{
-    ComponentHandler, Edit, EventQueue, HostApplication, MemoryStream, ParamChanges,
+    ComponentHandler, Edit, EventQueue, MemoryStream, ParamChanges, host, host_context,
 };
 use crate::module::{AUDIO_EFFECT_CLASS, ClassInfo, Module};
 use crate::util::{tuid_from_hex, tuid_to_hex, wstr_field};
@@ -176,7 +176,6 @@ pub struct Vst3Instance {
     split: bool,
     component: ComPtr<IComponent>,
     handler: ComWrapper<ComponentHandler>,
-    host: ComWrapper<HostApplication>,
     // Dropped last so the plugin's code stays mapped until every object above is released.
     _module: Arc<Module>,
 }
@@ -288,11 +287,9 @@ fn descriptor_for(
 }
 
 fn probe_ports(module: &Module, class: &ClassInfo) -> Option<(u16, u16)> {
-    let host = ComWrapper::new(HostApplication);
     let component = unsafe { create::<IComponent>(module, &class.cid)? };
-    let context = host.to_com_ptr::<FUnknown>()?;
     unsafe {
-        if component.initialize(context.as_ptr()) != kResultOk {
+        if component.initialize(host_context()) != kResultOk {
             return None;
         }
         let buses = read_buses(&component);
@@ -308,10 +305,7 @@ impl Vst3Instance {
         let module = Module::load(&d.path).map_err(PluginError::Load)?;
         let cid = tuid_from_hex(&d.id).ok_or_else(|| load_err("bad class id"))?;
 
-        let host = ComWrapper::new(HostApplication);
-        let context = host
-            .to_com_ptr::<FUnknown>()
-            .ok_or_else(|| load_err("host"))?;
+        let context = host_context();
         let (edits_tx, edits_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
         let (to_controller_tx, to_controller_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
         let handler = ComWrapper::new(ComponentHandler::new(edits_tx));
@@ -319,7 +313,7 @@ impl Vst3Instance {
         unsafe {
             let component = create::<IComponent>(&module, &cid)
                 .ok_or_else(|| load_err("factory could not create the component"))?;
-            if component.initialize(context.as_ptr()) != kResultOk {
+            if component.initialize(context) != kResultOk {
                 return Err(load_err("component failed to initialize"));
             }
             let Some(processor) = component.cast::<IAudioProcessor>() else {
@@ -340,7 +334,7 @@ impl Vst3Instance {
                         component.terminate();
                         return Err(load_err("plugin has no edit controller"));
                     };
-                    if controller.initialize(context.as_ptr()) != kResultOk {
+                    if controller.initialize(context) != kResultOk {
                         component.terminate();
                         return Err(load_err("controller failed to initialize"));
                     }
@@ -390,7 +384,6 @@ impl Vst3Instance {
                 split,
                 component,
                 handler,
-                host,
                 _module: module,
             };
             instance.sync_controller_to_component();
@@ -1080,6 +1073,7 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn on_main_thread(&mut self) {
+        host().run_loop.pump();
         self.flush_to_controller();
         self.handle_restart();
         if let Some(editor) = &mut self.editor {
@@ -1106,8 +1100,6 @@ impl Drop for Vst3Instance {
             }
             self.component.terminate();
         }
-        // Keep the host context alive until both objects are terminated.
-        let _ = &self.host;
     }
 }
 

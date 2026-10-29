@@ -13,6 +13,7 @@ mod editor;
 mod host;
 mod instance;
 mod module;
+mod runloop;
 mod util;
 
 use std::path::{Path, PathBuf};

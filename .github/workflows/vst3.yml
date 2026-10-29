@@ -24,7 +24,7 @@ jobs:
       - name: System packages for the SDK and VSTGUI
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build xvfb \
+          sudo apt-get install -y --no-install-recommends cmake ninja-build xvfb gdb \
             libx11-xcb-dev libxcb-util-dev libxcb-cursor-dev libxcb-xkb-dev libxcb-keysyms1-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libcairo2-dev \
             libgtkmm-3.0-dev libsqlite3-dev
@@ -57,3 +57,11 @@ jobs:
           DAW_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
           DAW_VST3_REQUIRE_SDK_PLUGINS: "1"
         run: xvfb-run -a cargo nextest run -p daw-plugins-vst3 --no-fail-fast
+      - name: Backtrace for a crashing editor test
+        if: failure()
+        env:
+          DAW_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
+        run: |
+          bin=$(find target/debug/deps -maxdepth 1 -type f -executable -name 'vst3-*' | head -1)
+          xvfb-run -a gdb -batch -ex run -ex 'thread apply all bt 30' --args "$bin" \
+            sdk_again_editor_opens_in_a_floating_window --exact --nocapture --test-threads=1

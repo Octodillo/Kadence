@@ -1,13 +1,8 @@
-//! Plugin editors in a floating X11 top-level window (XWayland on Wayland sessions), plus the
-//! `IRunLoop` VST3 editors on Linux need for their own event handling and timers.
+//! Plugin editors in a floating X11 top-level window (XWayland on Wayland sessions).
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-use vst3::Steinberg::Linux::{
-    FileDescriptor, IEventHandler, IEventHandlerTrait, IRunLoop, IRunLoopTrait, ITimerHandler,
-    ITimerHandlerTrait, TimerInterval,
-};
+use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait, ViewType};
 use vst3::Steinberg::{
     IPlugFrame, IPlugFrameTrait, IPlugView, IPlugViewTrait, ViewRect, kInvalidArgument,
@@ -22,6 +17,9 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
+
+use crate::host::host;
+use crate::runloop::forward_run_loop;
 
 /// The window the editor lives in. Shared with the frame so `resizeView` can resize it.
 struct Window {
@@ -57,18 +55,11 @@ fn rect_size(r: &ViewRect) -> (u32, u32) {
     )
 }
 
-struct Timer {
-    handler: ComPtr<ITimerHandler>,
-    interval: Duration,
-    next: Instant,
-}
-
-/// `IPlugFrame` plus `IRunLoop`: VSTGUI and friends ask the frame for the run loop.
+/// `IPlugFrame` plus `IRunLoop`: older plugins ask the frame for the run loop, newer ones the
+/// host context. Both forward to the same process-wide loop.
 #[derive(Default)]
 struct PlugFrame {
     window: Mutex<Option<Arc<Window>>>,
-    fds: Mutex<Vec<(ComPtr<IEventHandler>, FileDescriptor)>>,
-    timers: Mutex<Vec<Timer>>,
 }
 
 impl Class for PlugFrame {
@@ -89,95 +80,7 @@ impl IPlugFrameTrait for PlugFrame {
     }
 }
 
-impl IRunLoopTrait for PlugFrame {
-    unsafe fn registerEventHandler(
-        &self,
-        handler: *mut IEventHandler,
-        fd: FileDescriptor,
-    ) -> tresult {
-        // SAFETY: `from_raw` takes ownership, so add a reference of our own first.
-        let Some(handler) = (unsafe { vst3::ComRef::from_raw(handler) }) else {
-            return kInvalidArgument;
-        };
-        self.fds.lock().unwrap().push((handler.to_com_ptr(), fd));
-        kResultTrue
-    }
-
-    unsafe fn unregisterEventHandler(&self, handler: *mut IEventHandler) -> tresult {
-        self.fds
-            .lock()
-            .unwrap()
-            .retain(|(h, _)| h.as_ptr() != handler);
-        kResultTrue
-    }
-
-    unsafe fn registerTimer(
-        &self,
-        handler: *mut ITimerHandler,
-        milliseconds: TimerInterval,
-    ) -> tresult {
-        let Some(handler) = (unsafe { vst3::ComRef::from_raw(handler) }) else {
-            return kInvalidArgument;
-        };
-        let interval = Duration::from_millis(milliseconds.max(1));
-        self.timers.lock().unwrap().push(Timer {
-            handler: handler.to_com_ptr(),
-            interval,
-            next: Instant::now() + interval,
-        });
-        kResultTrue
-    }
-
-    unsafe fn unregisterTimer(&self, handler: *mut ITimerHandler) -> tresult {
-        self.timers
-            .lock()
-            .unwrap()
-            .retain(|t| t.handler.as_ptr() != handler);
-        kResultTrue
-    }
-}
-
-impl PlugFrame {
-    /// Runs ready fd handlers and due timers. Handlers may (un)register during the call, so the
-    /// lists are copied first and no lock is held while plugin code runs.
-    fn pump(&self) {
-        let fds: Vec<_> = self.fds.lock().unwrap().clone();
-        if !fds.is_empty() {
-            let mut polls: Vec<libc::pollfd> = fds
-                .iter()
-                .map(|(_, fd)| libc::pollfd {
-                    fd: *fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                })
-                .collect();
-            let ready = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, 0) };
-            if ready > 0 {
-                for ((handler, fd), p) in fds.iter().zip(&polls) {
-                    if p.revents != 0 {
-                        unsafe { handler.onFDIsSet(*fd) };
-                    }
-                }
-            }
-        }
-
-        let now = Instant::now();
-        let due: Vec<ComPtr<ITimerHandler>> = {
-            let mut timers = self.timers.lock().unwrap();
-            timers
-                .iter_mut()
-                .filter(|t| t.next <= now)
-                .map(|t| {
-                    t.next = now + t.interval;
-                    t.handler.clone()
-                })
-                .collect()
-        };
-        for handler in due {
-            unsafe { handler.onTimer() };
-        }
-    }
-}
+forward_run_loop!(PlugFrame, self => host().run_loop);
 
 pub struct Editor {
     view: ComPtr<IPlugView>,
@@ -357,7 +260,7 @@ impl Editor {
                 }
             }
         }
-        self.frame.pump();
+        host().run_loop.pump();
         open
     }
 }
@@ -369,8 +272,6 @@ impl Drop for Editor {
             self.view.setFrame(std::ptr::null_mut());
         }
         *self.frame.window.lock().unwrap() = None;
-        self.frame.fds.lock().unwrap().clear();
-        self.frame.timers.lock().unwrap().clear();
         let _ = self.window.conn.destroy_window(self.window.id);
         let _ = self.window.conn.flush();
     }
