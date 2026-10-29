@@ -24,8 +24,6 @@ const STATE_URI: &str = "urn:daw:lv2-state";
 const ATOM_CAPACITY: usize = 8192;
 /// Parameter changes buffered while waiting for their segment boundary.
 const MAX_PENDING_PARAMS: usize = 64;
-/// Largest UI-to-plugin atom applied on the audio thread.
-const MAX_UI_ATOM: usize = 4096;
 
 /// An instantiated LV2 plugin, usable as a graph [`Node`].
 pub struct Lv2Instance {
@@ -38,6 +36,9 @@ pub struct Lv2Instance {
     to_ui: rtrb::Producer<u8>,
     ui_active: bool,
     control_snapshot: Vec<(u32, f32)>,
+    /// Where messages from the UI are read on the audio thread; as big as the
+    /// ring, so any message fits.
+    ui_scratch: Vec<u8>,
 
     inst: livi::Instance,
     shared: Arc<Shared>,
@@ -79,7 +80,10 @@ impl Lv2Instance {
         if !(sample_rate.is_finite() && sample_rate > 0.0) {
             return Err(PluginError::Load(format!("bad sample rate {sample_rate}")));
         }
-        let max_frames = max_frames.max(1);
+        // Plugins are always told the host's fixed maximum block; longer host
+        // blocks are split in `process`.
+        let _ = max_frames;
+        let max_frames = crate::HOST_MAX_BLOCK as u32;
         let world = shared.world(&descriptor.path);
         let plugin = world.plugin_by_uri(&descriptor.id).ok_or_else(|| {
             PluginError::Load(format!(
@@ -88,7 +92,7 @@ impl Lv2Instance {
                 descriptor.path.display()
             ))
         })?;
-        let features = shared.features(&world, max_frames)?;
+        let features = shared.features(&world)?;
         let urids = Urids::new(&features);
         // SAFETY: the plugin comes from lilv's validated metadata, and the
         // sample rate is positive and finite. Port buffers are only connected
@@ -191,6 +195,7 @@ impl Lv2Instance {
             to_ui,
             ui_active: false,
             control_snapshot: Vec::new(),
+            ui_scratch: vec![0; ring::CAPACITY],
             inst,
             shared,
             world: world.clone(),
@@ -243,8 +248,8 @@ impl Lv2Instance {
 
     /// Applies what the UI (or `queue_atom`) sent since the last block.
     fn drain_from_ui(&mut self) {
-        let mut buf = [0u8; MAX_UI_ATOM];
-        while let Some(m) = ring::read(&mut self.from_ui, &mut buf) {
+        let buf = &mut self.ui_scratch;
+        while let Some(m) = ring::read(&mut self.from_ui, buf) {
             let Some(len) = m.len else { continue };
             match m.kind {
                 ring::CONTROL if len == 4 => {
@@ -258,9 +263,7 @@ impl Lv2Instance {
                     let size = u32::from_ne_bytes(buf[..4].try_into().unwrap()) as usize;
                     let ty = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
                     let body = &buf[8..len.min(8 + size)];
-                    if let Ok(ev) = LV2AtomEventBuilder::<MAX_UI_ATOM>::new(0, ty, body) {
-                        let _ = self.atom_in[i].push_event(&ev);
-                    }
+                    atom::push_event(&mut self.atom_in[i], 0, ty, body);
                 }
                 _ => {}
             }
@@ -336,11 +339,7 @@ impl Lv2Instance {
             audio_out[..host_out]
                 .iter_mut()
                 .map(|b| &mut b[start..end])
-                .chain(
-                    self.scratch_out[host_out..]
-                        .iter_mut()
-                        .map(|b| &mut b[start..end]),
-                ),
+                .chain(self.scratch_out[host_out..].iter_mut().map(|b| &mut b[..n])),
             self.n_audio_out,
         );
         let ports = EmptyPortConnections::new()
@@ -393,7 +392,17 @@ impl Lv2Instance {
     /// wherever a parameter changes. A MIDI event at the very frame of a change
     /// stays in the earlier segment, which moves that change one frame later.
     #[allow(unused_assignments)] // the macro's last expansion resets state for nothing
-    fn process_range(&mut self, ctx: &mut ProcessContext, start: usize, end: usize, frames: usize) {
+    /// Starts at event index `first` and returns the index of the first event
+    /// past the range.
+    fn process_range(
+        &mut self,
+        ctx: &mut ProcessContext,
+        start: usize,
+        end: usize,
+        frames: usize,
+        first: usize,
+    ) -> usize {
+        let mut next = first;
         let mut pending = [(0 as ParamId, 0.0f64); MAX_PENDING_PARAMS];
         let mut n_pending = 0;
         let mut pending_at = start;
@@ -419,14 +428,12 @@ impl Lv2Instance {
                 n_pending = 0;
             };
         }
-        for ev in ctx.events_in.iter() {
+        for ev in ctx.events_in.iter().skip(first) {
             let f = (ev.frame as usize).min(frames - 1);
-            if f < start {
-                continue;
-            }
             if f >= end {
                 break;
             }
+            next += 1;
             if n_pending > 0 && f >= pending_at {
                 flush!();
             }
@@ -440,6 +447,10 @@ impl Lv2Instance {
                     if n_pending == MAX_PENDING_PARAMS {
                         // Out of room: land the waiting ones first, in order.
                         flush!();
+                        if at <= seg_start {
+                            self.apply_param(param, value);
+                            continue;
+                        }
                     }
                     pending[n_pending] = (param, value);
                     n_pending += 1;
@@ -473,6 +484,7 @@ impl Lv2Instance {
         for &(p, v) in &pending[..n_pending] {
             self.apply_param(p, v);
         }
+        next
     }
 
     fn apply_param(&mut self, param: ParamId, value: f64) {
@@ -501,13 +513,12 @@ impl Node for Lv2Instance {
         }
     }
 
+    /// Any block size works without re-instantiating (see `process`); a new
+    /// sample rate needs a new instance, which takes over the old one's state.
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
-        let max_frames = max_frames.max(1);
-        if sample_rate == self.sample_rate && max_frames <= self.max_frames {
+        if sample_rate == self.sample_rate {
             return;
         }
-        // LV2 fixes the sample rate and block bounds at instantiation, so build
-        // a new instance and carry the state over.
         let state = self.save_state();
         let reopen = self.editor.is_some();
         self.close_editor();
@@ -545,13 +556,14 @@ impl Node for Lv2Instance {
         if self.pending_reset {
             self.send_reset();
         }
-        // The block size is fixed at instantiation; a longer host block (say,
-        // after a failed re-instantiation) is run in pieces.
+        // The plugin's maximum block is fixed at instantiation; a longer host
+        // block is run in pieces.
         let max = self.max_frames as usize;
         let mut start = 0;
+        let mut next_event = 0;
         while start < frames {
             let end = (start + max).min(frames);
-            self.process_range(ctx, start, end, frames);
+            next_event = self.process_range(ctx, start, end, frames, next_event);
             start = end;
         }
     }

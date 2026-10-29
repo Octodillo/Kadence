@@ -412,15 +412,17 @@ fn long_blocks_are_processed_in_pieces() {
     let mix = param_id(&*p, "FX Mix");
     let fb = param_id(&*p, "Feedback");
     let out_level = param_id(&*p, "Output");
-    let frames = BLOCK as usize * 3 + 40;
+    // Longer than the 8192 frames plugins are told to expect, and with one
+    // output buffer for the plugin's two, so the second goes to scratch.
+    let frames = 8192 * 2 + 40;
     let input = vec![vec![0.25f32; frames]; 2];
-    let mut outs = vec![vec![f32::NAN; frames]; 2];
+    let mut outs = vec![vec![f32::NAN; frames]; 1];
     let mut events_in = EventList::with_capacity(8);
     for e in [
         param(0, mix, 0.0),
         param(0, fb, 0.0),
         param(0, out_level, 1.0),
-        param(700, out_level, 0.0),
+        param(9000, out_level, 0.0),
     ] {
         events_in.push(e).unwrap();
     }
@@ -436,12 +438,12 @@ fn long_blocks_are_processed_in_pieces() {
         events_out: &mut events_out,
     });
     assert!(
-        outs[0][..700].iter().all(|&x| x.abs() > 0.1),
+        outs[0][..9000].iter().all(|&x| x.abs() > 0.1),
         "muted early or unwritten"
     );
     assert!(
-        outs[0][700..].iter().all(|&x| x == 0.0),
-        "not muted at frame 700"
+        outs[0][9000..].iter().all(|&x| x == 0.0),
+        "not muted at frame 9000"
     );
 }
 
@@ -450,13 +452,15 @@ fn long_blocks_are_processed_in_pieces() {
 #[test]
 fn many_changes_in_one_segment_keep_their_order() {
     let dir = need_plugins!();
-    let mut p = load(&dir, "mda.lv2", &format!("{MDA}Delay"));
-    let fb = param_id(&*p, "Feedback");
-    let mut events: Vec<Event> = (0..100)
-        .map(|i| param(50, fb, f64::from(i) / 200.0))
-        .collect();
-    events[99] = param(50, fb, 0.9);
-    run(&mut *p, &silence(2), &events, &TransportState::default());
+    // An instrument, so the note goes into the plugin and holds the changes.
+    let mut p = load(&dir, "mda.lv2", &format!("{MDA}EPiano"));
+    let fb = p.params()[0].id;
+    // The note keeps the changes pending (they move to frame 51), so more of
+    // them arrive than the pending buffer holds.
+    let mut events = vec![note_on(50, 60)];
+    events.extend((0..100).map(|i| param(50, fb, f64::from(i) / 200.0)));
+    events.push(param(50, fb, 0.9));
+    run(&mut *p, &[], &events, &TransportState::default());
     assert!(
         (p.param_value(fb) - 0.9).abs() < 1e-6,
         "got {}",

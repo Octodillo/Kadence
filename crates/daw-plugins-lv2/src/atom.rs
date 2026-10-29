@@ -43,6 +43,36 @@ impl Urids {
     }
 }
 
+/// Appends an event to an atom sequence without a size limit of its own (the
+/// sequence's capacity is the limit). Returns false if it does not fit.
+pub(crate) fn push_event(
+    seq: &mut livi::event::LV2AtomSequence,
+    time: i64,
+    ty: u32,
+    body: &[u8],
+) -> bool {
+    const EVENT_HEADER: usize = 16; // time (8), size (4), type (4)
+    let total = seq.capacity() + std::mem::size_of::<lv2_raw::LV2AtomSequence>();
+    let used = seq.size();
+    let padded = (EVENT_HEADER + body.len()).next_multiple_of(8);
+    if used + padded > total {
+        return false;
+    }
+    let base = seq.as_mut_ptr();
+    // SAFETY: the write stays inside the sequence's buffer (checked above);
+    // `used` is the end of the sequence, which is 8-byte aligned, and the
+    // sequence header's size is updated to cover the new, padded event.
+    unsafe {
+        let dst = base.cast::<u8>().add(used);
+        std::ptr::copy_nonoverlapping(time.to_ne_bytes().as_ptr(), dst, 8);
+        std::ptr::copy_nonoverlapping((body.len() as u32).to_ne_bytes().as_ptr(), dst.add(8), 4);
+        std::ptr::copy_nonoverlapping(ty.to_ne_bytes().as_ptr(), dst.add(12), 4);
+        std::ptr::copy_nonoverlapping(body.as_ptr(), dst.add(EVENT_HEADER), body.len());
+        (*base).atom.size += padded as u32;
+    }
+    true
+}
+
 /// Writes the body of an `atom:Object` into a fixed buffer, one property at a
 /// time. The atom header (size and type) is not included: the event builder
 /// adds it.

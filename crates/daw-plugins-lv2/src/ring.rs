@@ -9,7 +9,7 @@ pub(crate) const CONTROL: u8 = 0;
 pub(crate) const ATOM: u8 = 1;
 
 const HEADER: usize = 9;
-const CAPACITY: usize = 64 * 1024;
+pub(crate) const CAPACITY: usize = 64 * 1024;
 
 pub(crate) fn channel() -> (Producer<u8>, Consumer<u8>) {
     RingBuffer::new(CAPACITY)

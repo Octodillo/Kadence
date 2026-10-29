@@ -12,14 +12,10 @@ pub(crate) fn to_midi(kind: &EventKind) -> Option<([u8; 3], usize)> {
             velocity,
             ..
         } => {
-            // Velocity 0 would mean note-off, so a quiet note-on is clamped to 1.
+            // Velocity 0 would mean note-off, so quiet (and NaN) note-ons
+            // become 1.
             let v = (velocity * 127.0).round();
-            // NaN would cast to 0, which would turn the note into a note-off.
-            let v = if v.is_nan() {
-                1
-            } else {
-                v.clamp(1.0, 127.0) as u8
-            };
+            let v = if v >= 1.0 { v.min(127.0) as u8 } else { 1 };
             Some(([0x90 | (channel & 0x0f), key & 0x7f, v], 3))
         }
         EventKind::NoteOff {

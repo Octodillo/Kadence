@@ -66,9 +66,10 @@ impl Default for Lv2Format {
     }
 }
 
-/// The smallest maximum block length announced to plugins, so ordinary block
-/// size changes never need new host features.
-const MIN_MAX_BLOCK: usize = 4096;
+/// The maximum block length announced to every plugin. It is fixed, so all
+/// instances share one URID map and block size changes never re-instantiate;
+/// longer host blocks are processed in pieces.
+pub(crate) const HOST_MAX_BLOCK: usize = 8192;
 
 /// Caches shared by the format and every instance it creates. Only touched off
 /// the audio thread.
@@ -78,9 +79,7 @@ pub(crate) struct Shared {
     /// parsed when it is instantiated.
     worlds: Mutex<HashMap<PathBuf, Arc<livi::World>>>,
     /// Host features (URID map, options, worker thread) shared by every
-    /// instance, so they all see one URID map and one worker thread. Replaced
-    /// only when a block longer than any before is asked for; instances made
-    /// before then keep the old one.
+    /// instance, so they all see one URID map and one worker thread.
     features: Mutex<Option<Arc<livi::Features>>>,
 }
 
@@ -93,20 +92,14 @@ impl Shared {
             .clone()
     }
 
-    pub(crate) fn features(
-        &self,
-        world: &livi::World,
-        max_frames: u32,
-    ) -> Result<Arc<livi::Features>, PluginError> {
+    pub(crate) fn features(&self, world: &livi::World) -> Result<Arc<livi::Features>, PluginError> {
         let mut features = self.features.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(f) = features.as_ref()
-            && f.max_block_length() >= max_frames as usize
-        {
+        if let Some(f) = features.as_ref() {
             return Ok(f.clone());
         }
         let f = livi::FeaturesBuilder {
             min_block_length: 1,
-            max_block_length: (max_frames as usize).max(MIN_MAX_BLOCK),
+            max_block_length: HOST_MAX_BLOCK,
         }
         .try_build(world)
         .map_err(|e| PluginError::Load(e.to_string()))?;
