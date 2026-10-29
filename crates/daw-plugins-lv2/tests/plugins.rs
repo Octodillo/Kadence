@@ -70,7 +70,7 @@ fn run(
 ) -> (Vec<Vec<f32>>, Vec<Event>) {
     let ports = p.ports();
     let mut outs = vec![vec![0.0f32; BLOCK as usize]; ports.audio_out as usize];
-    let mut events_in = EventList::with_capacity(64);
+    let mut events_in = EventList::with_capacity(256);
     for e in events {
         events_in.push(*e).unwrap();
     }
@@ -401,4 +401,65 @@ fn other_editors_open_when_available() {
         }
         p.close_editor();
     }
+}
+
+/// A host block longer than the plugin was prepared for is run in pieces,
+/// with every frame written and events kept on their own frames.
+#[test]
+fn long_blocks_are_processed_in_pieces() {
+    let dir = need_plugins!();
+    let mut p = load(&dir, "mda.lv2", &format!("{MDA}Delay"));
+    let mix = param_id(&*p, "FX Mix");
+    let fb = param_id(&*p, "Feedback");
+    let out_level = param_id(&*p, "Output");
+    let frames = BLOCK as usize * 3 + 40;
+    let input = vec![vec![0.25f32; frames]; 2];
+    let mut outs = vec![vec![f32::NAN; frames]; 2];
+    let mut events_in = EventList::with_capacity(8);
+    for e in [
+        param(0, mix, 0.0),
+        param(0, fb, 0.0),
+        param(0, out_level, 1.0),
+        param(700, out_level, 0.0),
+    ] {
+        events_in.push(e).unwrap();
+    }
+    let mut events_out = EventList::with_capacity(8);
+    let ins: Vec<&[f32]> = input.iter().map(|b| &b[..]).collect();
+    let mut out_refs: Vec<&mut [f32]> = outs.iter_mut().map(|b| &mut b[..]).collect();
+    p.process(&mut ProcessContext {
+        frames: frames as u32,
+        transport: &TransportState::default(),
+        audio_in: &ins,
+        audio_out: &mut out_refs,
+        events_in: &events_in,
+        events_out: &mut events_out,
+    });
+    assert!(
+        outs[0][..700].iter().all(|&x| x.abs() > 0.1),
+        "muted early or unwritten"
+    );
+    assert!(
+        outs[0][700..].iter().all(|&x| x == 0.0),
+        "not muted at frame 700"
+    );
+}
+
+/// More changes in one segment than the pending buffer holds: the last value
+/// for a parameter still wins.
+#[test]
+fn many_changes_in_one_segment_keep_their_order() {
+    let dir = need_plugins!();
+    let mut p = load(&dir, "mda.lv2", &format!("{MDA}Delay"));
+    let fb = param_id(&*p, "Feedback");
+    let mut events: Vec<Event> = (0..100)
+        .map(|i| param(50, fb, f64::from(i) / 200.0))
+        .collect();
+    events[99] = param(50, fb, 0.9);
+    run(&mut *p, &silence(2), &events, &TransportState::default());
+    assert!(
+        (p.param_value(fb) - 0.9).abs() < 1e-6,
+        "got {}",
+        p.param_value(fb)
+    );
 }

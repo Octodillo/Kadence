@@ -17,16 +17,28 @@ pub(crate) fn channel() -> (Producer<u8>, Consumer<u8>) {
 
 /// Queues one message. Returns false, dropping it, when the ring is full.
 pub(crate) fn write(p: &mut Producer<u8>, port: u32, kind: u8, body: &[u8]) -> bool {
-    let total = HEADER + body.len();
+    write_parts(p, port, kind, body, &[])
+}
+
+/// Like [`write`], with the body given in two pieces.
+pub(crate) fn write_parts(
+    p: &mut Producer<u8>,
+    port: u32,
+    kind: u8,
+    first: &[u8],
+    second: &[u8],
+) -> bool {
+    let len = first.len() + second.len();
+    let total = HEADER + len;
     let Ok(mut chunk) = p.write_chunk(total) else {
         return false;
     };
     let mut header = [0u8; HEADER];
     header[..4].copy_from_slice(&port.to_le_bytes());
     header[4] = kind;
-    header[5..].copy_from_slice(&(body.len() as u32).to_le_bytes());
+    header[5..].copy_from_slice(&(len as u32).to_le_bytes());
     let (a, b) = chunk.as_mut_slices();
-    let mut src = header.iter().chain(body.iter());
+    let mut src = header.iter().chain(first).chain(second);
     for (dst, s) in a.iter_mut().chain(b.iter_mut()).zip(&mut src) {
         *dst = *s;
     }

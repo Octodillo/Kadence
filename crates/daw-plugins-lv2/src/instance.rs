@@ -15,6 +15,7 @@ const LV2_CORE: &str = "http://lv2plug.in/ns/lv2core#";
 const PPROPS_NOT_AUTOMATIC: &str = "http://lv2plug.in/ns/ext/port-props#notAutomatic";
 const RSZ_MINIMUM_SIZE: &str = "http://lv2plug.in/ns/ext/resize-port#minimumSize";
 const MIDI_EVENT: &str = "http://lv2plug.in/ns/ext/midi#MidiEvent";
+const ATOM_SUPPORTS: &str = "http://lv2plug.in/ns/ext/atom#supports";
 const TIME_POSITION: &str = "http://lv2plug.in/ns/ext/time#Position";
 /// Subject of serialized states. Any URI works; this one is never resolved.
 const STATE_URI: &str = "urn:daw:lv2-state";
@@ -110,6 +111,11 @@ impl Lv2Instance {
             raw.port_by_index(index)
                 .is_some_and(|p| p.supports_event(ev))
         };
+        let atom_supports = lilv.new_uri(ATOM_SUPPORTS);
+        let declares_nothing = |index: usize| {
+            raw.port_by_index(index)
+                .is_none_or(|p| p.value(&atom_supports).count() == 0)
+        };
 
         let mut atom_in = Vec::new();
         let mut atom_in_ports = Vec::new();
@@ -126,9 +132,9 @@ impl Lv2Instance {
             atom_in.push(LV2AtomSequence::new(&features, atom_capacity(p.index.0)));
             atom_in_ports.push(p.index.0 as u32);
         }
-        // A plugin with one atom input that declares no event types still gets
-        // MIDI: many plugins leave atom:supports out.
-        if midi_in.is_none() && atom_in.len() == 1 {
+        // A plugin whose only atom input declares no event types at all still
+        // gets MIDI: some plugins leave atom:supports out.
+        if midi_in.is_none() && atom_in.len() == 1 && declares_nothing(atom_in_ports[0] as usize) {
             midi_in = Some(0);
         }
         let mut atom_out = Vec::new();
@@ -139,7 +145,8 @@ impl Lv2Instance {
             atom_out_ports.push(p.index.0 as u32);
             atom_out_midi.push(supports(p.index.0, &midi_event));
         }
-        if atom_out.len() == 1 && !atom_out_midi[0] {
+        if atom_out.len() == 1 && !atom_out_midi[0] && declares_nothing(atom_out_ports[0] as usize)
+        {
             atom_out_midi[0] = true;
         }
 
@@ -362,24 +369,109 @@ impl Lv2Instance {
                     let _ = out.push(Event { frame, kind });
                 }
                 if self.ui_active {
-                    let mut buf = [0u8; MAX_UI_ATOM];
-                    let len = 8 + ev.data.len();
-                    if len <= buf.len() {
-                        buf[..4].copy_from_slice(&(ev.data.len() as u32).to_ne_bytes());
-                        buf[4..8].copy_from_slice(&ty.to_ne_bytes());
-                        buf[8..len].copy_from_slice(ev.data);
-                        ring::write(
-                            &mut self.to_ui,
-                            self.atom_out_ports[j],
-                            ring::ATOM,
-                            &buf[..len],
-                        );
-                    }
+                    // The atom header, then its body, as one message.
+                    let mut header = [0u8; 8];
+                    header[..4].copy_from_slice(&(ev.data.len() as u32).to_ne_bytes());
+                    header[4..].copy_from_slice(&ty.to_ne_bytes());
+                    ring::write_parts(
+                        &mut self.to_ui,
+                        self.atom_out_ports[j],
+                        ring::ATOM,
+                        &header,
+                        ev.data,
+                    );
                 }
             }
         }
         for seq in &mut self.atom_in {
             seq.clear();
+        }
+    }
+
+    /// Processes `[start, end)` of a `frames`-long block, at most `max_frames`
+    /// long. Control ports are block-rate in LV2, so the range is split
+    /// wherever a parameter changes. A MIDI event at the very frame of a change
+    /// stays in the earlier segment, which moves that change one frame later.
+    #[allow(unused_assignments)] // the macro's last expansion resets state for nothing
+    fn process_range(&mut self, ctx: &mut ProcessContext, start: usize, end: usize, frames: usize) {
+        let mut pending = [(0 as ParamId, 0.0f64); MAX_PENDING_PARAMS];
+        let mut n_pending = 0;
+        let mut pending_at = start;
+        let mut seg_start = start;
+        let mut last_midi: Option<usize> = None;
+        // Runs up to the pending changes' frame, then applies them in order.
+        macro_rules! flush {
+            () => {
+                if pending_at > seg_start {
+                    self.run_segment(
+                        ctx.audio_in,
+                        ctx.audio_out,
+                        Some(&mut *ctx.events_out),
+                        seg_start,
+                        pending_at,
+                    );
+                    seg_start = pending_at;
+                    last_midi = None;
+                }
+                for &(p, v) in &pending[..n_pending] {
+                    self.apply_param(p, v);
+                }
+                n_pending = 0;
+            };
+        }
+        for ev in ctx.events_in.iter() {
+            let f = (ev.frame as usize).min(frames - 1);
+            if f < start {
+                continue;
+            }
+            if f >= end {
+                break;
+            }
+            if n_pending > 0 && f >= pending_at {
+                flush!();
+            }
+            match ev.kind {
+                EventKind::ParamValue { param, value } => {
+                    let at = f.max(last_midi.map_or(0, |m| m + 1));
+                    if at <= seg_start {
+                        self.apply_param(param, value);
+                        continue;
+                    }
+                    if n_pending == MAX_PENDING_PARAMS {
+                        // Out of room: land the waiting ones first, in order.
+                        flush!();
+                    }
+                    pending[n_pending] = (param, value);
+                    n_pending += 1;
+                    pending_at = at;
+                }
+                ref kind => {
+                    let (Some(i), Some((bytes, len))) = (self.midi_in, midi::to_midi(kind)) else {
+                        continue;
+                    };
+                    let time = f.saturating_sub(seg_start) as i64;
+                    let _ = self.atom_in[i].push_midi_event::<3>(
+                        time,
+                        self.urids.midi_event,
+                        &bytes[..len],
+                    );
+                    last_midi = Some(f);
+                }
+            }
+        }
+        if n_pending > 0 && pending_at < end {
+            flush!();
+        }
+        self.run_segment(
+            ctx.audio_in,
+            ctx.audio_out,
+            Some(&mut *ctx.events_out),
+            seg_start,
+            end,
+        );
+        // Changes at or past the end take effect from the next range.
+        for &(p, v) in &pending[..n_pending] {
+            self.apply_param(p, v);
         }
     }
 
@@ -444,7 +536,7 @@ impl Node for Lv2Instance {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        let frames = (ctx.frames as usize).min(self.max_frames as usize);
+        let frames = ctx.frames as usize;
         if frames == 0 {
             return;
         }
@@ -453,87 +545,14 @@ impl Node for Lv2Instance {
         if self.pending_reset {
             self.send_reset();
         }
-
-        // Control ports are block-rate in LV2, so the block is split wherever a
-        // parameter changes. A MIDI event at the very frame of a change stays
-        // in the earlier segment, which moves that change one frame later.
-        let mut pending = [(0 as ParamId, 0.0f64); MAX_PENDING_PARAMS];
-        let mut n_pending = 0;
-        let mut pending_at = 0usize;
-        let mut seg_start = 0usize;
-        let mut last_midi: Option<usize> = None;
-        for ev in ctx.events_in.iter() {
-            let f = (ev.frame as usize).min(frames - 1);
-            if n_pending > 0 && f >= pending_at {
-                if pending_at > seg_start {
-                    self.run_segment(
-                        ctx.audio_in,
-                        ctx.audio_out,
-                        Some(ctx.events_out),
-                        seg_start,
-                        pending_at,
-                    );
-                    seg_start = pending_at;
-                    last_midi = None;
-                }
-                for &(p, v) in &pending[..n_pending] {
-                    self.apply_param(p, v);
-                }
-                n_pending = 0;
-            }
-            match ev.kind {
-                EventKind::ParamValue { param, value } => {
-                    let at = f.max(last_midi.map_or(0, |m| m + 1));
-                    if at <= seg_start {
-                        self.apply_param(param, value);
-                    } else if n_pending < MAX_PENDING_PARAMS {
-                        pending[n_pending] = (param, value);
-                        n_pending += 1;
-                        pending_at = at;
-                    } else {
-                        // Out of room: let this one land with the others.
-                        self.apply_param(param, value);
-                    }
-                }
-                ref kind => {
-                    let (Some(i), Some((bytes, len))) = (self.midi_in, midi::to_midi(kind)) else {
-                        continue;
-                    };
-                    let time = f.saturating_sub(seg_start) as i64;
-                    let _ = self.atom_in[i].push_midi_event::<3>(
-                        time,
-                        self.urids.midi_event,
-                        &bytes[..len],
-                    );
-                    last_midi = Some(f);
-                }
-            }
-        }
-        if n_pending > 0 && pending_at < frames {
-            if pending_at > seg_start {
-                self.run_segment(
-                    ctx.audio_in,
-                    ctx.audio_out,
-                    Some(ctx.events_out),
-                    seg_start,
-                    pending_at,
-                );
-                seg_start = pending_at;
-            }
-            for &(p, v) in &pending[..n_pending] {
-                self.apply_param(p, v);
-            }
-            n_pending = 0;
-        }
-        self.run_segment(
-            ctx.audio_in,
-            ctx.audio_out,
-            Some(ctx.events_out),
-            seg_start,
-            frames,
-        );
-        for &(p, v) in &pending[..n_pending] {
-            self.apply_param(p, v);
+        // The block size is fixed at instantiation; a longer host block (say,
+        // after a failed re-instantiation) is run in pieces.
+        let max = self.max_frames as usize;
+        let mut start = 0;
+        while start < frames {
+            let end = (start + max).min(frames);
+            self.process_range(ctx, start, end, frames);
+            start = end;
         }
     }
 
@@ -635,8 +654,9 @@ impl PluginInstance for Lv2Instance {
         }
     }
 
+    /// Plugin workers run on livi's own worker thread, not here, so slow work
+    /// (sample loading) never stalls the UI.
     fn on_main_thread(&mut self) {
-        self.features.worker_manager().run_workers();
         if self.editor.is_none() {
             return;
         }

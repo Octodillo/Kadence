@@ -36,8 +36,10 @@ pub(crate) fn default_search_paths() -> Vec<PathBuf> {
             v
         }
     };
-    paths.retain(|p| p.is_dir());
-    paths.dedup();
+    // The same directory can be listed twice or reached through a symlink
+    // (/usr/lib64 -> /usr/lib on Arch); scan it once.
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| p.is_dir() && seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
     paths
 }
 

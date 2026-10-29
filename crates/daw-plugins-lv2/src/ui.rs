@@ -399,11 +399,16 @@ impl Editor {
             })
             .ok_or_else(|| format!("{} is not in {}", info.uri, info.binary.display()))?;
 
-        // SAFETY: `controller` is valid until we free it.
-        let c = unsafe { &mut *controller };
+        // The UI's callbacks reach the controller through its pointer at any
+        // time we call into the UI, so it is only ever touched through short
+        // dereferences here, never a reference held across a UI call.
         if info.kind == UiKind::X11 {
-            c.x11 = Some(X11::open(host.title)?);
+            let x11 = X11::open(host.title)?;
+            // SAFETY: `controller` is valid until we free it; no UI exists yet.
+            unsafe { (*controller).x11 = Some(x11) };
         }
+        // SAFETY: as above.
+        let parent = unsafe { (*controller).x11.as_ref().map(|x| x.window) };
 
         let title = CString::new(host.title).unwrap_or_default();
         let mut external_host = Box::new(ExternalHost {
@@ -454,10 +459,10 @@ impl Editor {
             URI: uri(lv2_sys::LV2_UI__idleInterface),
             data: std::ptr::null_mut(),
         });
-        if let Some(x) = &c.x11 {
+        if let Some(window) = parent {
             features.push(LV2_Feature {
                 URI: uri(lv2_sys::LV2_UI__parent),
-                data: x.window as usize as *mut c_void,
+                data: window as usize as *mut c_void,
             });
             features.push(LV2_Feature {
                 URI: uri(lv2_sys::LV2_UI__resize),
@@ -514,9 +519,12 @@ impl Editor {
         if handle.is_null() {
             return Err(format!("{} failed to instantiate", info.uri));
         }
-        let external = match &mut c.x11 {
-            Some(x) => {
-                x.child = widget as usize as u32;
+        let external = match parent {
+            Some(_) => {
+                // SAFETY: the UI is not running right now.
+                if let Some(x) = unsafe { (*controller).x11.as_mut() } {
+                    x.child = widget as usize as u32;
+                }
                 None
             }
             None if widget.is_null() => {
@@ -549,8 +557,7 @@ impl Editor {
             self.ui_resize = Some(resize.cast());
         }
         // SAFETY: the controller is ours and the UI is not running right now.
-        let c = unsafe { &mut *self.controller };
-        if let Some(x) = &mut c.x11 {
+        if let Some(x) = unsafe { (*self.controller).x11.as_mut() } {
             if x.size == (0, 0) && x.child != 0 {
                 // The UI did not ask for a size: use its widget's.
                 if let Ok(Ok(g)) = x.conn.get_geometry(x.child).map(|r| r.reply()) {
@@ -626,40 +633,41 @@ impl Editor {
                 unsafe { run(w) };
             }
         }
-        // SAFETY: the controller is ours; the UI is not running right now.
-        let c = unsafe { &mut *self.controller };
-        if c.closed {
+        // SAFETY (for each dereference of the controller below): it is ours,
+        // and no reference to it is held across a call into the UI.
+        if unsafe { (*self.controller).closed } {
             return false;
         }
-        if let Some(x) = &mut c.x11 {
-            while let Ok(Some(ev)) = x.conn.poll_for_event() {
-                match ev {
-                    XEvent::ClientMessage(e)
-                        if e.window == x.window && e.data.as_data32()[0] == x.wm_delete =>
-                    {
-                        return false;
+        while let Some(x) = unsafe { (*self.controller).x11.as_mut() } {
+            let Ok(Some(ev)) = x.conn.poll_for_event() else {
+                break;
+            };
+            let resized = match ev {
+                XEvent::ClientMessage(e)
+                    if e.window == x.window && e.data.as_data32()[0] == x.wm_delete =>
+                {
+                    return false;
+                }
+                XEvent::DestroyNotify(e) if e.window == x.window => return false,
+                XEvent::ConfigureNotify(e) if e.window == x.window => {
+                    x.size = (e.width, e.height);
+                    if x.child != 0 {
+                        let aux = ConfigureWindowAux::new()
+                            .width(u32::from(e.width))
+                            .height(u32::from(e.height));
+                        let _ = x.conn.configure_window(x.child, &aux);
+                        let _ = x.conn.flush();
                     }
-                    XEvent::DestroyNotify(e) if e.window == x.window => return false,
-                    XEvent::ConfigureNotify(e) if e.window == x.window => {
-                        x.size = (e.width, e.height);
-                        if x.child != 0 {
-                            let aux = ConfigureWindowAux::new()
-                                .width(u32::from(e.width))
-                                .height(u32::from(e.height));
-                            let _ = x.conn.configure_window(x.child, &aux);
-                            let _ = x.conn.flush();
-                        }
-                        if let Some(r) = self.ui_resize {
-                            // SAFETY: the UI's own resize interface. Its `handle`
-                            // field is unused; the spec passes the UI handle.
-                            if let Some(f) = unsafe { (*r).ui_resize } {
-                                unsafe {
-                                    f(self.handle, c_int::from(e.width), c_int::from(e.height))
-                                };
-                            }
-                        }
-                    }
-                    _ => {}
+                    Some((e.width, e.height))
+                }
+                _ => None,
+            };
+            // `x` is no longer used: the UI may call back into the controller.
+            if let (Some((w, h)), Some(r)) = (resized, self.ui_resize) {
+                // SAFETY: the UI's own resize interface. Its `handle` field is
+                // unused; the spec passes the UI handle.
+                if let Some(f) = unsafe { (*r).ui_resize } {
+                    unsafe { f(self.handle, c_int::from(w), c_int::from(h)) };
                 }
             }
         }

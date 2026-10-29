@@ -13,7 +13,13 @@ pub(crate) fn to_midi(kind: &EventKind) -> Option<([u8; 3], usize)> {
             ..
         } => {
             // Velocity 0 would mean note-off, so a quiet note-on is clamped to 1.
-            let v = (velocity * 127.0).round().clamp(1.0, 127.0) as u8;
+            let v = (velocity * 127.0).round();
+            // NaN would cast to 0, which would turn the note into a note-off.
+            let v = if v.is_nan() {
+                1
+            } else {
+                v.clamp(1.0, 127.0) as u8
+            };
             Some(([0x90 | (channel & 0x0f), key & 0x7f, v], 3))
         }
         EventKind::NoteOff {
@@ -48,7 +54,7 @@ pub(crate) fn midi_len(status: u8) -> Option<usize> {
 pub(crate) fn from_midi(data: &[u8]) -> Option<EventKind> {
     let status = *data.first()?;
     let len = midi_len(status)?;
-    if data.len() < len {
+    if data.len() < len || data[1..len].iter().any(|&b| b >= 0x80) {
         return None;
     }
     let channel = status & 0x0f;
@@ -113,6 +119,13 @@ mod tests {
             note_id: 7,
         };
         assert_eq!(to_midi(&on).unwrap().0, [0x90, 1, 1]);
+        let nan = EventKind::NoteOn {
+            channel: 0,
+            key: 1,
+            velocity: f32::NAN,
+            note_id: 7,
+        };
+        assert_eq!(to_midi(&nan).unwrap().0, [0x90, 1, 1]);
     }
 
     #[test]
@@ -134,6 +147,11 @@ mod tests {
         assert_eq!(from_midi(&[0xc0, 5]), Some(pc));
         assert_eq!(from_midi(&[0xf0, 1, 2, 0xf7]), None);
         assert_eq!(from_midi(&[0xb0, 7]), None);
+        assert_eq!(
+            from_midi(&[0x90, 0x85, 0x40]),
+            None,
+            "data byte with the top bit set"
+        );
         assert_eq!(
             to_midi(&EventKind::ParamValue {
                 param: 0,
