@@ -1,10 +1,388 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import QtQuick
+import QtQuick.Controls as QQC2
+import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
-WorkspacePage {
+import io.github.octodillo.daw
+
+// The arrange view: track headers on the left, the painted timeline on the
+// right. All editing goes through ArrangeView (pointer input) and Project
+// (menus and shortcuts).
+Kirigami.Page {
+    id: page
+
+    property list<Kirigami.Action> transportActions
+    readonly property alias view: view
+
     title: i18nc("@title", "Arrange")
-    placeholderIcon: "view-media-track"
-    placeholderText: i18nc("@info:placeholder", "No tracks yet")
-    placeholderExplanation: i18nc("@info:placeholder", "Tracks and clips will be arranged on a timeline here.")
+    padding: 0
+
+    Kirigami.Theme.colorSet: Kirigami.Theme.View
+    Kirigami.Theme.inherit: false
+
+    readonly property Kirigami.Action loopAction: Kirigami.Action {
+        text: i18nc("@action:button", "Loop")
+        icon.name: "media-repeat-all"
+        checkable: true
+        checked: Project.looping
+        shortcut: "Ctrl+L"
+        tooltip: i18nc("@info:tooltip", "Loop the selection, or four bars from the playhead. Shift-drag in the ruler to set the loop.")
+        onTriggered: Project.toggleLoop()
+    }
+
+    readonly property Kirigami.Action addTrackAction: Kirigami.Action {
+        text: i18nc("@action:button", "Add Track")
+        icon.name: "list-add"
+        displayHint: Kirigami.DisplayHint.KeepVisible
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Audio Track")
+            icon.name: "audio-x-generic"
+            shortcut: "Ctrl+T"
+            onTriggered: Project.addTrack(0)
+        }
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Instrument Track")
+            icon.name: "audio-midi"
+            shortcut: "Ctrl+Shift+T"
+            onTriggered: Project.addTrack(1)
+        }
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Bus")
+            icon.name: "view-media-equalizer"
+            onTriggered: Project.addTrack(2)
+        }
+    }
+
+    readonly property list<Kirigami.Action> editActions: [
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Split at Playhead")
+            icon.name: "edit-cut"
+            shortcut: "Ctrl+E"
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Project.splitAtPlayhead()
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Duplicate")
+            icon.name: "edit-duplicate"
+            shortcut: "Ctrl+D"
+            enabled: Project.hasSelection
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Project.duplicateSelection()
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Delete")
+            icon.name: "edit-delete"
+            shortcut: StandardKey.Delete
+            enabled: Project.hasSelection
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Project.deleteSelection()
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Select All")
+            icon.name: "edit-select-all"
+            shortcut: StandardKey.SelectAll
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Project.selectAll()
+        },
+        Kirigami.Action {
+            separator: true
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Zoom In")
+            icon.name: "zoom-in"
+            shortcut: StandardKey.ZoomIn
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Project.zoom(1.5)
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Zoom Out")
+            icon.name: "zoom-out"
+            shortcut: StandardKey.ZoomOut
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Project.zoom(1 / 1.5)
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Zoom to Fit")
+            icon.name: "zoom-fit-width"
+            shortcut: "Ctrl+0"
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Project.zoomToFit()
+        }
+    ]
+
+    // QML list literals can't spread lists, so name each entry.
+    actions: [
+        page.transportActions[0],
+        page.loopAction,
+        page.addTrackAction,
+        page.editActions[0],
+        page.editActions[1],
+        page.editActions[2],
+        page.editActions[3],
+        page.editActions[4],
+        page.editActions[5],
+        page.editActions[6],
+        page.editActions[7]
+    ]
+
+    // Redraw on any change, and every frame while the playhead moves.
+    Connections {
+        target: Project
+        function onRevisionChanged() { view.refresh(); }
+    }
+    Timer {
+        interval: 16
+        repeat: true
+        running: Project.playing && page.visible
+        onTriggered: view.refresh()
+    }
+
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            position: Kirigami.InlineMessage.Position.Header
+            type: Kirigami.MessageType.Warning
+            showCloseButton: true
+            visible: Project.statusText !== ""
+            text: Project.statusText
+            onVisibleChanged: if (!visible) Project.clearStatus()
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+
+            // Track headers, scrolled with the timeline.
+            ColumnLayout {
+                Layout.fillHeight: true
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 12
+                spacing: 0
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: view.rulerHeight
+                    color: Kirigami.Theme.alternateBackgroundColor
+
+                    QQC2.Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: Kirigami.Units.largeSpacing
+                        text: Project.positionText
+                        font: Kirigami.Theme.smallFont
+                        Accessible.name: i18nc("@info:accessible", "Playhead position")
+                    }
+                    QQC2.Label {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.right: parent.right
+                        anchors.rightMargin: Kirigami.Units.largeSpacing
+                        text: Project.timeText
+                        font: Kirigami.Theme.smallFont
+                        opacity: 0.7
+                    }
+                    Kirigami.Separator {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                    }
+                }
+
+                ListView {
+                    id: headers
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    interactive: false
+                    model: Project.trackCount
+                    contentY: view.scrollY
+                    delegate: TrackHeader {
+                        width: headers.width
+                        height: view.trackHeight
+                    }
+
+                    WheelHandler {
+                        onWheel: (event) => page.forwardWheel(event, 0, event.y + view.rulerHeight)
+                    }
+                }
+            }
+
+            Kirigami.Separator {
+                Layout.fillHeight: true
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                ArrangeView {
+                    id: view
+                    anchors {
+                        left: parent.left
+                        top: parent.top
+                        right: vbar.left
+                        bottom: hbar.top
+                    }
+                    rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
+                    backgroundColor: Kirigami.Theme.backgroundColor
+                    alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
+                    textColor: Kirigami.Theme.textColor
+                    disabledTextColor: Kirigami.Theme.disabledTextColor
+                    highlightColor: Kirigami.Theme.highlightColor
+                    highlightedTextColor: Kirigami.Theme.highlightedTextColor
+                    negativeColor: Kirigami.Theme.negativeTextColor
+
+                    onWidthChanged: refresh()
+                    onHeightChanged: refresh()
+                    onBackgroundColorChanged: refresh()
+                    onTextColorChanged: refresh()
+                    onHighlightColorChanged: refresh()
+                    Component.onCompleted: refresh()
+
+                    onContextMenuRequested: (x, y, onClip) => {
+                        (onClip ? clipMenu : laneMenu).popup(view, x, y);
+                    }
+
+                    Accessible.role: Accessible.Canvas
+                    Accessible.name: i18nc("@info:accessible", "Timeline")
+                }
+
+                MouseArea {
+                    id: pointer
+                    anchors.fill: view
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                    hoverEnabled: true
+                    preventStealing: true
+                    cursorShape: view.cursorShape
+                    activeFocusOnTab: true
+
+                    onPressed: (m) => {
+                        forceActiveFocus();
+                        view.press(m.x, m.y, m.button, m.modifiers);
+                    }
+                    onPositionChanged: (m) => {
+                        if (pressed) {
+                            view.motion(m.x, m.y, m.modifiers);
+                        } else {
+                            view.hover(m.x, m.y);
+                        }
+                    }
+                    onReleased: (m) => view.release(m.x, m.y, m.modifiers)
+                    onDoubleClicked: (m) => view.doubleClick(m.x, m.y, m.modifiers)
+                    onCanceled: view.cancelDrag()
+                    onWheel: (w) => page.forwardWheel(w, w.x, w.y)
+
+                    Keys.onEscapePressed: view.cancelDrag()
+                    Keys.onLeftPressed: Project.nudge(-1)
+                    Keys.onRightPressed: Project.nudge(1)
+                }
+
+                // Two-finger zoom on touch screens.
+                PinchHandler {
+                    target: null
+                    property real last: 1
+                    onActiveChanged: last = 1
+                    onActiveScaleChanged: {
+                        view.pinch(activeScale / last, centroid.position.x);
+                        last = activeScale;
+                    }
+                }
+
+                // Audio files dragged in from Dolphin (or any file manager).
+                DropArea {
+                    anchors.fill: view
+                    keys: ["text/uri-list"]
+                    onEntered: (drag) => drag.accept(Qt.CopyAction)
+                    onDropped: (drop) => {
+                        for (let i = 0; i < drop.urls.length; ++i) {
+                            // The first file lands where it was dropped; the
+                            // rest each get a new track.
+                            const y = i === 0 ? drop.y : 1e9;
+                            view.dropFile(drop.urls[i], drop.x, y);
+                        }
+                        drop.accept(Qt.CopyAction);
+                    }
+                }
+
+                Kirigami.PlaceholderMessage {
+                    anchors.centerIn: view
+                    width: view.width - Kirigami.Units.gridUnit * 4
+                    visible: Project.trackCount === 0
+                    icon.name: "view-media-track"
+                    text: i18nc("@info:placeholder", "No tracks yet")
+                    explanation: i18nc("@info:placeholder", "Add a track, or drop audio files here.")
+                    helpfulAction: Kirigami.Action {
+                        text: i18nc("@action:button", "Add Audio Track")
+                        icon.name: "list-add"
+                        onTriggered: Project.addTrack(0)
+                    }
+                }
+
+                QQC2.ScrollBar {
+                    id: hbar
+                    anchors {
+                        left: parent.left
+                        right: vbar.left
+                        bottom: parent.bottom
+                    }
+                    orientation: Qt.Horizontal
+                    policy: QQC2.ScrollBar.AlwaysOn
+                    size: view.contentWidth > 0 ? Math.min(1, view.width / view.contentWidth) : 1
+                    position: view.contentWidth > 0 ? view.scrollX / view.contentWidth : 0
+                    onPositionChanged: if (pressed) view.scrollTo(position * view.contentWidth, view.scrollY)
+                }
+
+                QQC2.ScrollBar {
+                    id: vbar
+                    anchors {
+                        top: parent.top
+                        right: parent.right
+                        bottom: hbar.top
+                        topMargin: view.rulerHeight
+                    }
+                    orientation: Qt.Vertical
+                    policy: QQC2.ScrollBar.AsNeeded
+                    readonly property real lanes: Math.max(1, view.height - view.rulerHeight)
+                    size: view.contentHeight > lanes ? lanes / view.contentHeight : 1
+                    position: view.contentHeight > 0 ? view.scrollY / view.contentHeight : 0
+                    onPositionChanged: if (pressed) view.scrollTo(view.scrollX, position * view.contentHeight)
+                }
+            }
+        }
+    }
+
+    function forwardWheel(event, x, y): void {
+        // Mice report angles (120 per notch), touchpads pixels.
+        const pixels = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0;
+        const dx = pixels ? event.pixelDelta.x : event.angleDelta.x / 2;
+        const dy = pixels ? event.pixelDelta.y : event.angleDelta.y / 2;
+        view.wheel(x, y, dx, dy, event.modifiers);
+        event.accepted = true;
+    }
+
+    QQC2.Menu {
+        id: clipMenu
+        QQC2.MenuItem { action: page.editActions[0] }
+        QQC2.MenuItem { action: page.editActions[1] }
+        QQC2.MenuItem { action: page.editActions[2] }
+    }
+
+    QQC2.Menu {
+        id: laneMenu
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Add Audio Track")
+            icon.name: "audio-x-generic"
+            onTriggered: Project.addTrack(0)
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Add Instrument Track")
+            icon.name: "audio-midi"
+            onTriggered: Project.addTrack(1)
+        }
+    }
 }

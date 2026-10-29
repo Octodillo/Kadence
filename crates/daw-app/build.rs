@@ -23,6 +23,7 @@ const QML_FILES: &[&str] = &[
     "qml/AudioSettings.qml",
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
+    "qml/TrackHeader.qml",
 ];
 
 fn qmake_query(var: &str) -> PathBuf {
@@ -55,12 +56,20 @@ fn main() {
     let mut builder = CxxQtBuilder::new_qml_module(
         QmlModule::new("io.github.octodillo.daw").qml_files(QML_FILES.iter().copied()),
     )
-    .files(["src/bridge.rs", "src/ffi.rs", "src/test_helper.rs"])
+    .files([
+        "src/bridge.rs",
+        "src/ffi.rs",
+        "src/test_helper.rs",
+        "src/project.rs",
+        "src/items/arrange_view.rs",
+        "src/items/paint.rs",
+    ])
     .qt_module("Gui")
     .qt_module("Widgets")
     .qt_module("Quick")
     .qt_module("QuickControls2")
-    .cpp_file("src/cpp/kadence.cpp");
+    .cpp_file("src/cpp/kadence.cpp")
+    .cpp_file("src/cpp/scenepainter.cpp");
     let mut include_dirs: Vec<PathBuf> = KF6
         .iter()
         .flat_map(|(dirs, _)| dirs.iter().map(|d| include.join(d)))

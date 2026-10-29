@@ -442,6 +442,11 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
+ "daw-arrange",
+ "daw-core",
+ "daw-media",
+ "daw-model",
+ "daw-session",
 ]
 
 [[package]]
@@ -560,6 +565,7 @@ name = "daw-session"
 version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
+ "daw-backend",
  "daw-core",
  "daw-devices",
  "daw-engine",

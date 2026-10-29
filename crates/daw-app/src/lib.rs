@@ -6,9 +6,13 @@
 //! second, non-Qt front end can reuse the same engine API ([`engine`]).
 
 pub mod bridge;
+mod demo;
 pub mod engine;
 mod ffi;
+pub mod items;
+pub mod project;
 pub mod settings;
+pub mod state;
 mod test_helper;
 
 /// Run the application with the process arguments. Returns the exit code.

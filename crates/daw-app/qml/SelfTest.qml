@@ -39,6 +39,39 @@ Item {
             shoot(window.title, "arrange");
         },
         () => {
+            const arrange = window.pageStack.currentItem;
+            check(Project.trackCount === 0, "new project is empty");
+            Project.addTrack(1);
+            check(Project.trackCount === 1, "add instrument track");
+            // Double-click the first lane: a one-bar MIDI clip appears.
+            const v = arrange.view;
+            v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
+            check(Project.canUndo && Project.undoText !== "", "clip added");
+            Project.undo();
+            Project.undo();
+            check(Project.trackCount === 0, "undo back to empty");
+        },
+        () => {
+            check(TestHelper.loadDemoProject(), "load demo project");
+            check(Project.trackCount === 3, "demo has three tracks");
+        },
+        () => {
+            // Peaks load in the background; give them a step, then shoot.
+            window.pageStack.currentItem.view.refresh();
+            shoot(window.title, "arrange-demo");
+        },
+        () => {
+            Project.toggleLoop();
+            check(Project.looping, "loop on");
+            Project.togglePlay();
+        },
+        () => {
+            check(Project.timeText !== "0:00.0", "playhead moves while playing");
+            Project.togglePlay();
+            Project.toggleLoop();
+            shoot(window.title, "arrange-played");
+        },
+        () => {
             window.pageActions[1].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Mix"), "switch to Mix");
             shoot(window.title, "mix");
@@ -51,9 +84,9 @@ Item {
         },
         () => {
             window.playAction.trigger();
-            check(Engine.playing, "play");
+            check(Project.playing, "play");
             window.playAction.trigger();
-            check(!Engine.playing, "stop");
+            check(!Project.playing, "stop");
         },
         () => {
             settingsPage = window.openSettings();

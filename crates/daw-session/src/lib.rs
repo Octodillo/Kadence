@@ -16,6 +16,7 @@
 //! undo, redo and loading a file all take the same path.
 
 mod build;
+pub mod host;
 mod media;
 pub mod player;
 mod tempo;
@@ -86,6 +87,9 @@ pub struct Session {
     loop_ticks: Option<(TickTime, TickTime)>,
     built: Option<Built>,
     warnings: Vec<String>,
+    /// What the transport was last told, so the UI doesn't wait a period
+    /// for the audio thread to confirm.
+    playing: bool,
 }
 
 impl Session {
@@ -104,6 +108,7 @@ impl Session {
             loop_ticks: None,
             built: None,
             warnings: Vec::new(),
+            playing: false,
         };
         (session, processor)
     }
@@ -226,15 +231,20 @@ impl Session {
     }
 
     pub fn play(&mut self) -> Result<(), SessionError> {
-        Ok(self.controller.play()?)
+        self.controller.play()?;
+        self.playing = true;
+        Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), SessionError> {
-        Ok(self.controller.stop()?)
+        self.controller.stop()?;
+        self.playing = false;
+        Ok(())
     }
 
+    /// Whether the transport was last told to play.
     pub fn is_playing(&self) -> bool {
-        self.controller.is_playing()
+        self.playing
     }
 
     pub fn locate(&mut self, t: TickTime) -> Result<(), SessionError> {
