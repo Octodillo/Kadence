@@ -174,26 +174,45 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor<'a> {
             }
             start = end;
         }
+        // The aux output is constant 1.0, so a host that wrongly mixes it in is caught.
+        if let Some(mut aux) = audio.output_port(1)
+            && let Some(mut chans) = aux.channels()?.into_f32()
+        {
+            for chan in chans.iter_mut() {
+                chan.fill(1.0);
+            }
+        }
         Ok(ProcessStatus::ContinueIfNotQuiet)
     }
 }
 
 impl PluginAudioPortsImpl for MainThread<'_> {
+    /// A main stereo port each way, plus a stereo sidechain in and a mono aux out, neither of
+    /// which is main.
     fn count(&self, _is_input: bool) -> u32 {
-        1
+        2
     }
 
-    fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
-        if index == 0 {
-            writer.set(&AudioPortInfo {
-                id: ClapId::new(0),
-                name: b"main",
-                channel_count: 2,
-                flags: AudioPortFlags::IS_MAIN,
-                port_type: Some(AudioPortType::STEREO),
-                in_place_pair: None,
-            });
-        }
+    fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
+        let (name, channel_count, flags, port_type): (&[u8], _, _, _) = match (index, is_input) {
+            (0, _) => (b"main", 2, AudioPortFlags::IS_MAIN, AudioPortType::STEREO),
+            (1, true) => (
+                b"sidechain",
+                2,
+                AudioPortFlags::empty(),
+                AudioPortType::STEREO,
+            ),
+            (1, false) => (b"aux", 1, AudioPortFlags::empty(), AudioPortType::MONO),
+            _ => return,
+        };
+        writer.set(&AudioPortInfo {
+            id: ClapId::new(index),
+            name,
+            channel_count,
+            flags,
+            port_type: Some(port_type),
+            in_place_pair: None,
+        });
     }
 }
 

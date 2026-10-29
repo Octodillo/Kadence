@@ -2,11 +2,11 @@
 
 use std::cell::RefCell;
 use std::ffi::CString;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
-use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui};
+use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer, PluginAudioPorts};
+use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui, Window};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
@@ -19,6 +19,7 @@ use daw_core::event::ParamId;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{self, ParamInfo, PluginDescriptor, PluginError};
 
+use crate::editor::HostWindow;
 use crate::events;
 use crate::host::{AudioThreadScope, DawHost, HostShared};
 
@@ -46,6 +47,10 @@ struct Layout {
     audio_in: Vec<usize>,
     /// Channel count of each output port, in port order.
     audio_out: Vec<usize>,
+    /// The ports the graph connects to; other ports (sidechains, extra outputs) get silence
+    /// and are discarded.
+    main_in: Option<usize>,
+    main_out: Option<usize>,
     note_in: bool,
     note_out: bool,
     /// The note input port only takes MIDI, so notes are converted.
@@ -55,10 +60,13 @@ struct Layout {
 
 impl Layout {
     fn ports(&self) -> PortLayout {
-        let sum = |v: &[usize]| u16::try_from(v.iter().sum::<usize>()).unwrap_or(u16::MAX);
+        let channels = |ports: &[usize], main: Option<usize>| {
+            main.and_then(|i| ports.get(i))
+                .map_or(0, |&c| u16::try_from(c).unwrap_or(u16::MAX))
+        };
         PortLayout {
-            audio_in: sum(&self.audio_in),
-            audio_out: sum(&self.audio_out),
+            audio_in: channels(&self.audio_in, self.main_in),
+            audio_out: channels(&self.audio_out, self.main_out),
             event_in: self.note_in || self.has_params,
             event_out: self.note_out || self.has_params,
         }
@@ -98,9 +106,22 @@ impl Buffers {
     }
 }
 
+/// How this host can show the plugin's editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditorMode {
+    None,
+    /// The plugin opens its own top-level X11 window.
+    Floating,
+    /// The plugin embeds into an X11 window the host creates (JUCE-based plugins).
+    Embedded,
+}
+
 #[derive(Default)]
 struct EditorState {
     created: bool,
+    /// The host window an embedded editor lives in.
+    window: Option<HostWindow>,
+    resizable: bool,
 }
 
 /// A CLAP plugin instance. See the crate docs for which thread may call what.
@@ -111,7 +132,7 @@ pub struct ClapInstance {
     /// In a `RefCell` only so that `param_value(&self)` can reach the main-thread handle.
     instance: RefCell<clack_host::plugin::PluginInstance<DawHost>>,
     ext: Extensions,
-    editor_supported: bool,
+    editor_mode: EditorMode,
     layout: Layout,
     sample_rate: f64,
     max_frames: u32,
@@ -147,15 +168,21 @@ impl ClapInstance {
             timer: shared.get_extension(),
             posix_fd: shared.get_extension(),
         };
-        let editor_supported = ext
-            .gui
-            .is_some_and(|gui| gui.is_api_supported(&instance.plugin_handle(), floating_x11()));
+        let editor_mode = match ext.gui {
+            Some(gui) if gui.is_api_supported(&instance.plugin_handle(), x11(true)) => {
+                EditorMode::Floating
+            }
+            Some(gui) if gui.is_api_supported(&instance.plugin_handle(), x11(false)) => {
+                EditorMode::Embedded
+            }
+            _ => EditorMode::None,
+        };
         let mut this = Self {
             descriptor,
             processor: None,
             instance: RefCell::new(instance),
             ext,
-            editor_supported,
+            editor_mode,
             layout: Layout::default(),
             sample_rate: 0.0,
             max_frames: 0,
@@ -177,17 +204,21 @@ impl ClapInstance {
         if let Some(ports) = ext.audio_ports {
             let mut buf = AudioPortInfoBuffer::new();
             for is_input in [true, false] {
-                let channels: Vec<usize> = (0..ports.count(&handle, is_input))
+                let infos: Vec<(AudioPortFlags, u32)> = (0..ports.count(&handle, is_input))
                     .map(|i| {
                         ports
                             .get(&handle, i, is_input, &mut buf)
-                            .map_or(0, |p| p.channel_count as usize)
+                            .map_or((AudioPortFlags::empty(), 0), |p| (p.flags, p.channel_count))
                     })
                     .collect();
+                let channels = infos.iter().map(|&(_, c)| c as usize).collect();
+                let main = crate::main_port(&infos, is_input);
                 if is_input {
                     layout.audio_in = channels;
+                    layout.main_in = main;
                 } else {
                     layout.audio_out = channels;
+                    layout.main_out = main;
                 }
             }
         }
@@ -389,17 +420,16 @@ impl Node for ClapInstance {
             let end = offset + n;
             let last = end == total;
 
-            // Audio in: the context's channels are the plugin's ports' channels, flattened.
-            let mut ch = 0;
-            for port in bufs.audio_in.iter_mut() {
-                for chan in port.chunks_exact_mut(bufs.max_frames) {
+            // Audio in: the context's channels feed the main input port; others get silence.
+            for (pi, port) in bufs.audio_in.iter_mut().enumerate() {
+                let is_main = Some(pi) == self.layout.main_in;
+                for (ch, chan) in port.chunks_exact_mut(bufs.max_frames).enumerate() {
                     match ctx.audio_in.get(ch) {
-                        Some(src) if src.len() >= end => {
+                        Some(src) if is_main && src.len() >= end => {
                             chan[..n].copy_from_slice(&src[offset..end])
                         }
                         _ => chan[..n].fill(0.0),
                     }
-                    ch += 1;
                 }
             }
 
@@ -453,8 +483,9 @@ impl Node for ClapInstance {
                 Some(&transport),
             );
 
+            // Audio out: the main output port goes to the context's channels.
             let mut ch = 0;
-            for port in &bufs.audio_out {
+            if let Some(port) = self.layout.main_out.and_then(|i| bufs.audio_out.get(i)) {
                 for chan in port.chunks_exact(bufs.max_frames) {
                     if let Some(dst) = ctx.audio_out.get_mut(ch)
                         && dst.len() >= end
@@ -544,7 +575,7 @@ impl plugin::PluginInstance for ClapInstance {
     }
 
     fn has_editor(&self) -> bool {
-        self.editor_supported
+        self.editor_mode != EditorMode::None
     }
 
     fn open_editor(&mut self) -> Result<(), PluginError> {
@@ -552,24 +583,65 @@ impl plugin::PluginInstance for ClapInstance {
             .ext
             .gui
             .ok_or_else(|| PluginError::Editor("plugin has no editor".into()))?;
-        if !self.editor_supported {
-            return Err(PluginError::Editor(
-                "plugin has no floating X11 editor".into(),
-            ));
-        }
+        let embedded = match self.editor_mode {
+            EditorMode::None => {
+                return Err(PluginError::Editor("plugin has no X11 editor".into()));
+            }
+            EditorMode::Floating => false,
+            EditorMode::Embedded => true,
+        };
+        let editor_err = |e: &dyn std::fmt::Display| PluginError::Editor(e.to_string());
         let instance = self.instance.get_mut();
         if !self.editor.created {
             let handle = instance.plugin_handle();
-            gui.create(&handle, floating_x11())
-                .map_err(|e| PluginError::Editor(e.to_string()))?;
-            if let Ok(title) = CString::new(self.descriptor.name.as_str()) {
+            gui.create(&handle, x11(!embedded))
+                .map_err(|e| editor_err(&e))?;
+            self.editor.created = true;
+            if embedded {
+                // X11 sizes are physical pixels, so no `set_scale`.
+                let size = gui.get_size(&handle).unwrap_or(GuiSize {
+                    width: 800,
+                    height: 600,
+                });
+                let resizable = gui.can_resize(&handle);
+                let window = match HostWindow::new(
+                    &self.descriptor.name,
+                    size.width,
+                    size.height,
+                    resizable,
+                ) {
+                    Ok(window) => window,
+                    Err(e) => {
+                        gui.destroy(&handle);
+                        self.editor.created = false;
+                        return Err(PluginError::Editor(e));
+                    }
+                };
+                // SAFETY: the window outlives the plugin's GUI: `close_editor` destroys the GUI
+                // before dropping the window.
+                let parented =
+                    unsafe { gui.set_parent(&handle, Window::from_x11_handle(window.id().into())) };
+                if let Err(e) = parented {
+                    gui.destroy(&handle);
+                    self.editor.created = false;
+                    return Err(editor_err(&e));
+                }
+                self.editor.window = Some(window);
+                self.editor.resizable = resizable;
+            } else if let Ok(title) = CString::new(self.descriptor.name.as_str()) {
                 gui.suggest_title(&handle, &title);
             }
-            self.editor.created = true;
         }
-        instance.access_shared_handler(|s| HostShared::take(&s.gui_closed));
+        instance.access_shared_handler(|s| {
+            HostShared::take(&s.gui_closed);
+            s.pending_resize.store(0, Ordering::Relaxed);
+        });
         gui.show(&instance.plugin_handle())
-            .map_err(|e| PluginError::Editor(e.to_string()))
+            .map_err(|e| editor_err(&e))?;
+        if let Some(window) = &self.editor.window {
+            window.show();
+        }
+        Ok(())
     }
 
     fn close_editor(&mut self) {
@@ -581,6 +653,8 @@ impl plugin::PluginInstance for ClapInstance {
             let _ = gui.hide(&handle);
             gui.destroy(&handle);
         }
+        // Only after `destroy`: the plugin's window is a child of this one.
+        self.editor.window = None;
         self.editor.created = false;
     }
 
@@ -622,6 +696,54 @@ impl plugin::PluginInstance for ClapInstance {
             self.latency = self.read_latency();
         }
         self.service_timers_and_fds();
+        self.pump_editor_window();
+    }
+}
+
+impl ClapInstance {
+    /// Applies window-manager events to an embedded editor and the plugin's resize requests to
+    /// the host window.
+    fn pump_editor_window(&mut self) {
+        let Some(window) = self.editor.window.as_mut() else {
+            return;
+        };
+        let events = window.pump();
+        if events.closed {
+            plugin::PluginInstance::close_editor(self);
+            return;
+        }
+        let Some(gui) = self.ext.gui else {
+            return;
+        };
+        let resizable = self.editor.resizable;
+        let instance = self.instance.get_mut();
+        let requested =
+            instance.access_shared_handler(|s| s.pending_resize.swap(0, Ordering::AcqRel));
+        let handle = instance.plugin_handle();
+        let Some(window) = self.editor.window.as_mut() else {
+            return;
+        };
+        if requested != 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            let (w, h) = ((requested >> 32) as u32, requested as u32);
+            let size = GuiSize {
+                width: w,
+                height: h,
+            };
+            if gui.set_size(&handle, size).is_ok() || !resizable {
+                window.resize(w, h, resizable);
+            }
+        } else if let (Some((w, h)), true) = (events.resized, resizable) {
+            // The user resized the window: let the plugin pick the nearest size it supports.
+            let wanted = GuiSize {
+                width: w,
+                height: h,
+            };
+            let size = gui.adjust_size(&handle, wanted).unwrap_or(wanted);
+            if gui.set_size(&handle, size).is_ok() && size != wanted {
+                window.resize(size.width, size.height, resizable);
+            }
+        }
     }
 }
 
@@ -632,9 +754,9 @@ impl Drop for ClapInstance {
     }
 }
 
-fn floating_x11() -> GuiConfiguration<'static> {
+fn x11(is_floating: bool) -> GuiConfiguration<'static> {
     GuiConfiguration {
         api_type: GuiApiType::X11,
-        is_floating: true,
+        is_floating,
     }
 }

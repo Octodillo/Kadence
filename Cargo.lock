@@ -353,6 +353,7 @@ dependencies = [
  "clack-host",
  "daw-core",
  "libc",
+ "x11rb",
 ]
 
 [[package]]
