@@ -55,7 +55,7 @@ impl Strip {
     }
 
     pub fn with_gain(mut self, gain: f32) -> Self {
-        self.gain = gain;
+        self.set_gain(gain);
         self
     }
 
@@ -64,12 +64,18 @@ impl Strip {
         self
     }
 
+    /// Ignores NaN, which would poison every bus the strip feeds.
     pub fn set_gain(&mut self, gain: f32) {
-        self.gain = gain;
+        if !gain.is_nan() {
+            self.gain = gain;
+        }
     }
 
+    /// Ignores NaN, like [`set_gain`](Self::set_gain).
     pub fn set_pan(&mut self, pan: f32) {
-        self.pan = pan.clamp(-1.0, 1.0);
+        if !pan.is_nan() {
+            self.pan = pan.clamp(-1.0, 1.0);
+        }
     }
 
     pub fn set_muted(&mut self, muted: bool) {
@@ -109,6 +115,10 @@ impl Strip {
     }
 
     fn apply(&mut self, param: ParamId, value: f64) {
+        // `clamp` passes NaN through.
+        if value.is_nan() {
+            return;
+        }
         match param {
             Self::GAIN => self.gain = value.clamp(0.0, 4.0) as f32,
             Self::PAN if self.has_pan => self.set_pan(value as f32),

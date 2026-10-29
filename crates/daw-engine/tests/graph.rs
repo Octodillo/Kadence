@@ -318,3 +318,24 @@ fn zero_max_frames_does_not_hang_the_processor() {
         .expect("process returned");
     assert!(out.iter().all(|&v| v == 0.0));
 }
+
+#[test]
+fn strip_ignores_nan_params() {
+    let mut g = GraphDesc::new(2, 2);
+    let track = g.add_track("track", 2);
+    g.connect(g.input(), track);
+    let (mut ctl, mut proc) = EngineController::new(config(64));
+    ctl.set_graph(g).unwrap();
+    ctl.set_param(track, Strip::GAIN, f64::NAN).unwrap();
+    ctl.set_param(track, Strip::PAN, f64::NAN).unwrap();
+    let input = vec![0.5; 32];
+    let (mut l, mut r) = (vec![9.0; 32], vec![9.0; 32]);
+    proc.process(
+        32,
+        &[&input, &input],
+        &mut [&mut l, &mut r],
+        &EventList::with_capacity(0),
+    );
+    assert_eq!(l, input);
+    assert_eq!(r, input);
+}
