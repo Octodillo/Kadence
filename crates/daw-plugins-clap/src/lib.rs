@@ -115,19 +115,24 @@ fn scan_file(path: &Path) -> Option<Vec<PluginDescriptor>> {
             is_instrument,
             ports: (0, 0),
         };
-        d.ports = main_ports(&entry, id).unwrap_or((0, 0));
+        d.ports = main_ports(&entry, id, is_instrument).unwrap_or((0, 0));
         found.push(d);
     }
     Some(found)
 }
 
-/// Which port the graph connects to: the one flagged main or, for outputs only, the first. An
-/// input port that is not flagged main is a sidechain, not the signal to process.
-pub(crate) fn main_port(ports: &[(AudioPortFlags, u32)], is_input: bool) -> Option<usize> {
+/// Which port the graph connects to: the one flagged main, else the first. Many effects leave
+/// the main flag off, but an instrument's unflagged input is a sidechain (Surge XT's is), not the
+/// signal to process.
+pub(crate) fn main_port(
+    ports: &[(AudioPortFlags, u32)],
+    is_input: bool,
+    is_instrument: bool,
+) -> Option<usize> {
     ports
         .iter()
         .position(|(flags, _)| flags.contains(AudioPortFlags::IS_MAIN))
-        .or_else(|| (!is_input && !ports.is_empty()).then_some(0))
+        .or_else(|| (!ports.is_empty() && !(is_input && is_instrument)).then_some(0))
 }
 
 fn lossy(s: Option<&std::ffi::CStr>) -> Option<String> {
@@ -135,7 +140,7 @@ fn lossy(s: Option<&std::ffi::CStr>) -> Option<String> {
 }
 
 /// Channel counts of the main input and output ports, read from a short-lived instance.
-fn main_ports(entry: &PluginEntry, id: &str) -> Option<(u16, u16)> {
+fn main_ports(entry: &PluginEntry, id: &str, is_instrument: bool) -> Option<(u16, u16)> {
     let id = CString::new(id).ok()?;
     let mut instance = host::new_instance(entry, &id).ok()?;
     let ports: PluginAudioPorts = instance.plugin_shared_handle().get_extension()?;
@@ -149,7 +154,8 @@ fn main_ports(entry: &PluginEntry, id: &str) -> Option<(u16, u16)> {
                     .map_or((AudioPortFlags::empty(), 0), |p| (p.flags, p.channel_count))
             })
             .collect();
-        main_port(&infos, is_input).map_or(0, |i| u16::try_from(infos[i].1).unwrap_or(u16::MAX))
+        main_port(&infos, is_input, is_instrument)
+            .map_or(0, |i| u16::try_from(infos[i].1).unwrap_or(u16::MAX))
     };
     Some((main(true), main(false)))
 }
@@ -159,12 +165,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unflagged_inputs_are_sidechains_but_unflagged_outputs_still_count() {
+    fn unflagged_ports_count_except_an_instruments_inputs() {
         let main = AudioPortFlags::IS_MAIN;
         let none = AudioPortFlags::empty();
-        assert_eq!(main_port(&[(none, 2), (main, 2)], true), Some(1));
-        assert_eq!(main_port(&[(none, 2)], true), None);
-        assert_eq!(main_port(&[(none, 2), (none, 1)], false), Some(0));
-        assert_eq!(main_port(&[], false), None);
+        assert_eq!(main_port(&[(none, 2), (main, 2)], true, true), Some(1));
+        assert_eq!(main_port(&[(none, 2)], true, true), None);
+        assert_eq!(main_port(&[(none, 2)], true, false), Some(0));
+        assert_eq!(main_port(&[(none, 2), (none, 1)], false, true), Some(0));
+        assert_eq!(main_port(&[], false, false), None);
     }
 }

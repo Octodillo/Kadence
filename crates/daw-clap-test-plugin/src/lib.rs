@@ -174,6 +174,22 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor<'a> {
             }
             start = end;
         }
+        // Any sidechain signal shows up as an offset on the main output, so a host that feeds
+        // the sidechain is caught.
+        let side: f32 = audio
+            .input_port(1)
+            .and_then(|p| p.channels().ok()?.into_f32())
+            .map_or(0.0, |c| c.iter().flatten().map(|s| s.abs()).sum());
+        if side != 0.0
+            && let Some(mut main) = audio.output_port(0)
+            && let Some(mut outs) = main.channels()?.into_f32()
+        {
+            for out in outs.iter_mut() {
+                for o in out.iter_mut() {
+                    *o += side;
+                }
+            }
+        }
         // The aux output is constant 1.0, so a host that wrongly mixes it in is caught.
         if let Some(mut aux) = audio.output_port(1)
             && let Some(mut chans) = aux.channels()?.into_f32()

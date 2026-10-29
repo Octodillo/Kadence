@@ -199,6 +199,7 @@ impl ClapInstance {
 
     fn read_layout(&mut self) -> Layout {
         let ext = self.ext;
+        let is_instrument = self.descriptor.is_instrument;
         let handle = self.inst().plugin_handle();
         let mut layout = Layout::default();
         if let Some(ports) = ext.audio_ports {
@@ -212,7 +213,7 @@ impl ClapInstance {
                     })
                     .collect();
                 let channels = infos.iter().map(|&(_, c)| c as usize).collect();
-                let main = crate::main_port(&infos, is_input);
+                let main = crate::main_port(&infos, is_input, is_instrument);
                 if is_input {
                     layout.audio_in = channels;
                     layout.main_in = main;
@@ -420,12 +421,12 @@ impl Node for ClapInstance {
             let end = offset + n;
             let last = end == total;
 
-            // Audio in: the context's channels feed the main input port; others get silence.
-            for (pi, port) in bufs.audio_in.iter_mut().enumerate() {
-                let is_main = Some(pi) == self.layout.main_in;
+            // Audio in: the context's channels feed the main input port. Other ports keep the
+            // silence they were allocated with.
+            if let Some(port) = self.layout.main_in.and_then(|i| bufs.audio_in.get_mut(i)) {
                 for (ch, chan) in port.chunks_exact_mut(bufs.max_frames).enumerate() {
                     match ctx.audio_in.get(ch) {
-                        Some(src) if is_main && src.len() >= end => {
+                        Some(src) if src.len() >= end => {
                             chan[..n].copy_from_slice(&src[offset..end])
                         }
                         _ => chan[..n].fill(0.0),
@@ -592,6 +593,13 @@ impl plugin::PluginInstance for ClapInstance {
         };
         let editor_err = |e: &dyn std::fmt::Display| PluginError::Editor(e.to_string());
         let instance = self.instance.get_mut();
+        // Cleared first: a plugin may request its real size while being created or parented.
+        instance.access_shared_handler(|s| {
+            HostShared::take(&s.gui_closed);
+            if !self.editor.created {
+                s.pending_resize.store(0, Ordering::Relaxed);
+            }
+        });
         if !self.editor.created {
             let handle = instance.plugin_handle();
             gui.create(&handle, x11(!embedded))
@@ -632,12 +640,10 @@ impl plugin::PluginInstance for ClapInstance {
                 gui.suggest_title(&handle, &title);
             }
         }
-        instance.access_shared_handler(|s| {
-            HostShared::take(&s.gui_closed);
-            s.pending_resize.store(0, Ordering::Relaxed);
-        });
-        gui.show(&instance.plugin_handle())
-            .map_err(|e| editor_err(&e))?;
+        if let Err(e) = gui.show(&instance.plugin_handle()) {
+            plugin::PluginInstance::close_editor(self);
+            return Err(editor_err(&e));
+        }
         if let Some(window) = &self.editor.window {
             window.show();
         }
@@ -724,24 +730,29 @@ impl ClapInstance {
             return;
         };
         if requested != 0 {
+            // The plugin has already sized its own window; follow it, then confirm the size.
             #[allow(clippy::cast_possible_truncation)]
-            let (w, h) = ((requested >> 32) as u32, requested as u32);
             let size = GuiSize {
-                width: w,
-                height: h,
+                width: (requested >> 32) as u32,
+                height: requested as u32,
             };
-            if gui.set_size(&handle, size).is_ok() || !resizable {
-                window.resize(w, h, resizable);
-            }
+            window.resize(size.width, size.height, resizable);
+            let _ = gui.set_size(&handle, size);
         } else if let (Some((w, h)), true) = (events.resized, resizable) {
-            // The user resized the window: let the plugin pick the nearest size it supports.
+            // The user resized the window: let the plugin pick the nearest size it supports,
+            // and snap the window to whatever size the plugin ends up at.
             let wanted = GuiSize {
                 width: w,
                 height: h,
             };
             let size = gui.adjust_size(&handle, wanted).unwrap_or(wanted);
-            if gui.set_size(&handle, size).is_ok() && size != wanted {
-                window.resize(size.width, size.height, resizable);
+            let actual = if gui.set_size(&handle, size).is_ok() {
+                size
+            } else {
+                gui.get_size(&handle).unwrap_or(size)
+            };
+            if actual != wanted {
+                window.resize(actual.width, actual.height, resizable);
             }
         }
     }

@@ -52,6 +52,7 @@ impl HostWindow {
         let wm_delete = atom("WM_DELETE_WINDOW")?;
         let net_wm_name = atom("_NET_WM_NAME")?;
         let utf8 = atom("UTF8_STRING")?;
+        let net_wm_pid = atom("_NET_WM_PID")?;
         let id = conn.generate_id().map_err(|e| err(&e))?;
         let (w, h) = (clamp_dim(width), clamp_dim(height));
         (|| -> Result<(), x11rb::errors::ConnectionError> {
@@ -91,6 +92,14 @@ impl HostWindow {
                 wm_protocols,
                 AtomEnum::ATOM,
                 &[wm_delete],
+            )?;
+            // Lets the window manager group the editor with Kadence's own windows.
+            conn.change_property32(
+                PropMode::REPLACE,
+                id,
+                net_wm_pid,
+                AtomEnum::CARDINAL,
+                &[std::process::id()],
             )?;
             Ok(())
         })()
@@ -139,7 +148,16 @@ impl HostWindow {
     /// Drains window events without blocking.
     pub(crate) fn pump(&mut self) -> WindowEvents {
         let mut events = WindowEvents::default();
-        while let Ok(Some(event)) = self.conn.poll_for_event() {
+        loop {
+            let event = match self.conn.poll_for_event() {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                // A dead connection means the window is gone too.
+                Err(_) => {
+                    events.closed = true;
+                    break;
+                }
+            };
             match event {
                 Event::ClientMessage(m)
                     if m.type_ == self.wm_protocols && m.data.as_data32()[0] == self.wm_delete =>
