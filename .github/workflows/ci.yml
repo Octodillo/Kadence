@@ -82,11 +82,13 @@ jobs:
       - name: CMake install layout
         run: ci/check-install.sh
       - name: Screenshots (Breeze light and dark, 100% and 200%)
+        timeout-minutes: 10
         run: |
+          cargo build -p daw-app
           for scheme in BreezeLight BreezeDark; do
             for scale in 1 2; do
               XDG_CONFIG_HOME=$(mktemp -d) QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=$scale \
-                target/debug/kadence --color-scheme $scheme \
+                timeout 120 target/debug/kadence --color-scheme $scheme \
                 --screenshot-dir screenshots/$scheme-$((scale * 100))
             done
           done

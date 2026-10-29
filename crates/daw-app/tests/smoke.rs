@@ -17,21 +17,45 @@ fn kadence(config_home: &Path) -> Command {
 }
 
 fn run(mut cmd: Command) -> std::process::Output {
+    use std::io::Read;
+
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("start kadence");
+    // Drain both pipes while waiting, or a chatty run blocks on a full pipe.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            pipe.read_to_end(&mut buf).ok();
+            buf
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().expect("stdout")));
+    let stderr = drain(Box::new(child.stderr.take().expect("stderr")));
     // The self test takes a few seconds; anything near a minute is a hang.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while child.try_wait().expect("wait for kadence").is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for kadence") {
+            break status;
+        }
         if std::time::Instant::now() > deadline {
             child.kill().ok();
-            panic!("kadence did not exit within 60 s");
+            child.wait().ok();
+            let log = stderr.join().unwrap_or_default();
+            panic!(
+                "kadence did not exit within 60 s:\n{}",
+                String::from_utf8_lossy(&log)
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
+    };
+    std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
     }
-    child.wait_with_output().expect("collect kadence output")
 }
 
 #[test]
@@ -43,6 +67,10 @@ fn smoke_test_passes_and_saves_settings() {
     let log = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "smoke test failed:\n{log}");
     assert!(log.contains("smoke test: passed"), "no pass line:\n{log}");
+    assert!(
+        log.contains("startup audio: 0 48000 256"),
+        "fresh config should start on defaults:\n{log}"
+    );
 
     // SelfTest.qml leaves these audio settings behind, through KConfig.
     let rc = std::fs::read_to_string(config.join("kadencerc")).expect("read kadencerc");
@@ -55,10 +83,17 @@ fn smoke_test_passes_and_saves_settings() {
         assert!(rc.contains(line), "kadencerc lacks {line:?}:\n{rc}");
     }
 
-    // A second launch picks the saved settings up again.
+    // A second launch starts with the saved settings: device 1, 44.1 kHz,
+    // 512 samples.
     let mut cmd = kadence(&config);
     cmd.arg("--smoke-test");
-    assert!(run(cmd).status.success());
+    let output = run(cmd);
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "second run failed:\n{log}");
+    assert!(
+        log.contains("startup audio: 1 44100 512"),
+        "saved settings not loaded at startup:\n{log}"
+    );
 }
 
 #[test]

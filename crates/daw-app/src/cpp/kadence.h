@@ -9,12 +9,14 @@ namespace kadence {
 //
 // It is a QApplication, not a QGuiApplication, because the KDE desktop
 // QtQuick style (qqc2-desktop-style) draws through QStyle.
-int runApplication(const rust::Vec<rust::String> &args, rust::Str version);
+// `args` is each raw argument followed by a NUL byte.
+int runApplication(rust::Slice<const uint8_t> args, rust::Str version);
 
 // Saves the visible top-level window titled `title` as an image file.
 bool saveWindowScreenshot(rust::Str title, rust::Str path);
 
 rust::String configRead(rust::Str group, rust::Str key);
 void configWrite(rust::Str group, rust::Str key, rust::Str value);
+void configSync();
 
 } // namespace kadence

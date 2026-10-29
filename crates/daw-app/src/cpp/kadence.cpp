@@ -49,15 +49,18 @@ void applyColorScheme(const QString &name)
 
 } // namespace
 
-int runApplication(const rust::Vec<rust::String> &args, rust::Str version)
+int runApplication(rust::Slice<const uint8_t> args, rust::Str version)
 {
     // QApplication keeps references to argc and argv for its whole life.
     std::vector<QByteArray> storage;
-    std::vector<char *> argv;
-    storage.reserve(args.size());
-    for (const auto &arg : args) {
-        storage.emplace_back(arg.data(), static_cast<qsizetype>(arg.size()));
+    const auto *bytes = reinterpret_cast<const char *>(args.data());
+    for (std::size_t start = 0, i = 0; i < args.size(); ++i) {
+        if (bytes[i] == '\0') {
+            storage.emplace_back(bytes + start, static_cast<qsizetype>(i - start));
+            start = i + 1;
+        }
     }
+    std::vector<char *> argv;
     for (auto &arg : storage) {
         argv.push_back(arg.data());
     }
@@ -164,7 +167,11 @@ void configWrite(rust::Str group, rust::Str key, rust::Str value)
 {
     KConfigGroup cg(KSharedConfig::openConfig(), toQString(group));
     cg.writeEntry(toQString(key).toUtf8().constData(), toQString(value));
-    cg.sync();
+}
+
+void configSync()
+{
+    KSharedConfig::openConfig()->sync();
 }
 
 } // namespace kadence

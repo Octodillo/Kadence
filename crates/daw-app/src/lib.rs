@@ -19,6 +19,12 @@ pub fn run() -> i32 {
     cxx_qt::init_crate!(daw_app);
     cxx_qt::init_qml_module!("io.github.octodillo.daw");
 
-    let args: Vec<String> = std::env::args().collect();
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut args = Vec::new();
+    for arg in std::env::args_os() {
+        args.extend_from_slice(arg.as_bytes());
+        args.push(0);
+    }
     ffi::run_application(&args, env!("CARGO_PKG_VERSION"))
 }
