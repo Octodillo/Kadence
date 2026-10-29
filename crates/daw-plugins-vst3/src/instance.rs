@@ -1034,12 +1034,22 @@ impl PluginInstance for Vst3Instance {
         write(component.clone(), &|s| unsafe {
             self.component.setState(s)
         })?;
+        // The processor has its state now. Controllers may answer kNotImplemented (JUCE's
+        // wrapper does for setComponentState), so a refusal here only costs the controller's
+        // view of the values, not the restore.
         if self.split {
-            write(component, &|s| unsafe {
+            if let Err(e) = write(component, &|s| unsafe {
                 self.controller.setComponentState(s)
-            })?;
+            }) {
+                log::warn!(
+                    "vst3 {}: controller setComponentState: {e}",
+                    self.descriptor.name
+                );
+            }
             if !controller.is_empty() {
-                write(controller, &|s| unsafe { self.controller.setState(s) })?;
+                if let Err(e) = write(controller, &|s| unsafe { self.controller.setState(s) }) {
+                    log::warn!("vst3 {}: controller setState: {e}", self.descriptor.name);
+                }
             }
         }
         // Values pushed before the load are stale now.
