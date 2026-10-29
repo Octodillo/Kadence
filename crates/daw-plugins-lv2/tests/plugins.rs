@@ -255,6 +255,9 @@ fn worker_and_plugin_state() {
     let t = TransportState::default();
 
     let msg = patch_set_path(&p, "http://gareus.org/oss/lv2/midimap#cfgfile", &cfg);
+    // Too big to ever fit the port's buffer next to host events: refused.
+    assert!(!p.queue_atom(0, &vec![0u8; 20_000]));
+    assert!(!p.queue_atom(99, &msg), "no such atom input");
     assert!(p.queue_atom(0, &msg));
     let mut mapped = false;
     for _ in 0..50 {

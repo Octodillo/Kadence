@@ -341,7 +341,7 @@ impl Editor {
                     ui_resize: None,
                     external,
                     last_sent: Vec::new(),
-                    atom_buf: vec![0; 64 * 1024],
+                    atom_buf: vec![0; ring::CAPACITY],
                     event_transfer: host.urids.event_transfer,
                     _features: features,
                     _host_features: host.features.clone(),

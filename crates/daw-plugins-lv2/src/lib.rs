@@ -56,7 +56,9 @@ impl Lv2Format {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<Lv2Instance, PluginError> {
-        Lv2Instance::new(self.shared.clone(), d, sample_rate, max_frames)
+        // Plugins always get the fixed HOST_MAX_BLOCK; see `Lv2Instance`.
+        let _ = max_frames;
+        Lv2Instance::new(self.shared.clone(), d, sample_rate)
     }
 }
 

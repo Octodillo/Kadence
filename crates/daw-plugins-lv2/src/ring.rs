@@ -54,6 +54,22 @@ pub(crate) struct Message {
     pub len: Option<usize>,
 }
 
+/// The next message's port, kind and body size, without consuming it.
+pub(crate) fn peek(c: &mut Consumer<u8>) -> Option<(u32, u8, usize)> {
+    let chunk = c.read_chunk(HEADER).ok()?;
+    let mut header = [0u8; HEADER];
+    let (a, b) = chunk.as_slices();
+    for (dst, s) in header.iter_mut().zip(a.iter().chain(b.iter())) {
+        *dst = *s;
+    }
+    // Dropped without committing: nothing is consumed.
+    Some((
+        u32::from_le_bytes(header[..4].try_into().unwrap()),
+        header[4],
+        u32::from_le_bytes(header[5..].try_into().unwrap()) as usize,
+    ))
+}
+
 /// Pops the next message into `buf`.
 pub(crate) fn read(c: &mut Consumer<u8>, buf: &mut [u8]) -> Option<Message> {
     let mut header = [0u8; HEADER];

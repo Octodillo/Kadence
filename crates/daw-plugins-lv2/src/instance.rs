@@ -75,14 +75,12 @@ impl Lv2Instance {
         shared: Arc<Shared>,
         descriptor: &PluginDescriptor,
         sample_rate: f64,
-        max_frames: u32,
     ) -> Result<Self, PluginError> {
         if !(sample_rate.is_finite() && sample_rate > 0.0) {
             return Err(PluginError::Load(format!("bad sample rate {sample_rate}")));
         }
-        // Plugins are always told the host's fixed maximum block; longer host
-        // blocks are split in `process`.
-        let _ = max_frames;
+        // Plugins are always told the host's fixed maximum block, whatever the
+        // host's block size; longer host blocks are split in `process`.
         let max_frames = crate::HOST_MAX_BLOCK as u32;
         let world = shared.world(&descriptor.path);
         let plugin = world.plugin_by_uri(&descriptor.id).ok_or_else(|| {
@@ -239,6 +237,16 @@ impl Lv2Instance {
     /// path plugin UIs use; it also lets the host send `patch:Set` messages.
     /// Returns false if the queue is full. Not for the audio thread.
     pub fn queue_atom(&mut self, port: u32, atom: &[u8]) -> bool {
+        let fits = self
+            .atom_in_ports
+            .iter()
+            .position(|&p| p == port)
+            .is_some_and(|i| {
+                atom.len() >= 8 && ui_atom_room(&self.atom_in[i], atom.len()) != Room::Never
+            });
+        if !fits {
+            return false;
+        }
         match (&mut self.ui_ends, &mut self.editor) {
             (Some(ends), _) => ring::write(&mut ends.to_dsp, port, ring::ATOM, atom),
             (None, Some(editor)) => editor.queue(port, ring::ATOM, atom),
@@ -249,7 +257,17 @@ impl Lv2Instance {
     /// Applies what the UI (or `queue_atom`) sent since the last block.
     fn drain_from_ui(&mut self) {
         let buf = &mut self.ui_scratch;
-        while let Some(m) = ring::read(&mut self.from_ui, buf) {
+        while let Some((port, kind, size)) = ring::peek(&mut self.from_ui) {
+            if kind == ring::ATOM
+                && let Some(i) = self.atom_in_ports.iter().position(|&p| p == port)
+                && ui_atom_room(&self.atom_in[i], size) == Room::Later
+            {
+                // Leave it (and what follows) for the next block.
+                break;
+            }
+            let Some(m) = ring::read(&mut self.from_ui, buf) else {
+                break;
+            };
             let Some(len) = m.len else { continue };
             match m.kind {
                 ring::CONTROL if len == 4 => {
@@ -263,6 +281,8 @@ impl Lv2Instance {
                     let size = u32::from_ne_bytes(buf[..4].try_into().unwrap()) as usize;
                     let ty = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
                     let body = &buf[8..len.min(8 + size)];
+                    // Room was checked above; an atom that can never fit is
+                    // dropped here (and refused by `queue_atom`).
                     atom::push_event(&mut self.atom_in[i], 0, ty, body);
                 }
                 _ => {}
@@ -445,12 +465,13 @@ impl Lv2Instance {
                         continue;
                     }
                     if n_pending == MAX_PENDING_PARAMS {
-                        // Out of room: land the waiting ones first, in order.
-                        flush!();
-                        if at <= seg_start {
-                            self.apply_param(param, value);
-                            continue;
+                        // Out of room: apply the waiting ones now, in order.
+                        // They land up to a frame early, but the segment and
+                        // the MIDI already in it stay as they are.
+                        for &(p, v) in &pending[..n_pending] {
+                            self.apply_param(p, v);
                         }
+                        n_pending = 0;
                     }
                     pending[n_pending] = (param, value);
                     n_pending += 1;
@@ -515,19 +536,14 @@ impl Node for Lv2Instance {
 
     /// Any block size works without re-instantiating (see `process`); a new
     /// sample rate needs a new instance, which takes over the old one's state.
-    fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
+    fn prepare(&mut self, sample_rate: f64, _max_frames: u32) {
         if sample_rate == self.sample_rate {
             return;
         }
         let state = self.save_state();
         let reopen = self.editor.is_some();
         self.close_editor();
-        match Self::new(
-            self.shared.clone(),
-            &self.descriptor,
-            sample_rate,
-            max_frames,
-        ) {
+        match Self::new(self.shared.clone(), &self.descriptor, sample_rate) {
             Ok(mut fresh) => {
                 if let Ok(state) = state
                     && let Err(e) = fresh.load_state(&state)
@@ -686,6 +702,29 @@ impl PluginInstance for Lv2Instance {
 impl Drop for Lv2Instance {
     fn drop(&mut self) {
         self.close_editor();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Room {
+    Now,
+    Later,
+    Never,
+}
+
+/// Whether a UI atom of `atom_len` bytes (header included) fits in `seq` now.
+/// UI atoms may fill only half of an atom input, so host MIDI, transport and
+/// reset events pushed after them always have room.
+fn ui_atom_room(seq: &LV2AtomSequence, atom_len: usize) -> Room {
+    let half = (seq.capacity() + std::mem::size_of::<lv2_raw::LV2AtomSequence>()) / 2;
+    // Event header (16) plus the atom body, padded; the empty sequence is 16.
+    let needed = (16 + atom_len.saturating_sub(8)).next_multiple_of(8);
+    if 16 + needed > half {
+        Room::Never
+    } else if seq.size() + needed > half {
+        Room::Later
+    } else {
+        Room::Now
     }
 }
 
