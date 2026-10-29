@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Kadence
+GenericName=Digital Audio Workstation
+Comment=Record, arrange and mix music
+Exec=kadence %F
+Icon=io.github.octodillo.daw
+Terminal=false
+Categories=AudioVideo;Audio;Midi;Mixer;Sequencer;Recorder;Qt;KDE;
+Keywords=music;audio;midi;daw;recording;mixing;sequencer;plugin;clap;lv2;vst3;
+MimeType=application/x-kadence-project;
+StartupNotify=true
+StartupWMClass=kadence

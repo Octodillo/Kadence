@@ -1,7 +1,7 @@
-# daw
+# Kadence
 
-A digital audio workstation for KDE Plasma, written in Rust. Working name;
-the final name and app ID are still to be chosen.
+Kadence is a digital audio workstation for KDE Plasma, written in Rust.
+Its app ID is `io.github.octodillo.daw`.
 
 - Real-time engine in plain Rust crates with no UI toolkit dependency.
 - Plasma front end in Qt 6 and Kirigami through CXX-Qt, following the KDE HIG.
