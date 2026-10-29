@@ -200,6 +200,18 @@ impl AutomationRecorder {
             .copied()
             .collect();
         let after = lane.value_at(SampleTime(end.0 + 1));
+        // A ramp running into the take would now aim at the take's first
+        // value; pin it on its old line just before the take.
+        if let Some(i) = lane.segment(start.0 - 1)
+            && let (Curve::Linear, Some(next)) = (lane.points[i].curve, lane.points.get(i + 1))
+            && lane.points[i].time.0 < start.0 - 1
+        {
+            points.push(AutomationPoint {
+                time: SampleTime(start.0 - 1),
+                value: interpolate(&lane.points[i], next, start.0 - 1),
+                curve: Curve::Step,
+            });
+        }
         points.extend(kept.iter().map(|&(t, value)| AutomationPoint {
             time: SampleTime(t),
             value,
@@ -352,5 +364,33 @@ mod tests {
         assert_eq!(kept, vec![(0, 0.0), (200, 1.0), (400, 0.0)]);
         let empty = AutomationRecorder::new(0.1).finish(&AutomationLane::default());
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn recording_leaves_the_curve_before_the_take_alone() {
+        let ramp = AutomationLane::new(vec![pt(0, 0.0, Curve::Linear), pt(4000, 1.0, Curve::Step)]);
+        let mut rec = AutomationRecorder::new(0.01);
+        rec.record(SampleTime(1000), 0.9);
+        rec.record(SampleTime(2000), 0.9);
+        let out = rec.finish(&ramp);
+        for t in [0, 500, 960] {
+            assert_eq!(
+                out.value_at(SampleTime(t)),
+                ramp.value_at(SampleTime(t)),
+                "at {t}"
+            );
+        }
+        assert_eq!(out.value_at(SampleTime(1500)), Some(0.9));
+        assert_eq!(out.value_at(SampleTime(4000)), Some(1.0));
+
+        // A lane whose first point comes after the take: nothing before it
+        // to keep, the take simply starts the lane.
+        let late = AutomationLane::new(vec![pt(5000, 0.2, Curve::Step)]);
+        let mut rec = AutomationRecorder::new(0.01);
+        rec.record(SampleTime(1000), 0.7);
+        rec.record(SampleTime(2000), 0.7);
+        let out = rec.finish(&late);
+        assert_eq!(out.points()[0].time, SampleTime(1000));
+        assert_eq!(out.value_at(SampleTime(2001)), Some(0.2));
     }
 }

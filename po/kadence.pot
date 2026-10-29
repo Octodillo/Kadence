@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-29 23:09+0000\n"
+"POT-Creation-Date: 2026-10-29 23:20+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -105,99 +105,99 @@ msgctxt "@info milliseconds"
 msgid "%1 ms"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:36
+#: crates/daw-app/qml/ChannelStrip.qml:39
 msgctxt "@label fader at silence"
 msgid "−∞"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:39
+#: crates/daw-app/qml/ChannelStrip.qml:42
 #, qt-format
 msgctxt "@label decibels"
 msgid "%1 dB"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:45
+#: crates/daw-app/qml/ChannelStrip.qml:48
 msgctxt "@label pan centre"
 msgid "C"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:47
+#: crates/daw-app/qml/ChannelStrip.qml:50
 #, qt-format
 msgctxt "@label pan left, percent"
 msgid "L%1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:47
+#: crates/daw-app/qml/ChannelStrip.qml:50
 #, qt-format
 msgctxt "@label pan right, percent"
 msgid "R%1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:84
+#: crates/daw-app/qml/ChannelStrip.qml:87
 msgctxt "@label strip type"
 msgid "Bus"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:85
+#: crates/daw-app/qml/ChannelStrip.qml:88
 msgctxt "@label strip type"
 msgid "Main output"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:86
+#: crates/daw-app/qml/ChannelStrip.qml:89
 msgctxt "@label strip type"
 msgid "Track"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:106
+#: crates/daw-app/qml/ChannelStrip.qml:109
 msgctxt "@title:group effect slots"
 msgid "Effects"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:126
+#: crates/daw-app/qml/ChannelStrip.qml:129
 #, qt-format
 msgctxt "@action:button"
 msgid "Remove %1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:138
+#: crates/daw-app/qml/ChannelStrip.qml:141
 msgctxt "@action:button"
 msgid "Add Effect"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:158
+#: crates/daw-app/qml/ChannelStrip.qml:161
 msgctxt "@label gain reduction, short"
 msgid "GR"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:160
+#: crates/daw-app/qml/ChannelStrip.qml:163
 msgctxt "@info:tooltip"
 msgid "Gain reduction"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:173
+#: crates/daw-app/qml/ChannelStrip.qml:176
 msgctxt "@title:group"
 msgid "Sends"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:196
+#: crates/daw-app/qml/ChannelStrip.qml:199
 #, qt-format
 msgctxt "@info:tooltip send level to bus"
 msgid "Send to %1: %2"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:198
+#: crates/daw-app/qml/ChannelStrip.qml:201
 #, qt-format
 msgctxt "@label:slider"
 msgid "Send to %1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:218
-#: crates/daw-app/qml/ChannelStrip.qml:236
+#: crates/daw-app/qml/ChannelStrip.qml:221
+#: crates/daw-app/qml/ChannelStrip.qml:239
 msgctxt "@label:slider"
 msgid "Pan"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:237
+#: crates/daw-app/qml/ChannelStrip.qml:240
 #, qt-format
 msgctxt "@info:tooltip"
 msgid "Pan: %1 (double-click to centre)"
@@ -213,32 +213,32 @@ msgctxt "@info:tooltip"
 msgid "Volume (double-click for 0 dB)"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:298
+#: crates/daw-app/qml/ChannelStrip.qml:295
 msgctxt "@action:button short for Mute"
 msgid "M"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:299
+#: crates/daw-app/qml/ChannelStrip.qml:296
 msgctxt "@action:button"
 msgid "Mute"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:300
+#: crates/daw-app/qml/ChannelStrip.qml:297
 msgctxt "@info:tooltip"
 msgid "Mute"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:309
+#: crates/daw-app/qml/ChannelStrip.qml:306
 msgctxt "@action:button short for Solo"
 msgid "S"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:310
+#: crates/daw-app/qml/ChannelStrip.qml:307
 msgctxt "@action:button"
 msgid "Solo"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:311
+#: crates/daw-app/qml/ChannelStrip.qml:308
 msgctxt "@info:tooltip"
 msgid "Solo"
 msgstr ""
@@ -258,12 +258,12 @@ msgctxt "@info:placeholder"
 msgid "Select a clip to edit its notes or audio here."
 msgstr ""
 
-#: crates/daw-app/qml/GainReductionMeter.qml:24
+#: crates/daw-app/qml/GainReductionMeter.qml:21
 msgctxt "@label"
 msgid "Gain reduction meter"
 msgstr ""
 
-#: crates/daw-app/qml/LevelMeter.qml:29
+#: crates/daw-app/qml/LevelMeter.qml:22
 msgctxt "@label"
 msgid "Level meter"
 msgstr ""

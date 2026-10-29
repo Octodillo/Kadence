@@ -41,14 +41,14 @@ Item {
         () => {
             window.pageActions[1].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Mix"), "switch to Mix");
-            check(Mixer.levels.length >= 6 && Mixer.effectNames.length > 0, "mixer has strips and effects");
+            check(Mixer.levels.length >= 10 && Mixer.effectNames.length > 0, "mixer has strips and effects");
             // Play so the meters have something to show.
             window.playAction.trigger();
         },
         () => {
             check(Mixer.levels.some(v => v > 0), "meters move while playing");
             const keys = 2;
-            check(Mixer.levels[keys * 3 + 2] >= 0, "compressor gain reduction metered");
+            check(Mixer.levels[keys * 5 + 4] > 0, "compressor gain reduction metered");
             Mixer.setSoloed(0, true);
             check(Mixer.anySoloed, "solo");
             Mixer.setSoloed(0, false);

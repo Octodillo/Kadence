@@ -23,10 +23,13 @@ Item {
     required property bool insertMeters
     required property list<string> sends
 
+    required property double levelLeft
+    required property double levelRight
+    required property double holdLeft
+    required property double holdRight
+    required property double gainReduction
+
     readonly property bool isMaster: kind === "master"
-    readonly property real leftPeak: Mixer.levels[index * 3] ?? 0
-    readonly property real rightPeak: Mixer.levels[index * 3 + 1] ?? 0
-    readonly property real gainReduction: Mixer.levels[index * 3 + 2] ?? -1
 
     implicitWidth: Kirigami.Units.gridUnit * 7
     width: implicitWidth
@@ -238,10 +241,7 @@ Item {
             QQC2.ToolTip.visible: hovered || pressed
             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             TapHandler {
-                onDoubleTapped: {
-                    panSlider.value = 0;
-                    Mixer.setPan(strip.index, 0);
-                }
+                onDoubleTapped: Mixer.setPan(strip.index, 0)
             }
         }
 
@@ -266,16 +266,13 @@ Item {
                 QQC2.ToolTip.visible: hovered && !pressed
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                 TapHandler {
-                    onDoubleTapped: {
-                        fader.value = 0;
-                        Mixer.setVolume(strip.index, 0);
-                    }
+                    onDoubleTapped: Mixer.setVolume(strip.index, 0)
                 }
             }
             LevelMeter {
                 Layout.fillHeight: true
-                leftPeak: strip.leftPeak
-                rightPeak: strip.rightPeak
+                levels: [strip.levelLeft, strip.levelRight]
+                holds: [strip.holdLeft, strip.holdRight]
             }
         }
         QQC2.Label {

@@ -88,7 +88,66 @@ pub fn db_to_gain(db: f64) -> f64 {
     if db <= SILENT_DB {
         0.0
     } else {
-        10f64.powf(db.min(MAX_DB) / 20.0)
+        daw_devices::dsp::db_to_gain(db.min(MAX_DB))
+    }
+}
+
+/// What a meter shows: positions from 0 (-60 dB and below) to 1 (+6 dB).
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct MeterDisplay {
+    pub level: [f64; 2],
+    /// Recent highest level, held for a moment.
+    pub hold: [f64; 2],
+    /// Gain reduction in dB, falling back smoothly; `None` without a
+    /// dynamics insert.
+    pub gain_reduction_db: Option<f64>,
+}
+
+/// Meter ballistics: levels rise at once, fall at [`FALL_DB_PER_S`], and
+/// peaks are held for [`HOLD_S`]. Runs on every UI tick, whether or not new
+/// audio arrived, so meters fall back to rest when playback stops.
+#[derive(Default)]
+pub struct MeterBallistics {
+    shown: Vec<MeterDisplay>,
+    held_for: Vec<[f64; 2]>,
+}
+
+pub const FALL_DB_PER_S: f64 = 20.0;
+pub const HOLD_S: f64 = 1.5;
+
+/// A linear peak as a meter position.
+pub fn meter_position(linear: f32) -> f64 {
+    if linear <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * f64::from(linear).log10();
+    ((db - SILENT_DB) / (MAX_DB - SILENT_DB)).clamp(0.0, 1.0)
+}
+
+impl MeterBallistics {
+    pub fn update(&mut self, levels: &[StripLevels], seconds: f64) -> &[MeterDisplay] {
+        self.shown.resize(levels.len(), MeterDisplay::default());
+        self.held_for.resize(levels.len(), [0.0; 2]);
+        let fall = FALL_DB_PER_S * seconds.max(0.0);
+        let fall_pos = fall / (MAX_DB - SILENT_DB);
+        for ((shown, held_for), l) in self.shown.iter_mut().zip(&mut self.held_for).zip(levels) {
+            for (ch, held) in held_for.iter_mut().enumerate() {
+                let level = meter_position(l.peak[ch])
+                    .max(shown.level[ch] - fall_pos)
+                    .max(0.0);
+                shown.level[ch] = level;
+                *held += seconds.max(0.0);
+                if level >= shown.hold[ch] || *held > HOLD_S {
+                    shown.hold[ch] = level;
+                    *held = 0.0;
+                }
+            }
+            shown.gain_reduction_db = l.gain_reduction_db.map(|gr| {
+                let prev = shown.gain_reduction_db.unwrap_or(0.0);
+                f64::from(gr).max(prev - fall).max(0.0)
+            });
+        }
+        &self.shown
     }
 }
 
@@ -123,6 +182,8 @@ struct Insert {
     device_id: &'static str,
     name: &'static str,
     gr: Option<Arc<PeakMeter>>,
+    /// The device, until the next rebuild moves it into the engine.
+    fresh: Option<Box<dyn daw_devices::Device>>,
 }
 
 struct Send {
@@ -158,6 +219,7 @@ pub struct PreviewMixer {
     pending: f64,
     scratch: [Vec<f32>; 2],
     events: EventList,
+    effects: Vec<EffectChoice>,
 }
 
 /// Node keys: strip id in the high bits, role and index below.
@@ -185,6 +247,7 @@ impl PreviewMixer {
             pending: 0.0,
             scratch: [vec![0.0; BLOCK], vec![0.0; BLOCK]],
             events: EventList::with_capacity(0),
+            effects: effect_choices(),
         };
         let track = |id, name: &str, tone| PreviewStrip {
             id,
@@ -239,25 +302,21 @@ impl PreviewMixer {
 
     /// Adds an insert to the model without rebuilding.
     fn insert(&mut self, id: StripId, device_id: &str) -> bool {
-        let Some(entry) = daw_devices::devices()
-            .iter()
-            .find(|e| e.info.id == device_id && is_effect(e.info))
-        else {
-            return false;
-        };
-        if self.strip(id).is_none() {
+        if self.strip(id).is_none() || !self.effects.iter().any(|e| e.id == device_id) {
             return false;
         }
+        let Some(device) = daw_devices::create(device_id) else {
+            return false;
+        };
         let serial = self.next_serial;
         self.next_serial += 1;
-        let gr = (entry.create)()
-            .gain_reduction_meter()
-            .map(|_| Arc::new(PeakMeter::new()));
+        let info = device.info();
         self.strip_mut(id).inserts.push(Insert {
             serial,
-            device_id: entry.info.id,
-            name: entry.info.name,
-            gr,
+            device_id: info.id,
+            name: info.name,
+            gr: device.gain_reduction_meter(),
+            fresh: Some(device),
         });
         true
     }
@@ -307,8 +366,12 @@ impl PreviewMixer {
                 let id = match g.reuse(k) {
                     Some(id) => id,
                     None => {
-                        let dev = daw_devices::create(ins.device_id)
-                            .expect("inserts come from the catalog");
+                        let dev = match ins.fresh.take() {
+                            Some(dev) => dev,
+                            // Lost with a graph the engine refused: start over.
+                            None => daw_devices::create(ins.device_id)
+                                .expect("inserts come from the catalog"),
+                        };
                         ins.gr = dev.gain_reduction_meter();
                         let id = g.add_device(ins.name, dev);
                         g.set_key(id, k);
@@ -399,8 +462,20 @@ impl PreviewMixer {
     }
 }
 
-fn is_effect(info: &daw_devices::DeviceInfo) -> bool {
-    info.category != daw_devices::DeviceCategory::Instrument
+/// Built-in devices that process their input: effects and utilities with
+/// audio inputs, not instruments or generators like the metronome.
+fn effect_choices() -> Vec<EffectChoice> {
+    daw_devices::devices()
+        .iter()
+        .filter(|e| {
+            e.info.category != daw_devices::DeviceCategory::Instrument
+                && (e.create)().ports().audio_in > 0
+        })
+        .map(|e| EffectChoice {
+            id: e.info.id.to_owned(),
+            name: e.info.name.to_owned(),
+        })
+        .collect()
 }
 
 fn reuse_or(
@@ -528,14 +603,7 @@ impl MixerHandle for PreviewMixer {
     }
 
     fn effects(&self) -> Vec<EffectChoice> {
-        daw_devices::devices()
-            .iter()
-            .filter(|e| is_effect(e.info))
-            .map(|e| EffectChoice {
-                id: e.info.id.to_owned(),
-                name: e.info.name.to_owned(),
-            })
-            .collect()
+        self.effects.clone()
     }
 
     fn levels(&mut self) -> Vec<StripLevels> {
@@ -649,7 +717,10 @@ mod tests {
             assert!(l.peak[0] > 0.0, "{} is silent", s.name);
         }
         let keys = strips.iter().position(|s| s.name == "Keys").unwrap();
-        assert!(levels[keys].gain_reduction_db.is_some());
+        let gr = levels[keys]
+            .gain_reduction_db
+            .expect("Keys has a compressor");
+        assert!(gr > 0.0, "the demo drives the compressor: {gr}");
     }
 
     #[test]
@@ -708,7 +779,7 @@ mod tests {
         assert_eq!(bass.inserts.len(), 1);
         assert!(bass.inserts[0].has_gain_reduction);
         // The Keys compressor, untouched by these edits, still meters.
-        assert!(run(&mut m)[2].gain_reduction_db.is_some());
+        assert!(run(&mut m)[2].gain_reduction_db.is_some_and(|gr| gr > 0.0));
         assert!(m.ctl.has_node(key(3, ROLE_INSERT, 1)));
     }
 
@@ -717,5 +788,34 @@ mod tests {
         let effects = PreviewMixer::demo().effects();
         assert!(effects.iter().any(|e| e.id == "daw.compressor"));
         assert!(effects.iter().all(|e| e.id != "daw.synth"));
+        assert!(effects.iter().all(|e| e.id != "daw.metronome"));
+        assert!(effects.iter().any(|e| e.id == "daw.utility"));
+    }
+
+    #[test]
+    fn meters_fall_back_and_hold_peaks() {
+        let mut b = MeterBallistics::default();
+        let loud = StripLevels {
+            peak: [1.0, 0.5],
+            gain_reduction_db: Some(6.0),
+        };
+        let quiet = StripLevels {
+            peak: [0.0, 0.0],
+            gain_reduction_db: Some(0.0),
+        };
+        let first = b.update(&[loud], 0.03)[0];
+        assert!((first.level[0] - meter_position(1.0)).abs() < 1e-9);
+        let after = b.update(&[quiet], 1.0)[0];
+        // 20 dB in a second, out of a 66 dB scale.
+        assert!((first.level[0] - after.level[0] - 20.0 / 66.0).abs() < 1e-9);
+        assert_eq!(after.hold, first.level, "peak held");
+        assert_eq!(after.gain_reduction_db, Some(0.0));
+        // Silence keeps falling to rest, and the hold drops after it expires.
+        for _ in 0..10 {
+            b.update(&[quiet], 1.0);
+        }
+        let rest = b.update(&[quiet], 0.03)[0];
+        assert_eq!(rest.level, [0.0, 0.0]);
+        assert_eq!(rest.hold, [0.0, 0.0]);
     }
 }

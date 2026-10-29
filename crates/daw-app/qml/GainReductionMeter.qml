@@ -8,17 +8,14 @@ import org.kde.kirigami as Kirigami
 Rectangle {
     id: meter
 
-    // Gain reduction in dB, positive.
+    // Gain reduction in dB, positive, already smoothed (see MeterBallistics).
     property real reduction: 0
     readonly property real range: 24
-    property real shown: 0
 
     implicitHeight: Kirigami.Units.smallSpacing * 2
     color: Kirigami.Theme.alternateBackgroundColor
     border.color: Kirigami.ColorUtils.linearInterpolation(Kirigami.Theme.backgroundColor, Kirigami.Theme.textColor, 0.15)
     border.width: 1
-
-    onReductionChanged: shown = Math.max(Math.min(reduction / range, 1), shown - 0.02)
 
     Accessible.role: Accessible.Indicator
     Accessible.name: i18nc("@label", "Gain reduction meter")
@@ -30,7 +27,7 @@ Rectangle {
             right: parent.right
             margins: 1
         }
-        width: (parent.width - 2) * meter.shown
+        width: (parent.width - 2) * Math.min(meter.reduction / meter.range, 1)
         color: Kirigami.Theme.neutralTextColor
     }
 }
