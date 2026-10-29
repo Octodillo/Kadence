@@ -23,15 +23,24 @@ pub fn gain_to_db(gain: f64) -> f64 {
 }
 
 /// Flush values too small to hear to zero, so recursive state never decays
-/// into subnormal numbers (which are very slow on most CPUs).
+/// into subnormal numbers (which are very slow on most CPUs). NaN and
+/// infinity are zeroed too, so one bad input sample can't poison the state.
 #[inline]
 pub fn flush(x: f32) -> f32 {
-    if x.abs() < 1e-15 { 0.0 } else { x }
+    if (1e-15..f32::INFINITY).contains(&x.abs()) {
+        x
+    } else {
+        0.0
+    }
 }
 
 #[inline]
 pub fn flush64(x: f64) -> f64 {
-    if x.abs() < 1e-15 { 0.0 } else { x }
+    if (1e-15..f64::INFINITY).contains(&x.abs()) {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Coefficient for a one-pole filter that moves ~63% of the way in `ms`.
@@ -219,8 +228,11 @@ impl Biquad {
         self.s1 = c.b1 * x - c.a1 * y + self.s2;
         self.s2 = c.b2 * x - c.a2 * y;
         // Flush both states together: zeroing just one injects an error that
-        // a high-Q, low-frequency filter amplifies into a limit cycle.
-        if flush64(self.s1) == 0.0 && flush64(self.s2) == 0.0 {
+        // a high-Q, low-frequency filter amplifies into a limit cycle. A
+        // non-finite state would never recover, so it resets the filter.
+        if (flush64(self.s1) == 0.0 && flush64(self.s2) == 0.0)
+            || !(self.s1.is_finite() && self.s2.is_finite())
+        {
             self.s1 = 0.0;
             self.s2 = 0.0;
         }

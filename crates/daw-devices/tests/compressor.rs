@@ -78,3 +78,8 @@ fn denormals() {
         2.0,
     );
 }
+
+#[test]
+fn recovers_from_non_finite_input() {
+    check_recovers_from_non_finite(&mut Compressor::new());
+}

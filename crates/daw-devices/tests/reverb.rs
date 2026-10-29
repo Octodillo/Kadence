@@ -69,3 +69,8 @@ fn silence() {
 fn denormals() {
     check_denormals(&mut Reverb::new(), &[noise(8, 1.0, 4800)], &[], 12.0);
 }
+
+#[test]
+fn recovers_from_non_finite_input() {
+    check_recovers_from_non_finite(&mut Reverb::new());
+}
