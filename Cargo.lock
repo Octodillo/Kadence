@@ -261,6 +261,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "daw-midi"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+ "daw-core",
+ "proptest",
+]
+
+[[package]]
 name = "daw-plugins-vst3"
 version = "0.1.0"
 dependencies = [

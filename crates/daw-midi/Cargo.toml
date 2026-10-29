@@ -1,0 +1,19 @@
+[package]
+name = "daw-midi"
+description = "MIDI editing: grid and quantize, note operations, piano-roll geometry, clip playback and recording"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+daw-core.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
