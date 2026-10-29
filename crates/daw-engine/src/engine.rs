@@ -7,7 +7,8 @@ use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::SampleTime;
 
 use crate::compile::{CompileError, CompiledGraph};
-use crate::graph::{GraphDesc, NodeId};
+use crate::graph::{GraphDesc, LiveNodes, NodeId, NodeKey};
+use crate::meter::NodeMeter;
 use crate::transport::{LoopRange, Transport, TransportCommand};
 
 #[derive(Clone, Debug)]
@@ -39,6 +40,26 @@ pub enum EngineError {
     Compile(#[from] CompileError),
     #[error("the command queue to the audio thread is full")]
     QueueFull,
+    #[error("no node with key {0:?} is in the latest graph")]
+    UnknownKey(NodeKey),
+}
+
+/// Why [`EngineController::send_graph`] gave a graph back.
+pub enum SendError {
+    /// The command queue is full; retry later.
+    Full(Box<CompiledGraph>),
+    /// The graph reuses nodes from a graph that is no longer the latest
+    /// sent. Build it again.
+    Stale(Box<CompiledGraph>),
+}
+
+impl std::fmt::Debug for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Full(_) => "SendError::Full",
+            Self::Stale(_) => "SendError::Stale",
+        })
+    }
 }
 
 enum Command {
@@ -84,6 +105,7 @@ impl EngineController {
             commands: commands_tx,
             garbage: garbage_rx,
             shared,
+            live: Arc::default(),
         };
         (controller, processor)
     }
@@ -96,6 +118,8 @@ pub struct EngineController {
     commands: Producer<Command>,
     garbage: Collector<Box<CompiledGraph>>,
     shared: Arc<Shared>,
+    /// Keyed nodes of the latest graph sent.
+    live: Arc<LiveNodes>,
 }
 
 impl EngineController {
@@ -103,7 +127,36 @@ impl EngineController {
         &self.config
     }
 
+    /// An empty graph that can [`reuse`](GraphDesc::reuse) the keyed nodes
+    /// of the latest graph sent. Its master strip is the running one when the
+    /// channel count matches.
+    pub fn graph(&self, inputs: u16, outputs: u16) -> GraphDesc {
+        GraphDesc::with_live(inputs, outputs, self.live.clone())
+    }
+
+    /// Whether the latest graph sent has a node with `key`.
+    pub fn has_node(&self, key: NodeKey) -> bool {
+        self.live.nodes.contains_key(&key)
+    }
+
+    /// The meter attached to the node with `key` in the latest graph sent.
+    pub fn meter(&self, key: NodeKey) -> Option<Arc<NodeMeter>> {
+        self.live.nodes.get(&key)?.meter.clone()
+    }
+
+    /// Where the node with `key` sits in the latest graph sent.
+    pub fn node_id(&self, key: NodeKey) -> Option<NodeId> {
+        self.live.nodes.get(&key).map(|n| n.id)
+    }
+
+    /// Compiles `desc`. Fails with [`CompileError::StaleGraph`] if it reuses
+    /// nodes and another graph was sent after it was made.
     pub fn compile(&self, desc: GraphDesc) -> Result<CompiledGraph, CompileError> {
+        if desc.live.generation != self.live.generation
+            && desc.nodes.iter().any(|n| n.reuse.is_some())
+        {
+            return Err(CompileError::StaleGraph);
+        }
         let c = &self.config;
         CompiledGraph::compile(desc, c.sample_rate, c.max_frames, c.event_capacity)
     }
@@ -113,16 +166,30 @@ impl EngineController {
     /// is dropped by [`collect_garbage`](Self::collect_garbage).
     pub fn set_graph(&mut self, desc: GraphDesc) -> Result<(), EngineError> {
         let graph = Box::new(self.compile(desc)?);
-        self.send_graph(graph).map_err(|_| EngineError::QueueFull)
+        self.send_graph(graph).map_err(|e| match e {
+            SendError::Full(_) => EngineError::QueueFull,
+            SendError::Stale(_) => EngineError::Compile(CompileError::StaleGraph),
+        })
     }
 
-    /// Sends an already compiled graph. On a full queue the graph is given
-    /// back so the caller can retry.
-    pub fn send_graph(&mut self, graph: Box<CompiledGraph>) -> Result<(), Box<CompiledGraph>> {
+    /// Sends an already compiled graph.
+    ///
+    /// A graph that reuses nodes must be sent right after the graph it was
+    /// built from (the latest sent when its [`GraphDesc`] was made);
+    /// otherwise it is refused with [`SendError::Stale`]. On a full queue it
+    /// comes back in [`SendError::Full`] so the caller can retry.
+    pub fn send_graph(&mut self, graph: Box<CompiledGraph>) -> Result<(), SendError> {
         self.collect_garbage();
+        if graph.reuses_nodes() && graph.base != self.live.generation {
+            return Err(SendError::Stale(graph));
+        }
+        let live = graph.live.clone();
         match self.commands.push(Command::Graph(graph)) {
-            Ok(()) => Ok(()),
-            Err(Command::Graph(g)) => Err(g),
+            Ok(()) => {
+                self.live = live;
+                Ok(())
+            }
+            Err(Command::Graph(g)) => Err(SendError::Full(g)),
             Err(_) => unreachable!("pushed a graph command"),
         }
     }
@@ -160,6 +227,17 @@ impl EngineController {
         value: f64,
     ) -> Result<(), EngineError> {
         self.send(Command::Param { node, param, value })
+    }
+
+    /// Like [`set_param`](Self::set_param), addressed by key.
+    pub fn set_param_by_key(
+        &mut self,
+        key: NodeKey,
+        param: ParamId,
+        value: f64,
+    ) -> Result<(), EngineError> {
+        let node = self.node_id(key).ok_or(EngineError::UnknownKey(key))?;
+        self.set_param(node, param, value)
     }
 
     /// Drops graphs the audio thread has retired. Returns how many.
@@ -314,7 +392,10 @@ impl EngineProcessor {
         }
     }
 
-    fn install(&mut self, g: Box<CompiledGraph>) {
+    fn install(&mut self, mut g: Box<CompiledGraph>) {
+        if let Some(old) = self.graph.as_deref_mut() {
+            g.adopt(old);
+        }
         self.shared.latency.store(g.latency(), Ordering::Relaxed);
         self.retired = self.graph.replace(g);
         self.shared.swaps.fetch_add(1, Ordering::Relaxed);

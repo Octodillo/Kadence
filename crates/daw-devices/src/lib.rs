@@ -87,6 +87,12 @@ pub trait Device: Node {
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// A gain reduction meter (dB, positive) for dynamics devices, readable
+    /// from another thread once the device runs in the engine.
+    fn gain_reduction_meter(&self) -> Option<std::sync::Arc<daw_core::meter::PeakMeter>> {
+        None
+    }
 }
 
 /// A catalog entry: what the device is and how to make one.
@@ -154,8 +160,9 @@ pub fn create(id: &str) -> Option<Box<dyn Device>> {
 /// Implements the boilerplate parts of [`Device`] for a struct with
 /// `params: ParamStore` and an `apply_param(&mut self, id)` method.
 macro_rules! impl_device {
-    ($ty:ty, $info:expr, $specs:expr) => {
+    ($ty:ty, $info:expr, $specs:expr $(, { $($extra:tt)* })?) => {
         impl $crate::Device for $ty {
+            $($($extra)*)?
             fn info(&self) -> &'static $crate::DeviceInfo {
                 &$info
             }

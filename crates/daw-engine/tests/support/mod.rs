@@ -181,3 +181,43 @@ impl Node for EventProbe {
         }
     }
 }
+
+/// Outputs 1, 2, 3, ... one per frame, counting across blocks, so a test can
+/// tell whether the same instance kept running.
+pub struct Counter(pub f32);
+
+impl Node for Counter {
+    fn ports(&self) -> PortLayout {
+        PortLayout {
+            audio_out: 1,
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        for o in ctx.audio_out[0].iter_mut() {
+            self.0 += 1.0;
+            *o = self.0;
+        }
+    }
+}
+
+/// Outputs a constant on every frame.
+pub struct Dc(pub f32);
+
+impl Node for Dc {
+    fn ports(&self) -> PortLayout {
+        PortLayout {
+            audio_out: 1,
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        ctx.audio_out[0].fill(self.0);
+    }
+}

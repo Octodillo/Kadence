@@ -102,3 +102,51 @@ fn ten_minute_stereo_builds_under_a_second() {
     let limit = if cfg!(debug_assertions) { 10.0 } else { 1.0 };
     assert!(elapsed.as_secs_f64() < limit, "took {elapsed:?}");
 }
+
+#[test]
+fn unwritable_cache_still_returns_peaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let audio = dir.path().join("ro.wav");
+    write_wav(&audio, &test_signal(48_000, 5_000, 1), WavFormat::Pcm16).unwrap();
+    // A non-empty directory where the cache goes makes the save fail, even as root.
+    let blocker = PeakCache::path_for(&audio);
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("keep"), b"x").unwrap();
+    let cache = PeakCache::load_or_build(&audio).unwrap();
+    assert_eq!(cache.frames, 5_000);
+    // The failed save cleaned up after itself.
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn damaged_cache_headers_are_rebuilt_not_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let audio = dir.path().join("d.wav");
+    write_wav(&audio, &test_signal(48_000, 9_000, 2), WavFormat::Pcm16).unwrap();
+    let good = PeakCache::load_or_build(&audio).unwrap();
+    let cache_path = PeakCache::path_for(&audio);
+    let original = std::fs::read(&cache_path).unwrap();
+    // Header: magic 8, version 4, len 8, mtime 8, rate 4, channels 4, frames 8 (at 36),
+    // level count 4 (at 44), then the first level's frames_per_peak 4 (at 48).
+    let patches: [(usize, &[u8]); 4] = [
+        (44, &0u32.to_le_bytes()),         // no levels
+        (48, &0u32.to_le_bytes()),         // zero frames per peak
+        (36, &u64::MAX.to_le_bytes()),     // absurd frame count
+        (36, &(1u64 << 40).to_le_bytes()), // big but consistent-looking
+    ];
+    for (at, bytes) in patches {
+        let mut damaged = original.clone();
+        damaged[at..at + bytes.len()].copy_from_slice(bytes);
+        std::fs::write(&cache_path, &damaged).unwrap();
+        let rebuilt = PeakCache::load_or_build(&audio).unwrap();
+        assert_eq!(rebuilt, good, "patch at {at}");
+        let mut out = Vec::new();
+        rebuilt.query(0, 0, 9_000, 50, &mut out);
+        assert_eq!(out.len(), 50);
+    }
+}
