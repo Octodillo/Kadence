@@ -1,0 +1,35 @@
+[package]
+name = "daw-plugins"
+description = "Plugin registry, out-of-process scanner and scan cache shared by all plugin formats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["clap", "vst3"]
+# Each format crate is optional so the scanner binary can be built with any subset.
+clap = ["dep:daw-plugins-clap"]
+vst3 = ["dep:daw-plugins-vst3"]
+
+[dependencies]
+daw-core.workspace = true
+daw-plugins-clap = { path = "../daw-plugins-clap", optional = true }
+daw-plugins-vst3 = { path = "../daw-plugins-vst3", optional = true }
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+daw-plugins-clap = { path = "../daw-plugins-clap" }
+
+[[bin]]
+name = "daw-plugin-scan"
+path = "src/bin/daw-plugin-scan.rs"
+
+[lints]
+workspace = true
