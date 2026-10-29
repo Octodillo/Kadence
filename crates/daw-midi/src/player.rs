@@ -7,7 +7,9 @@
 //! - **Live edits.** [`PlayerHandle::set_sequence`] swaps in a new
 //!   sequence without a graph rebuild. Notes that are sounding keep
 //!   sounding if they still exist (with their new end), and stop if they
-//!   were deleted. Old sequences are freed on the handle's thread.
+//!   were deleted. A note moved to another key, or added under the play
+//!   position, starts at once when chase is on. Old sequences are freed on
+//!   the handle's thread.
 //! - **Seek and loop.** The engine splits blocks at the loop end, so a loop
 //!   wrap or a locate shows up as a block whose position is not where the
 //!   last one ended. The player then stops every sounding note and, with
@@ -258,7 +260,9 @@ impl MidiPlayer {
         while i < self.active.len() {
             let a = self.active[i];
             match self.seq.find(a.start, a.uid) {
-                Some(n) if n.end.0 > now => {
+                // A changed key or channel is a different sound: stop it
+                // and let the chase below start the new one.
+                Some(n) if n.end.0 > now && n.key == a.key && n.channel == a.channel => {
                     self.active[i].end = n.end.0;
                     i += 1;
                 }
@@ -269,7 +273,13 @@ impl MidiPlayer {
             }
         }
         self.cursor = match self.expected {
-            Some(pos) => self.seq.first_at_or_after(pos),
+            Some(pos) => {
+                // Edited notes, and notes added under the play position.
+                if self.shared.chase.load(Relaxed) {
+                    self.chase(out, pos);
+                }
+                self.seq.first_at_or_after(pos)
+            }
             None => 0,
         };
     }
@@ -280,14 +290,16 @@ impl MidiPlayer {
         }
     }
 
+    /// Starts every note that spans `pos` and is not already sounding.
     fn chase(&mut self, out: &mut EventList, pos: i64) {
-        let from = self
-            .seq
-            .first_at_or_after(pos.saturating_sub(self.seq.max_len()));
-        let to = self.seq.first_at_or_after(pos);
-        for i in from..to {
+        for i in self.seq.sounding_range(pos) {
             let n = self.seq.notes()[i];
-            if n.end.0 > pos {
+            if n.end.0 > pos
+                && !self
+                    .active
+                    .iter()
+                    .any(|a| a.uid == n.uid && a.start == n.start)
+            {
                 self.start_note(out, 0, &n);
             }
         }
@@ -396,6 +408,11 @@ impl Node for MidiPlayer {
 
     fn reset(&mut self) {
         self.active.clear();
-        self.expected = None;
+        if let Some(at) = self.expected.take()
+            && self.capturing
+        {
+            self.capture(Captured::Stop { at: SampleTime(at) });
+        }
+        self.capturing = false;
     }
 }

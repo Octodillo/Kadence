@@ -6,7 +6,7 @@ mod support;
 use std::collections::HashMap;
 
 use daw_core::event::EventKind;
-use daw_midi::sequence::SeqNote;
+use daw_midi::sequence::{SeqNote, Sequence};
 use proptest::prelude::*;
 use support::{Rig, note};
 
@@ -34,12 +34,21 @@ proptest! {
     }
 
     #[test]
-    fn notes_are_balanced(notes in notes(), sizes in sizes(), jumps in prop::collection::vec(0i64..6000, 0..4)) {
+    fn notes_are_balanced(
+        notes in notes(),
+        edited in notes(),
+        sizes in sizes(),
+        jumps in prop::collection::vec(0i64..6000, 0..4),
+    ) {
         let mut rig = Rig::with(notes);
         let mut out = Vec::new();
         let mut from = 0;
-        for j in jumps {
+        for (i, j) in jumps.into_iter().enumerate() {
             out.extend(rig.play(from, from + 700, &sizes));
+            if i == 0 {
+                // A live edit mid-play.
+                rig.handle.set_sequence(Sequence::new(edited.clone())).unwrap();
+            }
             from = j;
         }
         out.extend(rig.play(from, from + 700, &sizes));

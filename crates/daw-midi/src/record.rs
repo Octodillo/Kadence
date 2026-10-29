@@ -195,27 +195,32 @@ impl Recorder {
     }
 }
 
-/// Converts recorded notes to clip-relative ticks. Notes that start before
-/// the clip are moved to its start.
+/// Converts recorded notes to ticks relative to `clip.start`. Notes
+/// entirely outside `clip` (a timeline range) are dropped, and notes
+/// crossing its edges are cut to fit.
 pub fn to_clip_notes(
     notes: &[RecordedNote],
     tempo: &dyn TempoMap,
     sample_rate: f64,
-    clip_start: TickTime,
+    clip: Range<TickTime>,
 ) -> Vec<NoteData> {
     notes
         .iter()
-        .map(|n| {
-            let s = tempo.samples_to_ticks(n.start, sample_rate).0 - clip_start.0;
-            let e = tempo.samples_to_ticks(n.end, sample_rate).0 - clip_start.0;
-            let start = s.max(0);
-            NoteData {
-                start: TickTime(start),
-                length: TickTime((e - start).max(1)),
+        .filter_map(|n| {
+            let s = tempo.samples_to_ticks(n.start, sample_rate).0;
+            let e = tempo.samples_to_ticks(n.end, sample_rate).0;
+            let start = s.max(clip.start.0);
+            let end = e.min(clip.end.0);
+            if end <= clip.start.0 || start >= clip.end.0 {
+                return None;
+            }
+            Some(NoteData {
+                start: TickTime(start - clip.start.0),
+                length: TickTime((end - start).max(1)),
                 key: n.key.min(127),
                 channel: n.channel.min(15),
                 velocity: n.velocity.clamp(0.0, 1.0) as f64,
-            }
+            })
         })
         .collect()
 }
@@ -373,7 +378,12 @@ mod tests {
                 velocity: 0.5,
             },
         ];
-        let data = to_clip_notes(&notes, &tempo, 48_000.0, TickTime(PPQ / 2));
+        let data = to_clip_notes(
+            &notes,
+            &tempo,
+            48_000.0,
+            TickTime(PPQ / 2)..TickTime(4 * PPQ),
+        );
         assert_eq!((data[0].start.0, data[0].length.0), (PPQ / 2, PPQ / 2));
         assert_eq!((data[1].start.0, data[1].length.0), (0, PPQ * 3 / 4));
 
@@ -396,5 +406,27 @@ mod tests {
             TickTime(0)..TickTime(PPQ),
         );
         assert!(plan.remove.is_empty());
+    }
+
+    #[test]
+    fn notes_outside_the_clip_are_dropped_or_cut() {
+        let tempo = SegmentTempoMap::new(120.0);
+        let rn = |s, e| RecordedNote {
+            start: SampleTime(s),
+            end: SampleTime(e),
+            key: 60,
+            channel: 0,
+            velocity: 0.5,
+        };
+        // Clip from beat 1 to beat 2 (24,000..48,000 samples).
+        let notes = [
+            rn(0, 1000),
+            rn(20_000, 30_000),
+            rn(40_000, 60_000),
+            rn(50_000, 60_000),
+        ];
+        let data = to_clip_notes(&notes, &tempo, 48_000.0, TickTime(PPQ)..TickTime(2 * PPQ));
+        let spans: Vec<(i64, i64)> = data.iter().map(|n| (n.start.0, n.end().0)).collect();
+        assert_eq!(spans, [(0, PPQ / 4), (PPQ * 2 / 3, PPQ)]);
     }
 }

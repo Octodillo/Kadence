@@ -190,7 +190,7 @@ impl PianoRollView {
             length: TickTime(length.unwrap_or(step).max(MIN_LENGTH)),
             key: self.y_to_key(y),
             channel: 0,
-            velocity: velocity.clamp(0.0, 1.0),
+            velocity: edit::clamp_velocity(velocity),
         }
     }
 }
@@ -219,7 +219,7 @@ impl From<NotePart> for DragKind {
 #[derive(Clone, Debug)]
 pub struct Drag {
     pub kind: DragKind,
-    anchor_x: f64,
+    anchor_tick: TickTime,
     anchor_key: u8,
     grabbed: NoteData,
     originals: Vec<NoteData>,
@@ -238,7 +238,7 @@ impl Drag {
     ) -> Self {
         Self {
             kind,
-            anchor_x: x,
+            anchor_tick: view.x_to_tick(x),
             anchor_key: view.y_to_key(y),
             grabbed: grabbed.data(),
             originals: selection.iter().map(|n| n.data()).collect(),
@@ -254,7 +254,9 @@ impl Drag {
         y: f64,
         snap: Option<&Snap>,
     ) -> Vec<NoteData> {
-        let raw = view.x_to_tick(x).0 - view.x_to_tick(self.anchor_x).0;
+        // The anchor is a tick, so scrolling or zooming mid-drag keeps the
+        // note under the pointer.
+        let raw = view.x_to_tick(x).0 - self.anchor_tick.0;
         let g = self.grabbed;
         let mut notes = self.originals.clone();
         match self.kind {
@@ -534,5 +536,19 @@ mod tests {
         assert_eq!(changed, [0, 1, 2]);
         let vel: Vec<f64> = notes.iter().map(|n| n.velocity).collect();
         assert_eq!(vel, [0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn drag_follows_content_when_the_view_scrolls() {
+        let mut v = view();
+        let sel = [NoteData::new(0, 100, 60, 1.0)];
+        let d = Drag::begin(DragKind::Move, &v, 100.0, 675.0, &sel[0], &sel);
+        // Autoscroll one beat to the right while the pointer stays put.
+        v.left = TickTime(Q);
+        assert_eq!(d.update(&v, 100.0, 675.0, None)[0].start.0, Q);
+        // Zoom in 2x around the left edge: the same x is now half as far.
+        v.left = TickTime(0);
+        v.px_per_beat *= 2.0;
+        assert_eq!(d.update(&v, 200.0, 675.0, None)[0].start.0, 0);
     }
 }

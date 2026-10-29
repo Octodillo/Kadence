@@ -99,8 +99,8 @@ fn loop_wrap_restarts_cleanly() {
 fn live_edits_update_sounding_notes() {
     let mut rig = Rig::with(vec![note(0, 1000, 60, 1), note(0, 1000, 64, 2)]);
     rig.play(0, 100, &[100]);
-    // Shorten 60, delete 64, add 67 under the playhead (not chased) and
-    // a later 69.
+    // Shorten 60, delete 64, add 67 under the playhead (chased in) and a
+    // later 69.
     rig.handle
         .set_sequence(Sequence::new(vec![
             note(0, 150, 60, 1),
@@ -108,14 +108,16 @@ fn live_edits_update_sounding_notes() {
             note(300, 400, 69, 4),
         ]))
         .unwrap();
-    let out = rig.play(100, 500, &[100]);
+    let out = rig.play(100, 600, &[100]);
     assert_eq!(
         simple(&out),
         [
             (100, 64, false),
+            (100, 67, true),
             (150, 60, false),
             (300, 69, true),
-            (400, 69, false)
+            (400, 69, false),
+            (500, 67, false),
         ]
     );
     // Shortening a note to before the playhead stops it at once.
@@ -276,7 +278,33 @@ fn recording_round_trip() {
         ]
     );
     let tempo = SegmentTempoMap::new(120.0);
-    let notes = to_clip_notes(&take, &tempo, 48_000.0, TickTime(PPQ));
+    let notes = to_clip_notes(&take, &tempo, 48_000.0, TickTime(PPQ)..TickTime(2 * PPQ));
     assert_eq!(notes[3].end().0, PPQ);
     assert!(notes.iter().all(|n| n.is_valid()));
+}
+
+#[test]
+fn transposing_a_sounding_note_moves_it() {
+    let mut rig = Rig::with(vec![note(0, 1000, 60, 1)]);
+    rig.play(0, 100, &[100]);
+    rig.handle
+        .set_sequence(Sequence::new(vec![note(0, 1000, 64, 1)]))
+        .unwrap();
+    let out = rig.play(100, 1100, &[100]);
+    assert_eq!(
+        simple(&out),
+        [(100, 60, false), (100, 64, true), (1000, 64, false)]
+    );
+}
+
+#[test]
+fn reset_ends_a_capture() {
+    use daw_core::node::Node;
+    let mut rig = Rig::new();
+    rig.handle.set_armed(true);
+    rig.block(0, 64, true, &[]);
+    rig.player.reset();
+    rig.block(5000, 64, true, &[]);
+    let captured: Vec<Captured> = rig.handle.drain_captured().collect();
+    assert_eq!(captured, [Captured::Stop { at: SampleTime(64) }]);
 }

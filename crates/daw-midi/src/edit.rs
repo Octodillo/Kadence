@@ -200,12 +200,17 @@ pub fn scale_time<N: EditNote>(notes: &mut [N], anchor: TickTime, factor: f64) {
     if !factor.is_finite() || factor <= 0.0 {
         return;
     }
+    let scale = |t: i64| (anchor.0 as f64 + (t - anchor.0) as f64 * factor).round() as i64;
+    // Shift the whole result if it would start before 0, keeping its shape.
+    let Some(first) = notes.iter().map(|n| scale(n.data().start.0)).min() else {
+        return;
+    };
+    let shift = (-first).max(0);
     update(notes, |d| {
-        let start = anchor.0 as f64 + (d.start.0 - anchor.0) as f64 * factor;
-        let end = anchor.0 as f64 + (d.end().0 - anchor.0) as f64 * factor;
-        let start = (start.round() as i64).max(0);
+        let start = scale(d.start.0) + shift;
+        let end = scale(d.end().0) + shift;
         d.start = TickTime(start);
-        d.length = TickTime((end.round() as i64 - start).max(MIN_LENGTH));
+        d.length = TickTime((end - start).max(MIN_LENGTH));
     });
 }
 
@@ -345,17 +350,42 @@ pub fn reverse<N: EditNote>(notes: &mut [N]) {
     update(notes, |d| d.start = TickTime(start.0 + end.0 - d.end().0));
 }
 
-/// Mirrors keys around `axis` (inversion), clamped to the key range.
+/// Mirrors keys around `axis` (inversion). When that would leave the key
+/// range, the whole result moves by octaves until it fits, so the
+/// intervals survive.
 pub fn invert<N: EditNote>(notes: &mut [N], axis: u8) {
+    let mirrored = |k: u8| 2 * axis as i32 - k as i32;
+    let Some(lo) = notes.iter().map(|n| mirrored(n.data().key)).min() else {
+        return;
+    };
+    let hi = notes
+        .iter()
+        .map(|n| mirrored(n.data().key))
+        .max()
+        .unwrap_or(lo);
+    let mut shift = 0;
+    while lo + shift < 0 && hi + shift + 12 <= 127 {
+        shift += 12;
+    }
+    while hi + shift > 127 && lo + shift - 12 >= 0 {
+        shift -= 12;
+    }
+    // Wider than the range allows in octave steps: shift exactly to fit.
+    if lo + shift < 0 {
+        shift = -lo;
+    } else if hi + shift > 127 {
+        shift = 127 - hi;
+    }
     update(notes, |d| {
-        d.key = (2 * axis as i32 - d.key as i32).clamp(0, 127) as u8;
+        d.key = (mirrored(d.key) + shift).clamp(0, 127) as u8
     });
 }
 
 // ---------------------------------------------------------------------------
 // Velocity
 
-fn clamp_velocity(v: f64) -> f64 {
+/// Clamps to 0..1, with NaN and infinities going to 0.
+pub(crate) fn clamp_velocity(v: f64) -> f64 {
     if v.is_finite() {
         v.clamp(0.0, 1.0)
     } else {
@@ -640,5 +670,21 @@ mod tests {
             assert!((x.start.0 - y.start.0).abs() <= 20);
             assert!((x.velocity - y.velocity).abs() <= 0.1 + 1e-12);
         }
+    }
+
+    #[test]
+    fn invert_and_scale_keep_the_group_shape() {
+        let mut notes = [n(0, 10, 10), n(0, 10, 20), n(0, 10, 30)];
+        invert(&mut notes, 120);
+        let keys: Vec<u8> = notes.iter().map(|x| x.key).collect();
+        assert_eq!(keys, [122, 112, 102]);
+        let mut notes = [n(0, 10, 120), n(0, 10, 0)];
+        invert(&mut notes, 60);
+        assert_eq!((notes[0].key, notes[1].key), (0, 120));
+
+        let mut notes = [n(0, 50, 60), n(100, 50, 62)];
+        scale_time(&mut notes, TickTime(200), 2.0);
+        assert_eq!(starts(&notes), [0, 200]);
+        assert!(notes.iter().all(|x| x.length.0 == 100));
     }
 }

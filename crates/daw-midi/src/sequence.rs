@@ -6,6 +6,7 @@
 
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 
+use crate::edit::clamp_velocity;
 use crate::note::NoteData;
 
 /// One note on the timeline, in samples.
@@ -41,10 +42,18 @@ impl Sequence {
         Self::default()
     }
 
-    /// Sorts `notes` by start (then key, then uid) and drops notes with no
-    /// length or an out-of-range key or channel.
+    /// Sorts `notes` by start (then key, then uid) and drops notes that
+    /// cannot sound: no length, an out-of-range key or channel, or a
+    /// velocity that is not above 0 (a zero-velocity note-on means
+    /// note-off to most instruments).
     pub fn new(mut notes: Vec<SeqNote>) -> Self {
-        notes.retain(|n| n.end > n.start && n.key <= 127 && n.channel <= 15);
+        notes.retain(|n| {
+            n.end > n.start
+                && n.key <= 127
+                && n.channel <= 15
+                && n.velocity > 0.0
+                && n.velocity <= 1.0
+        });
         notes.sort_by_key(|n| (n.start, n.key, n.uid));
         let max_len = notes.iter().map(|n| n.end.0 - n.start.0).max().unwrap_or(0);
         Self { notes, max_len }
@@ -72,11 +81,19 @@ impl Sequence {
         self.notes.partition_point(|n| n.start.0 < pos)
     }
 
+    /// Index range that holds every note sounding at `pos` (started before
+    /// it, still playing). Notes in the range may have ended already; check
+    /// `end > pos`.
+    pub fn sounding_range(&self, pos: i64) -> std::ops::Range<usize> {
+        let from = self.first_at_or_after(pos.saturating_sub(self.max_len));
+        from..self.first_at_or_after(pos)
+    }
+
     /// Notes that started before `pos` and are still sounding at it.
     pub fn sounding_at(&self, pos: i64) -> impl Iterator<Item = &SeqNote> {
-        let from = self.first_at_or_after(pos.saturating_sub(self.max_len));
-        let to = self.first_at_or_after(pos);
-        self.notes[from..to].iter().filter(move |n| n.end.0 > pos)
+        self.notes[self.sounding_range(pos)]
+            .iter()
+            .filter(move |n| n.end.0 > pos)
     }
 
     /// The note with this start and uid, if it is still there.
@@ -125,7 +142,7 @@ where
                 end: tempo.ticks_to_samples(TickTime(end), sample_rate),
                 key: n.key,
                 channel: n.channel,
-                velocity: n.velocity.clamp(0.0, 1.0) as f32,
+                velocity: clamp_velocity(n.velocity) as f32,
                 uid,
             });
         }
@@ -194,5 +211,25 @@ mod tests {
         assert_eq!(seq.find(SampleTime(500), 3).map(|n| n.end.0), Some(600));
         assert!(seq.find(SampleTime(500), 1).is_none());
         assert_eq!(uid_from_u128(1 | (3 << 64)), 2);
+    }
+
+    #[test]
+    fn silent_notes_are_not_played() {
+        let tempo = SegmentTempoMap::new(120.0);
+        let seq = compile(
+            [ClipNotes {
+                start: TickTime(0),
+                length: TickTime(PPQ),
+                notes: vec![
+                    (1, NoteData::new(0, 10, 60, 0.0)),
+                    (2, NoteData::new(0, 10, 61, f64::NAN)),
+                    (3, NoteData::new(0, 10, 62, 0.5)),
+                ],
+            }],
+            &tempo,
+            48_000.0,
+        );
+        assert_eq!(seq.len(), 1);
+        assert_eq!(seq.notes()[0].uid, 3);
     }
 }
