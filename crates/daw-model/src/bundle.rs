@@ -113,8 +113,11 @@ pub fn from_json_with(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bundle {
     root: PathBuf,
-    /// The project file's name without extension.
+    /// The project file's name without extension, for naming backups.
     stem: String,
+    /// The project file's name as it is on disk (the extension's case may
+    /// differ from `.kadence`).
+    file_name: String,
 }
 
 impl Bundle {
@@ -134,7 +137,12 @@ impl Bundle {
                     "bundle needs a directory name",
                 ),
             })?;
-        let bundle = Self { root, stem };
+        let file_name = format!("{stem}.{EXTENSION}");
+        let bundle = Self {
+            root,
+            stem,
+            file_name,
+        };
         // Any other project file there would make the bundle ambiguous to open.
         if let Some(existing) = project_files(&bundle.root)?.into_iter().next() {
             return Err(FormatError::Io {
@@ -154,28 +162,38 @@ impl Bundle {
         let invalid = |msg: &str| FormatError::io(path)(std::io::Error::other(msg.to_owned()));
         if !path.is_file() {
             let mut files = project_files(path)?;
+            if files.is_empty() {
+                // The project file is gone but an autosave may be left to
+                // recover from.
+                files = files_with_suffix(path, AUTOSAVE_SUFFIX)?;
+            }
             return match files.len() {
                 0 => Err(FormatError::io(path)(std::io::ErrorKind::NotFound.into())),
                 1 => Self::open(files.remove(0)),
                 _ => Err(invalid("bundle holds more than one project file")),
             };
         }
-        if path.extension().is_none_or(|e| e != EXTENSION) {
-            return Err(invalid("not a .kadence project file"));
-        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| invalid("project file name is not valid UTF-8"))?;
+        // An autosave path stands for the project file next to it.
+        let file_name = strip_suffix_ci(name, ".autosave")
+            .filter(|n| has_suffix_ci(n, PROJECT_SUFFIX))
+            .unwrap_or(name);
+        let stem = strip_suffix_ci(file_name, PROJECT_SUFFIX)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| invalid("not a .kadence project file"))?;
         let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        if root.file_name().is_some_and(|n| n == BACKUPS_DIR) {
+        if is_backups_dir(&root)? {
             return Err(invalid(
                 "this is a backup; open it with read_project and save it into a bundle",
             ));
         }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| invalid("project file name is not valid UTF-8"))?;
         Ok(Self {
             root,
             stem: stem.to_owned(),
+            file_name: file_name.to_owned(),
         })
     }
 
@@ -184,12 +202,11 @@ impl Bundle {
     }
 
     pub fn project_file(&self) -> PathBuf {
-        self.root.join(format!("{}.{EXTENSION}", self.stem))
+        self.root.join(&self.file_name)
     }
 
     pub fn autosave_file(&self) -> PathBuf {
-        self.root
-            .join(format!("{}.{EXTENSION}.autosave", self.stem))
+        self.root.join(format!("{}.autosave", self.file_name))
     }
 
     pub fn audio_dir(&self) -> PathBuf {
@@ -236,7 +253,10 @@ impl Bundle {
         let mut backups: Vec<PathBuf> = fs::read_dir(self.backups_dir())
             .map_err(FormatError::io(self.backups_dir()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == EXTENSION))
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
+            })
             .collect();
         backups.sort();
         let excess = backups.len().saturating_sub(BACKUPS_KEPT);
@@ -255,7 +275,10 @@ impl Bundle {
         let mut v: Vec<PathBuf> = fs::read_dir(&dir)
             .map_err(FormatError::io(&dir))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == EXTENSION))
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
+            })
             .collect();
         v.sort();
         Ok(v)
@@ -330,19 +353,53 @@ impl Bundle {
     }
 }
 
-/// The `.kadence` files directly inside `dir`.
+const PROJECT_SUFFIX: &str = ".kadence";
+const AUTOSAVE_SUFFIX: &str = ".kadence.autosave";
+
+fn has_suffix_ci(name: &str, suffix: &str) -> bool {
+    strip_suffix_ci(name, suffix).is_some()
+}
+
+/// `name` without `suffix`, ignoring ASCII case.
+fn strip_suffix_ci<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    let split = name.len().checked_sub(suffix.len())?;
+    let (head, tail) = (name.get(..split)?, name.get(split..)?);
+    tail.eq_ignore_ascii_case(suffix).then_some(head)
+}
+
+/// The project files directly inside `dir`.
 fn project_files(dir: &Path) -> Result<Vec<PathBuf>, FormatError> {
-    if !dir.exists() {
+    files_with_suffix(dir, PROJECT_SUFFIX)
+}
+
+fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>, FormatError> {
+    if !dir.is_dir() {
         return Ok(Vec::new());
     }
     let mut files = Vec::new();
     for entry in fs::read_dir(dir).map_err(FormatError::io(dir))? {
         let p = entry.map_err(FormatError::io(dir))?.path();
-        if p.extension().is_some_and(|e| e == EXTENSION) && p.is_file() {
+        let matches = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| has_suffix_ci(n, suffix));
+        if matches && p.is_file() {
             files.push(p);
         }
     }
     Ok(files)
+}
+
+/// Whether `dir` is the `backups/` folder of a bundle, rather than a bundle
+/// that happens to be called "backups".
+fn is_backups_dir(dir: &Path) -> Result<bool, FormatError> {
+    if dir.file_name().is_none_or(|n| n != BACKUPS_DIR) {
+        return Ok(false);
+    }
+    match dir.parent() {
+        Some(parent) => Ok(!project_files(parent)?.is_empty()),
+        None => Ok(false),
+    }
 }
 
 /// Reads any project file on its own, such as a backup or an autosave.

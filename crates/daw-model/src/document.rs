@@ -22,6 +22,10 @@ pub struct Document {
     /// History position at the last save, or `None` if that state is gone.
     saved_at: Option<u64>,
     autosaved_revision: u64,
+    /// Whether the bundle's autosave file was written by this document, as
+    /// opposed to left over from an earlier session that may still need
+    /// recovering.
+    wrote_autosave: bool,
     snapshot: Option<ProjectSnapshot>,
 }
 
@@ -41,6 +45,7 @@ impl Document {
             revision: 0,
             saved_at: Some(0),
             autosaved_revision: 0,
+            wrote_autosave: false,
             snapshot: None,
         }
     }
@@ -163,6 +168,8 @@ impl Document {
         self.history.seal();
         self.saved_at = Some(self.history.position());
         self.autosaved_revision = self.revision;
+        // Saving deletes the autosave.
+        self.wrote_autosave = false;
     }
 
     /// Writes an autosave if anything changed since the last save or
@@ -176,10 +183,11 @@ impl Document {
         if !self.is_modified() {
             // Undone back to the saved state: an older autosave would offer
             // to "recover" edits the user took back.
-            if self.autosaved_revision != self.revision {
+            if self.wrote_autosave {
                 bundle.discard_autosave()?;
-                self.autosaved_revision = self.revision;
+                self.wrote_autosave = false;
             }
+            self.autosaved_revision = self.revision;
             return Ok(false);
         }
         if self.revision == self.autosaved_revision {
@@ -187,6 +195,7 @@ impl Document {
         }
         bundle.write_autosave(&self.project)?;
         self.autosaved_revision = self.revision;
+        self.wrote_autosave = true;
         Ok(true)
     }
 }

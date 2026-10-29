@@ -230,7 +230,7 @@ impl Project {
         Ok(())
     }
 
-    pub(crate) fn check_target(&self, source: TrackId, target: TrackId) -> Result<(), ModelError> {
+    fn check_target(&self, source: TrackId, target: TrackId) -> Result<(), ModelError> {
         match self.track(target) {
             Some(t) if matches!(t.kind, TrackKind::Bus | TrackKind::Master) => Ok(()),
             Some(_) => Err(ModelError::Invalid(format!(

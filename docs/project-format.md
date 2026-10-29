@@ -17,8 +17,10 @@ My Song/                      bundle directory
 
 - The project file is named after the bundle directory when the bundle is
   created. Opening accepts either the directory or the `.kadence` file.
-  Backups and autosaves are not bundles: read them with
-  `bundle::read_project` and save the result into a bundle.
+  The extension is matched without regard to case. Backups are not bundles:
+  read them with `bundle::read_project` and save the result into a bundle.
+  Opening the autosave path, or a bundle whose project file is missing but
+  whose autosave remains, resolves to the bundle so `Document::recover` works.
 - A bundle directory holds exactly one `.kadence` file; creating a bundle in a
   directory that already has one fails.
 - Saving copies the current project file into `backups/` (named with a

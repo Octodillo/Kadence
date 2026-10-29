@@ -61,7 +61,7 @@ fn save_as_drops_old_autosave() {
 }
 
 #[test]
-fn open_rejects_backups_autosaves_and_other_files() {
+fn open_rejects_backups_and_other_files() {
     let (p, id) = project_with_track();
     let dir = tempfile::tempdir().unwrap();
     let mut doc = Document::new(p);
@@ -77,7 +77,8 @@ fn open_rejects_backups_autosaves_and_other_files() {
     let backup = bundle.backups().unwrap().pop().unwrap();
     assert!(Bundle::open(&backup).is_err());
     assert!(bundle::read_project(&backup).is_ok());
-    assert!(Bundle::open(bundle.autosave_file()).is_err());
+    // An autosave path stands for its bundle, so recovery can start from it.
+    assert_eq!(Bundle::open(bundle.autosave_file()).unwrap(), bundle);
     let other = dir.path().join("song.json");
     std::fs::write(&other, "{}").unwrap();
     assert!(Bundle::open(&other).is_err());
@@ -165,4 +166,117 @@ fn add_track_rejects_self_routing_and_bad_targets() {
     let dup = (*p.tracks[0]).clone();
     assert!(AddTrack::new(0, dup).apply(&mut p).is_err());
     assert_eq!(p.tracks.len(), 1);
+}
+
+#[test]
+fn bundle_named_backups_reopens() {
+    let (p, _) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("backups")).unwrap();
+    assert_eq!(
+        Document::open(dir.path().join("backups"))
+            .unwrap()
+            .project(),
+        doc.project()
+    );
+}
+
+#[test]
+fn project_file_extension_case_is_ignored() {
+    let (p, _) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Case")).unwrap();
+    let root = dir.path().join("Case");
+    std::fs::rename(root.join("Case.kadence"), root.join("Case.Kadence")).unwrap();
+    assert_eq!(Document::open(&root).unwrap().project(), doc.project());
+    assert_eq!(
+        Document::open(root.join("Case.Kadence")).unwrap().project(),
+        doc.project()
+    );
+}
+
+#[test]
+fn recover_works_when_only_the_autosave_is_left() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Lost");
+    let mut doc = Document::new(p);
+    doc.save_as(&root).unwrap();
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    doc.autosave().unwrap();
+    std::fs::remove_file(root.join("Lost.kadence")).unwrap();
+    assert!(Bundle::open(&root).unwrap().has_newer_autosave());
+    assert_eq!(Document::recover(&root).unwrap().project(), doc.project());
+    assert_eq!(
+        Document::recover(root.join("Lost.kadence.autosave"))
+            .unwrap()
+            .project(),
+        doc.project()
+    );
+}
+
+#[test]
+fn leftover_crash_autosave_survives_edit_and_undo() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Crash");
+    let mut first = Document::new(p);
+    first.save_as(&root).unwrap();
+    first
+        .execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    first.autosave().unwrap();
+    drop(first); // the app crashes
+
+    let mut second = Document::open(&root).unwrap();
+    second
+        .execute(SetTrack::new(id, TrackField::Solo(true)))
+        .unwrap();
+    second.undo().unwrap();
+    assert!(!second.autosave().unwrap());
+    assert!(second.bundle().unwrap().autosave_file().exists());
+}
+
+#[test]
+fn failed_note_edit_does_not_copy_shared_clip() {
+    let mut p = Project::new("N");
+    let mut t = Track::new(TrackKind::Instrument, "I");
+    let mut m = MidiClip::default();
+    m.notes.push(Note::new(
+        daw_core::time::TickTime(0),
+        daw_core::time::TickTime(10),
+        60,
+        0.5,
+    ));
+    let clip = Clip::new(
+        "c",
+        daw_core::time::TickTime(0),
+        daw_core::time::TickTime(100),
+        ClipContent::Midi(m),
+    );
+    let clip_id = clip.id;
+    t.clips.push(clip.into());
+    p.tracks.push(t.into());
+    let mut doc = Document::new(p);
+    let snap = doc.snapshot();
+    let stale = Note::new(
+        daw_core::time::TickTime(0),
+        daw_core::time::TickTime(10),
+        61,
+        0.5,
+    );
+    assert!(
+        doc.execute(EditNotes {
+            clip: clip_id,
+            notes: vec![stale],
+        })
+        .is_err()
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &snap.tracks[0],
+        &doc.project().tracks[0]
+    ));
 }

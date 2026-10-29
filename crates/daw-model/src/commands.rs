@@ -72,8 +72,9 @@ impl Command for Batch {
                 Ok(c) => changes.extend(c),
                 Err(e) => {
                     for done in self.commands[..i].iter_mut().rev() {
-                        let undone = done.revert(project);
-                        debug_assert!(undone.is_ok(), "reverting a just-applied command failed");
+                        if let Err(e2) = done.revert(project) {
+                            rollback_failed(&e, &e2);
+                        }
                     }
                     return Err(e);
                 }
@@ -91,8 +92,9 @@ impl Command for Batch {
                     // Put back what this revert already undid, so a failed
                     // undo leaves the project as it was.
                     for undone in &mut self.commands[i + 1..] {
-                        let redone = undone.apply(project);
-                        debug_assert!(redone.is_ok(), "re-applying a just-reverted command failed");
+                        if let Err(e2) = undone.apply(project) {
+                            rollback_failed(&e, &e2);
+                        }
                     }
                     return Err(e);
                 }
@@ -100,6 +102,14 @@ impl Command for Batch {
         }
         Ok(changes)
     }
+}
+
+/// A command broke the `apply`/`revert` inverse contract while a batch was
+/// rolling back, so the project and history no longer agree. Carrying on would
+/// corrupt the document silently, so stop loudly instead.
+#[cold]
+fn rollback_failed(original: &ModelError, rollback: &ModelError) -> ! {
+    panic!("batch rollback failed ({rollback}) after: {original}");
 }
 
 // ---------------------------------------------------------------------------
@@ -193,17 +203,14 @@ impl Command for AddTrack {
         t.check()?;
         let ids: Vec<Uuid> = t.ids().collect();
         check_ids_free(project, &ids)?;
-        // Nothing routes into a new track yet, so it can't close a loop
-        // unless it routes to itself; its targets just have to be buses.
+        // Nothing routes into a new track yet, so only its own outputs and
+        // sends need checking.
         let targets = match t.output {
             TrackOutput::Bus(b) => Some(b),
             TrackOutput::Master => None,
         };
         for target in targets.into_iter().chain(t.sends.iter().map(|s| s.target)) {
-            if target == t.id {
-                return Err(invalid("a track can't route to itself"));
-            }
-            project.check_target(t.id, target)?;
+            project.can_route(t.id, target)?;
         }
         project.tracks.insert(self.index, self.track.clone());
         Ok(ChangeSet::one(Change::TrackList))
@@ -856,15 +863,23 @@ impl Command for EditNotes {
     }
 
     fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
-        midi(project, self.clip)?;
+        let existing: HashSet<NoteUid> = midi(project, self.clip)?
+            .notes
+            .iter()
+            .map(|n| n.id)
+            .collect();
         let mut seen = HashSet::new();
         for n in &self.notes {
             n.check()?;
             if !seen.insert(n.id) {
                 return Err(invalid("a note is listed twice"));
             }
+            if !existing.contains(&n.id) {
+                // Checked before `swap` so a failed edit doesn't copy a clip
+                // that a snapshot shares.
+                return Err(ModelError::NoteNotFound(n.id));
+            }
         }
-        // `swap` checks that every note exists before changing anything.
         self.swap(project)
     }
 
