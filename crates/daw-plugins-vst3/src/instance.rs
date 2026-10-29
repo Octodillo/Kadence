@@ -1046,10 +1046,10 @@ impl PluginInstance for Vst3Instance {
                     self.descriptor.name
                 );
             }
-            if !controller.is_empty() {
-                if let Err(e) = write(controller, &|s| unsafe { self.controller.setState(s) }) {
-                    log::warn!("vst3 {}: controller setState: {e}", self.descriptor.name);
-                }
+            if !controller.is_empty()
+                && let Err(e) = write(controller, &|s| unsafe { self.controller.setState(s) })
+            {
+                log::warn!("vst3 {}: controller setState: {e}", self.descriptor.name);
             }
         }
         // Values pushed before the load are stale now.

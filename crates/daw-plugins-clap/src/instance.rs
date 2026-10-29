@@ -441,13 +441,13 @@ impl Node for ClapInstance {
             let mut ch = 0;
             for port in &bufs.audio_out {
                 for chan in port.chunks_exact(bufs.max_frames) {
-                    if let Some(dst) = ctx.audio_out.get_mut(ch) {
-                        if dst.len() >= end {
-                            if result.is_ok() {
-                                dst[offset..end].copy_from_slice(&chan[..n]);
-                            } else {
-                                dst[offset..end].fill(0.0);
-                            }
+                    if let Some(dst) = ctx.audio_out.get_mut(ch)
+                        && dst.len() >= end
+                    {
+                        if result.is_ok() {
+                            dst[offset..end].copy_from_slice(&chan[..n]);
+                        } else {
+                            dst[offset..end].fill(0.0);
                         }
                     }
                     ch += 1;
@@ -589,13 +589,13 @@ impl plugin::PluginInstance for ClapInstance {
             // The user closed the floating window; release the editor's resources.
             plugin::PluginInstance::close_editor(self);
         }
-        if flush && self.processor.is_none() {
-            if let (Some(params), Some(mut handle)) =
+        if flush
+            && self.processor.is_none()
+            && let (Some(params), Some(mut handle)) =
                 (self.ext.params, self.inst().inactive_plugin_handle())
-            {
-                let mut out = EventBuffer::new();
-                params.flush(&mut handle, &InputEvents::empty(), &mut out.as_output());
-            }
+        {
+            let mut out = EventBuffer::new();
+            params.flush(&mut handle, &InputEvents::empty(), &mut out.as_output());
         }
         let (latency_changed, rescan) = self.inst().access_handler(|h| {
             (
