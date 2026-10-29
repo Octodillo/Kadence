@@ -1,3 +1,4 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -257,7 +258,9 @@ impl AudioBackend for JackBackend {
             shared: self.shared.clone(),
             frame_time: 0,
             rt_check_in: 0,
+            panicked: false,
         };
+        self.shared.callback_panicked.store(false, Relaxed);
         let notifications = Notifications {
             shared: self.shared.clone(),
         };
@@ -449,12 +452,30 @@ struct Processor {
     /// Cycles until the next real-time scheduling check; `u32::MAX` once
     /// the thread is known to be real-time.
     rt_check_in: u32,
+    /// The callback panicked; it is not called again.
+    panicked: bool,
 }
 
 impl ProcessHandler for Processor {
     fn process(&mut self, _: &Client, ps: &ProcessScope) -> Control {
-        let shared = self.shared.clone();
-        crate::rt_guard(&shared, || self.cycle(ps));
+        if !self.panicked {
+            let shared = self.shared.clone();
+            // Catch the panic here: the jack crate's own handler prints, leaks
+            // the payload and quits, which leaves us looking alive but silent.
+            let ok = crate::rt_guard(&shared, || {
+                catch_unwind(AssertUnwindSafe(|| self.cycle(ps))).is_ok()
+            });
+            if ok {
+                return Control::Continue;
+            }
+            self.panicked = true;
+            self.shared.callback_panicked.store(true, Relaxed);
+        }
+        self.silence(ps);
+        self.shared.cycles.fetch_add(1, Relaxed);
+        self.shared
+            .frames
+            .fetch_add(u64::from(ps.n_frames()), Relaxed);
         Control::Continue
     }
 
@@ -465,6 +486,17 @@ impl ProcessHandler for Processor {
 }
 
 impl Processor {
+    /// Writes silence to every output, for cycles without a callback.
+    fn silence(&mut self, ps: &ProcessScope) {
+        for port in &mut self.ports.audio_out {
+            port.as_mut_slice(ps).fill(0.0);
+        }
+        if let Some(port) = &mut self.ports.midi_out {
+            // Creating the writer clears the buffer.
+            let _ = port.writer(ps);
+        }
+    }
+
     fn cycle(&mut self, ps: &ProcessScope) {
         // PipeWire promotes its data thread to real-time asynchronously
         // (through rtkit or the xdg-desktop-portal), often after the first

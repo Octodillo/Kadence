@@ -22,6 +22,11 @@ pub struct BackendStats {
     /// The audio server shut down or kicked us out. The backend is dead and
     /// must be closed and reopened.
     pub server_gone: bool,
+    /// The process callback panicked. The backend keeps running but no
+    /// longer calls it, and outputs silence until the next
+    /// [`start`](crate::AudioBackend::start). (JACK only; the dummy backend's
+    /// `stop` returns an error instead.)
+    pub callback_panicked: bool,
     /// Allocations caught inside cycles (debug builds with
     /// `assert_no_alloc::AllocDisabler` installed; always 0 otherwise).
     pub rt_alloc_violations: u64,
@@ -39,6 +44,7 @@ pub(crate) struct SharedStats {
     /// f32 bits; NaN = unknown.
     dsp_load: AtomicU32,
     pub server_gone: AtomicBool,
+    pub callback_panicked: AtomicBool,
     pub rt_alloc_violations: AtomicU64,
     pub sample_rate: AtomicU32,
     pub buffer_size: AtomicU32,
@@ -72,6 +78,7 @@ impl SharedStats {
             },
             dsp_load: (!load.is_nan()).then_some(load),
             server_gone: self.server_gone.load(Relaxed),
+            callback_panicked: self.callback_panicked.load(Relaxed),
             rt_alloc_violations: self.rt_alloc_violations.load(Relaxed),
         }
     }
