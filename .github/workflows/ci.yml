@@ -34,7 +34,9 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
-        run: xvfb-run -a cargo nextest run --workspace --no-tests=warn
+        # -noreset: otherwise Xvfb resets when one test process disconnects
+        # and drops the connection of a test opening a plugin UI in parallel.
+        run: xvfb-run -a -s "-noreset" cargo nextest run --workspace --no-tests=warn
         env:
           DAW_REQUIRE_LV2_PLUGINS: 1
       - name: doc tests
