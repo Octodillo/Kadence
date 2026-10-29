@@ -16,9 +16,13 @@ daw-core = { path = "crates/daw-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
+assert_no_alloc = { version = "1", features = ["warn_debug"] }
+loom = "0.7"
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [workspace.lints.clippy]
 dbg_macro = "warn"
