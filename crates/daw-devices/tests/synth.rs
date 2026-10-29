@@ -49,6 +49,16 @@ fn plays_in_tune() {
     assert!(crossings.abs_diff(440) <= 1, "{crossings}");
 }
 
+/// Keys above 127 are clamped on note-on, so the note-off must clamp too.
+#[test]
+fn out_of_range_key_note_off_releases() {
+    let s = Setup::default();
+    let mut synth = Synth::new();
+    let events = [(0, note_on(130, 1.0)), (1000, note_off(130))];
+    render(&mut synth, 48000, &[], &events, s);
+    assert_eq!(synth.active_voices(), 0);
+}
+
 #[test]
 fn heavy_polyphony_stays_bounded_and_realtime_safe() {
     let s = Setup::default();
