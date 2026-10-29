@@ -88,6 +88,12 @@ impl ChunkResampler {
         })
     }
 
+    /// Output frames to run through after a reset before the output is clean. A seek
+    /// starts this far early and drops the lead-in.
+    pub fn warmup_frames(&self) -> usize {
+        2 * self.output[0].len().max(self.rs.output_delay())
+    }
+
     pub fn channels(&self) -> usize {
         self.channels
     }
