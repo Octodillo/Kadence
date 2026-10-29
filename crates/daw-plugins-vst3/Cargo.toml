@@ -18,7 +18,7 @@ libc = "0.2"
 log = "0.4"
 
 [dev-dependencies]
-assert_no_alloc = "1.1"
+assert_no_alloc.workspace = true
 tempfile = "3"
 
 # A tiny VST3 plugin used by the tests. `cargo test` builds examples before running tests.

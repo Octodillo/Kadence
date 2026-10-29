@@ -12,5 +12,12 @@ publish.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(loom)'.dependencies]
+loom.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
+proptest.workspace = true
+
 [lints]
 workspace = true

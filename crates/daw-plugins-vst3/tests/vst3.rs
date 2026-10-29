@@ -88,7 +88,14 @@ fn run(
             events_in: &events_in,
             events_out: &mut events_out,
         };
+        // The workspace enables `warn_debug`, so allocations are counted rather than aborting.
+        let before = assert_no_alloc::violation_count();
         assert_no_alloc(|| plugin.process(&mut ctx));
+        assert_eq!(
+            assert_no_alloc::violation_count(),
+            before,
+            "process allocated"
+        );
     }
     let out_events = events_out.iter().copied().collect();
     let mut outs = outs.into_iter();
