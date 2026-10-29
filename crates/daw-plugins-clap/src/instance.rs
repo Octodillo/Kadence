@@ -74,7 +74,6 @@ struct Buffers {
     in_ports: AudioPorts,
     out_ports: AudioPorts,
     events_in: EventBuffer,
-    events_out: EventBuffer,
 }
 
 impl Buffers {
@@ -95,7 +94,6 @@ impl Buffers {
                 layout.audio_out.len(),
             ),
             events_in: EventBuffer::with_capacity(EVENT_CAPACITY),
-            events_out: EventBuffer::with_capacity(EVENT_CAPACITY),
         }
     }
 }
@@ -244,9 +242,23 @@ impl ClapInstance {
 
     fn deactivate(&mut self) {
         if let Some(processor) = self.processor.take() {
-            let stopped = processor.into_stopped();
+            // `stop_processing` is an audio-thread call. The engine has stopped calling `process`
+            // by the time the main thread deactivates, so the main thread stands in for it.
+            let stopped = {
+                let _scope = AudioThreadScope::enter();
+                processor.into_stopped()
+            };
             self.inst().deactivate(stopped);
         }
+    }
+
+    /// What [`Node::prepare`] does, but reporting activation failure instead of leaving the
+    /// plugin silent.
+    pub fn try_prepare(&mut self, sample_rate: f64, max_frames: u32) -> Result<(), PluginError> {
+        self.sample_rate = sample_rate;
+        self.max_frames = max_frames.max(1);
+        self.steady_time = 0;
+        self.activate()
     }
 
     fn activate(&mut self) -> Result<(), PluginError> {
@@ -352,10 +364,7 @@ impl Node for ClapInstance {
     }
 
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
-        self.sample_rate = sample_rate;
-        self.max_frames = max_frames.max(1);
-        self.steady_time = 0;
-        if let Err(e) = self.activate() {
+        if let Err(e) = self.try_prepare(sample_rate, max_frames) {
             // `Node::prepare` cannot fail; an inactive plugin outputs silence.
             eprintln!("{e}");
         }
@@ -395,7 +404,6 @@ impl Node for ClapInstance {
             }
 
             bufs.events_in.clear();
-            bufs.events_out.clear();
             while let Some(e) = pending.peek() {
                 let frame = e.frame as usize;
                 if frame >= end && !last {
@@ -428,12 +436,19 @@ impl Node for ClapInstance {
                         port.chunks_exact_mut(max).map(|c| &mut c[..n]),
                     ),
                 }));
-            let transport = events::transport(ctx.transport, u32::try_from(offset).unwrap_or(0));
+            let frame_offset = u32::try_from(offset).unwrap_or(0);
+            let transport = events::transport(ctx.transport, frame_offset);
+            // The plugin's output events are converted straight into the context's fixed-size
+            // list, so a plugin that floods events cannot make the host allocate.
+            let mut sink = events::Sink {
+                out: &mut *ctx.events_out,
+                frame_offset,
+            };
             let result = processor.process(
                 &inputs,
                 &mut outputs,
                 &bufs.events_in.as_input(),
-                &mut bufs.events_out.as_output(),
+                &mut OutputEvents::from_buffer(&mut sink),
                 Some(self.steady_time),
                 Some(&transport),
             );
@@ -456,13 +471,6 @@ impl Node for ClapInstance {
             for dst in ctx.audio_out.iter_mut().skip(ch) {
                 if dst.len() >= end {
                     dst[offset..end].fill(0.0);
-                }
-            }
-
-            let frame_offset = u32::try_from(offset).unwrap_or(0);
-            for e in bufs.events_out.iter() {
-                if let Some(e) = events::from_clap(e, frame_offset) {
-                    let _ = ctx.events_out.push(e);
                 }
             }
 

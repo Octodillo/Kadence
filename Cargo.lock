@@ -326,6 +326,7 @@ dependencies = [
  "daw-core",
  "daw-plugins-clap",
  "daw-plugins-vst3",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

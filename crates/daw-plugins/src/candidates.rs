@@ -13,17 +13,23 @@ pub fn bundle_extension(kind: &PluginFormatKind) -> &'static str {
     }
 }
 
-/// Every bundle of `kind` under `roots`, sorted and without duplicates. A root may itself be a
+/// Every bundle of `kind` under `roots`, without duplicates. Roots keep their order, so earlier
+/// search paths take precedence; bundles within one root are sorted. A root may itself be a
 /// bundle. The walk does not descend into bundles (VST3 and LV2 bundles are directories) and
 /// skips anything it cannot read.
 pub fn find_candidates(kind: &PluginFormatKind, roots: &[PathBuf]) -> Vec<PathBuf> {
     let ext = bundle_extension(kind);
-    let mut found = Vec::new();
+    let mut found: Vec<PathBuf> = Vec::new();
     for root in roots {
-        walk(root, ext, &mut found, 0);
+        let mut here = Vec::new();
+        walk(root, ext, &mut here, 0);
+        here.sort();
+        for bundle in here {
+            if !found.contains(&bundle) {
+                found.push(bundle);
+            }
+        }
     }
-    found.sort();
-    found.dedup();
     found
 }
 

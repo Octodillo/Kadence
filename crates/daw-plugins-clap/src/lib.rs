@@ -72,7 +72,7 @@ impl PluginFormat for ClapFormat {
         }
         let entry = load_entry(&d.path)?;
         let mut instance = ClapInstance::new(&entry, d.clone())?;
-        daw_core::node::Node::prepare(&mut instance, sample_rate, max_frames);
+        instance.try_prepare(sample_rate, max_frames)?;
         Ok(Box::new(instance))
     }
 }

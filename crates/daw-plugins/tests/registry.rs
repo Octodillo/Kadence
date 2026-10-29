@@ -225,3 +225,49 @@ fn scan_child_ignores_other_arguments() {
     let registry = default_registry();
     assert!(daw_plugins::run_scan_child(&registry, ["--help".into()]).is_none());
 }
+
+#[test]
+fn a_helper_process_holding_the_pipe_cannot_hang_the_scan() {
+    let start = std::time::Instant::now();
+    let err = sh("sleep 10 & echo '[]'")
+        .with_timeout(Duration::from_millis(300))
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap_err();
+    assert!(matches!(err, ScanError::TimedOut(_)), "{err}");
+    assert!(start.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn scanner_problems_are_not_cached_as_plugin_failures() {
+    let dir = plugin_dir();
+    let mut registry = default_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    let missing = Scanner::new("/nonexistent/scanner", Vec::<String>::new());
+    let report = registry.scan(&missing, &mut cache);
+    assert_eq!(report.failed.len(), 1);
+    assert!(cache.is_empty());
+
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!((report.scanned, report.failed.len()), (1, 0));
+    assert_eq!(registry.plugins().len(), 1);
+}
+
+#[test]
+fn earlier_search_paths_win_for_duplicate_plugins() {
+    let first = plugin_dir();
+    let second = plugin_dir();
+    let mut registry = default_registry();
+    // Listed so that the second directory would sort first by path.
+    let (a, b) = if first.path() < second.path() {
+        (second.path(), first.path())
+    } else {
+        (first.path(), second.path())
+    };
+    registry.set_search_paths(PluginFormatKind::Clap, vec![a.to_owned(), b.to_owned()]);
+    let report = registry.scan(&scanner(), &mut ScanCache::new());
+    assert_eq!(report.scanned, 2);
+    assert_eq!(registry.plugins().len(), 1);
+    assert!(registry.plugins()[0].path.starts_with(a));
+}
