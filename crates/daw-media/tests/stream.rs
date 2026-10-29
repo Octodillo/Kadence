@@ -242,3 +242,127 @@ fn dropping_reader_lets_streamer_release_the_stream() {
     }
     drop(streamer); // joins the fill thread
 }
+
+#[test]
+fn resampled_seek_matches_continuous_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), 9, 44_100, 2.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let read_from = |start: i64| {
+        let mut r = streamer.open(&path).unwrap();
+        r.cue(SampleTime(start));
+        wait_ready(std::slice::from_mut(&mut r));
+        let t = Instant::now();
+        while r.buffered_frames() < 16_384 + 4096 {
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "fill never caught up"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut l = vec![0.0; 16_384];
+        let mut rr = vec![0.0; 16_384];
+        assert_eq!(
+            r.read(SampleTime(start), &mut [&mut l[..], &mut rr[..]]),
+            ReadStatus::Ok
+        );
+        l
+    };
+    let continuous = read_from(0);
+    for start in [7i64, 161, 1234, 9001] {
+        let seeked = read_from(start);
+        // From the very first frame, the seeked stream must line up sample for sample
+        // with continuous playback: no restart transient, no fractional-frame shift.
+        for i in 0..(16_384 - start as usize) {
+            let d = (seeked[i] - continuous[i + start as usize]).abs();
+            assert!(d < 1e-3, "start {start} frame {i}: diff {d}");
+        }
+    }
+}
+
+#[test]
+fn repeated_cue_while_pending_still_becomes_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), 4, RATE, 3.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let mut r = streamer.open(&path).unwrap();
+    let target = SampleTime(RATE as i64 + 5);
+    let t = Instant::now();
+    // A pre-roll loop that cues every cycle until ready must not keep restarting the seek.
+    loop {
+        r.cue(target);
+        if r.is_ready() {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(5), "never became ready");
+    }
+    let mut l = vec![0.0; BLOCK];
+    let mut rr = vec![0.0; BLOCK];
+    assert_eq!(
+        r.read(target, &mut [&mut l[..], &mut rr[..]]),
+        ReadStatus::Ok
+    );
+    assert!((l[0] - expected(4, 0, target.0, RATE)).abs() < 1e-6);
+}
+
+#[test]
+fn odd_rate_seek_is_ready_only_with_data_at_the_target() {
+    let dir = tempfile::tempdir().unwrap();
+    // gcd(22_254, 48_000) = 6, so an aligned seek period would be 8000 engine frames,
+    // longer than a fill block.
+    let path = write_file(dir.path(), 2, 22_254, 2.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let mut r = streamer.open(&path).unwrap();
+    for target in [10_000i64, 31_999, 40_000] {
+        r.cue(SampleTime(target));
+        wait_ready(std::slice::from_mut(&mut r));
+        let mut l = vec![0.0; BLOCK];
+        let mut rr = vec![0.0; BLOCK];
+        assert_eq!(
+            r.read(SampleTime(target), &mut [&mut l[..], &mut rr[..]]),
+            ReadStatus::Ok,
+            "target {target}"
+        );
+        // Values match the file at the target. The odd ratio leaves a sub-frame offset,
+        // so allow about one frame of slope.
+        for (f, s) in l.iter().enumerate() {
+            let want = expected(2, 0, target + f as i64, RATE);
+            assert!(
+                (s - want).abs() < 0.02,
+                "target {target} frame {f}: {s} vs {want}"
+            );
+        }
+    }
+    assert_eq!(r.underruns(), 0);
+}
+
+#[test]
+fn rolling_through_a_locate_reports_pending_not_underrun() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), 6, 44_100, 4.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let mut r = streamer.open(&path).unwrap();
+    wait_ready(std::slice::from_mut(&mut r));
+    let mut l = vec![0.0; BLOCK];
+    let mut rr = vec![0.0; BLOCK];
+    // Locate, and keep the transport rolling at real-time pace while the seek is served.
+    let start = Instant::now();
+    let period = Duration::from_secs_f64(BLOCK as f64 / f64::from(RATE));
+    let mut served = false;
+    for cycle in 0..400 {
+        let pos = 2 * RATE as i64 + (cycle * BLOCK) as i64;
+        let st = r.read(SampleTime(pos), &mut [&mut l[..], &mut rr[..]]);
+        if st == ReadStatus::Ok {
+            served = true;
+            break;
+        }
+        // Until the seek is served, the gap is reported as Pending, never Underrun.
+        assert_eq!(st, ReadStatus::Pending, "cycle {cycle}");
+        let deadline = start + period * (cycle as u32 + 1);
+        if let Some(d) = deadline.checked_duration_since(Instant::now()) {
+            std::thread::sleep(d);
+        }
+    }
+    assert!(served, "the seek was never served while rolling");
+    assert_eq!(r.underruns(), 0);
+}

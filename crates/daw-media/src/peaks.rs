@@ -151,6 +151,51 @@ impl PeakBuilder {
     }
 }
 
+/// Delete temp files a crashed save left next to `cache` (anything matching
+/// `<cache>.<pid>-<n>.tmp` older than an hour; younger ones may be in use).
+fn remove_stale_temps(cache: &Path) {
+    let (Some(dir), Some(name)) = (cache.parent(), cache.file_name()) else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        // Exactly `<cache>.<pid>-<n>.tmp`; checked before any stat so big sample
+        // folders cost one name comparison per entry.
+        let ours = file_name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+            .and_then(|id| id.split_once('-'))
+            .is_some_and(|(pid, n)| {
+                !pid.is_empty()
+                    && !n.is_empty()
+                    && pid.bytes().all(|b| b.is_ascii_digit())
+                    && n.bytes().all(|b| b.is_ascii_digit())
+            });
+        if !ours {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > 3600);
+        if old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Size and mtime of the source, used to tell whether a cache is stale.
 fn source_stamp(audio: &Path) -> Result<(u64, i64)> {
     let meta = fs::metadata(audio).map_err(|e| MediaError::io(audio, e))?;
@@ -195,7 +240,9 @@ impl PeakCache {
             return Ok(cache);
         }
         let cache = Self::build(audio)?;
-        cache.save(&cache_path, stamp)?;
+        // Saving is best-effort: a read-only sample library or a full disk still gets its
+        // waveform, it is just rebuilt next time. Use `save_for` to see the error.
+        let _ = cache.save(&cache_path, stamp);
         Ok(cache)
     }
 
@@ -208,8 +255,25 @@ impl PeakCache {
     fn save(&self, path: &Path, (len, mtime): (u64, i64)) -> Result<()> {
         let io = |e| MediaError::io(path, e);
         // Write to a temp name and rename so readers never see a half-written cache.
-        let tmp = path.with_extension("peaks.tmp");
-        let mut w = BufWriter::new(fs::File::create(&tmp).map_err(io)?);
+        // A unique temp name, so two savers of the same cache (say the recorder and the
+        // UI) never truncate, rename or delete each other's file.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("peaks.{}-{n}.tmp", std::process::id()));
+        remove_stale_temps(path);
+        let result = self
+            .write_to(&tmp, (len, mtime))
+            .and_then(|()| fs::rename(&tmp, path).map_err(io));
+        if result.is_err() {
+            // Don't leave a partial temp file next to the user's audio.
+            let _ = fs::remove_file(&tmp);
+        }
+        result
+    }
+
+    fn write_to(&self, tmp: &Path, (len, mtime): (u64, i64)) -> Result<()> {
+        let io = |e| MediaError::io(tmp, e);
+        let mut w = BufWriter::new(fs::File::create(tmp).map_err(io)?);
         let mut put = |b: &[u8]| w.write_all(b).map_err(io);
         put(MAGIC)?;
         put(&VERSION.to_le_bytes())?;
@@ -228,14 +292,15 @@ impl PeakCache {
         w.into_inner()
             .map_err(|e| io(e.into_error()))?
             .sync_all()
-            .map_err(io)?;
-        fs::rename(&tmp, path).map_err(io)
+            .map_err(io)
     }
 
     fn load(path: &Path, stamp: (u64, i64)) -> Result<Self> {
         let io = |e| MediaError::io(path, e);
         let bad = |what: &str| MediaError::Peaks(format!("{}: {what}", path.display()));
-        let mut r = BufReader::new(fs::File::open(path).map_err(io)?);
+        let file = fs::File::open(path).map_err(io)?;
+        let file_len = file.metadata().map_err(io)?.len();
+        let mut r = BufReader::new(file);
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic).map_err(io)?;
         if &magic != MAGIC {
@@ -258,16 +323,19 @@ impl PeakCache {
         let channels = get!(u32) as usize;
         let frames = get!(u64);
         let n = get!(u32) as usize;
-        if n > 64 || channels == 0 {
+        if n == 0 || n > 64 || channels == 0 || channels > 1024 {
             return Err(bad("corrupt header"));
         }
         let mut levels = Vec::with_capacity(n);
         for _ in 0..n {
             let frames_per_peak = get!(u32);
             let len = get!(u64) as usize;
-            let expected =
-                frames.div_ceil(u64::from(frames_per_peak.max(1))) as usize * 2 * channels;
-            if len != expected {
+            // Everything here is untrusted: check before doing arithmetic or allocating.
+            let expected = (frames_per_peak > 0)
+                .then(|| frames.div_ceil(u64::from(frames_per_peak)))
+                .and_then(|peaks| peaks.checked_mul(2 * channels as u64))
+                .filter(|&e| e as usize == len && e.saturating_mul(2) <= file_len);
+            if expected.is_none() {
                 return Err(bad("corrupt level"));
             }
             let mut bytes = vec![0u8; len * 2];
