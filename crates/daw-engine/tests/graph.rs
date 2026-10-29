@@ -281,3 +281,22 @@ fn checks_ports_again_after_prepare() {
         Err(CompileError::TooManyChannels { channels: 65, .. })
     ));
 }
+
+#[test]
+fn send_graph_refuses_a_graph_built_for_another_config() {
+    let (mut ctl, mut proc) = EngineController::new(config(1024));
+    let small = CompiledGraph::compile(GraphDesc::new(0, 1), 48_000.0, 64, 16).unwrap();
+    assert!(matches!(
+        ctl.send_graph(Box::new(small)),
+        Err(daw_engine::SendError::Config(_))
+    ));
+    let other_rate = CompiledGraph::compile(GraphDesc::new(0, 1), 44_100.0, 1024, 16).unwrap();
+    assert!(matches!(
+        ctl.send_graph(Box::new(other_rate)),
+        Err(daw_engine::SendError::Config(_))
+    ));
+    let larger = CompiledGraph::compile(GraphDesc::new(0, 1), 48_000.0, 2048, 16).unwrap();
+    assert!(ctl.send_graph(Box::new(larger)).is_ok());
+    run(&mut proc, 512, &EventList::with_capacity(0));
+    assert_eq!(ctl.graphs_swapped(), 1);
+}
