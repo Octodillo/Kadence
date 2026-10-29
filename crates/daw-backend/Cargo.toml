@@ -1,0 +1,25 @@
+[package]
+name = "daw-backend"
+description = "Audio and MIDI I/O: JACK (also PipeWire, through pipewire-jack) and a dummy backend for tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+daw-core.workspace = true
+thiserror.workspace = true
+assert_no_alloc.workspace = true
+# Loads libjack at run time, so the binary starts without JACK installed.
+# Building still needs jack.pc (libjack-jackd2-dev or pipewire-jack).
+jack = "0.13"
+libc = "0.2"
+log = "0.4"
+
+[dev-dependencies]
+ctrlc = "3"
+
+[lints]
+workspace = true

@@ -1076,10 +1076,10 @@ impl PluginInstance for Vst3Instance {
         host().run_loop.pump();
         self.flush_to_controller();
         self.handle_restart();
-        if let Some(editor) = &mut self.editor {
-            if !editor.pump() {
-                self.editor = None;
-            }
+        if let Some(editor) = &mut self.editor
+            && !editor.pump()
+        {
+            self.editor = None;
         }
     }
 }
