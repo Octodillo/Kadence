@@ -299,7 +299,9 @@ impl Sampler {
             .iter_mut()
             .filter(|v| v.active && !v.env.is_releasing())
         {
-            if (id >= 0 && v.id == id) || (id < 0 && v.key == key) {
+            // Match by id when both sides have one, otherwise by key, so an
+            // id-less (raw MIDI) note still ends on an off that has an id.
+            if (id >= 0 && v.id == id) || ((id < 0 || v.id < 0) && v.key == key) {
                 v.env.gate_off();
             }
         }

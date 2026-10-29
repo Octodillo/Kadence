@@ -3,6 +3,7 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
+use daw_core::event::EventKind;
 use daw_devices::devices::sampler::*;
 use daw_devices::{Device, SampleBuffer, Sampler, Zone};
 
@@ -95,6 +96,22 @@ fn key_mapped_releases_on_note_off() {
     );
     let len = sounding(&r.channels[0]);
     assert!(len > 1000 && len < 3000, "{len}");
+}
+
+#[test]
+fn note_off_with_id_releases_note_without_id() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 48000], s.sample_rate);
+    sampler.set_param(RELEASE, 10.0);
+    let off = EventKind::NoteOff {
+        channel: 0,
+        key: 60,
+        velocity: 0.0,
+        note_id: 7,
+    };
+    let events = [(0, EventKind::Midi([0x90, 60, 100])), (1000, off)];
+    render(&mut sampler, 48000, &[], &events, s);
+    assert_eq!(sampler.active_voices(), 0);
 }
 
 #[test]
