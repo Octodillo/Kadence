@@ -17,7 +17,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true
 tempfile = "3"
 
 [lints]
