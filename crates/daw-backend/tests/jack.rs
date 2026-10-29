@@ -81,6 +81,7 @@ fn runs_cycles_and_lists_ports() {
     let before = b.stats().cycles;
     b.start(Box::new(|_| {})).unwrap();
     wait(&b, |s| s.cycles >= before + 5);
+    assert_eq!(b.stats().rt_alloc_violations, 0);
     b.close().unwrap();
 }
 
@@ -89,10 +90,12 @@ fn runs_cycles_and_lists_ports() {
 fn audio_and_midi_flow_between_two_clients() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut src = JackBackend::new();
+    // Every port kind in both directions on both sides, so the allocation
+    // check covers the whole JACK cycle.
     src.open(BackendConfig {
-        audio_inputs: 0,
+        audio_inputs: 1,
         audio_outputs: 1,
-        midi_input: false,
+        midi_input: true,
         midi_output: true,
         ..cfg("wu2-src")
     })
@@ -100,8 +103,9 @@ fn audio_and_midi_flow_between_two_clients() {
     let mut dst = JackBackend::new();
     dst.open(BackendConfig {
         audio_inputs: 1,
-        audio_outputs: 0,
+        audio_outputs: 1,
         midi_input: true,
+        midi_output: true,
         ..cfg("wu2-dst")
     })
     .unwrap();
@@ -125,6 +129,7 @@ fn audio_and_midi_flow_between_two_clients() {
     let notes = Arc::new(AtomicU64::new(0));
     let (a, n) = (audio_ok.clone(), notes.clone());
     dst.start(Box::new(move |c| {
+        c.audio_out[0].fill(0.0);
         if c.audio_in[0].iter().all(|&x| x == 0.25) {
             a.fetch_add(1, Relaxed);
         }
@@ -152,6 +157,8 @@ fn audio_and_midi_flow_between_two_clients() {
         src.connect("wu2-dst:audio_in_1", "wu2-src:audio_out_1")
             .is_err()
     );
+    assert_eq!(src.stats().rt_alloc_violations, 0);
+    assert_eq!(dst.stats().rt_alloc_violations, 0);
     src.close().unwrap();
     dst.close().unwrap();
 }
@@ -178,6 +185,8 @@ fn auto_connect_reaches_physical_ports() {
         // Try to connect again: JACK reports the existing connection.
         assert!(b.connect("wu2-auto:audio_out_1", &first.name).is_err());
     }
+    wait(&b, |s| s.cycles >= 5);
+    assert_eq!(b.stats().rt_alloc_violations, 0);
     b.close().unwrap();
 }
 
