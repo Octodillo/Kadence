@@ -265,6 +265,24 @@ fn a_panicking_callback_is_contained() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut b = JackBackend::new();
     b.open(cfg("wu2-panic")).unwrap();
+    // A listener on our first output, counting cycles with sound in them.
+    let mut ear = JackBackend::new();
+    ear.open(BackendConfig {
+        audio_inputs: 1,
+        audio_outputs: 0,
+        midi_input: false,
+        midi_output: false,
+        ..cfg("wu2-ear")
+    })
+    .unwrap();
+    let loud = Arc::new(AtomicU64::new(0));
+    let l2 = loud.clone();
+    ear.start(Box::new(move |c| {
+        if c.audio_in[0].iter().any(|&x| x != 0.0) {
+            l2.fetch_add(1, Relaxed);
+        }
+    }))
+    .unwrap();
     let calls = Arc::new(AtomicU64::new(0));
     let c2 = calls.clone();
     b.start(Box::new(move |c| {
@@ -276,12 +294,19 @@ fn a_panicking_callback_is_contained() {
         }
     }))
     .unwrap();
+    ear.connect("wu2-panic:audio_out_1", "wu2-ear:audio_in_1")
+        .unwrap();
     wait(&b, |s| s.callback_panicked);
     // The backend keeps running (silently) and no longer calls the callback.
     let after = b.stats().cycles;
-    wait(&b, |s| s.cycles >= after + 10);
+    wait(&b, |s| s.cycles >= after + 2);
+    let loud_after = loud.load(Relaxed);
+    wait(&b, |s| s.cycles >= after + 12);
     assert_eq!(calls.load(Relaxed), 11);
     assert!(b.is_running());
+    // The panicking cycle's half-written output is not left playing.
+    assert_eq!(loud.load(Relaxed), loud_after, "output not silenced");
+    ear.close().unwrap();
     // Teardown is clean, and a new callback starts afresh.
     b.stop().unwrap();
     let before = b.stats().cycles;
