@@ -1,7 +1,10 @@
 //! Feed-forward stereo-linked compressor with a soft knee, computed in the
 //! log domain with a smooth branching peak detector.
 
+use std::sync::Arc;
+
 use daw_core::event::ParamId;
+use daw_core::meter::PeakMeter;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
 use crate::dsp::{db_to_gain, flush};
@@ -75,6 +78,8 @@ pub struct Compressor {
     release: f32,
     /// Smoothed gain reduction in dB (positive).
     envelope: f32,
+    /// Highest gain reduction since the UI last read it.
+    gr_meter: Arc<PeakMeter>,
 }
 
 impl Default for Compressor {
@@ -104,6 +109,7 @@ impl Compressor {
             attack: 0.0,
             release: 0.0,
             envelope: 0.0,
+            gr_meter: Arc::new(PeakMeter::new()),
         };
         c.prepare(48000.0, 0);
         c
@@ -114,6 +120,12 @@ impl Compressor {
         self.envelope
     }
 
+    /// The highest gain reduction in dB since the last read, for a meter on
+    /// another thread. Grab it before the compressor moves into the engine.
+    pub fn gain_reduction_meter(&self) -> Arc<PeakMeter> {
+        self.gr_meter.clone()
+    }
+
     fn apply_param(&mut self, _id: ParamId) {
         let sr = self.sample_rate;
         self.attack = (-1000.0 / (self.params.get(ATTACK) * sr)).exp() as f32;
@@ -121,7 +133,11 @@ impl Compressor {
     }
 }
 
-impl_device!(Compressor, INFO, PARAMS);
+impl_device!(Compressor, INFO, PARAMS, {
+    fn gain_reduction_meter(&self) -> Option<Arc<PeakMeter>> {
+        Some(self.gr_meter.clone())
+    }
+});
 
 impl Segmented for Compressor {
     fn param_event(&mut self, param: ParamId, value: f64) {
@@ -133,6 +149,7 @@ impl Segmented for Compressor {
         let (threshold, ratio, knee) = (p.get_f32(THRESHOLD), p.get_f32(RATIO), p.get_f32(KNEE));
         let makeup = p.get(MAKEUP);
         let mix = p.get_f32(MIX);
+        let mut most = 0.0f32;
         for i in start..end {
             let (l, r) = (input(ctx, 0, i), input(ctx, 1, i));
             let peak = l.abs().max(r.abs());
@@ -144,10 +161,12 @@ impl Segmented for Compressor {
                 self.release
             };
             self.envelope = flush(reduction + (self.envelope - reduction) * coef);
+            most = most.max(self.envelope);
             let gain = db_to_gain(makeup - self.envelope as f64) as f32;
             let g = 1.0 - mix + mix * gain;
             output(ctx, i, l * g, r * g);
         }
+        self.gr_meter.update_peak(most);
     }
 }
 
