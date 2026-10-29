@@ -12,7 +12,10 @@ use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, vio
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::time::SampleTime;
 use daw_engine::nodes::Strip;
-use daw_engine::{EngineConfig, EngineController, GraphDesc, LoopRange, NodeId};
+use daw_engine::{
+    AutomationLane, AutomationPoint, Curve, EngineConfig, EngineController, GraphDesc, LoopRange,
+    NodeId, NodeKey, NodeMeter,
+};
 use support::{Delay, EventProbe, NoteSource, Sine};
 
 #[global_allocator]
@@ -33,13 +36,37 @@ fn detector_catches_allocations() {
     assert!(violations(|| drop(std::hint::black_box(vec![1u8; 16]))) > 0);
 }
 
+const SINE: NodeKey = NodeKey(1);
+const TRACK: NodeKey = NodeKey(2);
+
 /// A graph with every feature the process path has: tracks, a send and
-/// bus, an event edge, external events and a latency delay line.
-fn graph(variant: u64) -> (GraphDesc, NodeId) {
-    let mut g = GraphDesc::new(1, 1);
-    let sine = g.add_device("sine", Box::new(Sine::new(1)));
-    let track = g.add_track("track", 1);
+/// bus, an event edge, external events, a latency delay line, nodes reused
+/// from the running graph, a meter and an automation lane.
+fn graph(ctl: &EngineController, variant: u64) -> (GraphDesc, NodeId) {
+    let mut g = ctl.graph(1, 1);
+    let sine = g.reuse(SINE).unwrap_or_else(|| {
+        let id = g.add_device("sine", Box::new(Sine::new(1)));
+        g.set_key(id, SINE);
+        id
+    });
+    let track = g.reuse(TRACK).unwrap_or_else(|| {
+        let id = g.add_track("track", 1);
+        g.set_key(id, TRACK);
+        g.set_meter(id, Arc::new(NodeMeter::new(1)));
+        id
+    });
+    g.connect(track, g.master());
     g.connect(sine, track);
+    let ramp = |t, value| AutomationPoint {
+        time: SampleTime(t),
+        value,
+        curve: Curve::Linear,
+    };
+    g.automate(
+        track,
+        Strip::PAN,
+        AutomationLane::new(vec![ramp(0, -1.0), ramp(500, 1.0), ramp(999, 0.0)]),
+    );
     g.connect(g.input(), track);
     g.route_external_events(track);
     let bus = g.add_bus("bus", 1);
@@ -60,7 +87,8 @@ fn swapping_graphs_while_processing_never_allocates() {
         max_frames: 64,
         ..Default::default()
     });
-    ctl.set_graph(graph(0).0).unwrap();
+    let first = graph(&ctl, 0).0;
+    ctl.set_graph(first).unwrap();
     ctl.set_loop(Some(LoopRange {
         start: SampleTime(0),
         end: SampleTime(1000),
@@ -91,9 +119,9 @@ fn swapping_graphs_while_processing_never_allocates() {
     });
 
     for i in 1..=SWAPS {
-        let (g, track) = graph(i);
+        let (g, track) = graph(&ctl, i);
         let mut compiled = Box::new(ctl.compile(g).unwrap());
-        while let Err(back) = ctl.send_graph(compiled) {
+        while let Err(daw_engine::SendError::Full(back)) = ctl.send_graph(compiled) {
             compiled = back;
             std::thread::yield_now();
         }
@@ -114,6 +142,8 @@ fn swapping_graphs_while_processing_never_allocates() {
     assert_eq!(ctl.graphs_swapped(), SWAPS + 1);
     assert!(cycles > 0);
     assert!(out.iter().any(|&v| v != 0.0));
+    let meter = ctl.meter(TRACK).expect("the track kept its meter");
+    assert!(meter.take()[0] > 0.0);
 }
 
 #[test]
@@ -122,7 +152,7 @@ fn steady_state_processing_never_allocates() {
         max_frames: 128,
         ..Default::default()
     });
-    let (g, track) = graph(7);
+    let (g, track) = graph(&ctl, 7);
     ctl.set_graph(g).unwrap();
     ctl.play().unwrap();
     let input = vec![0.25f32; 512];
