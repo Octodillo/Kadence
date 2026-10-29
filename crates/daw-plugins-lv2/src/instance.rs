@@ -606,7 +606,6 @@ impl PluginInstance for Lv2Instance {
             .ok_or_else(|| PluginError::Editor("UI channels unavailable".into()))?;
         let instance = self.inst.raw().instance();
         let host = ui::HostRefs {
-            shared: &self.shared,
             features: &self.features,
             urids: &self.urids,
             plugin_uri: &self.descriptor.id,

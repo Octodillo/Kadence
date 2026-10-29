@@ -6,8 +6,8 @@
 //! the main thread.
 
 use std::ffi::{CString, c_char, c_int, c_void};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use daw_core::plugin::PluginError;
 use lv2_sys::{
@@ -25,7 +25,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 use crate::atom::Urids;
-use crate::{Shared, ring, uri_to_path};
+use crate::{ring, uri_to_path};
 
 const X11_UI: &str = "http://lv2plug.in/ns/extensions/ui#X11UI";
 const KX_WIDGET: &str = "http://kxstudio.sf.net/ns/lv2ext/external-ui#Widget";
@@ -100,7 +100,6 @@ pub(crate) struct UiEnds {
 
 /// What the editor needs from its instance.
 pub(crate) struct HostRefs<'a> {
-    pub shared: &'a Shared,
     pub features: &'a Arc<livi::Features>,
     pub urids: &'a Urids,
     pub plugin_uri: &'a str,
@@ -223,6 +222,24 @@ impl Drop for X11 {
     }
 }
 
+/// Loads a UI library once and never unloads it: unloading toolkit-based UI
+/// libraries is a well-known source of crashes in LV2 hosts (their thread-local
+/// and atexit destructors outlive the code).
+fn ui_library(path: &Path) -> Result<&'static libloading::Library, String> {
+    static LIBRARIES: Mutex<Vec<(PathBuf, &'static libloading::Library)>> = Mutex::new(Vec::new());
+    let mut libs = LIBRARIES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, l)) = libs.iter().find(|(p, _)| p == path) {
+        return Ok(l);
+    }
+    // SAFETY: loading a UI library runs its initialisers; that is inherent to
+    // hosting native plugins.
+    let l = unsafe { libloading::Library::new(path) }
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let l: &'static libloading::Library = Box::leak(Box::new(l));
+    libs.push((path.to_path_buf(), l));
+    Ok(l)
+}
+
 /// What the UI's callbacks reach through their handle. Lives in a Box whose
 /// address the UI keeps until cleanup.
 struct Controller {
@@ -281,10 +298,10 @@ pub(crate) struct Editor {
     ui_resize: Option<*const LV2UI_Resize>,
     external: Option<*mut ExternalWidget>,
     last_sent: Vec<(u32, f32)>,
+    atom_buf: Vec<u8>,
     event_transfer: u32,
     // Everything the UI may still point at, kept until cleanup.
     _features: Box<FeatureStore>,
-    _library: Arc<libloading::Library>,
     _host_features: Arc<livi::Features>,
 }
 
@@ -314,7 +331,7 @@ impl Editor {
             x11: None,
         }));
         match Self::try_open(info, &host, controller) {
-            Ok((descriptor, handle, features, library, external)) => {
+            Ok((descriptor, handle, features, external)) => {
                 let mut editor = Editor {
                     descriptor,
                     handle,
@@ -324,9 +341,9 @@ impl Editor {
                     ui_resize: None,
                     external,
                     last_sent: Vec::new(),
+                    atom_buf: vec![0; 64 * 1024],
                     event_transfer: host.urids.event_transfer,
                     _features: features,
-                    _library: library,
                     _host_features: host.features.clone(),
                 };
                 editor.after_instantiate();
@@ -357,30 +374,11 @@ impl Editor {
             *const LV2UI_Descriptor,
             LV2UI_Handle,
             Box<FeatureStore>,
-            Arc<libloading::Library>,
             Option<*mut ExternalWidget>,
         ),
         String,
     > {
-        let library = {
-            let mut libs = host
-                .shared
-                .ui_libraries
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            match libs.get(&info.binary) {
-                Some(l) => l.clone(),
-                None => {
-                    // SAFETY: loading a UI library runs its initialisers; that
-                    // is inherent to hosting native plugins.
-                    let l = unsafe { libloading::Library::new(&info.binary) }
-                        .map_err(|e| format!("{}: {e}", info.binary.display()))?;
-                    let l = Arc::new(l);
-                    libs.insert(info.binary.clone(), l.clone());
-                    l
-                }
-            }
-        };
+        let library = ui_library(&info.binary)?;
         type DescriptorFn = unsafe extern "C" fn(u32) -> *const LV2UI_Descriptor;
         // SAFETY: `lv2ui_descriptor` has this signature in every LV2 UI binary.
         let lookup: DescriptorFn = unsafe {
@@ -532,7 +530,7 @@ impl Editor {
         };
         // The feature pointer array itself is only read during instantiate.
         drop(ptrs);
-        Ok((descriptor, handle, store, library, external))
+        Ok((descriptor, handle, store, external))
     }
 
     fn after_instantiate(&mut self) {
@@ -581,8 +579,7 @@ impl Editor {
         // SAFETY: `descriptor` and `handle` are live.
         let port_event = unsafe { (*self.descriptor).port_event };
         if let Some(port_event) = port_event {
-            let mut buf = vec![0u8; 64 * 1024];
-            while let Some(m) = ring::read(&mut self.from_dsp, &mut buf) {
+            while let Some(m) = ring::read(&mut self.from_dsp, &mut self.atom_buf) {
                 if let (ring::ATOM, Some(len)) = (m.kind, m.len) {
                     // SAFETY: a whole atom of `len` bytes for an atom port.
                     unsafe {
@@ -591,7 +588,7 @@ impl Editor {
                             m.port,
                             len as u32,
                             self.event_transfer,
-                            buf.as_ptr().cast(),
+                            self.atom_buf.as_ptr().cast(),
                         )
                     };
                 }
@@ -653,10 +650,11 @@ impl Editor {
                             let _ = x.conn.flush();
                         }
                         if let Some(r) = self.ui_resize {
-                            // SAFETY: the UI's own resize interface.
+                            // SAFETY: the UI's own resize interface. Its `handle`
+                            // field is unused; the spec passes the UI handle.
                             if let Some(f) = unsafe { (*r).ui_resize } {
                                 unsafe {
-                                    f((*r).handle, c_int::from(e.width), c_int::from(e.height))
+                                    f(self.handle, c_int::from(e.width), c_int::from(e.height))
                                 };
                             }
                         }
@@ -679,8 +677,8 @@ impl Editor {
         unsafe {
             let from_dsp = std::ptr::read(&this.from_dsp);
             drop(std::ptr::read(&this.last_sent));
+            drop(std::ptr::read(&this.atom_buf));
             drop(std::ptr::read(&this._features));
-            drop(std::ptr::read(&this._library));
             drop(std::ptr::read(&this._host_features));
             UiEnds {
                 to_dsp: c.to_dsp,

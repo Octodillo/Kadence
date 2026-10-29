@@ -47,6 +47,19 @@ impl Lv2Format {
     }
 }
 
+impl Lv2Format {
+    /// Like [`PluginFormat::instantiate`], but returns the concrete type for
+    /// LV2-specific calls such as [`Lv2Instance::queue_atom`].
+    pub fn instantiate_lv2(
+        &self,
+        d: &PluginDescriptor,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<Lv2Instance, PluginError> {
+        Lv2Instance::new(self.shared.clone(), d, sample_rate, max_frames)
+    }
+}
+
 impl Default for Lv2Format {
     fn default() -> Self {
         Self::new()
@@ -64,9 +77,6 @@ pub(crate) struct Shared {
     /// size. Sharing them gives every instance the same URID map and one worker
     /// thread instead of one each.
     features: Mutex<HashMap<u32, Arc<livi::Features>>>,
-    /// UI libraries stay loaded once opened: unloading toolkit-based UI
-    /// libraries is a well-known source of crashes in LV2 hosts.
-    pub(crate) ui_libraries: Mutex<HashMap<PathBuf, Arc<libloading::Library>>>,
 }
 
 impl Shared {
@@ -117,8 +127,7 @@ impl PluginFormat for Lv2Format {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<Box<dyn PluginInstance>, PluginError> {
-        Ok(Box::new(Lv2Instance::new(
-            self.shared.clone(),
+        Ok(Box::new(self.instantiate_lv2(
             d,
             sample_rate,
             max_frames,
