@@ -14,6 +14,8 @@ pub struct BackendStats {
     pub midi_dropped: u64,
     /// Whether the process thread runs with a real-time scheduling policy
     /// (`SCHED_FIFO` or `SCHED_RR`). `None` until the first cycle has run.
+    /// JACK re-checks while it reads `false`, because PipeWire grants
+    /// real-time asynchronously.
     pub realtime: Option<bool>,
     /// Time spent processing as a percentage of the period, when known.
     pub dsp_load: Option<f32>,
@@ -51,10 +53,6 @@ impl SharedStats {
 
     pub fn set_realtime(&self, rt: bool) {
         self.realtime.store(if rt { 2 } else { 1 }, Relaxed);
-    }
-
-    pub fn realtime_known(&self) -> bool {
-        self.realtime.load(Relaxed) != 0
     }
 
     pub fn set_dsp_load(&self, percent: f32) {

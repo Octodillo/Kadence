@@ -16,6 +16,8 @@ use crate::{
 
 const AUDIO_TYPE: &str = jack::jack_sys::FLOAT_MONO_AUDIO;
 const MIDI_TYPE: &str = jack::jack_sys::RAW_MIDI_TYPE;
+/// How often to re-check scheduling until real-time is granted.
+const RT_RECHECK_CYCLES: u32 = 64;
 
 /// JACK backend. On PipeWire systems this goes through `pipewire-jack`, the
 /// PipeWire implementation of `libjack`; on others, through a real JACK
@@ -193,6 +195,7 @@ impl AudioBackend for JackBackend {
             cb,
             shared: self.shared.clone(),
             frame_time: 0,
+            rt_check_in: 0,
         };
         let notifications = Notifications {
             shared: self.shared.clone(),
@@ -344,6 +347,9 @@ struct Processor {
     cb: ProcessCallback,
     shared: Arc<SharedStats>,
     frame_time: u64,
+    /// Cycles until the next real-time scheduling check; `u32::MAX` once
+    /// the thread is known to be real-time.
+    rt_check_in: u32,
 }
 
 impl ProcessHandler for Processor {
@@ -361,8 +367,15 @@ impl ProcessHandler for Processor {
 
 impl Processor {
     fn cycle(&mut self, ps: &ProcessScope) {
-        if !self.shared.realtime_known() {
-            self.shared.set_realtime(current_thread_is_realtime());
+        // PipeWire promotes its data thread to real-time asynchronously
+        // (through rtkit or the xdg-desktop-portal), often after the first
+        // cycles, so keep checking every so often until it reads true.
+        if self.rt_check_in == 0 {
+            let rt = current_thread_is_realtime();
+            self.shared.set_realtime(rt);
+            self.rt_check_in = if rt { u32::MAX } else { RT_RECHECK_CYCLES };
+        } else if self.rt_check_in != u32::MAX {
+            self.rt_check_in -= 1;
         }
         let frames = ps.n_frames();
         let mut dropped = 0;

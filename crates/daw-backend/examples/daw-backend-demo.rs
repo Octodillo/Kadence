@@ -215,12 +215,14 @@ fn main() {
             load,
             yes_no(s.realtime)
         );
-        if s.realtime == Some(false) && !warned_rt {
+        // Give PipeWire a few seconds to promote the thread before warning.
+        if s.realtime == Some(false) && !warned_rt && begin.elapsed() > Duration::from_secs(3) {
             warned_rt = true;
             eprintln!(
                 "warning: the audio thread did not get real-time scheduling, so xruns are likely.\n  \
-                 PipeWire gets it from rtkit or its RT module. Check that rtkit-daemon runs, or add\n  \
-                 your user to the 'realtime' group (Arch: realtime-privileges) and log in again."
+                 PipeWire gets it through its RT module: directly (needs RLIMIT_RTPRIO, e.g. the Arch\n  \
+                 'realtime' group from realtime-privileges), via rtkit on the system bus, or via the\n  \
+                 xdg-desktop-portal Realtime interface (the route that works inside distrobox)."
             );
         }
         if let Some(want) = args.frames
