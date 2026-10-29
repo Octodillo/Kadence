@@ -290,3 +290,19 @@ fn a_panicking_callback_is_contained() {
     assert!(!b.stats().callback_panicked);
     b.close().unwrap();
 }
+
+/// Connecting two other clients' ports needs nothing from us, so it happens
+/// at once even while we are stopped, and is not tied to our start and stop.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn connects_other_clients_ports_while_stopped() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(cfg("wu2-route")).unwrap();
+    b.connect("system:capture_1", "system:playback_1").unwrap();
+    assert_eq!(connections_of("system:capture_1"), ["system:playback_1"]);
+    b.disconnect("system:capture_1", "system:playback_1")
+        .unwrap();
+    assert!(connections_of("system:capture_1").is_empty());
+    b.close().unwrap();
+}

@@ -100,8 +100,10 @@ impl JackBackend {
     }
 
     /// Checks what JACK would check on connect, for a client that cannot
-    /// connect yet because it is inactive.
-    fn check_link(client: &Client, from: &str, to: &str) -> Result<(), String> {
+    /// connect yet because it is inactive. Returns whether either port is
+    /// ours: a link between two other clients' ports does not depend on us
+    /// being active, so it goes to JACK at once.
+    fn check_link(client: &Client, from: &str, to: &str) -> Result<bool, String> {
         let port = |name| {
             client
                 .port_by_name(name)
@@ -114,7 +116,7 @@ impl JackBackend {
         if a.port_type().ok() != b.port_type().ok() {
             return Err("port types differ".into());
         }
-        Ok(())
+        Ok(client.is_mine(&a) || client.is_mine(&b))
     }
 
     fn auto_connect(&self, client: &Client, cfg: &BackendConfig) {
@@ -367,7 +369,11 @@ impl AudioBackend for JackBackend {
         match &self.state {
             State::Closed => Err(BackendError::NotOpen),
             State::Open(client, _) => {
-                Self::check_link(client, from, to).map_err(err)?;
+                if !Self::check_link(client, from, to).map_err(err)? {
+                    return client
+                        .connect_ports_by_name(from, to)
+                        .map_err(|e| err(e.to_string()));
+                }
                 let link = (from.to_owned(), to.to_owned());
                 if self.links.contains(&link) {
                     return Err(err("already connected".into()));
@@ -390,14 +396,18 @@ impl AudioBackend for JackBackend {
         };
         match &self.state {
             State::Closed => Err(BackendError::NotOpen),
-            State::Open(..) => {
+            State::Open(client, _) => {
                 let before = self.links.len();
                 self.links
                     .retain(|(a, b)| (a.as_str(), b.as_str()) != (from, to));
-                if self.links.len() == before {
-                    return Err(err("not connected".into()));
+                if self.links.len() < before {
+                    return Ok(());
                 }
-                Ok(())
+                // Not one of ours waiting for start; it may be a live link
+                // between two other clients.
+                client
+                    .disconnect_ports_by_name(from, to)
+                    .map_err(|e| err(e.to_string()))
             }
             State::Running(a) => a
                 .as_client()
