@@ -108,7 +108,7 @@ impl DiskStreamer {
     /// side. Filling starts at frame 0 straight away.
     pub fn open(&self, path: impl AsRef<std::path::Path>) -> Result<ClipReader> {
         let decoder = Decoder::open(path)?;
-        let info = decoder.info().clone();
+        let info = Arc::new(decoder.info().clone());
         let ch = info.channels;
         let rate = self.config.sample_rate;
         let resampler = if info.sample_rate != rate {
@@ -130,6 +130,7 @@ impl DiskStreamer {
             (u128::from(f) * u128::from(rate) / u128::from(info.sample_rate.max(1))) as u64
         });
         let stream = WorkerStream {
+            _info: info.clone(),
             data: data_tx,
             segs: seg_tx,
             shared: shared.clone(),
@@ -179,14 +180,16 @@ impl Drop for DiskStreamer {
 }
 
 /// The RT side of one streamed file. [`read`](Self::read) never allocates, locks or
-/// does I/O. Don't drop it on the RT thread if you can avoid it; when you do, it only
-/// decrements reference counts because the fill thread frees the buffers.
+/// does I/O. Dropping it on the RT thread only decrements reference counts while the
+/// [`DiskStreamer`] is alive, because the fill thread holds the last references and
+/// frees the buffers and file info. After the streamer is gone, drop readers off the RT
+/// thread.
 pub struct ClipReader {
     data: Consumer<f32>,
     segs: Consumer<Segment>,
     shared: Arc<Shared>,
     channels: usize,
-    info: AudioFileInfo,
+    info: Arc<AudioFileInfo>,
     frames: Option<u64>,
     generation: u64,
     current: Option<Segment>,
@@ -235,7 +238,9 @@ impl ClipReader {
     /// Ask the fill thread to start buffering from `position` ahead of time, e.g. on a
     /// locate before playback resumes. RT-safe.
     pub fn cue(&mut self, position: SampleTime) {
-        if position.0 == self.expected && !self.waiting {
+        // Same position as already requested (or continuing): nothing to do, even while a
+        // seek is still pending. Re-cueing would restart the seek every call.
+        if position.0 == self.expected {
             return;
         }
         self.generation += 1;
@@ -405,6 +410,8 @@ fn silence(out: &mut [&mut [f32]], at: usize, frames: usize) {
 
 /// The fill-thread side of one stream.
 struct WorkerStream {
+    /// Keeps the reader's file info alive so its last drop happens on this thread.
+    _info: Arc<AudioFileInfo>,
     data: Producer<f32>,
     segs: Producer<Segment>,
     shared: Arc<Shared>,
@@ -496,9 +503,18 @@ impl WorkerStream {
     }
 
     fn seek(&mut self, target: i64) {
-        let target = target.max(0);
-        let src =
-            (i128::from(target) * i128::from(self.src_rate) / i128::from(self.dst_rate)) as u64;
+        let target = target.max(0) as u64;
+        // Start on a frame where source and engine grids coincide, so the resampled
+        // output lands exactly on engine frames; the reader drops the few frames before
+        // `target`. Without resampling both periods are 1.
+        let g = gcd(self.src_rate, self.dst_rate).max(1);
+        let (src_period, dst_period) = (
+            u64::from(self.src_rate / g).max(1),
+            u64::from(self.dst_rate / g).max(1),
+        );
+        let periods = target / dst_period;
+        let src = periods * src_period;
+        let start = (periods * dst_period) as i64;
         self.pending.clear();
         self.pending_pos = 0;
         self.eof_sent = false;
@@ -509,8 +525,15 @@ impl WorkerStream {
         if self.decoder.seek(src).is_err() {
             self.src_eof = true;
         }
-        self.next_frame = target;
+        self.next_frame = start;
     }
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 fn worker(rx: mpsc::Receiver<WorkerStream>, stop: Arc<AtomicBool>, config: StreamerConfig) {

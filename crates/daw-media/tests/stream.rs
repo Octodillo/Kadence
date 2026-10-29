@@ -242,3 +242,58 @@ fn dropping_reader_lets_streamer_release_the_stream() {
     }
     drop(streamer); // joins the fill thread
 }
+
+#[test]
+fn resampled_seek_matches_continuous_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), 9, 44_100, 2.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let read_from = |start: i64| {
+        let mut r = streamer.open(&path).unwrap();
+        r.cue(SampleTime(start));
+        wait_ready(std::slice::from_mut(&mut r));
+        std::thread::sleep(Duration::from_millis(50));
+        let mut l = vec![0.0; 4096];
+        let mut rr = vec![0.0; 4096];
+        assert_eq!(
+            r.read(SampleTime(start), &mut [&mut l[..], &mut rr[..]]),
+            ReadStatus::Ok
+        );
+        l
+    };
+    let continuous = read_from(0);
+    for start in [7i64, 161, 1234] {
+        let seeked = read_from(start);
+        // Away from the resampler's restart transient, the seeked stream must line up
+        // sample for sample with continuous playback (no fractional-frame shift).
+        for i in 1000..(4096 - start as usize) {
+            let d = (seeked[i] - continuous[i + start as usize]).abs();
+            assert!(d < 1e-3, "start {start} frame {i}: diff {d}");
+        }
+    }
+}
+
+#[test]
+fn repeated_cue_while_pending_still_becomes_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_file(dir.path(), 4, RATE, 3.0, 2);
+    let streamer = DiskStreamer::new(StreamerConfig::default());
+    let mut r = streamer.open(&path).unwrap();
+    let target = SampleTime(RATE as i64 + 5);
+    let t = Instant::now();
+    // A pre-roll loop that cues every cycle until ready must not keep restarting the seek.
+    loop {
+        r.cue(target);
+        if r.is_ready() {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(5), "never became ready");
+    }
+    let mut l = vec![0.0; BLOCK];
+    let mut rr = vec![0.0; BLOCK];
+    assert_eq!(
+        r.read(target, &mut [&mut l[..], &mut rr[..]]),
+        ReadStatus::Ok
+    );
+    assert!((l[0] - expected(4, 0, target.0, RATE)).abs() < 1e-6);
+}

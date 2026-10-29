@@ -47,7 +47,8 @@ impl AudioData {
     pub fn from_interleaved(sample_rate: u32, channels: usize, samples: &[f32]) -> Self {
         let channels = channels.max(1);
         let frames = samples.len() / channels;
-        let mut planes = vec![Vec::with_capacity(frames); channels];
+        // Not `vec![Vec::with_capacity(..); n]`: cloning drops the capacity.
+        let mut planes: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(frames)).collect();
         for frame in samples.chunks_exact(channels) {
             for (plane, s) in planes.iter_mut().zip(frame) {
                 plane.push(*s);

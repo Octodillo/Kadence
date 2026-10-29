@@ -195,7 +195,9 @@ impl PeakCache {
             return Ok(cache);
         }
         let cache = Self::build(audio)?;
-        cache.save(&cache_path, stamp)?;
+        // Saving is best-effort: a read-only sample library still gets its waveform,
+        // it is just rebuilt next time.
+        let _ = cache.save(&cache_path, stamp);
         Ok(cache)
     }
 
@@ -235,7 +237,9 @@ impl PeakCache {
     fn load(path: &Path, stamp: (u64, i64)) -> Result<Self> {
         let io = |e| MediaError::io(path, e);
         let bad = |what: &str| MediaError::Peaks(format!("{}: {what}", path.display()));
-        let mut r = BufReader::new(fs::File::open(path).map_err(io)?);
+        let file = fs::File::open(path).map_err(io)?;
+        let file_len = file.metadata().map_err(io)?.len();
+        let mut r = BufReader::new(file);
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic).map_err(io)?;
         if &magic != MAGIC {
@@ -258,16 +262,19 @@ impl PeakCache {
         let channels = get!(u32) as usize;
         let frames = get!(u64);
         let n = get!(u32) as usize;
-        if n > 64 || channels == 0 {
+        if n == 0 || n > 64 || channels == 0 || channels > 1024 {
             return Err(bad("corrupt header"));
         }
         let mut levels = Vec::with_capacity(n);
         for _ in 0..n {
             let frames_per_peak = get!(u32);
             let len = get!(u64) as usize;
-            let expected =
-                frames.div_ceil(u64::from(frames_per_peak.max(1))) as usize * 2 * channels;
-            if len != expected {
+            // Everything here is untrusted: check before doing arithmetic or allocating.
+            let expected = (frames_per_peak > 0)
+                .then(|| frames.div_ceil(u64::from(frames_per_peak)))
+                .and_then(|peaks| peaks.checked_mul(2 * channels as u64))
+                .filter(|&e| e as usize == len && e.saturating_mul(2) <= file_len);
+            if expected.is_none() {
                 return Err(bad("corrupt level"));
             }
             let mut bytes = vec![0u8; len * 2];
