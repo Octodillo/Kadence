@@ -40,6 +40,8 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
             })
         }
         EventKind::Midi([status, d1, d2]) => match status & 0xF0 {
+            // Data bytes never have bit 7 set; such a message is corrupt.
+            0x80 | 0x90 if (d1 | d2) & 0x80 != 0 => None,
             0x90 if d2 > 0 => Some(Note::On {
                 key: d1 & 0x7F,
                 velocity: (d2 & 0x7F) as f32 / 127.0,
@@ -183,5 +185,12 @@ mod tests {
         };
         assert!(matches!(note(&on), Some(Note::On { key: 127, .. })));
         assert_eq!(note(&off), Some(Note::Off { key: 127, id: -1 }));
+    }
+
+    #[test]
+    fn malformed_midi_note_data_is_dropped() {
+        assert_eq!(note(&EventKind::Midi([0x90, 60, 0x80])), None);
+        assert_eq!(note(&EventKind::Midi([0x90, 0xBC, 100])), None);
+        assert_eq!(note(&EventKind::Midi([0x80, 60, 0xFF])), None);
     }
 }
