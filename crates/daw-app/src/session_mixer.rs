@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
 use daw_core::time::{SampleTime, TickTime};
 use daw_engine::nodes::Strip;
@@ -121,6 +122,18 @@ fn send_to(track: &Track, target: StripId) -> Option<SendId> {
         .map(|s| s.id)
 }
 
+fn insert_info(d: &Device, session: Option<&Session>) -> InsertInfo {
+    let device_id = match &d.source {
+        DeviceSource::Builtin { kind } => kind.clone(),
+        DeviceSource::Plugin { id, .. } => id.clone(),
+    };
+    InsertInfo {
+        device_id,
+        name: d.name.clone(),
+        has_gain_reduction: session.is_some_and(|s| s.device_meter(d.id).is_some()),
+    }
+}
+
 impl SessionMixer {
     /// The strips of `project`. Gain reduction meters show once `session`
     /// plays the project.
@@ -149,21 +162,12 @@ impl SessionMixer {
                 muted: t.mute,
                 soloed: t.solo,
                 silenced: silenced.contains(&t.id),
-                inserts: t
-                    .devices
+                has_instrument: t.kind == TrackKind::Instrument,
+                instrument: instrument_of(t).map(|d| insert_info(d, session)),
+                instrument_choice: None,
+                inserts: t.devices[effects_start(t)..]
                     .iter()
-                    .map(|d| {
-                        let device_id = match &d.source {
-                            DeviceSource::Builtin { kind } => kind.clone(),
-                            DeviceSource::Plugin { id, .. } => id.clone(),
-                        };
-                        InsertInfo {
-                            device_id,
-                            name: d.name.clone(),
-                            has_gain_reduction: session
-                                .is_some_and(|s| s.device_meter(d.id).is_some()),
-                        }
-                    })
+                    .map(|d| insert_info(d, session))
                     .collect(),
                 sends: t
                     .sends
@@ -294,7 +298,10 @@ impl SessionMixer {
         id: StripId,
         index: usize,
     ) -> Result<(), Message> {
-        let Some(device) = find(doc.project(), id).and_then(|t| t.devices.get(index)) else {
+        // `index` counts effects, which come after the instrument.
+        let Some(device) =
+            find(doc.project(), id).and_then(|t| t.devices.get(effects_start(t) + index))
+        else {
             return Ok(());
         };
         let device = device.id;
@@ -305,6 +312,24 @@ impl SessionMixer {
 
     pub fn effects(&self) -> Vec<EffectChoice> {
         self.effects.clone()
+    }
+
+    /// Puts `choice` in an instrument track's instrument slot.
+    pub fn set_instrument(
+        &mut self,
+        doc: &mut Document,
+        id: StripId,
+        choice: &InstrumentChoice,
+    ) -> Result<(), Message> {
+        let Some(track) = find(doc.project(), id) else {
+            return Ok(());
+        };
+        let Some(command) = set_instrument(doc.project(), track.id, choice) else {
+            return Ok(());
+        };
+        let r = doc.execute_boxed(command);
+        doc.seal();
+        r.map(|_| ()).map_err(Message::from)
     }
 
     /// Meter readings in strip order, reset as they are read.
@@ -675,7 +700,14 @@ impl AppMixer {
 
 impl MixerHandle for AppMixer {
     fn strips(&self) -> Vec<StripInfo> {
-        state::with(|s| self.inner.strips(s.doc.project(), s.engine.session()))
+        state::with(|s| {
+            let mut strips = self.inner.strips(s.doc.project(), s.engine.session());
+            for (strip, track) in strips.iter_mut().zip(ordered(s.doc.project())) {
+                strip.instrument_choice =
+                    instrument_of(track).and_then(|d| s.instruments.position(&d.source));
+            }
+            strips
+        })
     }
 
     fn set_volume(&mut self, id: StripId, db: f64) {
@@ -708,6 +740,10 @@ impl MixerHandle for AppMixer {
 
     fn effects(&self) -> Vec<EffectChoice> {
         self.inner.effects()
+    }
+
+    fn set_instrument(&mut self, id: StripId, choice: &InstrumentChoice) {
+        self.report(|m, d, _| m.set_instrument(d, id, choice));
     }
 
     fn levels(&mut self) -> Vec<StripLevels> {
@@ -903,6 +939,46 @@ mod tests {
         assert_eq!(r.mixer.levels(r.doc.project(), Some(&r.session)).len(), 4);
         r.mixer.remove_insert(&mut r.doc, keys, 0).unwrap();
         assert!(r.track("Keys").devices.is_empty());
+    }
+
+    #[test]
+    fn the_instrument_has_its_own_slot_before_the_effects() {
+        let mut r = rig();
+        let keys = r.id("Keys");
+        let choices = crate::instrument::InstrumentChoices::builtin();
+        let synth = choices.default_choice().unwrap();
+        r.mixer.set_instrument(&mut r.doc, keys, synth).unwrap();
+        assert!(r.mixer.add_insert(&mut r.doc, keys, "daw.compressor"));
+        let strips = r.mixer.strips(r.doc.project(), Some(&r.session));
+        assert!(strips[1].has_instrument);
+        assert_eq!(
+            strips[1].instrument.as_ref().map(|i| i.device_id.as_str()),
+            Some("daw.synth")
+        );
+        let inserts: Vec<_> = strips[1].inserts.iter().map(|i| &i.device_id).collect();
+        assert_eq!(inserts, ["daw.compressor"]);
+        assert!(!strips[0].has_instrument && strips[0].instrument.is_none());
+
+        // Effect 0 is the compressor, not the synth.
+        r.mixer.remove_insert(&mut r.doc, keys, 0).unwrap();
+        let devices = &r.track("Keys").devices;
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].source, synth.source);
+
+        let sampler = choices
+            .as_slice()
+            .iter()
+            .find(|c| c.name != synth.name)
+            .unwrap();
+        r.mixer.set_instrument(&mut r.doc, keys, sampler).unwrap();
+        assert_eq!(r.track("Keys").devices.len(), 1);
+        assert_eq!(r.track("Keys").devices[0].source, sampler.source);
+        r.doc.undo().unwrap();
+        assert_eq!(r.track("Keys").devices[0].source, synth.source);
+        // Audio tracks have no instrument slot.
+        let drums = r.id("Drums");
+        r.mixer.set_instrument(&mut r.doc, drums, synth).unwrap();
+        assert!(r.track("Drums").devices.is_empty());
     }
 
     #[test]

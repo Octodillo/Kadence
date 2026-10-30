@@ -8,8 +8,8 @@ import org.kde.kirigami as Kirigami
 import io.github.octodillo.daw
 
 // One row of the track list beside the timeline: colour, drag handle,
-// name, mute, solo, and the button that shows the track's automation
-// lanes, whose headers follow under it. Everything is read from Project
+// name, instrument (on instrument tracks), mute, solo, and the button that
+// shows the track's automation lanes, whose headers follow under it. Everything is read from Project
 // and Automation by index; `revision` re-reads it after any change.
 // Dragging the handle reorders tracks; the list view shows where the track
 // will land (`dragFrom`, `dragTo`).
@@ -37,6 +37,7 @@ Column {
         readonly property bool muted: { revision; return Project.trackMuted(index); }
         readonly property bool soloed: { revision; return Project.trackSoloed(index); }
         readonly property color trackColor: { revision; return Project.trackColor(index); }
+        readonly property string instrument: { revision; return kind === 1 ? Project.trackInstrument(index) : ""; }
 
         highlighted: Project.selectedTrack === index
         opacity: row.ListView.view && row.ListView.view.dragFrom === index ? 0.5 : 1
@@ -151,6 +152,15 @@ Column {
                 }
                 onActiveFocusChanged: if (!activeFocus) visible = false
                 Keys.onEscapePressed: visible = false
+            }
+
+            InstrumentButton {
+                Layout.alignment: Qt.AlignVCenter
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 6
+                visible: header.kind === 1
+                instrument: header.instrument
+                currentChoice: { header.revision; return Project.trackInstrumentChoice(header.index); }
+                onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
             }
 
             QQC2.ToolButton {
