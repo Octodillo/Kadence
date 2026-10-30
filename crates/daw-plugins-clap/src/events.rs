@@ -122,27 +122,28 @@ impl OutputEventBuffer for Sink<'_> {
 
 /// CLAP transport for a block starting `offset` frames after the context's position.
 pub(crate) fn transport(t: &TransportState, offset: u32) -> TransportEvent {
+    let t = t.advanced(offset);
+    let m = &t.music;
     let mut flags = TransportFlags::HAS_SECONDS_TIMELINE;
     if t.playing {
         flags |= TransportFlags::IS_PLAYING;
     }
     let seconds = if t.sample_rate > 0.0 {
         #[allow(clippy::cast_precision_loss)]
-        let samples = (t.position.0 + i64::from(offset)) as f64;
+        let samples = t.position.0 as f64;
         samples / t.sample_rate
     } else {
         0.0
     };
-    let beats = if t.bpm > 0.0 {
-        flags |= TransportFlags::HAS_TEMPO | TransportFlags::HAS_BEATS_TIMELINE;
-        seconds * t.bpm / 60.0
-    } else {
-        0.0
-    };
+    if t.bpm > 0.0 {
+        flags |= TransportFlags::HAS_TEMPO
+            | TransportFlags::HAS_BEATS_TIMELINE
+            | TransportFlags::HAS_TIME_SIGNATURE;
+    }
     TransportEvent {
         header: EventHeader::new_core(0, EventFlags::empty()),
         flags,
-        song_pos_beats: BeatTime::from_float(beats),
+        song_pos_beats: BeatTime::from_float(m.beats),
         song_pos_seconds: SecondsTime::from_float(seconds),
         tempo: t.bpm,
         tempo_inc: 0.0,
@@ -150,10 +151,11 @@ pub(crate) fn transport(t: &TransportState, offset: u32) -> TransportEvent {
         loop_end_beats: BeatTime::from_int(0),
         loop_start_seconds: SecondsTime::from_int(0),
         loop_end_seconds: SecondsTime::from_int(0),
-        bar_start: BeatTime::from_int(0),
-        bar_number: 0,
-        time_signature_numerator: 4,
-        time_signature_denominator: 4,
+        bar_start: BeatTime::from_float(m.bar_start),
+        #[allow(clippy::cast_possible_truncation)]
+        bar_number: m.bar.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        time_signature_numerator: u16::from(m.numerator),
+        time_signature_denominator: u16::from(m.denominator),
     }
 }
 
@@ -179,6 +181,33 @@ fn to_u8(v: i16) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_has_bars_beats_and_time_signature() {
+        use daw_core::time::{Meter, PPQ, SampleTime, SegmentTempoMap, TickTime, Timeline};
+        // 120 bpm, then 160 from beat 4, in 3/4.
+        let mut tempo = SegmentTempoMap::new(120.0);
+        tempo.set_tempo(TickTime(4 * PPQ), 160.0, false);
+        let tl = Timeline::new(tempo, Meter::constant(3, 4));
+        let t = TransportState::at(&tl, true, SampleTime(96_000), 48_000.0);
+        // 18000 frames later is one beat at 160: quarter 5, bar 1 (from 3).
+        let e = transport(&t, 18_000);
+        assert!((e.song_pos_beats.to_float() - 5.0).abs() < 1e-6);
+        assert!((e.song_pos_seconds.to_float() - 2.375).abs() < 1e-6);
+        assert_eq!(e.tempo, 160.0);
+        assert_eq!(e.bar_number, 1);
+        assert!((e.bar_start.to_float() - 3.0).abs() < 1e-6);
+        assert_eq!(
+            (e.time_signature_numerator, e.time_signature_denominator),
+            (3, 4)
+        );
+        assert!(e.flags.contains(
+            TransportFlags::IS_PLAYING
+                | TransportFlags::HAS_TEMPO
+                | TransportFlags::HAS_BEATS_TIMELINE
+                | TransportFlags::HAS_TIME_SIGNATURE
+        ));
+    }
 
     #[test]
     fn quiet_notes_sent_as_midi_stay_note_ons() {

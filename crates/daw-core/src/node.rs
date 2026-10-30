@@ -44,6 +44,40 @@ impl TransportState {
         }
     }
 
+    /// This state, or, when the tempo is unknown, the same position at
+    /// 120 bpm in 4/4 from sample 0. For plugin formats whose plugins expect
+    /// a tempo. `sample_rate` stands in for an unknown rate.
+    pub fn or_default_tempo(&self, sample_rate: f64) -> Self {
+        if self.bpm > 0.0 {
+            return *self;
+        }
+        let rate = if self.sample_rate > 0.0 {
+            self.sample_rate
+        } else {
+            sample_rate
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let beats = if rate > 0.0 {
+            self.position.0 as f64 / rate * 2.0
+        } else {
+            0.0
+        };
+        let bar = (beats / 4.0).floor();
+        #[allow(clippy::cast_possible_truncation)]
+        let music = MusicalPosition {
+            beats,
+            bar: bar as i64,
+            bar_start: bar * 4.0,
+            ..MusicalPosition::default()
+        };
+        Self {
+            bpm: 120.0,
+            sample_rate: rate,
+            music,
+            ..*self
+        }
+    }
+
     /// The state `frames` samples into the block, for a node that splits
     /// its block. While playing, the position and beats move on at this
     /// block's tempo and bars roll over assuming the time signature holds.
@@ -165,6 +199,27 @@ mod tests {
         }
         .advanced(64);
         assert_eq!((u.position, u.music.beats), (SampleTime(64), 0.0));
+    }
+
+    #[test]
+    fn default_tempo_stands_in_for_an_unknown_one() {
+        let t = TransportState {
+            position: SampleTime(240_000),
+            ..TransportState::default()
+        }
+        .or_default_tempo(48_000.0);
+        assert_eq!((t.bpm, t.sample_rate), (120.0, 48_000.0));
+        assert_eq!(
+            (t.music.beats, t.music.bar, t.music.bar_start),
+            (10.0, 2, 8.0)
+        );
+        let known = TransportState::at(
+            &crate::time::Timeline::constant(90.0, 3, 4),
+            true,
+            SampleTime(1),
+            48_000.0,
+        );
+        assert_eq!(known.or_default_tempo(1.0).music, known.music);
     }
 
     #[test]

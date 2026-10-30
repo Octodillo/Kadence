@@ -8,7 +8,7 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use daw_core::event::{Event as DawEvent, EventKind, ParamId};
-use daw_core::node::{Node, PortLayout, ProcessContext};
+use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
 };
@@ -922,24 +922,7 @@ impl Node for Vst3Instance {
             bus.silenceFlags = 0;
         }
 
-        let t = ctx.transport;
-        let sample_rate = if t.sample_rate > 0.0 {
-            t.sample_rate
-        } else {
-            self.sample_rate
-        };
-        let c = &mut rt.context;
-        c.state = StatesAndFlags_::kTempoValid as u32
-            | StatesAndFlags_::kProjectTimeMusicValid as u32
-            | StatesAndFlags_::kTimeSigValid as u32
-            | StatesAndFlags_::kContTimeValid as u32;
-        if t.playing {
-            c.state |= StatesAndFlags_::kPlaying as u32;
-        }
-        c.sampleRate = sample_rate;
-        c.projectTimeSamples = t.position.0;
-        c.tempo = if t.bpm > 0.0 { t.bpm } else { 120.0 };
-        c.projectTimeMusic = t.position.0 as f64 / sample_rate * c.tempo / 60.0;
+        fill_context(&mut rt.context, ctx.transport, self.sample_rate);
 
         let mut data = rt.process_data(frames as i32);
         unsafe { self.processor.process(&mut data) };
@@ -1204,6 +1187,28 @@ impl Drop for Vst3Instance {
     }
 }
 
+/// Fills the transport part of a VST3 process context. Continuous time is
+/// the caller's.
+fn fill_context(c: &mut VstProcessContext, transport: &TransportState, sample_rate: f64) {
+    let t = transport.or_default_tempo(sample_rate);
+    let m = &t.music;
+    c.state = StatesAndFlags_::kContTimeValid as u32
+        | StatesAndFlags_::kTempoValid as u32
+        | StatesAndFlags_::kProjectTimeMusicValid as u32
+        | StatesAndFlags_::kBarPositionValid as u32
+        | StatesAndFlags_::kTimeSigValid as u32;
+    if t.playing {
+        c.state |= StatesAndFlags_::kPlaying as u32;
+    }
+    c.sampleRate = t.sample_rate;
+    c.projectTimeSamples = t.position.0;
+    c.tempo = t.bpm;
+    c.projectTimeMusic = m.beats;
+    c.barPositionMusic = m.bar_start;
+    c.timeSigNumerator = i32::from(m.numerator);
+    c.timeSigDenominator = i32::from(m.denominator);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1217,6 +1222,54 @@ mod tests {
     const GAIN: ParamID = 0;
 
     /// The `testgain` example wrapped in a bundle, as `tests/vst3.rs` does.
+    #[test]
+    fn context_has_bars_beats_and_time_signature() {
+        use daw_core::time::{
+            Meter, MeterPoint, PPQ, SampleTime, SegmentTempoMap, TickTime, Timeline,
+        };
+        // Two bars of 4/4 at 120, then 6/8.
+        let meter = Meter::new([
+            MeterPoint {
+                tick: TickTime(0),
+                numerator: 4,
+                denominator: 4,
+            },
+            MeterPoint {
+                tick: TickTime(8 * PPQ),
+                numerator: 6,
+                denominator: 8,
+            },
+        ]);
+        let tl = Timeline::new(SegmentTempoMap::new(120.0), meter);
+        let t = TransportState::at(&tl, true, SampleTime(300_000), 48_000.0);
+        let mut c: VstProcessContext = unsafe { std::mem::zeroed() };
+        fill_context(&mut c, &t, 44_100.0);
+        assert_eq!(c.sampleRate, 48_000.0);
+        assert_eq!(c.projectTimeSamples, 300_000);
+        assert_eq!(c.tempo, 120.0);
+        assert_eq!(c.projectTimeMusic, 12.5);
+        assert_eq!(c.barPositionMusic, 11.0);
+        assert_eq!((c.timeSigNumerator, c.timeSigDenominator), (6, 8));
+        let valid = StatesAndFlags_::kPlaying as u32
+            | StatesAndFlags_::kTempoValid as u32
+            | StatesAndFlags_::kProjectTimeMusicValid as u32
+            | StatesAndFlags_::kBarPositionValid as u32
+            | StatesAndFlags_::kTimeSigValid as u32;
+        assert_eq!(c.state & valid, valid);
+
+        // No tempo: 120 bpm in 4/4 from sample 0, at the plugin's rate.
+        let stopped = TransportState {
+            position: SampleTime(88_200),
+            ..TransportState::default()
+        };
+        fill_context(&mut c, &stopped, 44_100.0);
+        assert_eq!(
+            (c.sampleRate, c.tempo, c.projectTimeMusic),
+            (44_100.0, 120.0, 4.0)
+        );
+        assert_eq!(c.state & StatesAndFlags_::kPlaying as u32, 0);
+    }
+
     fn testgain() -> PluginDescriptor {
         static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
         let bundle = BUNDLE.get_or_init(|| {
