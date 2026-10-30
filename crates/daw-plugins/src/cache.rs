@@ -22,15 +22,25 @@ pub struct CacheEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScanCache {
     version: u32,
+    /// The release that wrote the cache. A new release may describe plugins differently (say,
+    /// which ports are the main ones), so it scans everything again.
+    #[serde(default)]
+    scanner: String,
     entries: BTreeMap<PathBuf, CacheEntry>,
 }
 
-const VERSION: u32 = 1;
+/// The cache's format. Bump it whenever scanning describes plugins differently, so caches
+/// written by an older build of the same release are not trusted either.
+const VERSION: u32 = 2;
+
+/// The release scanning, stored with the cache.
+const SCANNER: &str = env!("CARGO_PKG_VERSION");
 
 impl ScanCache {
     pub fn new() -> Self {
         Self {
             version: VERSION,
+            scanner: SCANNER.to_owned(),
             entries: BTreeMap::new(),
         }
     }
@@ -41,7 +51,7 @@ impl ScanCache {
         std::fs::read(path)
             .ok()
             .and_then(|data| serde_json::from_slice::<Self>(&data).ok())
-            .filter(|c| c.version == VERSION)
+            .filter(|c| c.version == VERSION && c.scanner == SCANNER)
             .unwrap_or_default()
     }
 
