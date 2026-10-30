@@ -175,7 +175,7 @@ impl cxx_qt::Constructor<()> for qobject::ArrangeView {
     }
 }
 
-fn to_qcolor(c: Rgba) -> QColor {
+pub(crate) fn to_qcolor(c: Rgba) -> QColor {
     QColor::from_rgba(
         i32::from(c.r()),
         i32::from(c.g()),
@@ -184,7 +184,7 @@ fn to_qcolor(c: Rgba) -> QColor {
     )
 }
 
-fn to_rgba(c: &QColor) -> Rgba {
+pub(crate) fn to_rgba(c: &QColor) -> Rgba {
     let ch = |v: i32| v.clamp(0, 255) as u32;
     Rgba(ch(c.alpha()) << 24 | ch(c.red()) << 16 | ch(c.green()) << 8 | ch(c.blue()))
 }
@@ -194,7 +194,7 @@ const SHIFT: i32 = 0x0200_0000;
 const CTRL: i32 = 0x0400_0000;
 const ALT: i32 = 0x0800_0000;
 
-fn pointer(x: f64, y: f64, button: i32, modifiers: i32) -> Pointer {
+pub(crate) fn pointer(x: f64, y: f64, button: i32, modifiers: i32) -> Pointer {
     Pointer {
         x,
         y,
@@ -210,7 +210,7 @@ fn pointer(x: f64, y: f64, button: i32, modifiers: i32) -> Pointer {
 }
 
 /// Qt::CursorShape values.
-fn cursor_shape(c: Cursor) -> i32 {
+pub(crate) fn cursor_shape(c: Cursor) -> i32 {
     match c {
         Cursor::Arrow => 0,
         Cursor::Move => 17,

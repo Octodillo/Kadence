@@ -498,7 +498,9 @@ dependencies = [
  "daw-devices",
  "daw-engine",
  "daw-media",
+ "daw-midi",
  "daw-model",
+ "daw-pianoroll",
  "daw-session",
 ]
 
@@ -607,6 +609,16 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "daw-pianoroll"
+version = "0.1.0"
+dependencies = [
+ "daw-arrange",
+ "daw-core",
+ "daw-midi",
+ "daw-model",
 ]
 
 [[package]]
