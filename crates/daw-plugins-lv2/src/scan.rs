@@ -15,9 +15,9 @@ const FOAF_NAME: &str = "http://xmlns.com/foaf/0.1/name";
 /// `LV2_PATH` if set, otherwise the usual per-user and system locations
 /// (Arch, Fedora/openSUSE lib64 and Debian/Ubuntu layouts). Inside Flatpak
 /// the plugin extension (`org.freedesktop.LinuxAudio.Plugins`) and plugins
-/// bundled with the app are searched too, even with `LV2_PATH` set, since
-/// lilv itself knows nothing about them. Only existing directories are
-/// returned.
+/// bundled with the app are searched after the others, even with `LV2_PATH`
+/// set: the manifest cannot set `LV2_PATH` without dropping the standard
+/// locations. Only existing directories are returned.
 pub(crate) fn default_search_paths() -> Vec<PathBuf> {
     let mut paths = candidate_paths(
         std::env::var_os("LV2_PATH"),
