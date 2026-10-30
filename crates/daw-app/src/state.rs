@@ -30,6 +30,8 @@ pub struct AppState {
     pub instruments: crate::instrument::InstrumentChoices,
     /// The MIDI take in progress.
     pub recording: Option<crate::recording::Recording>,
+    /// The audio takes in progress.
+    pub audio_recording: Option<crate::recording::AudioRecording>,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -95,6 +97,7 @@ impl AppState {
             piano: PianoRoll::new(),
             instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
+            audio_recording: None,
             synced: None,
             view_revision: 0,
             status: None,

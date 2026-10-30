@@ -6,7 +6,9 @@
 //! pacing itself in real time, so the app still runs (silently) and the
 //! playhead still moves.
 
-use daw_backend::{AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Pacing};
+use daw_backend::{
+    AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Latency, Pacing,
+};
 use daw_core::time::TickTime;
 use daw_engine::EngineConfig;
 
@@ -164,6 +166,16 @@ impl AudioHost {
 
     pub fn buffer_size(&self) -> u32 {
         self.backend.buffer_size()
+    }
+
+    /// The backend's input and output latency as it reports it now.
+    pub fn latency(&self) -> Latency {
+        self.backend.latency()
+    }
+
+    /// Cycles the backend missed (xruns) since it started.
+    pub fn xruns(&self) -> u64 {
+        self.backend.stats().xruns
     }
 
     pub fn backend(&self) -> &dyn AudioBackend {
