@@ -87,6 +87,9 @@ pub trait PluginFormat: Send + Sync {
     /// that cannot be loaded (a missing library, no entry point, a factory that fails) gives
     /// [`PluginError::Load`] saying why, so the host can show the user.
     fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError>;
+    /// Called once before the process exits, after every instance of this format is gone.
+    /// A format that keeps plugin code loaded (VST3) lets the plugins clean up here.
+    fn shutdown(&self) {}
     fn instantiate(
         &self,
         d: &PluginDescriptor,

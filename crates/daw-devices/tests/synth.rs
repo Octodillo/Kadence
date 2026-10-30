@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use daw_core::event::EventKind;
+use daw_core::time::Timeline;
 use daw_devices::devices::synth::*;
 use daw_devices::{Device, Synth};
 
@@ -96,7 +97,8 @@ fn wildcard_note_off_releases_by_id_or_everything() {
     let events = [(0, on(60, 1)), (0, on(64, 2)), (1000, off_any(1))];
     render(&mut synth, 48000, &[], &events, s);
     assert_eq!(synth.active_voices(), 1);
-    render_prepared(&mut synth, 48000, &[], &[(0, off_any(-1))], s, |_| s.bpm);
+    let timeline = Timeline::constant(s.bpm, 4, 4);
+    render_prepared(&mut synth, 48000, &[], &[(0, off_any(-1))], s, &timeline);
     assert_eq!(synth.active_voices(), 0);
 }
 

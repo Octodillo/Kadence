@@ -123,16 +123,41 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:24.04
     steps:
-      - name: Install system packages
+      - name: Add the KDE neon archive
+        # archive.neon.kde.org has had outages (502s for hours). When it is
+        # unreachable on a pull request, skip this job with a warning instead
+        # of failing it; once it answers, build and test failures still fail.
+        id: neon
+        shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl gnupg
-          curl -fsSL https://archive.neon.kde.org/public.key \
-            | gpg --dearmor -o /usr/share/keyrings/neon.gpg
-          echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
-            > /etc/apt/sources.list.d/neon.list
+          neon=https://archive.neon.kde.org
+          # Probe only neon, so an Ubuntu mirror hiccup still fails below.
+          if curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /tmp/neon.key "$neon/public.key" \
+              && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /dev/null "$neon/user/dists/noble/InRelease"; then
+            gpg --batch --yes --dearmor -o /usr/share/keyrings/neon.gpg /tmp/neon.key
+            echo "deb [signed-by=/usr/share/keyrings/neon.gpg] $neon/user noble main" \
+              > /etc/apt/sources.list.d/neon.list
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "::warning title=KDE neon archive unreachable::Skipping this job: $neon did not answer. This is not a failure of the code under test."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            # On main and scheduled runs, stay red so the gap gets noticed.
+            echo "::error title=KDE neon archive unreachable::$neon did not answer."
+            exit 1
+          fi
+      - name: Install system packages
+        if: steps.neon.outputs.available == 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential git cmake ninja-build clang pkg-config \
@@ -145,16 +170,22 @@ jobs:
             desktop-file-utils appstream xvfb
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - if: steps.neon.outputs.available == 'true'
+        uses: actions/checkout@v4
+      - if: steps.neon.outputs.available == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           key: neon
-      - uses: taiki-e/install-action@v2
+      - if: steps.neon.outputs.available == 'true'
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
       - name: clippy
+        if: steps.neon.outputs.available == 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
+        if: steps.neon.outputs.available == 'true'
         run: cargo nextest run --workspace --no-tests=warn
       - name: CMake install layout
+        if: steps.neon.outputs.available == 'true'
         run: ci/check-install.sh

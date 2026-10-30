@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{ProcessContext, TransportState};
-use daw_core::time::SampleTime;
+use daw_core::time::{SampleTime, Timeline};
 use daw_devices::Device;
 
 #[global_allocator]
@@ -64,19 +64,20 @@ pub fn render(
     setup: Setup,
 ) -> Rendered {
     dev.prepare(setup.sample_rate, setup.block as u32);
-    render_prepared(dev, frames, input, events, setup, |_| setup.bpm)
+    let timeline = Timeline::constant(setup.bpm, 4, 4);
+    render_prepared(dev, frames, input, events, setup, &timeline)
 }
 
 /// Like [`render`], but without calling `prepare` first (the device must
-/// already be prepared for `setup`), and with the tempo of each block given
-/// by `bpm(first frame of the block)`.
+/// already be prepared for `setup`), and with the transport following
+/// `timeline` instead of `setup.bpm` in 4/4.
 pub fn render_prepared(
     dev: &mut dyn Device,
     frames: usize,
     input: &[Vec<f32>],
     events: &[(usize, EventKind)],
     setup: Setup,
-    bpm: impl Fn(usize) -> f64,
+    timeline: &Timeline,
 ) -> Rendered {
     let ports = dev.ports();
     let mut out = vec![vec![0.0f32; frames]; ports.audio_out as usize];
@@ -108,12 +109,12 @@ pub fn render_prepared(
                 })
                 .expect("event capacity");
         }
-        let transport = TransportState {
-            playing: setup.playing,
-            position: SampleTime(pos as i64),
-            bpm: bpm(pos),
-            sample_rate: setup.sample_rate,
-        };
+        let transport = TransportState::at(
+            timeline,
+            setup.playing,
+            SampleTime(pos as i64),
+            setup.sample_rate,
+        );
         {
             let ins: Vec<&[f32]> = in_blocks.iter().map(|b| &b[..n]).collect();
             let mut outs: Vec<&mut [f32]> = out_blocks.iter_mut().map(|b| &mut b[..n]).collect();

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use daw_core::{
     Event, EventKind, EventList, PluginFormat, PluginInstance, ProcessContext, SampleTime,
-    TransportState,
+    Timeline, TransportState,
 };
 use daw_plugins_vst3::Vst3Format;
 
@@ -32,12 +32,12 @@ fn block(p: &mut dyn PluginInstance, position: i64, events: &[Event]) -> (f32, u
         let _ = events_in.push(*e);
     }
     let mut events_out = EventList::with_capacity(256);
-    let transport = TransportState {
-        playing: true,
-        position: SampleTime(position),
-        bpm: 120.0,
-        sample_rate: SAMPLE_RATE,
-    };
+    let transport = TransportState::at(
+        &Timeline::default(),
+        true,
+        SampleTime(position),
+        SAMPLE_RATE,
+    );
     let audio_in: Vec<&[f32]> = ins.iter().map(|v| v.as_slice()).collect();
     let mut audio_out: Vec<&mut [f32]> = outs.iter_mut().map(|v| v.as_mut_slice()).collect();
     p.process(&mut ProcessContext {
