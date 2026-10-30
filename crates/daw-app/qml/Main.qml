@@ -249,6 +249,33 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    EngineErrorText {
+        id: engineError
+    }
+
+    // Audio trouble the user did not cause from the settings page (those
+    // errors show there): say so wherever they are, with a way to fix it.
+    function notifyEngineError(): void {
+        switch (Engine.errorContext) {
+        case Engine.StartupFallback:
+        case Engine.StartupFailed:
+        case Engine.AudioFailed:
+            showPassiveNotification(engineError.text, "long",
+                                    i18nc("@action:button", "Audio Settings…"),
+                                    () => root.openSettings());
+            break;
+        }
+    }
+
+    Component.onCompleted: notifyEngineError()
+
+    Connections {
+        target: Engine
+        function onErrorContextChanged(): void {
+            root.notifyEngineError();
+        }
+    }
+
     function showPage(page: Kirigami.Page, action: Kirigami.Action): void {
         for (const a of pageActions) {
             a.checked = a === action;

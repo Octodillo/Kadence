@@ -49,22 +49,35 @@ pub enum EngineStatus {
     Stopped,
     /// Audio is running with this configuration.
     Running { sample_rate: u32, buffer_size: u32 },
-    /// The backend refused to start; the message is for the user.
-    Failed(String),
+    /// Audio stopped or never started, and this is why.
+    Failed(EngineError),
 }
 
-/// Why an [`EngineHandle`] call was refused.
+/// Why an [`EngineHandle`] call was refused, or why audio stopped.
+///
+/// The variants carry data, not sentences: each front end words them in
+/// the user's language. [`Display`](fmt::Display) is English for logs only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineError {
+    /// No device with this id (most likely it was unplugged).
     UnknownDevice(String),
-    Unsupported(String),
+    /// The device cannot run at this sample rate, in Hz.
+    UnsupportedSampleRate(u32),
+    /// The device cannot run with this buffer size, in frames.
+    UnsupportedBufferSize(u32),
+    /// The audio system failed for a reason of its own. The text comes from
+    /// the backend or a library below it, so it is not translated; show it
+    /// as a detail after a translated sentence.
+    Backend(String),
 }
 
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownDevice(id) => write!(f, "unknown audio device “{id}”"),
-            Self::Unsupported(what) => write!(f, "not supported: {what}"),
+            Self::UnsupportedSampleRate(rate) => write!(f, "unsupported sample rate {rate} Hz"),
+            Self::UnsupportedBufferSize(size) => write!(f, "unsupported buffer size {size}"),
+            Self::Backend(message) => write!(f, "audio system error: {message}"),
         }
     }
 }
@@ -175,16 +188,10 @@ impl EngineHandle for SessionEngine {
             return Err(EngineError::UnknownDevice(id.clone()));
         }
         if !self.supported_sample_rates().contains(&config.sample_rate) {
-            return Err(EngineError::Unsupported(format!(
-                "sample rate {} Hz",
-                config.sample_rate
-            )));
+            return Err(EngineError::UnsupportedSampleRate(config.sample_rate));
         }
         if !self.supported_buffer_sizes().contains(&config.buffer_size) {
-            return Err(EngineError::Unsupported(format!(
-                "buffer size {}",
-                config.buffer_size
-            )));
+            return Err(EngineError::UnsupportedBufferSize(config.buffer_size));
         }
         let wanted = HostConfig {
             sample_rate: config.sample_rate,
@@ -204,7 +211,7 @@ impl EngineHandle for SessionEngine {
 
     fn status(&self) -> EngineStatus {
         match (self.host.kind(), self.host.last_error()) {
-            (HostKind::Silent, Some(e)) => EngineStatus::Failed(e.to_owned()),
+            (HostKind::Silent, Some(e)) => EngineStatus::Failed(EngineError::Backend(e.to_owned())),
             _ => EngineStatus::Running {
                 sample_rate: self.host.sample_rate(),
                 buffer_size: self.host.buffer_size(),
@@ -301,16 +308,10 @@ impl EngineHandle for StubEngine {
             return Err(EngineError::UnknownDevice(id.clone()));
         }
         if !self.supported_sample_rates().contains(&config.sample_rate) {
-            return Err(EngineError::Unsupported(format!(
-                "sample rate {} Hz",
-                config.sample_rate
-            )));
+            return Err(EngineError::UnsupportedSampleRate(config.sample_rate));
         }
         if !self.supported_buffer_sizes().contains(&config.buffer_size) {
-            return Err(EngineError::Unsupported(format!(
-                "buffer size {}",
-                config.buffer_size
-            )));
+            return Err(EngineError::UnsupportedBufferSize(config.buffer_size));
         }
         self.config = config.clone();
         self.running = true;
@@ -393,7 +394,18 @@ mod tests {
             sample_rate: 12_345,
             ..AudioConfig::default()
         };
-        assert!(engine.apply_audio_config(&bad_rate).is_err());
+        assert_eq!(
+            engine.apply_audio_config(&bad_rate),
+            Err(EngineError::UnsupportedSampleRate(12_345))
+        );
+        let bad_size = AudioConfig {
+            buffer_size: 100,
+            ..AudioConfig::default()
+        };
+        assert_eq!(
+            engine.apply_audio_config(&bad_size),
+            Err(EngineError::UnsupportedBufferSize(100))
+        );
         assert_eq!(engine.audio_config(), before);
     }
 
