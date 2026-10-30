@@ -70,7 +70,7 @@ QtObject {
             return i18nc("@info %1 is a track name",
                          "Changes to the clips on “%1” have not reached the audio engine yet.", m.name);
         case Project.NoInstrumentTrack:
-            return i18nc("@info", "Add an instrument track to record MIDI on.");
+            return i18nc("@info", "Arm an audio track to record audio, or add an instrument track to record MIDI on.");
         case Project.EngineNotRunning:
             return i18nc("@info", "The audio engine is not running.");
         case Project.NoMidiPlayer:
@@ -79,6 +79,34 @@ QtObject {
             return i18nc("@info", "Some MIDI input arrived too fast to be recorded, so the take may be missing notes.");
         case Project.NothingRecorded:
             return i18nc("@info", "The take was outside the song, so nothing was added.");
+        case Project.CannotRecordTo:
+            return i18nc("@info %1 is a file path, %2 a message which may be in English",
+                         "“%1” could not be created (%2).", m.path, m.detail);
+        case Project.NoSuchInput:
+            return i18nc("@info %1 is a track name",
+                         "“%1” records from an input the audio system does not have, so it was not recorded.", m.name);
+        case Project.TrackNotReady:
+            return i18nc("@info %1 is a track name",
+                         "“%1” is not ready to record yet, so it was not recorded; try again in a moment.", m.name);
+        case Project.RecordingStopped:
+            return i18nc("@info %1 is a track name, %2 a message which may be in English",
+                         "Recording “%1” stopped early, possibly because the disk is full. What was recorded before is kept (%2).", m.name, m.detail);
+        case Project.AudioDropped:
+            return i18ncp("@info %1 is a number of samples, %2 a track name",
+                          "The disk was too slow and %1 sample of “%2” was lost, so the rest of its take is slightly early.",
+                          "The disk was too slow and %1 samples of “%2” were lost, so the rest of its take is slightly early.",
+                          m.number, m.name);
+        case Project.PositionJumped:
+            return i18nc("@info %1 is a track name",
+                         "The play position jumped while recording “%1”; the take carries on straight past the jump.", m.name);
+        case Project.TrackGoneWhileRecording:
+            return i18nc("@info %1 is a track name",
+                         "“%1” was deleted while recording, so its take was not kept.", m.name);
+        case Project.RecordXruns:
+            return i18ncp("@info",
+                          "The audio system missed %1 cycle while recording, so the take may have a gap or click.",
+                          "The audio system missed %1 cycles while recording, so the takes may have gaps or clicks.",
+                          m.number);
         }
         return "";
     }
@@ -113,6 +141,8 @@ QtObject {
             case Project.EngineNotRunning:
             case Project.NoMidiPlayer:
                 return i18nc("@info %1 is the reason, a full sentence", "Could not start recording. %1", why);
+            case Project.CannotRecordTo:
+                return i18nc("@info %1 is the reason, a full sentence", "Could not record. %1", why);
             case Project.EditRefused:
                 return i18nc("@info %1 is the reason, a full sentence", "The take could not be added. %1", why);
             }
