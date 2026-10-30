@@ -391,6 +391,9 @@ Item {
             Accessible.ignored: strip.isMaster
             model: strip.outputChoices.map(name => name || strip.masterName)
             currentIndex: strip.outputIndex
+            // A new model resets the index without re-running the binding,
+            // so a renamed or added bus would show the master; bind again.
+            onModelChanged: currentIndex = Qt.binding(() => strip.outputIndex)
             onActivated: index => Mixer.setOutput(strip.index, index)
             Accessible.name: i18nc("@label:listbox", "Output")
             QQC2.ToolTip.text: i18nc("@info:tooltip", "Output: %1", displayText)
