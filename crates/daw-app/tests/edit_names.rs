@@ -15,6 +15,7 @@ const NAMING_CALLS: &[&str] = &[
     "NoteEdit::new(",
     "edit_selected(",
     "edit_selection(",
+    "edit_selected_audio(",
 ];
 
 /// How many lines after a naming call to look for its name, for calls
