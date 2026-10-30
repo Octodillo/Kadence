@@ -466,3 +466,81 @@ fn tempo_and_meter_edits_reach_the_engine() {
     assert_eq!(timeline.tempo.bpm_at(TickTime(0)), 90.0);
     assert_eq!(timeline.meter.points()[0].numerator, 3);
 }
+
+/// An instrument track with the built-in synth and one MIDI clip of a
+/// held note over beats 1 to 3.
+fn synth_rig() -> (Rig, TrackId, ClipId) {
+    let mut rig = Rig::new(f64::INFINITY);
+    let track = Track::new(TrackKind::Instrument, "Synth");
+    let tid = track.id;
+    rig.doc.execute(AddTrack::new(1, track)).unwrap();
+    let synth = daw_model::Device::new(
+        "Synth",
+        daw_model::DeviceSource::Builtin {
+            kind: "daw.synth".into(),
+        },
+    );
+    rig.doc
+        .execute(daw_model::commands::AddDevice {
+            track: tid,
+            index: 0,
+            device: synth,
+        })
+        .unwrap();
+    let note = daw_model::Note {
+        id: daw_model::NoteUid::new(),
+        start: TickTime(0),
+        length: TickTime(2 * PPQ),
+        channel: 0,
+        key: 60,
+        velocity: 0.8,
+    };
+    let clip = Clip::new(
+        "notes",
+        TickTime(PPQ),
+        TickTime(4 * PPQ),
+        ClipContent::Midi(daw_model::MidiClip { notes: vec![note] }),
+    );
+    let cid = clip.id;
+    rig.doc.execute(AddClip::new(tid, clip)).unwrap();
+    rig.sync();
+    (rig, tid, cid)
+}
+
+fn peak(s: &[f32]) -> f32 {
+    s.iter().fold(0.0, |m, v| m.max(v.abs()))
+}
+
+#[test]
+fn midi_clip_plays_its_notes_through_the_instrument() {
+    let (mut rig, _, _) = synth_rig();
+    rig.session.play().unwrap();
+    let out = rig.run(4 * BEAT as usize);
+    assert!(peak(&out[..20_000]) < 1e-4, "silent before the clip");
+    assert!(peak(&out[30_000..70_000]) > 1e-3, "the note sounds");
+}
+
+#[test]
+fn note_edits_reach_the_player_without_a_rebuild() {
+    let (mut rig, _, clip) = synth_rig();
+    rig.run(BLOCK);
+    let swaps = rig.session.controller().graphs_swapped();
+    let mut notes = match &rig.doc.project().clip(clip).unwrap().content {
+        ClipContent::Midi(m) => m.notes.clone(),
+        _ => unreachable!(),
+    };
+    notes[0].start = TickTime(2 * PPQ);
+    rig.doc
+        .execute(daw_model::commands::EditNotes { clip, notes })
+        .unwrap();
+    rig.sync();
+    rig.session.play().unwrap();
+    let out = rig.run(4 * BEAT as usize);
+    assert_eq!(
+        rig.session.controller().graphs_swapped(),
+        swaps,
+        "no rebuild"
+    );
+    assert!(peak(&out[..70_000]) < 1e-4, "the note moved later");
+    assert!(peak(&out[74_000..]) > 1e-3, "and plays there");
+}

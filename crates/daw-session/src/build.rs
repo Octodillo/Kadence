@@ -21,6 +21,9 @@ use daw_model::{
     SendId, Track, TrackId, TrackKind, TrackOutput,
 };
 
+use daw_midi::model::compile_track;
+use daw_midi::player::midi_player;
+
 use crate::media::Loaded;
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
 use crate::{Built, Session, db_to_gain};
@@ -43,6 +46,14 @@ pub(crate) fn strip_key(project: &Project, track: TrackId) -> NodeKey {
 fn player_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 1)
 }
+
+/// The key of an instrument track's MIDI player.
+fn midi_key(track: TrackId) -> NodeKey {
+    NodeKey(track.0.as_u128() ^ 2)
+}
+
+/// How many captured input events can wait for the recorder.
+const MIDI_CAPTURE: usize = 4096;
 
 pub(crate) fn device_key(device: DeviceId) -> NodeKey {
     NodeKey(device.0.as_u128())
@@ -190,6 +201,32 @@ pub(crate) fn graph(
                 }
             }
         }
+        // An instrument track's MIDI player feeds its first device events,
+        // not audio, so it stays out of the audio chain.
+        let mut midi = None;
+        if track.kind == TrackKind::Instrument {
+            let mkey = midi_key(track.id);
+            midi = Some(match old.midi.remove(&track.id) {
+                Some(handle) if g.can_reuse(mkey) => {
+                    built.midi.insert(track.id, handle);
+                    if let Some(c) = old.midi_clips.remove(&track.id) {
+                        built.midi_clips.insert(track.id, c);
+                    }
+                    g.reuse(mkey).expect("checked")
+                }
+                _ => {
+                    let (node, mut handle) = midi_player(MIDI_CAPTURE);
+                    let seq = compile_track(track, &session.tempo, session.sample_rate());
+                    // A fresh queue has room for the first sequence.
+                    let _ = handle.set_sequence(seq);
+                    built.midi_clips.insert(track.id, track.clips.clone());
+                    built.midi.insert(track.id, handle);
+                    let id = g.add_device(format!("{} notes", track.name), Box::new(node));
+                    g.set_key(id, mkey);
+                    id
+                }
+            });
+        }
         for d in &track.devices {
             let key = device_key(d.id);
             let same_source = old.structure.device_source(d.id) == Some(&d.source);
@@ -239,15 +276,17 @@ pub(crate) fn graph(
             _ => chain.first().copied().unwrap_or(strip),
         };
         heads.insert(track.id, head);
-        // Live MIDI goes to every instrument track's first device for now;
-        // record arming (with the MIDI player) will narrow it down.
-        if track.kind == TrackKind::Instrument
-            && let Some(first) = track.devices.iter().find(|d| d.enabled)
-            && let Some(&id) = chain
-                .iter()
-                .find(|&&n| g.key(n) == Some(device_key(first.id)))
-        {
-            g.route_external_events(id);
+        // Live MIDI goes through every instrument track's player (which
+        // passes it on) for now; record arming will narrow it down.
+        if let Some(player) = midi {
+            g.route_external_events(player);
+            if let Some(first) = track.devices.iter().find(|d| d.enabled)
+                && let Some(&id) = chain
+                    .iter()
+                    .find(|&&n| g.key(n) == Some(device_key(first.id)))
+            {
+                g.connect_events(player, id);
+            }
         }
     }
 
