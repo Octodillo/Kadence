@@ -22,6 +22,7 @@ Item {
     required property list<string> inserts
     required property bool insertMeters
     required property list<string> sends
+    required property list<real> sendLevels
 
     required property double levelLeft
     required property double levelRight
@@ -192,7 +193,7 @@ Item {
                             Layout.fillWidth: true
                             from: -60
                             to: 6
-                            value: Mixer.sendLevel(strip.index, sendRow.index)
+                            value: strip.sendLevels[sendRow.index] ?? -60
                             onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
                             onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
                             QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.modelData, strip.dbText(value))

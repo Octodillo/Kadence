@@ -143,6 +143,7 @@ const ROLES: &[&str] = &[
     "inserts",
     "insertMeters",
     "sends",
+    "sendLevels",
     "levelLeft",
     "levelRight",
     "holdLeft",
@@ -390,11 +391,14 @@ impl qobject::Mixer {
             }
         } else {
             self.as_mut().begin_reset_model();
+            let meters = vec![MeterDisplay::default(); strips.len()];
+            let flat = flatten(&meters);
             let mut rust = self.as_mut().rust_mut();
-            rust.meters = vec![MeterDisplay::default(); strips.len()];
+            rust.meters = meters;
             rust.ballistics = MeterBallistics::default();
             rust.strips = strips;
             self.as_mut().end_reset_model();
+            self.as_mut().set_levels(flat);
         }
         self.as_mut().set_any_soloed(soloed);
     }
@@ -446,6 +450,13 @@ impl qobject::Mixer {
             Some("insertMeters") => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
             Some("sends") => {
                 QVariant::from(&string_list(s.sends.iter().map(|x| x.target_name.as_str())))
+            }
+            Some("sendLevels") => {
+                let mut levels = QList::<f64>::default();
+                for x in &s.sends {
+                    levels.append(x.level_db);
+                }
+                QVariant::from(&levels)
             }
             Some("levelLeft") => QVariant::from(&m.level[0]),
             Some("levelRight") => QVariant::from(&m.level[1]),

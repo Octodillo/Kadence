@@ -207,7 +207,8 @@ impl SessionMixer {
             if let Some(s) = session {
                 record(take, s);
                 if let Some((key, param, v)) = live_param(doc.project(), s, take) {
-                    s.set_live_param(key, param, v).map_err(|e| e.to_string())?;
+                    s.set_live_param(key, param, Some(v))
+                        .map_err(|e| e.to_string())?;
                 }
             }
             return Ok(());
@@ -252,9 +253,10 @@ impl SessionMixer {
             return Ok(());
         }
         let id = track.id;
-        doc.execute(SetTrack::new(id, field))
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        let r = doc.execute(SetTrack::new(id, field));
+        // A click is a gesture of its own.
+        doc.seal();
+        r.map(|_| ()).map_err(|e| e.to_string())
     }
 
     /// Appends a built-in effect to the strip's chain.
@@ -276,7 +278,9 @@ impl SessionMixer {
             index: track.devices.len(),
             device,
         };
-        doc.execute(command).is_ok()
+        let added = doc.execute(command).is_ok();
+        doc.seal();
+        added
     }
 
     pub fn remove_insert(
@@ -289,9 +293,9 @@ impl SessionMixer {
             return Ok(());
         };
         let device = device.id;
-        doc.execute(RemoveDevice::new(device))
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        let r = doc.execute(RemoveDevice::new(device));
+        doc.seal();
+        r.map(|_| ()).map_err(|e| e.to_string())
     }
 
     pub fn effects(&self) -> Vec<EffectChoice> {
@@ -369,7 +373,11 @@ impl SessionMixer {
                 // Start from what is heard: the lane's value, if it has one.
                 let value = lane_of(&track, target)
                     .filter(|l| l.enabled)
-                    .and_then(|l| lane_value(l, session, session.controller().position()))
+                    .and_then(|l| {
+                        session
+                            .engine_lane(&l.points)
+                            .value_at(session.controller().position())
+                    })
                     .unwrap_or(value);
                 let mut take = Take {
                     track: track.id,
@@ -385,19 +393,38 @@ impl SessionMixer {
                     live_param(doc.project(), session, self.takes.last().expect("pushed"))
                 {
                     session
-                        .set_live_param(key, param, v)
+                        .set_live_param(key, param, Some(v))
                         .map_err(|e| e.to_string())?;
                 }
                 Ok(())
             }
-            (false, Some(i)) => {
-                let take = self.takes.remove(i);
-                let r = commit(doc, session, take);
-                self.suspend(doc, session)?;
+            (false, running) => {
+                let mut r = Ok(());
+                if let Some(i) = running {
+                    let take = self.takes.remove(i);
+                    r = self.end(doc, session, take);
+                }
+                // Letting go ends the gesture, written or not: the next drag
+                // is its own undo step.
+                doc.seal();
                 r
             }
             _ => Ok(()),
         }
+    }
+
+    /// Ends a take: writes it, lets the document's value play again and
+    /// resumes its lane.
+    fn end(&mut self, doc: &mut Document, session: &mut Session, take: Take) -> Result<(), String> {
+        let live = live_param(doc.project(), session, &take);
+        let r = commit(doc, session, take);
+        if let Some((key, param, _)) = live {
+            session
+                .set_live_param(key, param, None)
+                .map_err(|e| e.to_string())?;
+        }
+        self.suspend(doc, session)?;
+        r
     }
 
     /// Records held controls on the clock. A take ends when the transport
@@ -419,6 +446,7 @@ impl SessionMixer {
         }
         let now = session.controller().position();
         let mut result = Ok(());
+        let mut wrote = false;
         for i in 0..self.takes.len() {
             let take = &mut self.takes[i];
             let behind = take.recorder.range().is_some_and(|(_, end)| now < end);
@@ -435,8 +463,14 @@ impl SessionMixer {
                 if let Err(e) = commit(doc, session, done) {
                     result = Err(e);
                 }
+                wrote = true;
             }
             record(&mut self.takes[i], session);
+        }
+        if wrote {
+            // A lane written just now must not drown out the hand that is
+            // still on the control.
+            self.suspend(doc, session)?;
         }
         result
     }
@@ -451,12 +485,12 @@ impl SessionMixer {
             return Ok(());
         };
         let mut result = Ok(());
-        for take in std::mem::take(&mut self.takes) {
-            if let Err(e) = commit(doc, session, take) {
+        while let Some(take) = self.takes.pop() {
+            if let Err(e) = self.end(doc, session, take) {
                 result = Err(e);
             }
         }
-        self.suspend(doc, session)?;
+        doc.seal();
         result
     }
 
@@ -504,11 +538,7 @@ fn live_param(project: &Project, session: &Session, take: &Take) -> Option<(Node
         AutomationTarget::Pan => Some((session.strip_key(take.track)?, Strip::PAN, take.value)),
         AutomationTarget::SendLevel { send } => {
             project.send_location(send)?;
-            Some((
-                NodeKey(send.0.as_u128()),
-                Strip::GAIN,
-                db_to_gain(take.value),
-            ))
+            Some((Session::send_key(send), Strip::GAIN, db_to_gain(take.value)))
         }
         AutomationTarget::DeviceParam { .. } => None,
     }
@@ -517,24 +547,6 @@ fn live_param(project: &Project, session: &Session, take: &Take) -> Option<(Node
 fn record(take: &mut Take, session: &Session) {
     take.recorder
         .record(session.controller().position(), take.value);
-}
-
-/// A model lane in engine samples, as the session plays it.
-fn engine_lane(points: &[AutomationPoint], session: &Session) -> daw_engine::AutomationLane {
-    daw_engine::AutomationLane::new(
-        points
-            .iter()
-            .map(|p| daw_engine::AutomationPoint {
-                time: session.ticks_to_samples(p.tick),
-                value: p.value,
-                curve: if p.step { Curve::Step } else { Curve::Linear },
-            })
-            .collect(),
-    )
-}
-
-fn lane_value(lane: &AutomationLane, session: &Session, at: SampleTime) -> Option<f64> {
-    engine_lane(&lane.points, session).value_at(at)
 }
 
 /// Merges a finished take into its lane, creating the lane if needed.
@@ -551,8 +563,9 @@ fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), Strin
     };
     let existing = lane_of(track, take.target);
     let base = match existing {
-        Some(l) if !l.points.is_empty() => engine_lane(&l.points, session),
-        // A new lane holds the static value around the take.
+        Some(l) if l.enabled && !l.points.is_empty() => session.engine_lane(&l.points),
+        // A new lane, or one that was switched off (and so not heard while
+        // writing), starts over from the static value around the take.
         _ => daw_engine::AutomationLane::new(vec![daw_engine::AutomationPoint {
             time: SampleTime(0),
             value: static_value,
@@ -560,8 +573,22 @@ fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), Strin
         }]),
     };
     let merged = take.recorder.finish(&base);
+    // Points the take left alone keep their exact tick and curve shape,
+    // which the engine's lane doesn't carry.
+    let kept: Vec<&AutomationPoint> = existing
+        .filter(|l| l.enabled)
+        .map(|l| l.points.iter().collect())
+        .unwrap_or_default();
     let mut points: Vec<AutomationPoint> = Vec::with_capacity(merged.points().len());
     for p in merged.points() {
+        if let Some(&orig) = kept
+            .iter()
+            .find(|o| session.ticks_to_samples(o.tick) == p.time && o.value == p.value)
+            && points.last().is_none_or(|prev| prev.tick < orig.tick)
+        {
+            points.push(orig.clone());
+            continue;
+        }
         let mut tick = session.samples_to_ticks(p.time);
         // Samples finer than a tick: keep points apart and in order.
         if let Some(prev) = points.last() {
@@ -684,7 +711,9 @@ impl MixerHandle for AppMixer {
     }
 
     fn revision(&self) -> u64 {
-        state::with(|s| s.view_revision)
+        // Strips depend only on the document; a new document restarts its
+        // revision count, so its serial goes in the high bits.
+        state::with(|s| (s.doc_serial << 40) ^ s.doc.revision())
     }
 
     fn set_write_automation(&mut self, on: bool) {
@@ -703,6 +732,7 @@ impl MixerHandle for AppMixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daw_core::time::PPQ;
     use daw_engine::EngineProcessor;
     use daw_model::Send;
     use daw_session::SessionConfig;
@@ -898,7 +928,7 @@ mod tests {
         assert_eq!(drums.automation.len(), 1);
         let lane = &drums.automation[0];
         assert_eq!(lane.target, AutomationTarget::Volume);
-        let engine = engine_lane(&lane.points, &r.session);
+        let engine = r.session.engine_lane(&lane.points);
         let v = |t: i64| engine.value_at(SampleTime(t)).unwrap();
         assert_eq!(v(0), -3.0, "before the take: the static value");
         assert!((v(start.0) - -3.0).abs() < 0.5);
@@ -949,5 +979,127 @@ mod tests {
         assert_eq!(lane.points[0].value, -1.0);
         assert!(lane.points.windows(2).all(|w| w[0].tick < w[1].tick));
         assert_eq!(lane.points.last().unwrap().value, -1.0, "restored after");
+    }
+
+    #[test]
+    fn separate_gestures_undo_separately() {
+        let mut r = rig();
+        r.set("Drums", Control::Volume, -6.0);
+        r.touch("Drums", Control::Volume, false);
+        r.set("Drums", Control::Volume, -12.0);
+        r.touch("Drums", Control::Volume, false);
+        r.doc.undo().unwrap();
+        assert_eq!(r.track("Drums").volume_db, -6.0);
+        let drums = r.id("Drums");
+        r.mixer.set_muted(&mut r.doc, drums, true).unwrap();
+        r.mixer.set_muted(&mut r.doc, drums, false).unwrap();
+        r.doc.undo().unwrap();
+        assert!(r.track("Drums").mute, "each click undoes on its own");
+    }
+
+    #[test]
+    fn a_held_control_survives_other_edits_and_loop_wraps() {
+        let mut r = rig();
+        r.mixer
+            .set_write(&mut r.doc, Some(&mut r.session), true)
+            .unwrap();
+        r.session
+            .set_loop(Some((TickTime(0), TickTime(4 * PPQ))))
+            .unwrap();
+        r.session.play().unwrap();
+        r.run(4);
+        r.touch("Drums", Control::Volume, true);
+        r.set("Drums", Control::Volume, -20.0);
+        r.run(4);
+        r.tick();
+        // Another edit syncs the session; the held value stays live.
+        r.set("Keys", Control::Pan, 0.3);
+        let drums = r.track("Drums").id;
+        let key = r.session.strip_key(drums).unwrap();
+        r.session.sync(&r.doc.snapshot()).unwrap();
+        assert!(r.session.controller().has_node(key), "the strip still runs");
+        // Jump back as a loop wrap does: the take is written, and its new
+        // lane is held out of playback while the hand stays on.
+        r.session.locate(TickTime(0)).unwrap();
+        r.run(1);
+        r.tick();
+        assert_eq!(r.track("Drums").automation.len(), 1);
+        assert_eq!(r.session.suspended_lanes().len(), 1);
+        assert_eq!(
+            r.mixer.strips(r.doc.project(), Some(&r.session))[0].volume_db,
+            -20.0
+        );
+        r.touch("Drums", Control::Volume, false);
+        assert!(r.session.suspended_lanes().is_empty());
+    }
+
+    #[test]
+    fn writing_keeps_curves_outside_the_take() {
+        let mut r = rig();
+        let drums = r.track("Drums").id;
+        let mut lane = AutomationLane::new(AutomationTarget::Pan);
+        let curved = AutomationPoint {
+            tick: TickTime(0),
+            value: -1.0,
+            curve: 0.6,
+            step: false,
+        };
+        lane.points = vec![
+            curved.clone(),
+            AutomationPoint {
+                tick: TickTime(PPQ),
+                value: 1.0,
+                curve: 0.0,
+                step: true,
+            },
+        ];
+        r.doc.execute(AddLane { track: drums, lane }).unwrap();
+        r.sync();
+        r.mixer
+            .set_write(&mut r.doc, Some(&mut r.session), true)
+            .unwrap();
+        r.session.play().unwrap();
+        // Well after the last point: 1 beat at 120 bpm is 24000 samples.
+        r.run(200);
+        r.touch("Drums", Control::Pan, true);
+        r.set("Drums", Control::Pan, 0.0);
+        r.run(8);
+        r.touch("Drums", Control::Pan, false);
+        let lane = &r.track("Drums").automation[0];
+        assert_eq!(lane.points[0], curved, "the curve before the take is kept");
+        assert!(lane.points.iter().any(|p| p.value == 0.0));
+    }
+
+    #[test]
+    fn writing_over_a_switched_off_lane_starts_it_over() {
+        let mut r = rig();
+        let drums = r.track("Drums").id;
+        let mut lane = AutomationLane::new(AutomationTarget::Pan);
+        lane.enabled = false;
+        lane.points = vec![AutomationPoint {
+            tick: TickTime(0),
+            value: -1.0,
+            curve: 0.0,
+            step: true,
+        }];
+        r.doc.execute(AddLane { track: drums, lane }).unwrap();
+        r.sync();
+        r.mixer
+            .set_write(&mut r.doc, Some(&mut r.session), true)
+            .unwrap();
+        r.session.play().unwrap();
+        r.run(8);
+        r.touch("Drums", Control::Pan, true);
+        r.set("Drums", Control::Pan, 0.5);
+        r.run(8);
+        r.touch("Drums", Control::Pan, false);
+        let lane = &r.track("Drums").automation[0];
+        assert!(lane.enabled);
+        assert!(
+            lane.points.iter().all(|p| p.value != -1.0),
+            "the switched-off curve doesn't come back: {:?}",
+            lane.points
+        );
+        assert_eq!(lane.points[0].value, 0.0, "static pan before the take");
     }
 }

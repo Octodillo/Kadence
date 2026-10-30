@@ -28,9 +28,10 @@ use std::sync::Arc;
 use daw_core::meter::PeakMeter;
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 use daw_engine::{
-    EngineConfig, EngineController, EngineError, EngineProcessor, LoopRange, NodeKey, NodeMeter,
+    AutomationLane, Curve, EngineConfig, EngineController, EngineError, EngineProcessor, LoopRange,
+    NodeKey, NodeMeter,
 };
-use daw_model::{ClipId, DeviceId, LaneId, ProjectSnapshot, TrackId};
+use daw_model::{ClipId, DeviceId, LaneId, ProjectSnapshot, SendId, TrackId};
 
 pub use build::effective_mutes;
 pub use media::{MEMORY_LIMIT_SECONDS, MediaPool};
@@ -94,6 +95,8 @@ pub struct Session {
     /// Automation lanes left out of the graph while the user overwrites
     /// them (touch write).
     suspended: HashSet<LaneId>,
+    /// Parameters held at a value the document doesn't have yet.
+    live: HashMap<(NodeKey, u32), f64>,
 }
 
 impl Session {
@@ -115,6 +118,7 @@ impl Session {
             playing: false,
             master: None,
             suspended: HashSet::new(),
+            live: HashMap::new(),
         };
         (session, processor)
     }
@@ -188,6 +192,10 @@ impl Session {
     /// Leaves the automation lanes in `lanes` out of playback, so a control
     /// being recorded over them is heard instead. Takes effect on the next
     /// [`sync`](Self::sync).
+    ///
+    /// Lanes are compiled into the graph, so this rebuilds it. Every node is
+    /// reused, so nothing is heard or lost, but the build costs as much as
+    /// any routing edit.
     pub fn set_suspended_lanes(&mut self, lanes: HashSet<LaneId>) {
         self.suspended = lanes;
     }
@@ -196,15 +204,21 @@ impl Session {
         &self.suspended
     }
 
-    /// Sends a parameter value that isn't in the document yet, such as a
-    /// fader being recorded as automation. The next [`sync`](Self::sync)
-    /// sends the document's value again if it differs.
+    /// Holds a parameter at a value that isn't in the document, such as a
+    /// fader being recorded as automation: sent now, and kept over the
+    /// document's value by every [`sync`](Self::sync) until cleared with
+    /// `None`. After clearing, the next sync sends the document's value.
     pub fn set_live_param(
         &mut self,
         key: NodeKey,
         param: u32,
-        value: f64,
+        value: Option<f64>,
     ) -> Result<(), SessionError> {
+        let Some(value) = value else {
+            self.live.remove(&(key, param));
+            return Ok(());
+        };
+        self.live.insert((key, param), value);
         self.controller.set_param_by_key(key, param, value)?;
         if let Some(b) = &mut self.built {
             b.params.insert((key, param), value);
@@ -212,9 +226,30 @@ impl Session {
         Ok(())
     }
 
+    /// The engine node key for a send.
+    pub fn send_key(send: SendId) -> NodeKey {
+        build::send_key(send)
+    }
+
+    /// A model automation lane's points as the engine plays them: in
+    /// samples, values in the lane's own unit.
+    pub fn engine_lane(&self, points: &[daw_model::AutomationPoint]) -> AutomationLane {
+        AutomationLane::new(
+            points
+                .iter()
+                .map(|p| daw_engine::AutomationPoint {
+                    time: self.ticks_to_samples(p.tick),
+                    value: p.value,
+                    curve: if p.step { Curve::Step } else { Curve::Linear },
+                })
+                .collect(),
+        )
+    }
+
     fn send_params(&mut self, snapshot: &ProjectSnapshot) -> Result<(), SessionError> {
         let built = self.built.as_mut().expect("built before params");
         for ((key, param), value) in build::params(snapshot) {
+            let value = self.live.get(&(key, param)).copied().unwrap_or(value);
             if built.params.get(&(key, param)) != Some(&value) {
                 self.controller.set_param_by_key(key, param, value)?;
                 built.params.insert((key, param), value);

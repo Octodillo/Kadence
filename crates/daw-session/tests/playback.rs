@@ -451,3 +451,54 @@ fn split_clip_plays_through_the_cut_without_a_dip() {
         );
     }
 }
+
+#[test]
+fn live_params_hold_over_syncs_and_suspended_lanes_are_skipped() {
+    use daw_engine::nodes::Strip;
+    use daw_model::commands::AddLane;
+    use daw_model::{AutomationLane, AutomationPoint, AutomationTarget};
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 48_000 * 4, 0.5);
+    rig.add_clip("a.wav", 0, 8);
+    let mut lane = AutomationLane::new(AutomationTarget::Volume);
+    lane.points = vec![AutomationPoint {
+        tick: TickTime(0),
+        value: -6.0206,
+        curve: 0.0,
+        step: true,
+    }];
+    let lane_id = lane.id;
+    rig.doc
+        .execute(AddLane {
+            track: rig.track,
+            lane,
+        })
+        .unwrap();
+    rig.sync();
+    rig.session.play().unwrap();
+    let level = |rig: &mut Rig| *rig.run(BLOCK * 4).last().unwrap();
+    assert!((level(&mut rig) - 0.25).abs() < 1e-3, "the lane plays");
+
+    // A held fader: its lane is left out and its value stays live over a
+    // sync caused by another edit.
+    let key = rig.session.strip_key(rig.track).unwrap();
+    rig.session.set_suspended_lanes([lane_id].into());
+    rig.session
+        .set_live_param(key, Strip::GAIN, Some(0.2))
+        .unwrap();
+    rig.sync();
+    assert!((level(&mut rig) - 0.1).abs() < 1e-3);
+    rig.doc
+        .execute(SetTrack::new(rig.track, TrackField::Name("Renamed".into())))
+        .unwrap();
+    rig.sync();
+    assert!((level(&mut rig) - 0.1).abs() < 1e-3, "held over the sync");
+
+    // Let go: the document's static value, then the lane again.
+    rig.session.set_live_param(key, Strip::GAIN, None).unwrap();
+    rig.sync();
+    assert!((level(&mut rig) - 0.5).abs() < 1e-3);
+    rig.session.set_suspended_lanes(Default::default());
+    rig.sync();
+    assert!((level(&mut rig) - 0.25).abs() < 1e-3);
+}

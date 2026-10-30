@@ -14,7 +14,7 @@ use daw_core::time::TickTime;
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
 use daw_engine::{
-    AutomationLane, AutomationPoint, Curve, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
+    AutomationLane, AutomationPoint, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
 };
 use daw_model::{
     AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, LaneId, Project,
@@ -48,7 +48,7 @@ pub(crate) fn device_key(device: DeviceId) -> NodeKey {
     NodeKey(device.0.as_u128())
 }
 
-fn send_key(send: SendId) -> NodeKey {
+pub(crate) fn send_key(send: SendId) -> NodeKey {
     NodeKey(send.0.as_u128())
 }
 
@@ -355,13 +355,13 @@ fn automate(
                 }
             };
             let Some(node) = node else { continue };
-            let points = lane
-                .points
+            let points = session
+                .engine_lane(&lane.points)
+                .points()
                 .iter()
                 .map(|p| AutomationPoint {
-                    time: session.ticks_to_samples(p.tick),
                     value: to_value(p.value),
-                    curve: if p.step { Curve::Step } else { Curve::Linear },
+                    ..*p
                 })
                 .collect();
             g.automate(node, param, AutomationLane::new(points));
