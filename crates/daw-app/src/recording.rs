@@ -1,63 +1,65 @@
-//! MIDI recording: arms the clip players of the armed instrument tracks (or,
-//! with none armed, of the target track), collects what they capture while
-//! playing, and turns the takes into one undoable edit.
+//! Recording: the Record action records every armed track, audio and
+//! MIDI, and on stop adds the audio takes as one undoable edit and the
+//! MIDI take as another.
 //!
-//! A take is overdubbed into the clip open in the piano roll when recording
-//! starts inside it and every note fits; otherwise it becomes a new clip
-//! spanning the bars that were played into, so nothing is lost.
+//! Audio takes are recorded by `daw-session` ([`AudioTakes`]) into the
+//! project bundle's audio folder, or a recordings folder in the user's data
+//! directory while the project is unsaved.
+//!
+//! MIDI arms the target track's clip player and collects what it captures
+//! while playing. The take is overdubbed into the clip open in the piano
+//! roll when recording starts inside it and every note fits; otherwise it
+//! becomes a new clip spanning the bars that were played into, so nothing
+//! is lost. With nothing armed, Record records MIDI on the open clip's
+//! track, the selected track or the first instrument track.
 
 use daw_core::time::{SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::model::{meter, midi_clip, new_note, take_command, tempo_map};
 use daw_midi::record::{RecordedNote, Recorder, TakeMode, merge_take, to_clip_notes};
-use daw_model::commands::{AddClip, Batch};
+use std::path::PathBuf;
+
+use daw_model::commands::AddClip;
 use daw_model::{Clip, ClipContent, ClipId, Command, MidiClip, Project, TrackId, TrackKind};
+use daw_session::record::{AudioTakes, armed_audio_tracks};
 
 use crate::message::{Message, RecordProblem};
 use crate::state::AppState;
 
-/// One track's take in progress.
-struct Take {
+/// A take in progress.
+pub struct Recording {
     track: TrackId,
     /// The clip the take goes into, if one was open on the track.
     clip: Option<ClipId>,
-    recorder: Recorder,
-}
-
-/// A recording in progress: a take per track.
-pub struct Recording {
-    takes: Vec<Take>,
-    /// The name of a new clip for a take, in the user's language.
+    /// The name of a new clip for the take, in the user's language.
     name: String,
-    /// Whether dropped input was reported for this recording.
+    /// Whether dropped input was reported for this take.
     dropped: bool,
+    recorder: Recorder,
     /// Where playback was when recording started.
     from: TickTime,
-    /// The tempo and rate the takes' sample times were recorded under.
+    /// The tempo and rate the take's sample times were recorded under.
     tempo: SegmentTempoMap,
     sample_rate: f64,
 }
 
-/// The tracks to record on: every armed instrument track, else the
-/// [`target`]. Each goes into the open clip when the playhead is in it.
-fn targets(state: &AppState) -> Vec<(TrackId, Option<ClipId>)> {
-    let project = state.doc.project();
-    let armed: Vec<TrackId> = project
-        .tracks
-        .iter()
-        .filter(|t| t.kind == TrackKind::Instrument && t.armed)
-        .map(|t| t.id)
-        .collect();
-    if armed.is_empty() {
-        return target(state).into_iter().collect();
-    }
-    let open = target(state).filter(|(_, clip)| clip.is_some());
-    armed
-        .into_iter()
-        .map(|track| match open {
-            Some((t, clip)) if t == track => (track, clip),
-            _ => (track, None),
-        })
-        .collect()
+/// Audio takes in progress.
+pub struct AudioRecording {
+    takes: AudioTakes,
+    /// The audio system's xrun count when recording started.
+    xruns: u64,
+    /// Whether xruns were reported for this recording.
+    xruns_reported: bool,
+}
+
+/// Where takes of an unsaved project go: `kadence/recordings` in the
+/// user's data directory.
+fn unsaved_recordings_dir() -> PathBuf {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+    data.join("kadence").join("recordings")
 }
 
 /// The instrument track that hears live MIDI while none is armed: the one
@@ -67,7 +69,7 @@ fn targets(state: &AppState) -> Vec<(TrackId, Option<ClipId>)> {
 /// notes) as playback crosses the open clip.
 pub fn input_focus(state: &AppState) -> Option<TrackId> {
     if let Some(rec) = &state.recording {
-        return rec.takes.first().map(|t| t.track);
+        return Some(rec.track);
     }
     let project = state.doc.project();
     let is_instrument = |id: TrackId| {
@@ -94,15 +96,26 @@ pub fn input_focus(state: &AppState) -> Option<TrackId> {
         })
 }
 
-/// The track to record on: the open clip's track when the playhead is in
-/// that clip, else the selected track, else the open clip's track, else the
-/// first instrument track. Only instrument tracks qualify.
+/// Whether any audio or instrument track is armed.
+fn anything_armed(project: &Project) -> bool {
+    project
+        .tracks
+        .iter()
+        .any(|t| t.armed && matches!(t.kind, TrackKind::Audio | TrackKind::Instrument))
+}
+
+/// The track to record MIDI on. When anything is armed, the first armed
+/// instrument track (the open clip goes with it when the playhead is in
+/// it), or none. Otherwise the open clip's track when the playhead is in
+/// that clip, else the selected track, else the open clip's track, else
+/// the first instrument track. Only instrument tracks qualify.
 fn target(state: &AppState) -> Option<(TrackId, Option<ClipId>)> {
     let project = state.doc.project();
+    let armed = anything_armed(project);
     let is_instrument = |id: TrackId| {
         project
             .track(id)
-            .is_some_and(|t| t.kind == TrackKind::Instrument)
+            .is_some_and(|t| t.kind == TrackKind::Instrument && (t.armed || !armed))
     };
     let playhead = state.playhead();
     let open = state
@@ -127,180 +140,257 @@ fn target(state: &AppState) -> Option<(TrackId, Option<ClipId>)> {
     project
         .tracks
         .iter()
-        .find(|t| t.kind == TrackKind::Instrument)
+        .find(|t| is_instrument(t.id))
         .map(|t| (t.id, None))
 }
 
 impl AppState {
     pub fn is_recording(&self) -> bool {
-        self.recording.is_some()
+        self.recording.is_some() || self.audio_recording.is_some()
     }
 
-    /// Arms the tracks to record on and starts playback. Fails when there
-    /// is no instrument track or no running session.
+    /// Starts recording every armed audio track and MIDI on the target
+    /// track, then starts playback. Fails when there is nothing to record
+    /// on or no running session; problems with single tracks are reported
+    /// and the rest record.
     pub fn start_recording(&mut self) -> Result<(), Message> {
-        if self.recording.is_some() {
+        if self.is_recording() {
             return Ok(());
         }
-        let targets = targets(self);
-        if targets.is_empty() {
-            return Err(Message::Record(RecordProblem::NoInstrumentTrack));
+        let audio_armed = armed_audio_tracks(self.doc.project()).next().is_some();
+        let audio = self.start_audio()?;
+        let midi = match target(self) {
+            Some((track, clip)) => self.start_midi(track, clip),
+            None if audio => Ok(()),
+            // Every armed audio track failed, and each was reported.
+            None if audio_armed => return Ok(()),
+            None => Err(Message::Record(RecordProblem::NoInstrumentTrack)),
+        };
+        match midi {
+            Ok(()) => {}
+            // Audio is recording; say why MIDI isn't and go on.
+            Err(e) if audio => self.report(e),
+            Err(e) => return Err(e),
         }
+        self.engine.play();
+        Ok(())
+    }
+
+    /// Starts the audio takes. Returns whether any track records.
+    fn start_audio(&mut self) -> Result<bool, Message> {
+        let project = self.doc.project();
+        if armed_audio_tracks(project).next().is_none() {
+            return Ok(false);
+        }
+        let dir = self
+            .doc
+            .bundle()
+            .map_or_else(unsaved_recordings_dir, |b| b.audio_dir());
+        let latency = self.engine.round_trip_latency();
+        let xruns = self.engine.xruns();
+        let Some(session) = self.engine.session_mut() else {
+            return Err(Message::Record(RecordProblem::EngineNotRunning));
+        };
+        let (takes, problems) = AudioTakes::start(session, project, &dir, latency);
+        for p in problems {
+            self.report(Message::Record(RecordProblem::Take(p)));
+        }
+        if takes.is_empty() {
+            return Ok(false);
+        }
+        self.audio_recording = Some(AudioRecording {
+            takes,
+            xruns,
+            xruns_reported: false,
+        });
+        Ok(true)
+    }
+
+    /// Arms the MIDI player of `track` for a take into `clip`, if given.
+    fn start_midi(&mut self, track: TrackId, clip: Option<ClipId>) -> Result<(), Message> {
         let from = self.playhead();
         let sample_rate = self.sample_rate();
         let tempo = tempo_map(&self.doc.project().tempo);
         let Some(session) = self.engine.session_mut() else {
             return Err(Message::Record(RecordProblem::EngineNotRunning));
         };
-        if targets
-            .iter()
-            .any(|&(track, _)| session.midi_player(track).is_none())
-        {
+        let Some(player) = session.midi_player(track) else {
             return Err(Message::Record(RecordProblem::NoMidiPlayer));
-        }
-        let mut takes = Vec::new();
-        for (track, clip) in targets {
-            let player = session.midi_player(track).expect("checked above");
-            // Anything captured before arming belongs to no take.
-            player.drain_captured().for_each(drop);
-            player.set_armed(true);
-            takes.push(Take {
-                track,
-                clip,
-                recorder: Recorder::new(),
-            });
-        }
+        };
+        // Anything captured before arming belongs to no take.
+        player.drain_captured().for_each(drop);
+        player.set_armed(true);
         self.recording = Some(Recording {
-            takes,
+            track,
+            clip,
             name: self.arrange.names.recording.clone(),
             dropped: false,
+            recorder: Recorder::new(),
             from,
             tempo,
             sample_rate,
         });
-        if let Some(focus) = input_focus(self)
-            && let Some(session) = self.engine.session_mut()
-        {
-            session.set_input_focus(Some(focus));
-        }
-        self.engine.play();
         Ok(())
     }
 
-    /// Feeds what the players captured into the takes. Stops recording
-    /// when playback stopped.
+    /// Feeds what the player captured into the take and reports problems
+    /// with the audio takes. Stops recording when playback stopped.
     pub fn poll_recording(&mut self) {
+        self.poll_audio();
+        self.poll_midi();
+        if self.is_recording() && !self.engine.is_playing() {
+            self.stop_recording();
+        }
+    }
+
+    fn poll_audio(&mut self) {
+        let xruns = self.engine.xruns();
+        let Some(rec) = self.audio_recording.as_mut() else {
+            return;
+        };
+        let mut messages: Vec<Message> = rec
+            .takes
+            .poll()
+            .into_iter()
+            .map(|p| Message::Record(RecordProblem::Take(p)))
+            .collect();
+        let missed = xruns.saturating_sub(rec.xruns);
+        if missed > 0 && !rec.xruns_reported {
+            rec.xruns_reported = true;
+            messages.push(Message::Record(RecordProblem::Xruns(missed)));
+        }
+        for m in messages {
+            self.report(m);
+        }
+    }
+
+    fn poll_midi(&mut self) {
         let Some(rec) = self.recording.as_mut() else {
             return;
         };
         let mut dropped = false;
-        if let Some(session) = self.engine.session_mut() {
-            for take in &mut rec.takes {
-                let Some(player) = session.midi_player(take.track) else {
-                    continue;
-                };
-                // A rebuild (a new bundle root, say) makes fresh, unarmed
-                // players.
-                if !player.is_armed() {
-                    player.set_armed(true);
-                }
-                for c in player.drain_captured() {
-                    take.recorder.feed(c);
-                }
-                if player.take_capture_overflows() > 0 {
-                    dropped = true;
-                }
+        if let Some(player) = self
+            .engine
+            .session_mut()
+            .and_then(|s| s.midi_player(rec.track))
+        {
+            // A rebuild (a new bundle root, say) makes fresh, unarmed players.
+            if !player.is_armed() {
+                player.set_armed(true);
+            }
+            for c in player.drain_captured() {
+                rec.recorder.feed(c);
+            }
+            if player.take_capture_overflows() > 0 {
+                dropped = true;
             }
         }
-        // Once per recording, so a flood of input can't keep the message up.
+        // Once per take, so a flood of input can't keep the message up.
         let first_drop = dropped && !rec.dropped;
         rec.dropped |= dropped;
         if first_drop {
             self.report(Message::Record(RecordProblem::InputDropped));
         }
-        if !self.engine.is_playing() {
-            self.stop_recording();
-        }
     }
 
-    /// Disarms, stops playback and adds the takes as one undo step.
+    /// Stops recording and playback and adds the takes: all audio takes as
+    /// one undo step, the MIDI take as another.
     pub fn stop_recording(&mut self) {
-        let Some(mut rec) = self.recording.take() else {
+        if !self.is_recording() {
             return;
-        };
-        let stop_at = self
-            .engine
-            .session()
-            .map(|s| s.ticks_to_samples(self.playhead()));
-        if let Some(session) = self.engine.session_mut() {
-            for take in &mut rec.takes {
-                if let Some(player) = session.midi_player(take.track) {
-                    player.set_armed(false);
-                    for c in player.drain_captured() {
-                        take.recorder.feed(c);
-                    }
+        }
+        let mut commands = Vec::new();
+        if let Some(cmd) = self.stop_midi() {
+            commands.push(cmd);
+        }
+        self.engine.stop();
+        if let Some(mut rec) = self.audio_recording.take() {
+            let root = self.root();
+            // Port latencies settle a while after connections change; the
+            // value now is more trustworthy than the one at the start.
+            rec.takes.set_io_latency(self.engine.round_trip_latency());
+            if let Some(session) = self.engine.session_mut() {
+                let done = rec
+                    .takes
+                    .finish(session, self.doc.project(), root.as_deref());
+                commands.extend(done.command);
+                for p in done.problems {
+                    self.report(Message::Record(RecordProblem::Take(p)));
                 }
             }
         }
-        self.engine.stop();
-        let played: Vec<_> = rec
-            .takes
-            .iter_mut()
-            .map(|take| take.recorder.finish(stop_at))
-            .collect();
-        if played.iter().all(Vec::is_empty) {
-            return;
-        }
-        let mut commands: Vec<Box<dyn Command>> = rec
-            .takes
-            .iter()
-            .zip(&played)
-            .filter(|(_, notes)| !notes.is_empty())
-            .filter_map(|(take, notes)| take_into(self.doc.project(), &rec, take, notes))
-            .collect();
-        let cmd = match commands.len() {
-            0 => {
-                self.report(Message::Record(RecordProblem::NothingRecorded));
-                return;
+        // Each kind of take is its own undo step, so a take the model
+        // refuses can't take the other kind down with it.
+        for cmd in commands {
+            if let Err(e) = self.doc.execute_boxed(cmd) {
+                self.report(Message::Record(RecordProblem::Refused(e)));
             }
-            1 => commands.pop().expect("one command"),
-            _ => Box::new(Batch::new("Record Takes", commands)),
-        };
-        if let Err(e) = self.doc.execute_boxed(cmd) {
-            self.report(Message::Record(RecordProblem::Refused(e)));
+            self.doc.seal();
         }
         self.doc.seal();
     }
 
-    /// Ends a recording without keeping it, for when the document or the
-    /// engine is about to be replaced.
+    /// Disarms the MIDI player and returns the command that adds its take.
+    fn stop_midi(&mut self) -> Option<Box<dyn Command>> {
+        let mut rec = self.recording.take()?;
+        let stop_at = self
+            .engine
+            .session()
+            .map(|s| s.ticks_to_samples(self.playhead()));
+        if let Some(player) = self
+            .engine
+            .session_mut()
+            .and_then(|s| s.midi_player(rec.track))
+        {
+            player.set_armed(false);
+            for c in player.drain_captured() {
+                rec.recorder.feed(c);
+            }
+        }
+        let take = rec.recorder.finish(stop_at);
+        if take.is_empty() {
+            return None;
+        }
+        let cmd = take_into(self.doc.project(), &rec, &take);
+        if cmd.is_none() {
+            self.report(Message::Record(RecordProblem::NothingRecorded));
+        }
+        cmd
+    }
+
+    /// Ends a take without keeping it, for when the document or the engine
+    /// is about to be replaced.
     pub fn discard_recording(&mut self) {
+        if let Some(rec) = self.audio_recording.take()
+            && let Some(session) = self.engine.session_mut()
+        {
+            rec.takes.discard(session);
+        }
         let Some(rec) = self.recording.take() else {
             return;
         };
-        if let Some(session) = self.engine.session_mut() {
-            for take in &rec.takes {
-                if let Some(player) = session.midi_player(take.track) {
-                    player.set_armed(false);
-                    player.drain_captured().for_each(drop);
-                }
-            }
+        if let Some(player) = self
+            .engine
+            .session_mut()
+            .and_then(|s| s.midi_player(rec.track))
+        {
+            player.set_armed(false);
+            player.drain_captured().for_each(drop);
         }
     }
 }
 
-/// The command that adds the notes of `take` to the project: overdubbed
-/// into its clip when it has one, else as a new clip on its track.
+/// The command that adds `take` to the project: overdubbed into the
+/// recording's clip when it has one, else as a new clip on its track.
 fn take_into(
     project: &Project,
     rec: &Recording,
-    take: &Take,
-    take_notes: &[RecordedNote],
+    take: &[RecordedNote],
 ) -> Option<Box<dyn Command>> {
     let (tempo, sample_rate) = (&rec.tempo, rec.sample_rate);
-    let in_clip = take.clip.and_then(|c| project.clip(c)).filter(|clip| {
+    let in_clip = rec.clip.and_then(|c| project.clip(c)).filter(|clip| {
         let end = clip.start.0 + clip.length.0;
-        take_notes.iter().all(|n| {
+        take.iter().all(|n| {
             tempo.samples_to_ticks(n.start, sample_rate) >= clip.start
                 && tempo.samples_to_ticks(n.end, sample_rate).0 <= end
         })
@@ -308,15 +398,15 @@ fn take_into(
     match in_clip {
         Some(clip) => {
             let range = clip.start..TickTime(clip.start.0 + clip.length.0);
-            let notes = to_clip_notes(take_notes, tempo, sample_rate, range);
+            let notes = to_clip_notes(take, tempo, sample_rate, range);
             let existing = midi_clip(project, clip.id).map_or(&[][..], |m| &m.notes);
             let span = TickTime(rec.from.0 - clip.start.0)..TickTime(i64::MAX);
             let plan = merge_take(existing, notes, TakeMode::Overdub, span);
             take_command(clip.id, existing, plan)
         }
         None => {
-            let (start, end) = take_span(project, take_notes, tempo, sample_rate);
-            let mut notes: Vec<_> = to_clip_notes(take_notes, tempo, sample_rate, start..end)
+            let (start, end) = take_span(project, take, tempo, sample_rate);
+            let mut notes: Vec<_> = to_clip_notes(take, tempo, sample_rate, start..end)
                 .into_iter()
                 .map(new_note)
                 .collect();
@@ -330,7 +420,7 @@ fn take_into(
                 TickTime(end.0 - start.0),
                 ClipContent::Midi(MidiClip { notes }),
             );
-            Some(Box::new(AddClip::new(take.track, clip)))
+            Some(Box::new(AddClip::new(rec.track, clip)))
         }
     }
 }
@@ -382,23 +472,6 @@ mod tests {
         }
     }
 
-    fn recording(track: TrackId, clip: Option<ClipId>) -> (Recording, Take) {
-        let rec = Recording {
-            takes: Vec::new(),
-            name: "Recording".into(),
-            dropped: false,
-            from: TickTime(0),
-            tempo: SegmentTempoMap::default(),
-            sample_rate: SR,
-        };
-        let take = Take {
-            track,
-            clip,
-            recorder: Recorder::new(),
-        };
-        (rec, take)
-    }
-
     fn doc() -> (Document, TrackId) {
         let mut doc = Document::new(Project::new("t"));
         let track = Track::new(TrackKind::Instrument, "keys");
@@ -410,10 +483,19 @@ mod tests {
     #[test]
     fn a_take_without_a_clip_becomes_a_clip_of_whole_bars() {
         let (mut doc, track) = doc();
-        let (rec, one) = recording(track, None);
+        let rec = Recording {
+            track,
+            clip: None,
+            name: "Recording".into(),
+            dropped: false,
+            recorder: Recorder::new(),
+            from: TickTime(0),
+            tempo: SegmentTempoMap::default(),
+            sample_rate: SR,
+        };
         // Beat 5 to 6.5: all inside bar 2 in 4/4.
         let take = [note(5.0, 6.5, 60), note(5.0, 5.5, 64)];
-        let cmd = take_into(doc.project(), &rec, &one, &take).unwrap();
+        let cmd = take_into(doc.project(), &rec, &take).unwrap();
         doc.execute_boxed(cmd).unwrap();
         let clip = &doc.project().track(track).unwrap().clips[0];
         assert_eq!(
@@ -443,9 +525,18 @@ mod tests {
         );
         let clip_id = existing.id;
         doc.execute(AddClip::new(track, existing)).unwrap();
-        let (rec, one) = recording(track, Some(clip_id));
+        let rec = Recording {
+            track,
+            clip: Some(clip_id),
+            name: "Recording".into(),
+            dropped: false,
+            recorder: Recorder::new(),
+            from: TickTime(0),
+            tempo: SegmentTempoMap::default(),
+            sample_rate: SR,
+        };
         let take = [note(1.0, 2.0, 60)];
-        let cmd = take_into(doc.project(), &rec, &one, &take).unwrap();
+        let cmd = take_into(doc.project(), &rec, &take).unwrap();
         doc.execute_boxed(cmd).unwrap();
         let keys: Vec<u8> = midi_clip(doc.project(), clip_id)
             .unwrap()
@@ -460,7 +551,7 @@ mod tests {
         // A note past the clip's end: the whole take becomes a new clip
         // rather than losing that note.
         let take = [note(1.0, 2.0, 60), note(5.0, 6.0, 62)];
-        let cmd = take_into(doc.project(), &rec, &one, &take).unwrap();
+        let cmd = take_into(doc.project(), &rec, &take).unwrap();
         doc.execute_boxed(cmd).unwrap();
         let clips = &doc.project().track(track).unwrap().clips;
         assert_eq!(clips.len(), 2);

@@ -379,6 +379,7 @@ pub enum TrackField {
     Solo(bool),
     Armed(bool),
     MidiInput(MidiInput),
+    AudioInput(AudioInput),
     Output(TrackOutput),
 }
 
@@ -406,6 +407,7 @@ impl SetTrack {
             TrackField::Solo(v) => mem::swap(&mut t.solo, v),
             TrackField::Armed(v) => mem::swap(&mut t.armed, v),
             TrackField::MidiInput(v) => mem::swap(&mut t.midi_input, v),
+            TrackField::AudioInput(v) => mem::swap(&mut t.audio_input, v),
             TrackField::Output(v) => mem::swap(&mut t.output, v),
         }
         Ok(ChangeSet::one(Change::Track(self.id)))
@@ -423,6 +425,7 @@ impl Command for SetTrack {
             TrackField::Solo(_) => "Solo Track",
             TrackField::Armed(_) => "Arm Track",
             TrackField::MidiInput(_) => "Change MIDI Input",
+            TrackField::AudioInput(_) => "Change Track Input",
             TrackField::Output(_) => "Change Track Output",
         }
         .into()
@@ -439,6 +442,11 @@ impl Command for SetTrack {
                 channel: Some(c), ..
             }) if c > 15 => {
                 return Err(invalid("MIDI channel must be within 0..15"));
+            }
+            TrackField::Armed(true)
+                if !matches!(track.kind, TrackKind::Audio | TrackKind::Instrument) =>
+            {
+                return Err(invalid("only audio and instrument tracks can record"));
             }
             TrackField::Output(TrackOutput::Bus(b)) => {
                 if track.kind == TrackKind::Master {

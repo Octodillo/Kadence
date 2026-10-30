@@ -61,7 +61,7 @@ fn v2_clip_fades(v: Value) -> Result<Value, FormatError> {
     Ok(v)
 }
 
-/// Version 4 adds `armed` and `midi_input` to tracks. Both have defaults.
+/// Version 4 adds `midi_input` to tracks, which defaults to every input.
 fn v3_add_track_inputs(v: Value) -> Result<Value, FormatError> {
     Ok(v)
 }

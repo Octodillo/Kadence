@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, MAX_MIDI_INPUTS,
+    AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Latency, MAX_MIDI_INPUTS,
     MidiInputPort, Pacing, PortDirection, PortFilter, PortInfo, PortKind,
 };
 use daw_core::event::EventList;
@@ -370,6 +370,16 @@ impl AudioHost {
 
     pub fn buffer_size(&self) -> u32 {
         self.backend.buffer_size()
+    }
+
+    /// The backend's input and output latency as it reports it now.
+    pub fn latency(&self) -> Latency {
+        self.backend.latency()
+    }
+
+    /// Cycles the backend missed (xruns) since it started.
+    pub fn xruns(&self) -> u64 {
+        self.backend.stats().xruns
     }
 
     pub fn backend(&self) -> &dyn AudioBackend {

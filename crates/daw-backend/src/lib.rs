@@ -211,6 +211,30 @@ pub trait AudioBackend: Send {
     /// unregistering ports. Call it now and then (the host does on every
     /// MIDI refresh).
     fn collect_removed(&mut self) {}
+
+    /// How late our ports are against the hardware, as the audio system
+    /// reports it now. Recording uses it to line takes up with what the
+    /// player heard. Zero when the backend doesn't know.
+    fn latency(&self) -> Latency {
+        Latency::default()
+    }
+}
+
+/// Port latency in frames.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Latency {
+    /// From the sound reaching the hardware input to it arriving in our
+    /// input ports.
+    pub input: u32,
+    /// From our output ports to the sound leaving the hardware output.
+    pub output: u32,
+}
+
+impl Latency {
+    /// The round trip: input plus output.
+    pub fn total(&self) -> u32 {
+        self.input.saturating_add(self.output)
+    }
 }
 
 /// The short name for a port made from `name`: JACK separates client and

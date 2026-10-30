@@ -4,14 +4,14 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use daw_core::event::EventList;
 use jack::{
-    AudioIn, AudioOut, Client, ClientOptions, ClientStatus, Control, Frames, MidiIn, MidiOut,
-    NotificationHandler, Port, PortFlags, ProcessHandler, ProcessScope, RawMidi,
+    AudioIn, AudioOut, Client, ClientOptions, ClientStatus, Control, Frames, LatencyType, MidiIn,
+    MidiOut, NotificationHandler, Port, PortFlags, ProcessHandler, ProcessScope, RawMidi,
 };
 
 use crate::cycle::{PortBuffers, push_or_count};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, PortDirection,
+    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
     PortFilter, PortInfo, PortKind, ProcessCallback, midi,
 };
 use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
@@ -578,6 +578,38 @@ impl AudioBackend for JackBackend {
             s.dsp_load = Some(a.as_client().cpu_load());
         }
         s
+    }
+
+    fn latency(&self) -> Latency {
+        let (Ok(client), Some(cfg)) = (self.client(), &self.cfg) else {
+            return Latency::default();
+        };
+        // The worst case over our ports: the capture latency of an input port
+        // is how long ago its samples reached the hardware, the playback
+        // latency of an output port how long until ours leave it.
+        let me = client.name();
+        let worst = |names: Vec<String>, mode| {
+            names
+                .iter()
+                .filter_map(|n| client.port_by_name(n))
+                .map(|p| p.get_latency_range(mode).1)
+                .max()
+                .unwrap_or(0)
+        };
+        Latency {
+            input: worst(
+                (1..=cfg.audio_inputs)
+                    .map(|i| format!("{me}:audio_in_{i}"))
+                    .collect(),
+                LatencyType::Capture,
+            ),
+            output: worst(
+                (1..=cfg.audio_outputs)
+                    .map(|i| format!("{me}:audio_out_{i}"))
+                    .collect(),
+                LatencyType::Playback,
+            ),
+        }
     }
 }
 

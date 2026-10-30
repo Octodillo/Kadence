@@ -106,7 +106,8 @@ denominator a power of two.
 | `volume_db`  | number               | fader                                          |
 | `pan`        | number               |                                                |
 | `mute`, `solo` | bool               |                                                |
-| `armed`      | bool                 | armed for recording; default `false`           |
+| `armed`      | bool                 | optional, default false; armed for recording (audio and instrument tracks only) |
+| `audio_input` | `{channels, monitor}` | optional; audio tracks only. `channels` is `{"mono": n}` or `{"stereo": n}` (inputs `n`, `n+1`), counted from 0, default `{"mono": 0}`; `monitor` is `"off"` (default) or `"auto"` |
 | `midi_input` | `{device, channel}`  | live MIDI an instrument track takes: `device` is a source port name (`client:port`) or `null` for all; `channel` is 0–15 or `null` for all. Default: all |
 | `output`     | `"master"` or `{"bus": id}` | target must be a bus; no loops          |
 | `clips`      | Clip[]               | sorted by `start`; audio clips on audio tracks, MIDI clips on instrument tracks |
@@ -182,4 +183,4 @@ fails is rejected rather than half-loaded.
 | 1       | First schema. |
 | 2       | Default names are no longer saved in English: a project name of `"Untitled"` and a master named `"Master"` become `""`, and the UI words them in the user's language. |
 | 3       | Audio clips get `fade_in` and `fade_out`. Missing fades mean no fade, so version 2 files load unchanged. |
-| 4       | Tracks gain `armed` (record arm, default `false`) and `midi_input` (`device`: a source port name or `null` for every input; `channel`: 0–15 or `null` for every channel). |
+| 4       | Instrument tracks gain `midi_input` (`device`: a source port name or `null` for every input; `channel`: 0–15 or `null` for every channel). Missing means every input, so version 3 files load unchanged. |

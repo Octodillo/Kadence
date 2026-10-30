@@ -2,8 +2,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, DummyBackend, Pacing, PortDirection, PortFilter,
-    PortKind,
+    AudioBackend, BackendConfig, BackendError, DummyBackend, Latency, Pacing, PortDirection,
+    PortFilter, PortKind,
 };
 use daw_core::event::{Event, EventKind};
 
@@ -520,4 +520,49 @@ fn other_clients_ports_come_and_go() {
     system.remove_port("keys:out");
     assert!(b.connections().is_empty(), "unplugging drops the link");
     assert!(b.connect("keys:out", &port.name).is_err());
+}
+
+#[test]
+fn loopback_returns_the_outputs_after_the_reported_latency() {
+    let latency = Latency {
+        input: 100,
+        output: 70,
+    };
+    let mut b = DummyBackend::new(Pacing::Freewheel)
+        .with_max_cycles(20)
+        .with_loopback(latency);
+    b.open(cfg(64)).unwrap();
+    // The total is longer than a period, so it is kept as given.
+    assert_eq!(b.latency(), latency);
+    let (tx, rx) = mpsc::sync_channel(20);
+    b.start(Box::new(move |c| {
+        // Output a ramp of the frame time; the input should repeat it 170
+        // frames later.
+        let mut late = Vec::new();
+        for (i, s) in c.audio_out[0].iter_mut().enumerate() {
+            *s = (c.frame_time + i as u64) as f32;
+        }
+        for (i, &x) in c.audio_in[0].iter().enumerate() {
+            let t = c.frame_time + i as u64;
+            let want = t.checked_sub(170).map_or(0.0, |t| t as f32);
+            if x != want {
+                late.push((t, x));
+            }
+        }
+        let _ = tx.try_send(late);
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(20, WAIT));
+    b.stop().unwrap();
+    for late in rx.try_iter() {
+        assert!(late.is_empty(), "{late:?}");
+    }
+
+    // A round trip shorter than a period is raised to a period.
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_loopback(Latency {
+        input: 10,
+        output: 10,
+    });
+    b.open(cfg(64)).unwrap();
+    assert_eq!(b.latency().total(), 64);
 }
