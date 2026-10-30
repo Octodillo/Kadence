@@ -38,20 +38,26 @@ VERSION) and in the Kadence source release, which vendors it.
 """
 
 
-def host_triple(rustc):
-    out = subprocess.run([rustc, "-vV"], check=True, capture_output=True, text=True).stdout
-    for line in out.splitlines():
+def run(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.exit(f"third-party-licenses: {' '.join(cmd)} failed:\n{result.stderr}")
+    return result.stdout
+
+
+def host_triple(cargo):
+    # Ask cargo, not rustc: CMake hands us cargo's path, and a bare `rustc`
+    # on PATH may be a different install, or a rustup proxy with no default.
+    for line in run([cargo, "-vV"]).splitlines():
         if line.startswith("host: "):
             return line[len("host: "):].strip()
-    sys.exit("third-party-licenses: rustc -vV printed no host triple")
+    sys.exit("third-party-licenses: cargo -vV printed no host triple")
 
 
 def metadata(cargo, manifest, host):
-    out = subprocess.run(
+    return json.loads(run(
         [cargo, "metadata", "--format-version", "1", "--locked", "--offline",
-         "--filter-platform", host, "--manifest-path", manifest],
-        check=True, capture_output=True, text=True).stdout
-    return json.loads(out)
+         "--filter-platform", host, "--manifest-path", manifest]))
 
 
 def linked_packages(meta):
@@ -94,12 +100,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output")
     parser.add_argument("--cargo", default=os.environ.get("CARGO", "cargo"))
-    parser.add_argument("--rustc", default=os.environ.get("RUSTC", "rustc"))
     parser.add_argument("--manifest-path",
                         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Cargo.toml"))
     args = parser.parse_args()
 
-    meta = metadata(args.cargo, args.manifest_path, host_triple(args.rustc))
+    meta = metadata(args.cargo, args.manifest_path, host_triple(args.cargo))
     packages = linked_packages(meta)
 
     lines = [HEADER, "Crates", "------", ""]
