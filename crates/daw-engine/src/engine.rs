@@ -455,9 +455,10 @@ mod tests {
 
     #[test]
     fn swaps_with_a_full_garbage_queue_neither_free_nor_reorder() {
+        const CAPACITY: usize = 4;
         let (mut ctl, mut proc) = EngineController::new(EngineConfig {
             max_frames: 32,
-            command_capacity: 2,
+            command_capacity: CAPACITY,
             ..Default::default()
         });
         let mut out = [0.0f32; 32];
@@ -469,43 +470,40 @@ mod tests {
 
         push_graph(&mut ctl, plain());
         assert_eq!(process(&mut proc, &mut out), 0);
-        // Two swaps retire the first two graphs and fill the garbage queue.
-        push_graph(&mut ctl, plain());
-        push_graph(&mut ctl, plain());
+        // Each swap retires the graph before it; these fill the garbage queue.
+        for _ in 0..CAPACITY {
+            push_graph(&mut ctl, plain());
+        }
         assert_eq!(process(&mut proc, &mut out), 0);
-        assert_eq!(ctl.graphs_swapped(), 3);
+        assert_eq!(ctl.graphs_swapped(), 1 + CAPACITY as u64);
 
-        // The next swap cannot retire its old graph, so the processor holds
-        // it, and the graph after that has to wait.
+        // The first swap below cannot retire its old graph, so the processor
+        // holds it and `last` has to wait. The change for `track`, which
+        // only exists in `last`, and the graph after it must wait behind
+        // `last`: run early, the change would be dropped and the second
+        // pending graph would free `last` on this thread.
         push_graph(&mut ctl, plain());
         let mut last = GraphDesc::new(1, 1);
         let track = last.add_track("track", 1);
         last.connect(last.input(), track);
         last.connect(track, last.master());
         push_graph(&mut ctl, last);
-        assert_eq!(process(&mut proc, &mut out), 0);
-        assert_eq!(ctl.graphs_swapped(), 4);
-        assert!(proc.retired.is_some() && proc.pending.is_some());
-
-        // `track` only exists in the pending graph: the change must wait
-        // behind it instead of reaching the running graph, where it would be
-        // dropped.
         ctl.set_param(track, Strip::MUTE, 1.0).unwrap();
-        assert_eq!(process(&mut proc, &mut out), 0);
-        assert_eq!(ctl.graphs_swapped(), 4);
-        assert!(out.iter().all(|&v| v == 1.0));
+        push_graph(&mut ctl, plain());
+        for _ in 0..2 {
+            assert_eq!(process(&mut proc, &mut out), 0);
+            assert_eq!(ctl.graphs_swapped(), 2 + CAPACITY as u64);
+            assert!(proc.retired.is_some() && proc.pending.is_some());
+        }
 
-        assert_eq!(ctl.collect_garbage(), 2);
+        assert_eq!(ctl.collect_garbage(), CAPACITY);
         assert_eq!(process(&mut proc, &mut out), 0);
-        assert_eq!(ctl.graphs_swapped(), 5);
-        assert_eq!(ctl.dropped_params(), 0);
-        assert!(
-            out.iter().all(|&v| v == 0.0),
-            "the change reached the track"
-        );
+        assert_eq!(ctl.graphs_swapped(), 4 + CAPACITY as u64);
+        assert_eq!(ctl.dropped_params(), 0, "the change reached `last`");
+        assert!(proc.retired.is_none() && proc.pending.is_none());
 
         // Every replaced graph comes back to be freed here.
-        assert_eq!(ctl.collect_garbage(), 2);
+        assert_eq!(ctl.collect_garbage(), 3);
         drop(proc);
     }
 }
