@@ -56,7 +56,8 @@ impl self_test::TestHelper {
                 true
             }
             Err(e) => {
-                s.status = e;
+                // Test-only; the self test reports the failure.
+                eprintln!("demo project: {e}");
                 false
             }
         })

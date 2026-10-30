@@ -20,6 +20,14 @@ Item {
         id: engineError
     }
 
+    EditNames {
+        id: editNames
+    }
+
+    ProjectMessageText {
+        id: projectMessage
+    }
+
     function check(ok: bool, what: string): void {
         if (!ok) {
             console.error("smoke test: FAILED:", what);
@@ -51,15 +59,36 @@ Item {
         () => {
             const arrange = window.pageStack.currentItem;
             check(Project.trackCount === 0, "new project is empty");
-            Project.addTrack(1);
+            arrange.addTrack(1);
             check(Project.trackCount === 1, "add instrument track");
+            check(Project.trackName(0) === i18nc("@item default track name, %1 is a number", "Instrument %1", 1),
+                  "default track name worded in QML");
             // Double-click the first lane: a one-bar MIDI clip appears.
             const v = arrange.view;
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
+            check(Project.undoText in editNames.names, "undo name has a translation");
             Project.undo();
             Project.undo();
             check(Project.trackCount === 0, "undo back to empty");
+            // A failed import says why, worded in QML (checked next step).
+            check(!v.dropFile("file:///nonexistent/take.wav", 10, 10), "missing file refused");
+            const open = Project.openProject("file:///nonexistent/song.kadence");
+            check(open.context === Project.OpenContext && open.reason === Project.FileAccess,
+                  "open failure reported as data");
+            console.info("open message:", projectMessage.text(open));
+            check(Project.save().reason === Project.NoLocation, "save without a location refused");
+        },
+        () => {
+            // Pick up the state now: on a slow first start the step timer can
+            // fire before Project's own timer has ticked.
+            Project.tick();
+            check(Project.status.context === Project.ImportContext
+                  && Project.status.reason === Project.CannotDecode
+                  && Project.status.fileName === "take.wav", "import failure reported as data");
+            console.info("import message:", projectMessage.text(Project.status));
+            Project.clearStatus();
+            check(projectMessage.text(Project.status) === "", "status cleared");
         },
         () => {
             check(TestHelper.loadDemoProject(), "load demo project");

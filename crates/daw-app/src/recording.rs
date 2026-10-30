@@ -11,6 +11,7 @@ use daw_midi::record::{RecordedNote, Recorder, TakeMode, merge_take, to_clip_not
 use daw_model::commands::AddClip;
 use daw_model::{Clip, ClipContent, ClipId, Command, MidiClip, Project, TrackId, TrackKind};
 
+use crate::message::{Message, RecordProblem};
 use crate::state::AppState;
 
 /// A take in progress.
@@ -18,6 +19,10 @@ pub struct Recording {
     track: TrackId,
     /// The clip the take goes into, if one was open on the track.
     clip: Option<ClipId>,
+    /// The name of a new clip for the take, in the user's language.
+    name: String,
+    /// Whether dropped input was reported for this take.
+    dropped: bool,
     recorder: Recorder,
     /// Where playback was when recording started.
     from: TickTime,
@@ -70,21 +75,21 @@ impl AppState {
 
     /// Arms the target track and starts playback. Fails when there is no
     /// instrument track or no running session.
-    pub fn start_recording(&mut self) -> Result<(), String> {
+    pub fn start_recording(&mut self) -> Result<(), Message> {
         if self.recording.is_some() {
             return Ok(());
         }
         let Some((track, clip)) = target(self) else {
-            return Err("Add an instrument track to record MIDI".into());
+            return Err(Message::Record(RecordProblem::NoInstrumentTrack));
         };
         let from = self.playhead();
         let sample_rate = self.sample_rate();
         let tempo = tempo_map(&self.doc.project().tempo);
         let Some(session) = self.engine.session_mut() else {
-            return Err("The audio engine is not running".into());
+            return Err(Message::Record(RecordProblem::EngineNotRunning));
         };
         let Some(player) = session.midi_player(track) else {
-            return Err("The track has no MIDI player yet".into());
+            return Err(Message::Record(RecordProblem::NoMidiPlayer));
         };
         // Anything captured before arming belongs to no take.
         player.drain_captured().for_each(drop);
@@ -92,6 +97,8 @@ impl AppState {
         self.recording = Some(Recording {
             track,
             clip,
+            name: self.arrange.names.recording.clone(),
+            dropped: false,
             recorder: Recorder::new(),
             from,
             tempo,
@@ -107,6 +114,7 @@ impl AppState {
         let Some(rec) = self.recording.as_mut() else {
             return;
         };
+        let mut dropped = false;
         if let Some(player) = self
             .engine
             .session_mut()
@@ -120,8 +128,14 @@ impl AppState {
                 rec.recorder.feed(c);
             }
             if player.take_capture_overflows() > 0 {
-                self.status = "Some MIDI input was dropped while recording".into();
+                dropped = true;
             }
+        }
+        // Once per take, so a flood of input can't keep the message up.
+        let first_drop = dropped && !rec.dropped;
+        rec.dropped |= dropped;
+        if first_drop {
+            self.report(Message::Record(RecordProblem::InputDropped));
         }
         if !self.engine.is_playing() {
             self.stop_recording();
@@ -155,10 +169,10 @@ impl AppState {
         match take_into(self.doc.project(), &rec, &take) {
             Some(cmd) => {
                 if let Err(e) = self.doc.execute_boxed(cmd) {
-                    self.status = format!("The recording could not be added: {e}");
+                    self.report(Message::Record(RecordProblem::Refused(e)));
                 }
             }
-            None => self.status = "Nothing was recorded inside the song".into(),
+            None => self.report(Message::Record(RecordProblem::NothingRecorded)),
         }
         self.doc.seal();
     }
@@ -215,7 +229,7 @@ fn take_into(
             }
             notes.sort_by_key(|n| (n.start, n.key, n.id));
             let clip = Clip::new(
-                "Recording",
+                rec.name.clone(),
                 start,
                 TickTime(end.0 - start.0),
                 ClipContent::Midi(MidiClip { notes }),
@@ -286,6 +300,8 @@ mod tests {
         let rec = Recording {
             track,
             clip: None,
+            name: "Recording".into(),
+            dropped: false,
             recorder: Recorder::new(),
             from: TickTime(0),
             tempo: SegmentTempoMap::default(),
@@ -326,6 +342,8 @@ mod tests {
         let rec = Recording {
             track,
             clip: Some(clip_id),
+            name: "Recording".into(),
+            dropped: false,
             recorder: Recorder::new(),
             from: TickTime(0),
             tempo: SegmentTempoMap::default(),

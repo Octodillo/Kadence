@@ -32,6 +32,27 @@ ColumnLayout {
 
     Component.onCompleted: syncFromEngine()
 
+    readonly property string backendLabel: {
+        switch (Engine.backendKind) {
+        case Engine.JackBackend:
+            return i18nc("@info audio system", "JACK (PipeWire)");
+        case Engine.SilentBackend:
+            return i18nc("@info audio system", "None (no audio server, playing silently)");
+        }
+        return i18nc("@info audio system", "Test (no audio)");
+    }
+
+    // The name of the backend's own output, which has no name of its own.
+    readonly property string backendDevice: {
+        switch (Engine.backendKind) {
+        case Engine.JackBackend:
+            return i18nc("@item:inlistbox audio device", "JACK / PipeWire output");
+        case Engine.SilentBackend:
+            return i18nc("@item:inlistbox audio device", "No audio server (silent)");
+        }
+        return i18nc("@item:inlistbox audio device", "Test output");
+    }
+
     EngineErrorText {
         id: engineError
     }
@@ -50,7 +71,7 @@ ColumnLayout {
 
         QQC2.Label {
             Kirigami.FormData.label: i18nc("@label", "Audio system:")
-            text: Engine.backendName
+            text: settings.backendLabel
         }
 
         QQC2.Label {
@@ -66,7 +87,8 @@ ColumnLayout {
         QQC2.ComboBox {
             id: deviceBox
             Kirigami.FormData.label: i18nc("@label:listbox", "Device:")
-            model: Engine.deviceNames.map((name, i) => i === 0 ? i18nc("@item:inlistbox audio device", "System default") : name)
+            model: Engine.deviceNames.map((name, i) => i === 0 ? i18nc("@item:inlistbox audio device", "System default")
+                                                     : name !== "" ? name : settings.backendDevice)
             onActivated: settings.apply()
         }
 

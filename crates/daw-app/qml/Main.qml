@@ -112,7 +112,7 @@ Kirigami.ApplicationWindow {
 
     readonly property list<Kirigami.Action> historyActions: [
         Kirigami.Action {
-            text: Project.canUndo ? i18nc("@action:inmenu %1 is an edit, like Move Clip", "Undo %1", Project.undoText)
+            text: Project.canUndo ? i18nc("@action:inmenu %1 is an edit, like Move Clip", "Undo %1", editNames.name(Project.undoText))
                                   : i18nc("@action:inmenu", "Undo")
             icon.name: "edit-undo"
             shortcut: StandardKey.Undo
@@ -120,7 +120,7 @@ Kirigami.ApplicationWindow {
             onTriggered: Project.undo()
         },
         Kirigami.Action {
-            text: Project.canRedo ? i18nc("@action:inmenu %1 is an edit, like Move Clip", "Redo %1", Project.redoText)
+            text: Project.canRedo ? i18nc("@action:inmenu %1 is an edit, like Move Clip", "Redo %1", editNames.name(Project.redoText))
                                   : i18nc("@action:inmenu", "Redo")
             icon.name: "edit-redo"
             shortcut: StandardKey.Redo
@@ -134,10 +134,7 @@ Kirigami.ApplicationWindow {
             saveDialog.open();
             return;
         }
-        const error = Project.save();
-        if (error !== "") {
-            showPassiveNotification(i18nc("@info", "Could not save: %1", error));
-        }
+        notify(Project.save());
     }
 
     FileDialog {
@@ -145,10 +142,7 @@ Kirigami.ApplicationWindow {
         title: i18nc("@title:window", "Open Project")
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         onAccepted: {
-            const error = Project.openProject(selectedFile);
-            if (error !== "") {
-                root.showPassiveNotification(i18nc("@info", "Could not open: %1", error));
-            }
+            root.notify(Project.openProject(selectedFile));
         }
     }
 
@@ -158,10 +152,7 @@ Kirigami.ApplicationWindow {
         fileMode: FileDialog.SaveFile
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         onAccepted: {
-            const error = Project.saveAs(selectedFile);
-            if (error !== "") {
-                root.showPassiveNotification(i18nc("@info", "Could not save: %1", error));
-            }
+            root.notify(Project.saveAs(selectedFile));
         }
     }
 
@@ -228,6 +219,17 @@ Kirigami.ApplicationWindow {
     pageStack.globalToolBar.style: Kirigami.ApplicationHeaderStyle.ToolBar
     pageStack.columnView.columnResizeMode: Kirigami.ColumnView.SingleColumn
 
+    // The status line is on the Arrange page; elsewhere (recording from
+    // the Mix or Edit page, a mixer error) a new message pops up instead.
+    Connections {
+        target: Project
+        function onStatusChanged() {
+            if (root.pageStack.currentItem !== arrangePage) {
+                root.notify(Project.status);
+            }
+        }
+    }
+
     ArrangePage {
         id: arrangePage
         visible: false
@@ -260,6 +262,22 @@ Kirigami.ApplicationWindow {
 
     EngineErrorText {
         id: engineError
+    }
+
+    ProjectMessageText {
+        id: projectMessage
+    }
+
+    EditNames {
+        id: editNames
+    }
+
+    // Shows a message map from Project, if it holds one.
+    function notify(message: var): void {
+        const text = projectMessage.text(message);
+        if (text !== "") {
+            showPassiveNotification(text, "long");
+        }
     }
 
     // Audio trouble the user did not cause from the settings page (those

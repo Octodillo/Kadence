@@ -19,8 +19,21 @@ use daw_session::host::{AudioHost, HostConfig, HostKind};
 pub struct AudioDevice {
     /// Stable identifier, stored in the config file.
     pub id: String,
-    /// Human-readable name for the device list.
+    /// Human-readable name for the device list. Empty for the backend's
+    /// own output (the only device of JACK or the silent backend): the
+    /// front end names that after [`BackendKind`], in the user's language.
     pub name: String,
+}
+
+/// Which audio system runs, for the front end to name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendKind {
+    /// A JACK server, usually PipeWire's.
+    Jack,
+    /// No audio server answered; the project plays silently.
+    Silent,
+    /// [`StubEngine`], for tests.
+    Stub,
 }
 
 /// The audio configuration the user asked for.
@@ -86,8 +99,7 @@ impl std::error::Error for EngineError {}
 
 /// The engine as the UI sees it. Called on the UI thread only.
 pub trait EngineHandle: Send {
-    /// Name of the audio backend, such as "JACK (PipeWire)".
-    fn backend_name(&self) -> String;
+    fn backend_kind(&self) -> BackendKind;
     fn audio_devices(&self) -> Vec<AudioDevice>;
     fn supported_sample_rates(&self) -> Vec<u32>;
     fn supported_buffer_sizes(&self) -> Vec<u32>;
@@ -141,11 +153,11 @@ impl SessionEngine {
         match self.host.kind() {
             HostKind::Jack => AudioDevice {
                 id: Self::JACK.into(),
-                name: "JACK / PipeWire".into(),
+                name: String::new(),
             },
             HostKind::Silent => AudioDevice {
                 id: Self::SILENT.into(),
-                name: "No audio server (silent)".into(),
+                name: String::new(),
             },
         }
     }
@@ -158,10 +170,10 @@ impl Default for SessionEngine {
 }
 
 impl EngineHandle for SessionEngine {
-    fn backend_name(&self) -> String {
+    fn backend_kind(&self) -> BackendKind {
         match self.host.kind() {
-            HostKind::Jack => "JACK (PipeWire)".into(),
-            HostKind::Silent => "Silent (no audio server)".into(),
+            HostKind::Jack => BackendKind::Jack,
+            HostKind::Silent => BackendKind::Silent,
         }
     }
 
@@ -279,8 +291,8 @@ impl StubEngine {
 }
 
 impl EngineHandle for StubEngine {
-    fn backend_name(&self) -> String {
-        "Stub (no audio)".to_owned()
+    fn backend_kind(&self) -> BackendKind {
+        BackendKind::Stub
     }
 
     fn audio_devices(&self) -> Vec<AudioDevice> {

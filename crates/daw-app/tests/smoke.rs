@@ -84,6 +84,17 @@ fn smoke_test_passes_and_saves_settings() {
         log.contains("startup message: none"),
         "fresh config should start without an error:\n{log}"
     );
+    // Project messages are worded in QML, not Rust (issue #81).
+    assert!(
+        log.contains("import message: Could not add “take.wav”. It could not be read as audio"),
+        "import failure not worded:\n{log}"
+    );
+    assert!(
+        log.contains(
+            "open message: Could not open the project. Could not access “/nonexistent/song.kadence"
+        ),
+        "open failure not worded:\n{log}"
+    );
 
     // SelfTest.qml leaves these audio settings behind, through KConfig.
     let rc = std::fs::read_to_string(config.join("kadencerc")).expect("read kadencerc");

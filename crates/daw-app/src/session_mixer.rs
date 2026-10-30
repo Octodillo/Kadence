@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::message::Message;
 use daw_core::time::{SampleTime, TickTime};
 use daw_engine::nodes::Strip;
 use daw_engine::{AutomationRecorder, Curve, NodeKey};
@@ -190,7 +191,7 @@ impl SessionMixer {
         id: StripId,
         control: Control,
         value: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
         let Some(track) = find(doc.project(), id).cloned() else {
             return Ok(());
         };
@@ -208,7 +209,7 @@ impl SessionMixer {
                 record(take, s);
                 if let Some((key, param, v)) = live_param(doc.project(), s, take) {
                     s.set_live_param(key, param, Some(v))
-                        .map_err(|e| e.to_string())?;
+                        .map_err(Message::from)?;
                 }
             }
             return Ok(());
@@ -227,15 +228,15 @@ impl SessionMixer {
                 })
             }
         };
-        doc.execute_boxed(command).map_err(|e| e.to_string())?;
+        doc.execute_boxed(command).map_err(Message::from)?;
         Ok(())
     }
 
-    pub fn set_muted(&mut self, doc: &mut Document, id: StripId, on: bool) -> Result<(), String> {
+    pub fn set_muted(&mut self, doc: &mut Document, id: StripId, on: bool) -> Result<(), Message> {
         self.set_flag(doc, id, TrackField::Mute(on))
     }
 
-    pub fn set_soloed(&mut self, doc: &mut Document, id: StripId, on: bool) -> Result<(), String> {
+    pub fn set_soloed(&mut self, doc: &mut Document, id: StripId, on: bool) -> Result<(), Message> {
         self.set_flag(doc, id, TrackField::Solo(on))
     }
 
@@ -244,7 +245,7 @@ impl SessionMixer {
         doc: &mut Document,
         id: StripId,
         field: TrackField,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
         let Some(track) = find(doc.project(), id) else {
             return Ok(());
         };
@@ -256,7 +257,7 @@ impl SessionMixer {
         let r = doc.execute(SetTrack::new(id, field));
         // A click is a gesture of its own.
         doc.seal();
-        r.map(|_| ()).map_err(|e| e.to_string())
+        r.map(|_| ()).map_err(Message::from)
     }
 
     /// Appends a built-in effect to the strip's chain.
@@ -288,14 +289,14 @@ impl SessionMixer {
         doc: &mut Document,
         id: StripId,
         index: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
         let Some(device) = find(doc.project(), id).and_then(|t| t.devices.get(index)) else {
             return Ok(());
         };
         let device = device.id;
         let r = doc.execute(RemoveDevice::new(device));
         doc.seal();
-        r.map(|_| ()).map_err(|e| e.to_string())
+        r.map(|_| ()).map_err(Message::from)
     }
 
     pub fn effects(&self) -> Vec<EffectChoice> {
@@ -337,7 +338,7 @@ impl SessionMixer {
         doc: &mut Document,
         session: Option<&mut Session>,
         on: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
         self.write = on;
         if on {
             return Ok(());
@@ -354,7 +355,7 @@ impl SessionMixer {
         id: StripId,
         control: Control,
         pressed: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
         let Some(session) = session else {
             return Ok(());
         };
@@ -394,7 +395,7 @@ impl SessionMixer {
                 {
                     session
                         .set_live_param(key, param, Some(v))
-                        .map_err(|e| e.to_string())?;
+                        .map_err(Message::from)?;
                 }
                 Ok(())
             }
@@ -415,13 +416,18 @@ impl SessionMixer {
 
     /// Ends a take: writes it, lets the document's value play again and
     /// resumes its lane.
-    fn end(&mut self, doc: &mut Document, session: &mut Session, take: Take) -> Result<(), String> {
+    fn end(
+        &mut self,
+        doc: &mut Document,
+        session: &mut Session,
+        take: Take,
+    ) -> Result<(), Message> {
         let live = live_param(doc.project(), session, &take);
         let r = commit(doc, session, take);
         if let Some((key, param, _)) = live {
             session
                 .set_live_param(key, param, None)
-                .map_err(|e| e.to_string())?;
+                .map_err(Message::from)?;
         }
         self.suspend(doc, session)?;
         r
@@ -434,7 +440,7 @@ impl SessionMixer {
         &mut self,
         doc: &mut Document,
         session: Option<&mut Session>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
         let Some(session) = session else {
             return Ok(());
         };
@@ -479,7 +485,7 @@ impl SessionMixer {
         &mut self,
         doc: &mut Document,
         session: Option<&mut Session>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
         let Some(session) = session else {
             self.takes.clear();
             return Ok(());
@@ -495,7 +501,7 @@ impl SessionMixer {
     }
 
     /// Leaves the lanes of running takes out of playback.
-    fn suspend(&self, doc: &mut Document, session: &mut Session) -> Result<(), String> {
+    fn suspend(&self, doc: &mut Document, session: &mut Session) -> Result<(), Message> {
         let project = doc.project();
         let lanes: HashSet<LaneId> = self
             .takes
@@ -506,7 +512,7 @@ impl SessionMixer {
             return Ok(());
         }
         session.set_suspended_lanes(lanes);
-        session.sync(&doc.snapshot()).map_err(|e| e.to_string())
+        session.sync(&doc.snapshot()).map_err(Message::from)
     }
 }
 
@@ -550,7 +556,7 @@ fn record(take: &mut Take, session: &Session) {
 }
 
 /// Merges a finished take into its lane, creating the lane if needed.
-fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), String> {
+fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), Message> {
     if take.recorder.is_empty() {
         return Ok(());
     }
@@ -626,7 +632,7 @@ fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), Strin
     };
     doc.execute_boxed(command)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(Message::from)
 }
 
 /// [`SessionMixer`] on the app state: the mixer the Mix page shows.
@@ -652,13 +658,10 @@ impl AppMixer {
 
     fn report(
         &mut self,
-        f: impl FnOnce(&mut SessionMixer, &mut Document, Option<&mut Session>) -> Result<(), String>,
+        f: impl FnOnce(&mut SessionMixer, &mut Document, Option<&mut Session>) -> Result<(), Message>,
     ) {
         if let Err(e) = self.edit(f) {
-            state::with(|s| {
-                s.status = e;
-                s.touch();
-            });
+            state::with(|s| s.report(e));
         }
     }
 }
