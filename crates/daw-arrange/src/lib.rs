@@ -255,7 +255,6 @@ enum Drag {
     },
 }
 
-/// The arrange view's state. See the crate docs.
 /// Names the arrange view gives what it creates. The front end sets them in
 /// the user's language; the defaults are English.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,6 +277,7 @@ impl Default for DefaultNames {
     }
 }
 
+/// The arrange view's state. See the crate docs.
 pub struct Arrange {
     pub view: TimelineView,
     /// Size of the timeline area, ruler included.

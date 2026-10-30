@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use daw_arrange::{Arrange, Env};
 use daw_core::time::{SegmentTempoMap, TickTime};
@@ -32,9 +33,9 @@ pub struct AppState {
     pub view_revision: u64,
     /// The last error or warning, for the status line.
     pub status: Option<Fields>,
-    /// The document revision whose autosave failed, so the timer doesn't
-    /// retry and report it again until there is a new edit.
-    autosave_failed: Option<u64>,
+    /// The document revision whose autosave failed and when it was last
+    /// tried, so the timer reports it once and retries only now and then.
+    autosave_failed: Option<(u64, Instant)>,
     /// Scroll to keep the playhead in view while playing.
     pub follow_playhead: bool,
     /// Tempo map for the view when no session runs.
@@ -98,18 +99,26 @@ impl AppState {
         self.view_revision += 1;
     }
 
-    /// Writes an autosave if the document changed, reporting a failure once
-    /// per revision.
+    /// Writes an autosave if the document changed. A failure is reported
+    /// once per revision and retried quietly every few seconds, in case it
+    /// was passing (a full disk that was cleared).
     pub fn autosave(&mut self) {
+        const RETRY: Duration = Duration::from_secs(10);
         let revision = self.doc.revision();
-        if self.autosave_failed == Some(revision) {
+        let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
+        if let Some((r, at)) = self.autosave_failed
+            && r == revision
+            && at.elapsed() < RETRY
+        {
             return;
         }
         match self.doc.autosave() {
             Ok(_) => self.autosave_failed = None,
             Err(e) => {
-                self.autosave_failed = Some(revision);
-                self.report(Message::File(Context::Autosave, e));
+                self.autosave_failed = Some((revision, Instant::now()));
+                if !failed_here {
+                    self.report(Message::File(Context::Autosave, e));
+                }
             }
         }
     }

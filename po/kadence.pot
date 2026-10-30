@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-30 10:06+0000\n"
+"POT-Creation-Date: 2026-10-30 10:11+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -106,52 +106,52 @@ msgctxt "@action:inmenu"
 msgid "Zoom to Fit"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:220
+#: crates/daw-app/qml/ArrangePage.qml:221
 msgctxt "@info:accessible"
 msgid "Playhead position"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:288
+#: crates/daw-app/qml/ArrangePage.qml:289
 msgctxt "@label default name of a new MIDI clip"
 msgid "MIDI clip"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:289
+#: crates/daw-app/qml/ArrangePage.qml:290
 msgctxt "@label default name of audio from a file without a name"
 msgid "Audio"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:290
+#: crates/daw-app/qml/ArrangePage.qml:291
 msgctxt "@label default name of a recorded MIDI clip"
 msgid "Recording"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:299
+#: crates/daw-app/qml/ArrangePage.qml:300
 msgctxt "@info:accessible"
 msgid "Timeline"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:364
+#: crates/daw-app/qml/ArrangePage.qml:365
 msgctxt "@info:placeholder"
 msgid "No tracks yet"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:365
+#: crates/daw-app/qml/ArrangePage.qml:366
 msgctxt "@info:placeholder"
 msgid "Add a track, or drop audio files here."
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:367
+#: crates/daw-app/qml/ArrangePage.qml:368
 msgctxt "@action:button"
 msgid "Add Audio Track"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:425
+#: crates/daw-app/qml/ArrangePage.qml:426
 msgctxt "@action:inmenu"
 msgid "Add Audio Track"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:430
+#: crates/daw-app/qml/ArrangePage.qml:431
 msgctxt "@action:inmenu"
 msgid "Add Instrument Track"
 msgstr ""
@@ -986,12 +986,12 @@ msgctxt "@title"
 msgid "Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:280
+#: crates/daw-app/qml/Main.qml:291
 msgctxt "@action:button"
 msgid "Audio Settings…"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:306
+#: crates/daw-app/qml/Main.qml:317
 msgctxt "@title:window"
 msgid "Configure — Kadence"
 msgstr ""
@@ -1153,7 +1153,7 @@ msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:81
 msgctxt "@info"
-msgid "Nothing was played inside the song."
+msgid "The take was outside the song, so nothing was added."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:94
@@ -1193,7 +1193,12 @@ msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:115
 msgctxt "@info %1 is the reason, a full sentence"
-msgid "Nothing was recorded. %1"
+msgid "Could not start recording. %1"
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml:117
+msgctxt "@info %1 is the reason, a full sentence"
+msgid "The take could not be added. %1"
 msgstr ""
 
 #: crates/daw-app/qml/SettingsPage.qml:7

@@ -78,7 +78,7 @@ QtObject {
         case Project.MidiInputDropped:
             return i18nc("@info", "Some MIDI input arrived too fast to be recorded, so the take may be missing notes.");
         case Project.NothingRecorded:
-            return i18nc("@info", "Nothing was played inside the song.");
+            return i18nc("@info", "The take was outside the song, so nothing was added.");
         }
         return "";
     }
@@ -108,11 +108,17 @@ QtObject {
         case Project.PlaybackContext:
             return i18nc("@info %1 is the reason, a full sentence", "Playback may be incomplete. %1", why);
         case Project.RecordContext:
-            // The take was kept; the reason says what it may lack.
-            if (m.reason === Project.MidiInputDropped) {
-                return why;
+            switch (m.reason) {
+            case Project.NoInstrumentTrack:
+            case Project.EngineNotRunning:
+            case Project.NoMidiPlayer:
+                return i18nc("@info %1 is the reason, a full sentence", "Could not start recording. %1", why);
+            case Project.EditRefused:
+                return i18nc("@info %1 is the reason, a full sentence", "The take could not be added. %1", why);
             }
-            return i18nc("@info %1 is the reason, a full sentence", "Nothing was recorded. %1", why);
+            // The reason says it all: what the take may lack, or why it
+            // was not added.
+            return why;
         }
         return "";
     }

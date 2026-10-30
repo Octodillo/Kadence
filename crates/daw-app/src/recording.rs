@@ -21,6 +21,8 @@ pub struct Recording {
     clip: Option<ClipId>,
     /// The name of a new clip for the take, in the user's language.
     name: String,
+    /// Whether dropped input was reported for this take.
+    dropped: bool,
     recorder: Recorder,
     /// Where playback was when recording started.
     from: TickTime,
@@ -96,6 +98,7 @@ impl AppState {
             track,
             clip,
             name: self.arrange.names.recording.clone(),
+            dropped: false,
             recorder: Recorder::new(),
             from,
             tempo,
@@ -128,7 +131,10 @@ impl AppState {
                 dropped = true;
             }
         }
-        if dropped {
+        // Once per take, so a flood of input can't keep the message up.
+        let first_drop = dropped && !rec.dropped;
+        rec.dropped |= dropped;
+        if first_drop {
             self.report(Message::Record(RecordProblem::InputDropped));
         }
         if !self.engine.is_playing() {
@@ -295,6 +301,7 @@ mod tests {
             track,
             clip: None,
             name: "Recording".into(),
+            dropped: false,
             recorder: Recorder::new(),
             from: TickTime(0),
             tempo: SegmentTempoMap::default(),
@@ -336,6 +343,7 @@ mod tests {
             track,
             clip: Some(clip_id),
             name: "Recording".into(),
+            dropped: false,
             recorder: Recorder::new(),
             from: TickTime(0),
             tempo: SegmentTempoMap::default(),

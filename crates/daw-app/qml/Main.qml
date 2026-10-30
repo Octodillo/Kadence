@@ -219,6 +219,17 @@ Kirigami.ApplicationWindow {
     pageStack.globalToolBar.style: Kirigami.ApplicationHeaderStyle.ToolBar
     pageStack.columnView.columnResizeMode: Kirigami.ColumnView.SingleColumn
 
+    // The status line is on the Arrange page; elsewhere (recording from
+    // the Mix or Edit page, a mixer error) a new message pops up instead.
+    Connections {
+        target: Project
+        function onStatusChanged() {
+            if (root.pageStack.currentItem !== arrangePage) {
+                root.notify(Project.status);
+            }
+        }
+    }
+
     ArrangePage {
         id: arrangePage
         visible: false

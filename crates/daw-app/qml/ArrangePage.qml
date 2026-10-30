@@ -181,7 +181,8 @@ Kirigami.Page {
             // would break a binding and keep later messages hidden.
             visible: false
             text: projectMessage.text(Project.status)
-            onVisibleChanged: if (!visible) Project.clearStatus()
+            // Only the close button clears it, not leaving the page.
+            onVisibleChanged: if (!visible && page.visible) Project.clearStatus()
             Component.onCompleted: visible = projectMessage.text(Project.status) !== ""
 
             Connections {
