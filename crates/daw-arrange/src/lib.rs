@@ -336,6 +336,9 @@ pub struct Arrange {
     pub palette: Palette,
     pub selection: BTreeSet<ClipId>,
     pub selected_track: Option<TrackId>,
+    /// The clip under the pointer, which shows its handles like a selected
+    /// one. Set by [`Arrange::hover`].
+    pub hovered: Option<ClipId>,
     pub peaks: PeakPool,
     pub names: DefaultNames,
     drag: Option<Drag>,
@@ -364,6 +367,7 @@ impl Arrange {
             palette: Palette::default(),
             selection: BTreeSet::new(),
             selected_track: None,
+            hovered: None,
             peaks: PeakPool::new(),
             names: DefaultNames::default(),
             drag: None,
@@ -435,7 +439,7 @@ impl Arrange {
                 continue;
             }
             let edge = self.edge_px.min(r.w / 4.0);
-            let handle = self.handles(row, clip).and_then(|h| {
+            let handle = self.active_handles(row, clip).and_then(|h| {
                 [
                     (h.fade_in, Zone::FadeIn),
                     (h.fade_out, Zone::FadeOut),
@@ -518,6 +522,29 @@ impl Arrange {
             fade_in_x,
             fade_out_x,
         })
+    }
+
+    /// [`handles`](Self::handles), only for a clip that shows them: the
+    /// selected and hovered ones. Others keep the whole clip for moving and
+    /// trimming, and stay uncluttered.
+    pub fn active_handles(&self, row: usize, clip: &Clip) -> Option<Handles> {
+        if self.selection.contains(&clip.id) || self.hovered == Some(clip.id) {
+            self.handles(row, clip)
+        } else {
+            None
+        }
+    }
+
+    /// The pointer moved without a button. Returns whether the hovered clip
+    /// changed, so the front end redraws.
+    pub fn hover(&mut self, project: &Project, x: f64, y: f64) -> bool {
+        let clip = match self.hit(project, x, y) {
+            Hit::Clip { clip, .. } => Some(clip),
+            _ => None,
+        };
+        let changed = clip != self.hovered;
+        self.hovered = clip;
+        changed
     }
 
     /// The gain of the clip being gain-dragged, so the front end can show

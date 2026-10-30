@@ -378,8 +378,17 @@ impl qobject::ArrangeView {
     }
 
     fn hover(mut self: Pin<&mut Self>, x: f64, y: f64) {
-        let c = state::with(|s| s.arrange.cursor(s.doc.project(), x, y));
+        let (c, changed) = state::with(|s| {
+            let project = s.doc.project();
+            // First, so the cursor sees the hovered clip's handles.
+            let changed = s.arrange.hover(project, x, y);
+            (s.arrange.cursor(project, x, y), changed)
+        });
         self.as_mut().set_cursor_shape(cursor_shape(c));
+        if changed {
+            // The hovered clip shows its fade and gain handles.
+            self.refresh();
+        }
     }
 
     fn wheel(self: Pin<&mut Self>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32) {

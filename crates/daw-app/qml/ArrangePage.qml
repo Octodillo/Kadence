@@ -362,6 +362,8 @@ Kirigami.Page {
                             view.hover(m.x, m.y);
                         }
                     }
+                    // Off the timeline: no clip is hovered.
+                    onExited: if (!pressed) view.hover(-1, -1)
                     onReleased: (m) => view.release(m.x, m.y, m.modifiers)
                     onDoubleClicked: (m) => view.doubleClick(m.x, m.y, m.modifiers)
                     onCanceled: view.cancelDrag()

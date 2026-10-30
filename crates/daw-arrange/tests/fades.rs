@@ -87,6 +87,8 @@ impl Rig {
             shift,
             ..Pointer::left(x, y)
         };
+        // A mouse hovers before it presses, which shows the handles.
+        self.arrange.hover(self.doc.project(), from.0, from.1);
         self.arrange.press(&mut self.doc, mk(from.0, from.1));
         for i in 1..=4 {
             let f = f64::from(i) / 4.0;
@@ -98,7 +100,9 @@ impl Rig {
         }
     }
 
-    fn zone(&self, x: f64, y: f64) -> Option<Zone> {
+    /// The zone under a hovering pointer.
+    fn zone(&mut self, x: f64, y: f64) -> Option<Zone> {
+        self.arrange.hover(self.doc.project(), x, y);
         match self.arrange.hit(self.doc.project(), x, y) {
             Hit::Clip { zone, .. } => Some(zone),
             _ => None,
@@ -117,6 +121,7 @@ fn handles_sit_along_the_top_of_audio_clips() {
     // Below the handles the edges still trim.
     assert_eq!(r.zone(r.x(BAR) + 2.0, mid), Some(Zone::Start));
     assert_eq!(r.zone(r.x(2 * BAR) - 2.0, mid), Some(Zone::End));
+    r.arrange.hover(r.doc.project(), r.x(BAR + BAR / 2), top);
     let p = r.doc.project();
     assert_eq!(
         r.arrange.cursor(p, r.x(BAR + BAR / 2), top),
@@ -239,6 +244,7 @@ fn double_clicking_a_handle_resets_it() {
         .unwrap();
     r.doc.seal();
     let (top, mid, x) = (r.top(), r.mid(), r.x(BAR + BAR / 2));
+    r.arrange.hover(r.doc.project(), x, top);
     let out = r.arrange.double_click(&mut r.doc, Pointer::left(x, top));
     assert!(out.document);
     assert!(out.open_clip.is_none());
@@ -342,16 +348,59 @@ fn fades_and_handles_are_drawn() {
             .count();
         (lines, handles)
     };
+    // Handles only on the hovered or selected clip.
+    assert_eq!(count(&mut r), (0, 0));
+    r.arrange.hover(r.doc.project(), r.x(BAR / 2), r.mid());
     assert_eq!(count(&mut r), (0, 3));
+    r.arrange.hover(r.doc.project(), r.x(2 * BAR), r.mid());
+    assert_eq!(count(&mut r), (0, 0));
     r.doc
         .execute(SetClip::new(
             id,
             ClipField::FadeIn(Fade::new(TickTime(BEAT), FadeShape::EqualPower)),
         ))
         .unwrap();
+    // Fades show on every clip.
     let (lines, handles) = count(&mut r);
     assert!(lines >= 10, "{lines} curve segments");
-    assert_eq!(handles, 3);
+    assert_eq!(handles, 0);
+    r.arrange.selection = [id].into();
+    assert_eq!(count(&mut r).1, 3);
+}
+
+#[test]
+fn clips_without_handles_shown_keep_their_edges() {
+    let mut r = Rig::new();
+    let id = r.clip(BAR, BAR);
+    let (x, top) = (r.x(BAR) + 2.0, r.top());
+    // Not hovered or selected: the top corner trims.
+    let hit = r.arrange.hit(r.doc.project(), x, top);
+    assert!(
+        matches!(
+            hit,
+            Hit::Clip {
+                zone: Zone::Start,
+                ..
+            }
+        ),
+        "{hit:?}"
+    );
+    assert!(r.arrange.hover(r.doc.project(), x, top));
+    assert_eq!(r.arrange.hovered, Some(id));
+    assert!(!r.arrange.hover(r.doc.project(), x + 1.0, top));
+    let hit = r.arrange.hit(r.doc.project(), x, top);
+    assert!(
+        matches!(
+            hit,
+            Hit::Clip {
+                zone: Zone::FadeIn,
+                ..
+            }
+        ),
+        "{hit:?}"
+    );
+    assert!(r.arrange.hover(r.doc.project(), x, 5.0));
+    assert_eq!(r.arrange.hovered, None);
 }
 
 #[test]
