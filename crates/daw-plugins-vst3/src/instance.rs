@@ -1,6 +1,7 @@
 //! A running VST3 plugin: component, edit controller and audio processor behind
 //! [`PluginInstance`].
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
@@ -9,9 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off};
+use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
-    ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
+    ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance, PluginProcessor,
 };
 use vst3::Steinberg::Vst::{
     AudioBusBuffers, AudioBusBuffers__type0, BusDirections_, BusInfo, ControllerNumbers_,
@@ -107,54 +109,66 @@ impl Param {
     }
 }
 
-/// Values the processor saw, on their way to the controller off the real-time thread.
+/// The controller's parameter list, shared by the main thread and `process`, with the values
+/// the processor saw on their way to the controller off the real-time thread.
 ///
-/// Known parameters keep only their newest value, so no amount of automation between two
+/// Listed parameters keep only their newest value, so no amount of automation between two
 /// main-thread pumps can leave the controller (and `param_value`) on a stale one. Ids the
-/// controller does not list go through a small ring that drops what does not fit.
-struct ToController {
+/// controller does not list go through a small ring that drops what does not fit. A new list
+/// is a new `Params`; the old one is drained once `process` has moved over.
+struct Params {
+    list: Vec<Param>,
+    index: HashMap<ParamID, usize>,
     values: Box<[AtomicU64]>,
     dirty: Box<[AtomicBool]>,
-    unknown_tx: rtrb::Producer<Edit>,
-    unknown_rx: Mutex<rtrb::Consumer<Edit>>,
 }
 
-impl ToController {
-    fn new(params: usize) -> ToController {
-        let (unknown_tx, unknown_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
-        ToController {
-            values: (0..params).map(|_| AtomicU64::new(0)).collect(),
-            dirty: (0..params).map(|_| AtomicBool::new(false)).collect(),
-            unknown_tx,
-            unknown_rx: Mutex::new(unknown_rx),
-        }
+impl Params {
+    fn new(list: Vec<Param>) -> Arc<Params> {
+        Arc::new(Params {
+            index: list
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.info.id, i))
+                .collect(),
+            values: (0..list.len()).map(|_| AtomicU64::new(0)).collect(),
+            dirty: (0..list.len()).map(|_| AtomicBool::new(false)).collect(),
+            list,
+        })
     }
 
-    /// Real-time safe. `index` is the parameter's position in `params`, if it has one.
-    fn send(&mut self, index: Option<usize>, edit: Edit) {
-        match index.filter(|&i| i < self.values.len()) {
+    fn index(&self, id: ParamID) -> Option<usize> {
+        self.index.get(&id).copied()
+    }
+
+    fn to_plain(&self, id: ParamID, normalized: f64) -> f64 {
+        self.index(id)
+            .map_or(normalized, |i| self.list[i].to_plain(normalized))
+    }
+
+    /// Real-time safe. `unknown` takes ids the list does not have.
+    fn send(&self, unknown: &mut rtrb::Producer<Edit>, edit: Edit) {
+        match self.index(edit.id) {
             Some(i) => {
                 self.values[i].store(edit.normalized.to_bits(), Ordering::Relaxed);
                 self.dirty[i].store(true, Ordering::Release);
             }
             None => {
-                let _ = self.unknown_tx.push(edit);
+                let _ = unknown.push(edit);
             }
         }
     }
 
-    /// Takes every value sent since the last call: `(Some(index), value)` for listed
-    /// parameters, `(None, edit)` for the rest.
-    fn drain(&self, mut f: impl FnMut(Option<usize>, Edit)) {
+    /// Takes the newest value of every listed parameter sent since the last call.
+    fn drain(&self, mut f: impl FnMut(Edit)) {
         for (i, dirty) in self.dirty.iter().enumerate() {
             if dirty.swap(false, Ordering::Acquire) {
                 let normalized = f64::from_bits(self.values[i].load(Ordering::Relaxed));
-                f(Some(i), Edit { id: 0, normalized });
+                f(Edit {
+                    id: self.list[i].info.id,
+                    normalized,
+                });
             }
-        }
-        let mut rx = self.unknown_rx.lock().unwrap_or_else(|e| e.into_inner());
-        while let Ok(e) = rx.pop() {
-            f(None, e);
         }
     }
 }
@@ -276,38 +290,288 @@ impl Rt {
     }
 }
 
+impl Audio {
+    /// Starts or stops processing, on the main thread.
+    fn set_processing(&mut self, on: bool) {
+        if self.processing != on {
+            // Plugins may refuse to start; they still process, so carry on either way.
+            unsafe { self.processor.setProcessing(on as u8) };
+            self.processing = on;
+        }
+    }
+
+    /// Runs on the audio thread, so only cycles `setProcessing`, which the spec allows there
+    /// and plugins treat as a state reset. `setActive` and the latency
+    /// re-read stay on the main thread, in `prepare` (and `handle_restart` for a changed
+    /// layout).
+    fn reset(&mut self) {
+        if self.processing {
+            in_process(|| unsafe {
+                self.processor.setProcessing(0);
+                self.processor.setProcessing(1);
+            });
+        }
+    }
+
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        let rt = self.rt.as_deref_mut().filter(|_| !self.io_stale);
+        let Some(rt) = rt else {
+            silence(ctx);
+            return;
+        };
+        let frames = ctx.frames.min(rt.max_frames) as usize;
+
+        rt.in_params.clear();
+        rt.out_params.clear();
+        rt.in_events.clear();
+        rt.out_events.clear();
+
+        // Edits made in the plugin's editor: to the processor, and out to the host so it can
+        // record automation.
+        while let Ok(e) = self.edits_rx.pop() {
+            rt.in_params.add(e.id, 0, e.normalized);
+            let value = self.params.to_plain(e.id, e.normalized);
+            let _ = ctx.events_out.push(DawEvent {
+                frame: 0,
+                kind: EventKind::ParamValue { param: e.id, value },
+            });
+        }
+
+        for ev in ctx.events_in.iter() {
+            let frame = ev.frame.min(frames.saturating_sub(1) as u32);
+            let kind = match ev.kind {
+                // VST3 has no wildcard note off; send all notes off, which reaches plugins that
+                // map CC 123.
+                EventKind::NoteOff {
+                    channel, key: None, ..
+                } => EventKind::Midi(all_notes_off(channel)),
+                kind => kind,
+            };
+            match kind {
+                EventKind::NoteOn {
+                    channel,
+                    key,
+                    velocity,
+                    note_id,
+                } => {
+                    rt.in_events.push(vst_event(
+                        frame,
+                        EventTypes_::kNoteOnEvent,
+                        Event__type0 {
+                            noteOn: NoteOnEvent {
+                                channel: channel as i16,
+                                pitch: key as i16,
+                                tuning: 0.0,
+                                velocity,
+                                length: 0,
+                                noteId: note_id,
+                            },
+                        },
+                    ));
+                }
+                EventKind::NoteOff {
+                    channel,
+                    key: Some(key),
+                    velocity,
+                    note_id,
+                } => {
+                    rt.in_events.push(vst_event(
+                        frame,
+                        EventTypes_::kNoteOffEvent,
+                        Event__type0 {
+                            noteOff: NoteOffEvent {
+                                channel: channel as i16,
+                                pitch: key as i16,
+                                velocity,
+                                noteId: note_id,
+                                tuning: 0.0,
+                            },
+                        },
+                    ));
+                }
+                EventKind::Midi(bytes) => {
+                    if let Some(e) = midi_to_vst_event(frame, bytes) {
+                        rt.in_events.push(e);
+                        continue;
+                    }
+                    // Controllers, channel pressure and pitch bend become parameter changes
+                    // through the plugin's MIDI mapping.
+                    let channel = (bytes[0] & 0x0f) as usize;
+                    let (cc, normalized) = match bytes[0] & 0xf0 {
+                        // Data bytes are 7 bits; a corrupt one must not push the value past 1.
+                        0xb0 => (bytes[1] as usize & 0x7f, (bytes[2] & 0x7f) as f64 / 127.0),
+                        0xd0 => (
+                            ControllerNumbers_::kAfterTouch as usize,
+                            (bytes[1] & 0x7f) as f64 / 127.0,
+                        ),
+                        0xe0 => (
+                            ControllerNumbers_::kPitchBend as usize,
+                            (((bytes[2] as u32 & 0x7f) << 7) | (bytes[1] as u32 & 0x7f)) as f64
+                                / 16383.0,
+                        ),
+                        _ => continue,
+                    };
+                    let id = self.midi_map[channel][cc];
+                    if id != kNoParamId {
+                        rt.in_params.add(id, frame as i32, normalized);
+                        self.params
+                            .send(&mut self.unknown_tx, Edit { id, normalized });
+                    }
+                }
+                // Turned into all notes off above.
+                EventKind::NoteOff { key: None, .. } => {}
+                EventKind::ParamValue { param, value } => {
+                    let normalized = self.params.index(param).map_or(value.clamp(0.0, 1.0), |i| {
+                        self.params.list[i].to_normalized(value)
+                    });
+                    rt.in_params.add(param, frame as i32, normalized);
+                    self.params.send(
+                        &mut self.unknown_tx,
+                        Edit {
+                            id: param,
+                            normalized,
+                        },
+                    );
+                }
+            }
+        }
+
+        if !self.event_in {
+            // Notes have nowhere to go without an event bus.
+            rt.in_events.clear();
+        }
+
+        for (i, buf) in rt.in_audio.iter_mut().enumerate() {
+            let buf = &mut buf[..frames];
+            match ctx.audio_in.get(i) {
+                Some(src) => {
+                    let n = src.len().min(frames);
+                    buf[..n].copy_from_slice(&src[..n]);
+                    buf[n..].fill(0.0);
+                }
+                None => buf.fill(0.0),
+            }
+        }
+        for bus in rt.in_buses.iter_mut() {
+            bus.silenceFlags = 0;
+        }
+        for bus in rt.out_buses.iter_mut() {
+            bus.silenceFlags = 0;
+        }
+
+        fill_context(&mut rt.context, ctx.transport, self.sample_rate);
+
+        let mut data = rt.process_data(frames as i32);
+        in_process(|| unsafe { self.processor.process(&mut data) });
+        rt.context.continousTimeSamples += frames as i64;
+
+        for (i, out) in ctx.audio_out.iter_mut().enumerate() {
+            let n = out.len().min(frames);
+            match rt.out_audio.get(i) {
+                Some(src) => out[..n].copy_from_slice(&src[..n]),
+                None => out[..n].fill(0.0),
+            }
+            out[n..].fill(0.0);
+        }
+
+        for q in rt.out_params.queues() {
+            let id = q.id();
+            let Some((offset, normalized)) = q.last() else {
+                continue;
+            };
+            self.params
+                .send(&mut self.unknown_tx, Edit { id, normalized });
+            let value = self.params.to_plain(id, normalized);
+            let _ = ctx.events_out.push(DawEvent {
+                frame: offset.max(0) as u32,
+                kind: EventKind::ParamValue { param: id, value },
+            });
+        }
+
+        for e in rt.out_events.iter() {
+            let frame = e.sampleOffset.max(0) as u32;
+            let kind = unsafe {
+                match e.r#type as vst3::Steinberg::Vst::Event_::EventTypes {
+                    EventTypes_::kNoteOnEvent => {
+                        let n = e.__field0.noteOn;
+                        EventKind::NoteOn {
+                            channel: n.channel as u8,
+                            key: n.pitch as u8,
+                            velocity: n.velocity,
+                            note_id: n.noteId,
+                        }
+                    }
+                    EventTypes_::kNoteOffEvent => {
+                        let n = e.__field0.noteOff;
+                        EventKind::NoteOff {
+                            channel: n.channel as u8,
+                            // A negative pitch names no key; read it as every key, as CLAP does.
+                            key: (n.pitch >= 0).then_some(n.pitch as u8),
+                            velocity: n.velocity,
+                            note_id: n.noteId,
+                        }
+                    }
+                    EventTypes_::kPolyPressureEvent => {
+                        let p = e.__field0.polyPressure;
+                        EventKind::Midi([
+                            0xa0 | (p.channel as u8 & 0x0f),
+                            p.pitch as u8 & 0x7f,
+                            (p.pressure.clamp(0.0, 1.0) * 127.0).round() as u8,
+                        ])
+                    }
+                    EventTypes_::kLegacyMIDICCOutEvent => {
+                        let m = e.__field0.midiCCOut;
+                        let ch = m.channel as u8 & 0x0f;
+                        let (v1, v2) = (m.value as u8 & 0x7f, m.value2 as u8 & 0x7f);
+                        match m.controlNumber as i32 {
+                            c if c < 128 => EventKind::Midi([0xb0 | ch, c as u8, v1]),
+                            c if c == ControllerNumbers_::kAfterTouch as i32 => {
+                                EventKind::Midi([0xd0 | ch, v1, 0])
+                            }
+                            c if c == ControllerNumbers_::kPitchBend as i32 => {
+                                EventKind::Midi([0xe0 | ch, v1, v2])
+                            }
+                            c if c == ControllerNumbers_::kCtrlProgramChange as i32 => {
+                                EventKind::Midi([0xc0 | ch, v1, 0])
+                            }
+                            _ => continue,
+                        }
+                    }
+                    _ => continue,
+                }
+            };
+            let _ = ctx.events_out.push(DawEvent { frame, kind });
+        }
+    }
+}
+
 pub struct Vst3Instance {
     descriptor: PluginDescriptor,
     editor: Option<Editor>,
-    rt: Option<Box<Rt>>,
-    params: Vec<Param>,
-    param_index: HashMap<ParamID, usize>,
-    /// `[channel][controller]` to parameter, or `kNoParamId`.
-    midi_map: Box<[[ParamID; MIDI_CONTROLLERS]; 16]>,
+    /// The same list `process` uses; replaced together with `audio`'s.
+    params: Arc<Params>,
+    /// Values for ids `params` does not list, from `process` to the controller.
+    unknown_rx: Mutex<rtrb::Consumer<Edit>>,
     buses: Buses,
     sample_rate: f64,
     max_frames: u32,
     latency: u32,
     active: bool,
-    processing: bool,
     /// The plugin asked for a new port layout or latency since the last `prepare`. Reported
     /// once through `take_layout_changed`.
     layout_changed: bool,
-    /// The plugin's buses no longer match `rt`, so `process` outputs silence until `prepare`.
-    io_stale: bool,
     /// Whether the plugin had parameters at the last `prepare`, which makes its ports take
     /// and send events. Fixed between prepares like the rest of the layout.
     has_params: bool,
     /// The speaker arrangements `prepare` settled on, inputs then outputs.
     arrangements: (Vec<SpeakerArrangement>, Vec<SpeakerArrangement>),
 
-    /// Edits from the plugin's editor, read by `process`.
-    edits_rx: rtrb::Consumer<Edit>,
-    /// Values the processor saw, forwarded to the controller off the real-time thread.
-    to_controller: ToController,
+    /// What `process` runs on, shared with the [`Vst3Processor`] that `split` hands out.
+    audio: Arc<Exclusive<Audio>>,
+    /// The processor half is out, so this object's own `process` and `reset` do nothing.
+    lent: bool,
 
     connection: Option<Connection>,
-    processor: ComPtr<IAudioProcessor>,
     controller: ComPtr<IEditController>,
     /// False when the component implements the controller itself.
     split: bool,
@@ -317,10 +581,74 @@ pub struct Vst3Instance {
     _module: Arc<Module>,
 }
 
-// SAFETY: the raw pointers in `Rt` only point at buffers owned by the same instance, and the
-// engine never uses an instance from two threads at once (every method takes `&mut self`
-// except the read-only `param_value`, which goes through a mutex).
+// SAFETY: the engine never uses an instance from two threads at once (every method takes
+// `&mut self` except the read-only `params` and `param_value`, and `param_value` reaches the
+// processor's values through atomics and a mutex). The controller and component are only
+// called from the main thread; `process` goes through `audio`.
 unsafe impl Send for Vst3Instance {}
+
+/// What `process` works on. The instance and its [`Vst3Processor`] share it through an
+/// [`Exclusive`]: the audio thread takes it for one block, and the main thread only for the
+/// calls the spec keeps apart from `process` (activation, bus changes, the parameter flush)
+/// and to swap in a new parameter list or MIDI mapping, each brief. Everything else the
+/// main thread does (state, editors, the controller) runs while the plugin processes, as
+/// VST3 allows.
+struct Audio {
+    processor: ComPtr<IAudioProcessor>,
+    rt: Option<Box<Rt>>,
+    /// The plugin's buses no longer match `rt`, so `process` outputs silence until `prepare`.
+    io_stale: bool,
+    processing: bool,
+    event_in: bool,
+    sample_rate: f64,
+    params: Arc<Params>,
+    /// `[channel][controller]` to parameter, or `kNoParamId`.
+    midi_map: Box<[[ParamID; MIDI_CONTROLLERS]; 16]>,
+    /// Edits from the plugin's editor.
+    edits_rx: rtrb::Consumer<Edit>,
+    unknown_tx: rtrb::Producer<Edit>,
+}
+
+// SAFETY: the raw pointers in `Rt` only point at buffers owned by the same `Audio`, and the
+// `Exclusive` it lives in lets one thread at a time call the processor.
+unsafe impl Send for Audio {}
+
+/// The audio-thread half of a [`Vst3Instance`], from [`PluginInstance::split`].
+///
+/// A block that comes while the main thread is in one of the few calls that must not
+/// overlap `process` waits a few microseconds for it, then is silent and loses its events;
+/// a `reset` then is skipped. Join it before dropping the instance, or the plugin's last
+/// reference goes wherever this is dropped.
+pub struct Vst3Processor(Arc<Exclusive<Audio>>);
+
+/// How many times a [`Vst3Processor`] block retries the audio state the main thread holds.
+const AUDIO_RETRIES: u32 = 100;
+
+impl PluginProcessor for Vst3Processor {
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        for _ in 0..AUDIO_RETRIES {
+            if self.0.try_audio(|a| a.process(ctx)).is_some() {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+        silence(ctx);
+    }
+
+    fn reset(&mut self) {
+        self.0.try_audio(Audio::reset);
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+}
+
+fn silence(ctx: &mut ProcessContext) {
+    for out in ctx.audio_out.iter_mut() {
+        out.fill(0.0);
+    }
+}
 
 fn load_err(what: &str) -> PluginError {
     PluginError::Load(what.to_string())
@@ -515,27 +843,37 @@ impl Vst3Instance {
                 controller.setComponentHandler(h.as_ptr());
             }
 
+            let (unknown_tx, unknown_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
+            let params = Params::new(Vec::new());
+            let buses = read_buses(&component);
+            let audio = Audio {
+                processor,
+                rt: None,
+                io_stale: false,
+                processing: false,
+                event_in: buses.event_in,
+                sample_rate: 0.0,
+                params: Arc::clone(&params),
+                midi_map: Box::new([[kNoParamId; MIDI_CONTROLLERS]; 16]),
+                edits_rx,
+                unknown_tx,
+            };
             let mut instance = Vst3Instance {
                 descriptor: d.clone(),
                 editor: None,
-                rt: None,
-                params: Vec::new(),
-                param_index: HashMap::new(),
-                midi_map: Box::new([[kNoParamId; MIDI_CONTROLLERS]; 16]),
-                buses: read_buses(&component),
+                params,
+                unknown_rx: Mutex::new(unknown_rx),
+                buses,
                 sample_rate: 0.0,
                 max_frames: 0,
                 latency: 0,
                 active: false,
-                processing: false,
                 layout_changed: false,
-                io_stale: false,
                 arrangements: Default::default(),
                 has_params: false,
-                edits_rx,
-                to_controller: ToController::new(0),
+                audio: Arc::new(Exclusive::new(audio)),
+                lent: false,
                 connection,
-                processor,
                 controller,
                 split,
                 component,
@@ -544,7 +882,7 @@ impl Vst3Instance {
             };
             instance.sync_controller_to_component();
             instance.read_params();
-            instance.has_params = !instance.params.is_empty();
+            instance.has_params = !instance.params.list.is_empty();
             instance.read_midi_map();
             instance.descriptor.ports = (
                 channel_total(&instance.buses.inputs),
@@ -572,8 +910,15 @@ impl Vst3Instance {
         }
     }
 
+    /// Runs `f` with the audio side, after the audio thread finishes its block, keeping it
+    /// silent meanwhile. Keep `f` short, and never call this from inside `f`.
+    fn with_audio<R>(&mut self, f: impl FnOnce(&mut Self, &mut Audio) -> R) -> R {
+        let audio = Arc::clone(&self.audio);
+        audio.main(|a| f(self, a))
+    }
+
     fn read_params(&mut self) {
-        let mut params = Vec::new();
+        let mut list = Vec::new();
         unsafe {
             let count = self.controller.getParameterCount();
             for i in 0..count {
@@ -601,94 +946,81 @@ impl Vst3Instance {
                 );
                 param.info.min = param.to_plain(0.0);
                 param.info.max = param.to_plain(1.0);
-                params.push(param);
+                list.push(param);
             }
         }
-        // Values still waiting are indexed by the old list.
-        self.flush_to_controller();
-        self.to_controller = ToController::new(params.len());
-        self.param_index = params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.info.id, i))
-            .collect();
-        self.params = params;
+        let new = Params::new(list);
+        let old = std::mem::replace(&mut self.params, Arc::clone(&new));
+        self.audio.main(|a| a.params = new);
+        // `process` sends to the new list from here on; values still in the old one are
+        // its last.
+        self.flush_to_controller_from(&old);
     }
 
     fn read_midi_map(&mut self) {
         let Some(mapping) = self.controller.cast::<IMidiMapping>() else {
             return;
         };
-        for (channel, row) in self.midi_map.iter_mut().enumerate() {
+        let mut map = Box::new([[kNoParamId; MIDI_CONTROLLERS]; 16]);
+        for (channel, row) in map.iter_mut().enumerate() {
             for (cc, slot) in row.iter_mut().enumerate() {
                 let mut id: ParamID = kNoParamId;
                 let found = unsafe {
                     mapping.getMidiControllerAssignment(0, channel as i16, cc as i16, &mut id)
                 };
-                *slot = if found == kResultOk || found == kResultTrue {
-                    id
-                } else {
-                    kNoParamId
-                };
+                if found == kResultOk || found == kResultTrue {
+                    *slot = id;
+                }
             }
+        }
+        let old = self.audio.main(|a| std::mem::replace(&mut a.midi_map, map));
+        drop(old);
+    }
+
+    fn deactivate(&mut self, a: &mut Audio) {
+        a.set_processing(false);
+        if self.active {
+            unsafe { self.component.setActive(0) };
+            self.active = false;
         }
     }
 
-    fn deactivate(&mut self) {
-        unsafe {
-            if self.processing {
-                self.processor.setProcessing(0);
-                self.processing = false;
-            }
-            if self.active {
-                self.component.setActive(0);
-                self.active = false;
-            }
-        }
-    }
-
-    fn activate(&mut self) {
+    fn activate(&mut self, a: &mut Audio) {
         unsafe {
             if !self.active {
                 self.component.setActive(1);
                 self.active = true;
             }
-            self.latency = self.processor.getLatencySamples();
-            if !self.processing {
-                // Plugins may refuse; they still process, so carry on either way.
-                self.processor.setProcessing(1);
-                self.processing = true;
-            }
+            self.latency = a.processor.getLatencySamples();
         }
-    }
-
-    fn param(&self, id: ParamID) -> Option<&Param> {
-        self.param_index.get(&id).map(|&i| &self.params[i])
-    }
-
-    fn to_plain(&self, id: ParamID, normalized: f64) -> f64 {
-        self.param(id)
-            .map_or(normalized, |p| p.to_plain(normalized))
+        a.set_processing(true);
     }
 
     /// Applies processor-side values to the controller so editors and `param_value` follow.
     fn flush_to_controller(&self) {
-        self.to_controller.drain(|index, e| {
-            let id = index.map_or(e.id, |i| self.params[i].info.id);
-            unsafe { self.controller.setParamNormalized(id, e.normalized) };
-        });
+        self.flush_to_controller_from(&self.params);
+    }
+
+    fn flush_to_controller_from(&self, params: &Params) {
+        let set = |e: Edit| unsafe {
+            self.controller.setParamNormalized(e.id, e.normalized);
+        };
+        params.drain(set);
+        let mut rx = self.unknown_rx.lock().unwrap_or_else(|e| e.into_inner());
+        while let Ok(e) = rx.pop() {
+            set(e);
+        }
     }
 
     /// Hands editor edits still queued for the processor over with a zero-sample `process`,
-    /// the spec's parameter flush, so a state saved while the engine is not running this
-    /// instance includes them. `&mut self` means the audio thread is not using it. Edits
-    /// flushed this way are not reported to the host as `ParamValue` events.
-    fn flush_edits(&mut self) {
+    /// the spec's parameter flush, so a state saved now includes them. Edits flushed this
+    /// way are not reported to the host as `ParamValue` events.
+    fn flush_edits(&mut self, a: &mut Audio) {
         // While stale, `rt`'s buffers no longer match the plugin's buses.
-        if !self.processing || self.io_stale {
+        if !a.processing || a.io_stale {
             return;
         }
-        let Some(rt) = self.rt.as_deref_mut() else {
+        let Some(rt) = a.rt.as_deref_mut() else {
             return;
         };
         // Bounded, so a plugin that calls `performEdit` from its own `process` cannot keep
@@ -696,39 +1028,47 @@ impl Vst3Instance {
         // which holds at most one edit per parameter.
         for _ in 0..FLUSH_ROUNDS {
             self.handler.retry_overflow();
-            if self.edits_rx.is_empty() {
+            if a.edits_rx.is_empty() {
                 return;
             }
             rt.in_params.clear();
             rt.out_params.clear();
             rt.in_events.clear();
             rt.out_events.clear();
-            while let Ok(e) = self.edits_rx.pop() {
+            while let Ok(e) = a.edits_rx.pop() {
                 rt.in_params.add(e.id, 0, e.normalized);
             }
             let mut data = rt.process_data(0);
-            unsafe { self.processor.process(&mut data) };
+            unsafe { a.processor.process(&mut data) };
             for q in rt.out_params.queues() {
                 if let Some((_, normalized)) = q.last() {
-                    let id = q.id();
-                    self.to_controller
-                        .send(self.param_index.get(&id).copied(), Edit { id, normalized });
+                    a.params.send(
+                        &mut a.unknown_tx,
+                        Edit {
+                            id: q.id(),
+                            normalized,
+                        },
+                    );
                 }
             }
         }
     }
 
     /// Asks the plugin to go back to the arrangements from `prepare` after it changed its
-    /// buses. Returns whether its buses match `rt` again.
-    fn keep_layout(&mut self) -> bool {
+    /// buses; `process` stays silent until the next `prepare` if it will not. Returns false
+    /// before the first `prepare`, when there is no layout to keep.
+    fn keep_layout(&mut self, a: &mut Audio) -> bool {
+        if a.rt.is_none() {
+            return false;
+        }
         let old = (self.buses.inputs.clone(), self.buses.outputs.clone());
         let (mut ins, mut outs) = self.arrangements.clone();
-        self.deactivate();
+        self.deactivate(a);
         let now = read_buses(&self.component);
         let kept = now.inputs.len() == ins.len()
             && now.outputs.len() == outs.len()
             && unsafe {
-                self.processor.setBusArrangements(
+                a.processor.setBusArrangements(
                     ins.as_mut_ptr(),
                     ins.len() as i32,
                     outs.as_mut_ptr(),
@@ -739,9 +1079,86 @@ impl Vst3Instance {
                 let now = read_buses(&self.component);
                 (now.inputs, now.outputs) == old
             };
-        // Back to processing either way; `process` stays silent while the layout differs.
-        self.activate();
-        kept
+        // Back to processing either way.
+        self.activate(a);
+        a.io_stale = !kept;
+        true
+    }
+
+    fn prepare_with(&mut self, a: &mut Audio, sample_rate: f64, max_frames: u32) {
+        self.deactivate(a);
+        self.layout_changed = false;
+        a.io_stale = false;
+
+        // The plugin may have added or removed buses since they were last read.
+        self.buses = read_buses(&self.component);
+        self.sample_rate = sample_rate;
+        self.max_frames = max_frames.max(1);
+        unsafe {
+            let mut setup = ProcessSetup {
+                processMode: ProcessModes_::kRealtime as i32,
+                symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
+                maxSamplesPerBlock: self.max_frames as i32,
+                sampleRate: sample_rate,
+            };
+            a.processor.setupProcessing(&mut setup);
+
+            // Offer the plugin its own default arrangements, then use whatever it ends up with.
+            let arrangements = |dir: i32, n: usize| -> Vec<SpeakerArrangement> {
+                (0..n)
+                    .map(|i| {
+                        let mut arr: SpeakerArrangement = 0;
+                        a.processor.getBusArrangement(dir, i as i32, &mut arr);
+                        arr
+                    })
+                    .collect()
+            };
+            let mut ins = arrangements(BusDirections_::kInput as i32, self.buses.inputs.len());
+            let mut outs = arrangements(BusDirections_::kOutput as i32, self.buses.outputs.len());
+            a.processor.setBusArrangements(
+                ins.as_mut_ptr(),
+                ins.len() as i32,
+                outs.as_mut_ptr(),
+                outs.len() as i32,
+            );
+            self.buses = read_buses(&self.component);
+            self.arrangements = (
+                arrangements(BusDirections_::kInput as i32, self.buses.inputs.len()),
+                arrangements(BusDirections_::kOutput as i32, self.buses.outputs.len()),
+            );
+
+            for (media, dir, n) in [
+                (
+                    MediaTypes_::kAudio,
+                    BusDirections_::kInput,
+                    self.buses.inputs.len(),
+                ),
+                (
+                    MediaTypes_::kAudio,
+                    BusDirections_::kOutput,
+                    self.buses.outputs.len(),
+                ),
+            ] {
+                for i in 0..n {
+                    self.component
+                        .activateBus(media as i32, dir as i32, i as i32, 1);
+                }
+            }
+            for dir in [BusDirections_::kInput, BusDirections_::kOutput] {
+                let n = self
+                    .component
+                    .getBusCount(MediaTypes_::kEvent as i32, dir as i32);
+                for i in 0..n {
+                    self.component
+                        .activateBus(MediaTypes_::kEvent as i32, dir as i32, i, 1);
+                }
+            }
+        }
+        self.has_params = !self.params.list.is_empty();
+        a.event_in = self.buses.event_in;
+        a.sample_rate = sample_rate;
+        a.rt = Some(Rt::new(&self.buses, self.max_frames, sample_rate));
+        self.activate(a);
     }
 
     fn handle_restart(&mut self) {
@@ -753,9 +1170,10 @@ impl Vst3Instance {
         // host learns through `take_layout_changed` and may prepare again, which renegotiates
         // the buses and does the deactivate/activate cycle the spec asks for before reading
         // the new latency. Until then the plugin is asked to keep the layout the engine has.
-        if flags & (RestartFlags_::kIoChanged as i32) != 0 && self.rt.is_some() {
+        if flags & (RestartFlags_::kIoChanged as i32) != 0
+            && self.with_audio(|p, a| p.keep_layout(a))
+        {
             self.layout_changed = true;
-            self.io_stale = !self.keep_layout();
         }
         if flags & (RestartFlags_::kLatencyChanged as i32) != 0 && self.active {
             self.layout_changed = true;
@@ -767,7 +1185,7 @@ impl Vst3Instance {
         {
             self.read_params();
             // Gaining the first parameter or losing the last changes the event ports.
-            if self.params.is_empty() == self.has_params {
+            if self.params.list.is_empty() == self.has_params {
                 self.layout_changed = true;
             }
         }
@@ -850,316 +1268,15 @@ impl Node for Vst3Instance {
         }
     }
 
+    /// Safe with the processor half out too, though the host joins it first: the audio
+    /// thread stays out until this is done.
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
-        self.deactivate();
-        self.layout_changed = false;
-        self.io_stale = false;
-        // The plugin may have added or removed buses since they were last read.
-        self.buses = read_buses(&self.component);
-        self.sample_rate = sample_rate;
-        self.max_frames = max_frames.max(1);
-        unsafe {
-            let mut setup = ProcessSetup {
-                processMode: ProcessModes_::kRealtime as i32,
-                symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
-                maxSamplesPerBlock: self.max_frames as i32,
-                sampleRate: sample_rate,
-            };
-            self.processor.setupProcessing(&mut setup);
-
-            // Offer the plugin its own default arrangements, then use whatever it ends up with.
-            let arrangements = |dir: i32, n: usize| -> Vec<SpeakerArrangement> {
-                (0..n)
-                    .map(|i| {
-                        let mut arr: SpeakerArrangement = 0;
-                        self.processor.getBusArrangement(dir, i as i32, &mut arr);
-                        arr
-                    })
-                    .collect()
-            };
-            let mut ins = arrangements(BusDirections_::kInput as i32, self.buses.inputs.len());
-            let mut outs = arrangements(BusDirections_::kOutput as i32, self.buses.outputs.len());
-            self.processor.setBusArrangements(
-                ins.as_mut_ptr(),
-                ins.len() as i32,
-                outs.as_mut_ptr(),
-                outs.len() as i32,
-            );
-            self.buses = read_buses(&self.component);
-            self.arrangements = (
-                arrangements(BusDirections_::kInput as i32, self.buses.inputs.len()),
-                arrangements(BusDirections_::kOutput as i32, self.buses.outputs.len()),
-            );
-
-            for (media, dir, n) in [
-                (
-                    MediaTypes_::kAudio,
-                    BusDirections_::kInput,
-                    self.buses.inputs.len(),
-                ),
-                (
-                    MediaTypes_::kAudio,
-                    BusDirections_::kOutput,
-                    self.buses.outputs.len(),
-                ),
-            ] {
-                for i in 0..n {
-                    self.component
-                        .activateBus(media as i32, dir as i32, i as i32, 1);
-                }
-            }
-            for dir in [BusDirections_::kInput, BusDirections_::kOutput] {
-                let n = self
-                    .component
-                    .getBusCount(MediaTypes_::kEvent as i32, dir as i32);
-                for i in 0..n {
-                    self.component
-                        .activateBus(MediaTypes_::kEvent as i32, dir as i32, i, 1);
-                }
-            }
-        }
-        self.has_params = !self.params.is_empty();
-        self.rt = Some(Rt::new(&self.buses, self.max_frames, sample_rate));
-        self.activate();
+        self.with_audio(|p, a| p.prepare_with(a, sample_rate, max_frames));
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        let rt = self.rt.as_deref_mut().filter(|_| !self.io_stale);
-        let Some(rt) = rt else {
-            for out in ctx.audio_out.iter_mut() {
-                out.fill(0.0);
-            }
-            return;
-        };
-        let frames = ctx.frames.min(rt.max_frames) as usize;
-
-        rt.in_params.clear();
-        rt.out_params.clear();
-        rt.in_events.clear();
-        rt.out_events.clear();
-
-        // Edits made in the plugin's editor: to the processor, and out to the host so it can
-        // record automation.
-        while let Ok(e) = self.edits_rx.pop() {
-            rt.in_params.add(e.id, 0, e.normalized);
-            let value = self
-                .param_index
-                .get(&e.id)
-                .map_or(e.normalized, |&i| self.params[i].to_plain(e.normalized));
-            let _ = ctx.events_out.push(DawEvent {
-                frame: 0,
-                kind: EventKind::ParamValue { param: e.id, value },
-            });
-        }
-
-        for ev in ctx.events_in.iter() {
-            let frame = ev.frame.min(frames.saturating_sub(1) as u32);
-            let kind = match ev.kind {
-                // VST3 has no wildcard note off; send all notes off, which reaches plugins that
-                // map CC 123.
-                EventKind::NoteOff {
-                    channel, key: None, ..
-                } => EventKind::Midi(all_notes_off(channel)),
-                kind => kind,
-            };
-            match kind {
-                EventKind::NoteOn {
-                    channel,
-                    key,
-                    velocity,
-                    note_id,
-                } => {
-                    rt.in_events.push(vst_event(
-                        frame,
-                        EventTypes_::kNoteOnEvent,
-                        Event__type0 {
-                            noteOn: NoteOnEvent {
-                                channel: channel as i16,
-                                pitch: key as i16,
-                                tuning: 0.0,
-                                velocity,
-                                length: 0,
-                                noteId: note_id,
-                            },
-                        },
-                    ));
-                }
-                EventKind::NoteOff {
-                    channel,
-                    key: Some(key),
-                    velocity,
-                    note_id,
-                } => {
-                    rt.in_events.push(vst_event(
-                        frame,
-                        EventTypes_::kNoteOffEvent,
-                        Event__type0 {
-                            noteOff: NoteOffEvent {
-                                channel: channel as i16,
-                                pitch: key as i16,
-                                velocity,
-                                noteId: note_id,
-                                tuning: 0.0,
-                            },
-                        },
-                    ));
-                }
-                EventKind::Midi(bytes) => {
-                    if let Some(e) = midi_to_vst_event(frame, bytes) {
-                        rt.in_events.push(e);
-                        continue;
-                    }
-                    // Controllers, channel pressure and pitch bend become parameter changes
-                    // through the plugin's MIDI mapping.
-                    let channel = (bytes[0] & 0x0f) as usize;
-                    let (cc, normalized) = match bytes[0] & 0xf0 {
-                        // Data bytes are 7 bits; a corrupt one must not push the value past 1.
-                        0xb0 => (bytes[1] as usize & 0x7f, (bytes[2] & 0x7f) as f64 / 127.0),
-                        0xd0 => (
-                            ControllerNumbers_::kAfterTouch as usize,
-                            (bytes[1] & 0x7f) as f64 / 127.0,
-                        ),
-                        0xe0 => (
-                            ControllerNumbers_::kPitchBend as usize,
-                            (((bytes[2] as u32 & 0x7f) << 7) | (bytes[1] as u32 & 0x7f)) as f64
-                                / 16383.0,
-                        ),
-                        _ => continue,
-                    };
-                    let id = self.midi_map[channel][cc];
-                    if id != kNoParamId {
-                        rt.in_params.add(id, frame as i32, normalized);
-                        self.to_controller
-                            .send(self.param_index.get(&id).copied(), Edit { id, normalized });
-                    }
-                }
-                // Turned into all notes off above.
-                EventKind::NoteOff { key: None, .. } => {}
-                EventKind::ParamValue { param, value } => {
-                    let index = self.param_index.get(&param).copied();
-                    let normalized = index.map_or(value.clamp(0.0, 1.0), |i| {
-                        self.params[i].to_normalized(value)
-                    });
-                    rt.in_params.add(param, frame as i32, normalized);
-                    self.to_controller.send(
-                        index,
-                        Edit {
-                            id: param,
-                            normalized,
-                        },
-                    );
-                }
-            }
-        }
-
-        if !self.buses.event_in {
-            // Notes have nowhere to go without an event bus.
-            rt.in_events.clear();
-        }
-
-        for (i, buf) in rt.in_audio.iter_mut().enumerate() {
-            let buf = &mut buf[..frames];
-            match ctx.audio_in.get(i) {
-                Some(src) => {
-                    let n = src.len().min(frames);
-                    buf[..n].copy_from_slice(&src[..n]);
-                    buf[n..].fill(0.0);
-                }
-                None => buf.fill(0.0),
-            }
-        }
-        for bus in rt.in_buses.iter_mut() {
-            bus.silenceFlags = 0;
-        }
-        for bus in rt.out_buses.iter_mut() {
-            bus.silenceFlags = 0;
-        }
-
-        fill_context(&mut rt.context, ctx.transport, self.sample_rate);
-
-        let mut data = rt.process_data(frames as i32);
-        in_process(|| unsafe { self.processor.process(&mut data) });
-        rt.context.continousTimeSamples += frames as i64;
-
-        for (i, out) in ctx.audio_out.iter_mut().enumerate() {
-            let n = out.len().min(frames);
-            match rt.out_audio.get(i) {
-                Some(src) => out[..n].copy_from_slice(&src[..n]),
-                None => out[..n].fill(0.0),
-            }
-            out[n..].fill(0.0);
-        }
-
-        for q in rt.out_params.queues() {
-            let id = q.id();
-            let Some((offset, normalized)) = q.last() else {
-                continue;
-            };
-            self.to_controller
-                .send(self.param_index.get(&id).copied(), Edit { id, normalized });
-            let value = self
-                .param_index
-                .get(&id)
-                .map_or(normalized, |&i| self.params[i].to_plain(normalized));
-            let _ = ctx.events_out.push(DawEvent {
-                frame: offset.max(0) as u32,
-                kind: EventKind::ParamValue { param: id, value },
-            });
-        }
-
-        for e in rt.out_events.iter() {
-            let frame = e.sampleOffset.max(0) as u32;
-            let kind = unsafe {
-                match e.r#type as vst3::Steinberg::Vst::Event_::EventTypes {
-                    EventTypes_::kNoteOnEvent => {
-                        let n = e.__field0.noteOn;
-                        EventKind::NoteOn {
-                            channel: n.channel as u8,
-                            key: n.pitch as u8,
-                            velocity: n.velocity,
-                            note_id: n.noteId,
-                        }
-                    }
-                    EventTypes_::kNoteOffEvent => {
-                        let n = e.__field0.noteOff;
-                        EventKind::NoteOff {
-                            channel: n.channel as u8,
-                            // A negative pitch names no key; read it as every key, as CLAP does.
-                            key: (n.pitch >= 0).then_some(n.pitch as u8),
-                            velocity: n.velocity,
-                            note_id: n.noteId,
-                        }
-                    }
-                    EventTypes_::kPolyPressureEvent => {
-                        let p = e.__field0.polyPressure;
-                        EventKind::Midi([
-                            0xa0 | (p.channel as u8 & 0x0f),
-                            p.pitch as u8 & 0x7f,
-                            (p.pressure.clamp(0.0, 1.0) * 127.0).round() as u8,
-                        ])
-                    }
-                    EventTypes_::kLegacyMIDICCOutEvent => {
-                        let m = e.__field0.midiCCOut;
-                        let ch = m.channel as u8 & 0x0f;
-                        let (v1, v2) = (m.value as u8 & 0x7f, m.value2 as u8 & 0x7f);
-                        match m.controlNumber as i32 {
-                            c if c < 128 => EventKind::Midi([0xb0 | ch, c as u8, v1]),
-                            c if c == ControllerNumbers_::kAfterTouch as i32 => {
-                                EventKind::Midi([0xd0 | ch, v1, 0])
-                            }
-                            c if c == ControllerNumbers_::kPitchBend as i32 => {
-                                EventKind::Midi([0xe0 | ch, v1, v2])
-                            }
-                            c if c == ControllerNumbers_::kCtrlProgramChange as i32 => {
-                                EventKind::Midi([0xc0 | ch, v1, 0])
-                            }
-                            _ => continue,
-                        }
-                    }
-                    _ => continue,
-                }
-            };
-            let _ = ctx.events_out.push(DawEvent { frame, kind });
+        if self.lent || self.audio.try_audio(|a| a.process(ctx)).is_none() {
+            silence(ctx);
         }
     }
 
@@ -1167,15 +1284,9 @@ impl Node for Vst3Instance {
         self.latency
     }
 
-    /// Runs on the audio thread, so only cycles `setProcessing`, which the spec allows there
-    /// and plugins treat as a state reset. `setActive` and the latency re-read stay on the
-    /// main thread, in `prepare` (and `handle_restart` for a changed layout).
     fn reset(&mut self) {
-        if self.processing {
-            in_process(|| unsafe {
-                self.processor.setProcessing(0);
-                self.processor.setProcessing(1);
-            });
+        if !self.lent {
+            self.audio.try_audio(Audio::reset);
         }
     }
 }
@@ -1186,19 +1297,22 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn params(&self) -> Vec<ParamInfo> {
-        self.params.iter().map(|p| p.info.clone()).collect()
+        self.params.list.iter().map(|p| p.info.clone()).collect()
     }
 
     fn param_value(&self, id: ParamId) -> f64 {
         self.flush_to_controller();
         let normalized = unsafe { self.controller.getParamNormalized(id) };
-        self.to_plain(id, normalized)
+        self.params.to_plain(id, normalized)
     }
 
     /// Format: magic, version, then the component and controller states as length-prefixed
     /// blobs (little endian).
     fn save_state(&mut self) -> Result<Vec<u8>, PluginError> {
-        self.flush_edits();
+        // Only edits need the flush, and it keeps the audio thread out while it runs.
+        if self.handler.has_edits() {
+            self.with_audio(|p, a| p.flush_edits(a));
+        }
         let read = |get: &dyn Fn(*mut IBStream) -> i32| -> Result<Vec<u8>, PluginError> {
             let stream = ComWrapper::new(MemoryStream::default());
             let s = stream
@@ -1256,6 +1370,11 @@ impl PluginInstance for Vst3Instance {
                 }
                 Ok(())
             };
+        // Editor edits made before the load are stale and must not reach `process` on top of
+        // the restored state; with the half out the audio thread could apply them before the
+        // clear below, so drop them first.
+        self.handler.discard_overflow();
+        self.with_audio(|_, a| while a.edits_rx.pop().is_ok() {});
         write(component.clone(), &|s| unsafe {
             self.component.setState(s)
         })?;
@@ -1277,11 +1396,14 @@ impl PluginInstance for Vst3Instance {
                 log::warn!("vst3 {}: controller setState: {e}", self.descriptor.name);
             }
         }
-        // Values pushed before the load are stale now, in both directions: editor edits still
-        // queued for the processor would otherwise overwrite the restored state.
+        // Values pushed before the load are stale now, in both directions.
         self.handler.discard_overflow();
-        while self.edits_rx.pop().is_ok() {}
-        self.to_controller.drain(|_, _| {});
+        self.with_audio(|p, a| {
+            while a.edits_rx.pop().is_ok() {}
+            a.params.drain(|_| {});
+            let mut rx = p.unknown_rx.lock().unwrap_or_else(|e| e.into_inner());
+            while rx.pop().is_ok() {}
+        });
         Ok(())
     }
 
@@ -1321,13 +1443,40 @@ impl PluginInstance for Vst3Instance {
     fn take_layout_changed(&mut self) -> bool {
         std::mem::take(&mut self.layout_changed)
     }
+
+    fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
+        // Before the first `prepare` there is nothing to process.
+        if self.lent || self.sample_rate == 0.0 {
+            return None;
+        }
+        self.lent = true;
+        Some(Box::new(Vst3Processor(Arc::clone(&self.audio))))
+    }
+
+    fn join(&mut self, processor: Box<dyn PluginProcessor>) {
+        match processor.into_any().downcast::<Vst3Processor>() {
+            Ok(half) if Arc::ptr_eq(&half.0, &self.audio) => self.lent = false,
+            _ => log::warn!(
+                "vst3 {}: asked to join a processor that is not its own",
+                self.descriptor.name
+            ),
+        }
+    }
 }
 
 impl Drop for Vst3Instance {
     fn drop(&mut self) {
         self.editor = None;
-        self.deactivate();
-        self.rt = None;
+        if self.lent {
+            log::warn!(
+                "vst3 {}: dropped with its processor half still out",
+                self.descriptor.name
+            );
+        }
+        self.with_audio(|p, a| {
+            p.deactivate(a);
+            a.rt = None;
+        });
         unsafe {
             if let Some(c) = self.connection.take() {
                 if let Some(p) = c.proxy.as_com_ref::<IConnectionPoint>() {
@@ -1508,6 +1657,11 @@ mod tests {
 
     /// `gain_heard` with events in.
     fn gain_heard_with(p: &mut Vst3Instance, events: &[EventKind]) -> f32 {
+        heard_through(&mut |ctx| p.process(ctx), events)
+    }
+
+    /// Runs one block of ones through `process` and returns the left output's first sample.
+    fn heard_through(process: &mut dyn FnMut(&mut ProcessContext), events: &[EventKind]) -> f32 {
         let input = [1.0f32; FRAMES as usize];
         let mut outs = [[0.0f32; FRAMES as usize]; 2];
         let mut events_in = EventList::with_capacity(8);
@@ -1527,7 +1681,7 @@ mod tests {
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        p.process(&mut ctx);
+        process(&mut ctx);
         outs[0][0]
     }
 
@@ -1626,6 +1780,7 @@ mod tests {
         // Most effects have no event bus; testgain has one, so take it away.
         p.buses.event_in = false;
         p.buses.event_out = false;
+        p.audio.main(|a| a.event_in = false);
         assert!(p.ports().event_in, "the engine would refuse automation");
         assert!(p.ports().event_out, "editor edits could not be recorded");
         let heard = gain_heard_with(
@@ -1644,7 +1799,10 @@ mod tests {
             ],
         );
         assert_eq!(heard, 0.5);
-        assert!(p.rt.as_ref().unwrap().in_events.iter().next().is_none());
+        let notes_sent = p
+            .audio
+            .main(|a| a.rt.as_ref().unwrap().in_events.iter().next().is_some());
+        assert!(!notes_sent);
 
         // A plugin that gains its first parameter (or loses its last) changes its event
         // ports, which the host must hear about.
@@ -1761,6 +1919,141 @@ mod tests {
         gain_heard(&mut p);
         main_thread(&mut p);
         assert_eq!(p.param_value(ACTIVATIONS), 0.02);
+    }
+
+    #[test]
+    fn a_split_instance_processes_while_the_main_thread_works() {
+        let mut p = instance();
+        let mut half = p.split().unwrap();
+        assert!(p.split().is_none(), "split twice");
+        // The instance's own `process` does nothing while the half is out.
+        assert_eq!(gain_heard(&mut p), 0.0);
+
+        let done = AtomicBool::new(false);
+        let blocks = std::thread::scope(|s| {
+            let audio = s.spawn(|| {
+                let mut blocks = Vec::new();
+                while !done.load(Ordering::Acquire) || blocks.len() < 200 {
+                    let value = if blocks.len() < 100 { 1.0 } else { 0.5 };
+                    let param = EventKind::ParamValue { param: GAIN, value };
+                    blocks.push(heard_through(&mut |ctx| half.process(ctx), &[param]));
+                }
+                blocks
+            });
+            // Main-thread calls that VST3 allows during processing never hold the audio
+            // half up, so no block above comes out silent.
+            for _ in 0..200 {
+                main_thread(&mut p);
+                p.param_value(GAIN);
+                p.has_editor();
+                p.save_state().unwrap();
+            }
+            done.store(true, Ordering::Release);
+            audio.join().unwrap()
+        });
+        assert!(
+            blocks.iter().all(|&g| g == 1.0 || g == 0.5),
+            "a block went silent: {blocks:?}"
+        );
+        main_thread(&mut p);
+        assert_eq!(
+            p.param_value(GAIN),
+            0.5,
+            "the controller missed the half's values"
+        );
+
+        p.join(half);
+        assert_eq!(gain_heard(&mut p), 0.5);
+        p.prepare(48_000.0, FRAMES);
+        assert_eq!(gain_heard(&mut p), 0.5);
+        assert!(p.split().is_some(), "split again after join");
+    }
+
+    #[test]
+    fn editor_edits_and_restarts_reach_a_split_instance() {
+        let mut p = instance();
+        let mut half = p.split().unwrap();
+        let heard =
+            |half: &mut Box<dyn PluginProcessor>| heard_through(&mut |ctx| half.process(ctx), &[]);
+
+        editor_edit(&p, GAIN, 0.25);
+        // Saving with the half out flushes the edit through it, under the audio lock.
+        let state = p.save_state().unwrap();
+        let mut q = instance();
+        q.load_state(&state).unwrap();
+        assert_eq!(gain_heard(&mut q), 0.25);
+        assert_eq!(heard(&mut half), 0.25);
+
+        editor_edit(&p, GAIN, 0.75);
+        assert_eq!(heard(&mut half), 0.75);
+
+        // A layout change the plugin takes back keeps the half playing; one it refuses
+        // silences it until the host joins and prepares.
+        switch_outputs(&p, 1, false);
+        main_thread(&mut p);
+        assert!(p.take_layout_changed());
+        assert_eq!(heard(&mut half), 0.75);
+        switch_outputs(&p, 1, true);
+        main_thread(&mut p);
+        assert!(p.take_layout_changed());
+        assert_eq!(heard(&mut half), 0.0);
+
+        // A new parameter list reaches the half too.
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kParamTitlesChanged as i32)
+        };
+        main_thread(&mut p);
+        p.join(half);
+        p.prepare(48_000.0, FRAMES);
+        assert_eq!(p.ports().audio_out, 1);
+        let mut half = p.split().unwrap();
+        let param = EventKind::ParamValue {
+            param: GAIN,
+            value: 0.5,
+        };
+        assert_eq!(heard_through(&mut |ctx| half.process(ctx), &[param]), 0.5);
+        main_thread(&mut p);
+        assert_eq!(p.param_value(GAIN), 0.5);
+        p.join(half);
+    }
+
+    #[test]
+    fn load_state_discards_editor_edits_before_a_split_half_hears_them() {
+        let mut p = instance();
+        let state = p.save_state().unwrap();
+        let mut half = p.split().unwrap();
+        for _ in 0..2 * EDIT_QUEUE {
+            editor_edit(&p, GAIN, 0.3);
+        }
+        p.load_state(&state).unwrap();
+        main_thread(&mut p);
+        assert_eq!(
+            heard_through(&mut |ctx| half.process(ctx), &[]),
+            1.0,
+            "the stale edit overrode the loaded state"
+        );
+        p.join(half);
+    }
+
+    #[test]
+    fn nothing_splits_before_the_first_prepare() {
+        let mut p = Vst3Instance::new(&testgain()).unwrap();
+        assert!(p.split().is_none());
+        p.prepare(48_000.0, FRAMES);
+        let half = p.split().unwrap();
+        p.join(half);
+    }
+
+    #[test]
+    fn a_processor_from_another_instance_is_not_taken_back() {
+        let mut p = instance();
+        let mut q = instance();
+        let _ = p.split().unwrap();
+        q.join(Box::new(Vst3Processor(Arc::clone(&p.audio))));
+        assert!(q.split().is_some(), "q's own half was never out");
+        assert!(p.split().is_none(), "p's half is still out");
+        p.lent = false;
     }
 
     #[test]
