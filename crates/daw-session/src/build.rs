@@ -14,11 +14,11 @@ use daw_core::time::TickTime;
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
 use daw_engine::{
-    AutomationLane, AutomationPoint, Curve, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
+    AutomationLane, AutomationPoint, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
 };
 use daw_model::{
-    AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, Project, ProjectSnapshot,
-    SendId, Track, TrackId, TrackKind, TrackOutput,
+    AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, LaneId, Project,
+    ProjectSnapshot, SendId, Track, TrackId, TrackKind, TrackOutput,
 };
 
 use daw_midi::model::compile_track;
@@ -59,7 +59,7 @@ pub(crate) fn device_key(device: DeviceId) -> NodeKey {
     NodeKey(device.0.as_u128())
 }
 
-fn send_key(send: SendId) -> NodeKey {
+pub(crate) fn send_key(send: SendId) -> NodeKey {
     NodeKey(send.0.as_u128())
 }
 
@@ -82,7 +82,9 @@ struct TrackShape {
 }
 
 impl Structure {
-    pub fn of(project: &Project) -> Self {
+    /// The shape of `project`, leaving out the automation lanes in
+    /// `suspended`.
+    pub fn of(project: &Project, suspended: &HashSet<LaneId>) -> Self {
         Self {
             tracks: project
                 .all_tracks()
@@ -100,7 +102,12 @@ impl Structure {
                         .iter()
                         .map(|s| (s.id, s.target, s.pre_fader))
                         .collect(),
-                    lanes: t.automation.clone(),
+                    lanes: t
+                        .automation
+                        .iter()
+                        .filter(|l| !suspended.contains(&l.id))
+                        .cloned()
+                        .collect(),
                 })
                 .collect(),
         }
@@ -375,7 +382,7 @@ fn automate(
         for lane in t
             .automation
             .iter()
-            .filter(|l| l.enabled && !l.points.is_empty())
+            .filter(|l| l.enabled && !l.points.is_empty() && !session.suspended.contains(&l.id))
         {
             let (node, param, to_value): (Option<NodeId>, u32, fn(f64) -> f64) = match lane.target {
                 AutomationTarget::Volume => (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain),
@@ -388,13 +395,13 @@ fn automate(
                 }
             };
             let Some(node) = node else { continue };
-            let points = lane
-                .points
+            let points = session
+                .engine_lane(&lane.points)
+                .points()
                 .iter()
                 .map(|p| AutomationPoint {
-                    time: session.ticks_to_samples(p.tick),
                     value: to_value(p.value),
-                    curve: if p.step { Curve::Step } else { Curve::Linear },
+                    ..*p
                 })
                 .collect();
             g.automate(node, param, AutomationLane::new(points));
