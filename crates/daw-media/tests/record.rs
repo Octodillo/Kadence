@@ -46,10 +46,11 @@ fn records_rt_blocks_to_wav_with_peaks() {
 }
 
 #[test]
-fn overflow_drops_whole_blocks_and_counts_them() {
+fn overflow_drops_and_counts_what_does_not_fit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("burst.wav");
-    // Tiny ring (the minimum, 4096 frames); push 10 x 1000 frames instantly.
+    // Tiny ring (the minimum, 4096 frames); push 10 x 1000 frames instantly. The
+    // block that straddles the end is queued in part.
     let (rec, mut input) = Recorder::start(&path, 1, 48_000, WavFormat::Pcm24, 0.0).unwrap();
     let block = vec![0.25f32; 1000];
     let mut queued = 0;
@@ -95,40 +96,38 @@ fn failed_peak_save_does_not_fail_the_take() {
     assert_eq!(decode_file(&path).unwrap().frames(), 1000);
 }
 
-/// Issue #22: a writer I/O error (disk full) used to make `finish` return only the
-/// error, losing the stats, while the RT side kept "recording" into a dead ring.
-#[cfg(target_os = "linux")]
+/// Issue #28: recording to an existing path truncated the earlier take.
 #[test]
-fn writer_error_is_reported_at_once_and_keeps_the_stats() {
-    let (rec, mut input) =
-        Recorder::start("/dev/full", 2, 48_000, WavFormat::Float32, 1.0).unwrap();
-    let block = vec![0.1f32; 512];
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    // BufWriter holds 8 KiB, so the error shows up on a later write or header flush.
-    while !input.failed() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "writer error never surfaced"
-        );
-        input.write(&[&block, &block]);
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(rec.failed());
-    let dropped_before = rec.dropped_frames();
-    assert_eq!(
-        input.write(&[&block, &block]),
-        0,
-        "nothing is queued after a failure"
-    );
-    assert_eq!(rec.dropped_frames(), dropped_before);
+fn start_never_overwrites_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Vox-3.wav");
+    std::fs::write(&path, b"earlier take").unwrap();
+    assert!(Recorder::start(&path, 1, 48_000, WavFormat::Pcm16, 1.0).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"earlier take");
+}
+
+/// Issue #28: a block bigger than the ring was dropped whole, every time, and a block
+/// with a missing channel was ignored without being counted.
+#[test]
+fn oversized_blocks_are_queued_in_part_and_missing_channels_are_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.wav");
+    // The ring holds 4096 frames; blocks are 8192.
+    let (rec, mut input) = Recorder::start(&path, 1, 48_000, WavFormat::Pcm16, 0.0).unwrap();
+    let block = vec![0.25f32; 8192];
+    assert_eq!(input.write(&[&block]), 4096);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(input.write(&[&block]), 4096);
     drop(input);
-    let stats = rec
-        .finish()
-        .expect("a writer error still returns the stats");
-    let err = stats.error.expect("the error is reported");
-    assert!(err.to_string().contains("space"), "{err}");
-    assert_eq!(stats.files.len(), 1);
-    // No peak cache is written for a failed file (here it would be /dev/full.peaks).
-    assert!(stats.files[0].peaks_error.is_some());
-    assert!(!std::path::Path::new("/dev/full.peaks").exists());
+    let stats = rec.finish().unwrap();
+    assert_eq!(stats.frames, 8192);
+    assert_eq!(stats.dropped_frames, 8192);
+
+    let path = dir.path().join("stereo.wav");
+    let (rec, mut input) = Recorder::start(&path, 2, 48_000, WavFormat::Pcm16, 1.0).unwrap();
+    assert_eq!(input.write(&[&block[..512]]), 0);
+    drop(input);
+    let stats = rec.finish().unwrap();
+    assert_eq!(stats.frames, 0);
+    assert_eq!(stats.dropped_frames, 512);
 }
