@@ -4,12 +4,14 @@
 #include <QByteArray>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QFile>
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
 #include <QQuickStyle>
 #include <QStandardPaths>
 #include <QString>
+#include <QTemporaryDir>
 
 #include <KAboutData>
 #include <KColorScheme>
@@ -20,6 +22,7 @@
 #include <KLocalizedString>
 #include <KSharedConfig>
 
+#include <memory>
 #include <vector>
 
 namespace kadence {
@@ -66,6 +69,30 @@ int runApplication(rust::Slice<const uint8_t> args, rust::Str version)
     }
     int argc = static_cast<int>(argv.size());
     argv.push_back(nullptr);
+
+    // --smoke-test tries out audio settings, which are saved to kadencerc, so
+    // it must never run against the user's config (Flatpak sets
+    // XDG_CONFIG_HOME to the app's real one). Use $KADENCE_SMOKE_TEST_CONFIG
+    // when a test wants to read the result back, or else a throwaway
+    // directory. This has to happen before anything opens a KConfig, so look
+    // for the flag before QCommandLineParser runs.
+    std::unique_ptr<QTemporaryDir> smokeConfig;
+    for (std::size_t i = 1; i < storage.size() && storage[i] != QByteArrayLiteral("--"); ++i) {
+        if (storage[i] != QByteArrayLiteral("--smoke-test")) {
+            continue;
+        }
+        QByteArray dir = qgetenv("KADENCE_SMOKE_TEST_CONFIG");
+        if (dir.isEmpty()) {
+            smokeConfig = std::make_unique<QTemporaryDir>();
+            if (!smokeConfig->isValid()) {
+                qWarning("cannot create a config directory for the smoke test");
+                return 1;
+            }
+            dir = QFile::encodeName(smokeConfig->path());
+        }
+        qputenv("XDG_CONFIG_HOME", dir);
+        break;
+    }
 
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) {
         QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));

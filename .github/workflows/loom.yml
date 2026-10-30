@@ -8,6 +8,9 @@ on:
       - "crates/daw-core/**"
       - ".github/workflows/loom.yml"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 

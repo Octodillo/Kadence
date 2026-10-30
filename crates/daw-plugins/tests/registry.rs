@@ -340,3 +340,60 @@ fn registry_scans_and_instantiates_lv2() {
     let plugin = registry.instantiate(&d, 48_000.0, 256).unwrap();
     assert_eq!(plugin.ports().audio_out, 2);
 }
+
+#[test]
+fn a_scanner_that_crashes_after_a_complete_result_keeps_it() {
+    // Plugins often crash in exit-time destructors, after the result is already written.
+    let found = sh("echo '[]'; kill -SEGV $$")
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap();
+    assert!(found.is_empty());
+    let err = sh("printf '[{'; kill -SEGV $$")
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap_err();
+    assert!(matches!(err, ScanError::Crashed(_)), "{err}");
+}
+
+#[test]
+fn a_hanging_scanners_helpers_are_killed_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+    let err = sh(&script)
+        .with_timeout(Duration::from_secs(1))
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap_err();
+    assert!(matches!(err, ScanError::TimedOut(_)), "{err}");
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    let stat = Path::new("/proc").join(pid.trim()).join("stat");
+    // The kill is asynchronous; give it generous time before calling the helper a survivor.
+    let gone = (0..500).any(|_| {
+        let alive = std::fs::read_to_string(&stat).is_ok_and(|s| {
+            s.rsplit(')')
+                .next()
+                .is_some_and(|r| !r.trim_start().starts_with('Z'))
+        });
+        if alive {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !alive
+    });
+    assert!(gone, "the helper outlived its scanner");
+}
+
+#[test]
+fn bundles_without_plugins_are_retried_with_failures() {
+    // A CLAP that fails to load scans as an empty list, so "rescan failed plugins" must retry
+    // empty results too.
+    let dir = plugin_dir();
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+    registry.scan(&sh("echo '[]'"), &mut cache);
+    assert_eq!(cache.len(), 1);
+    cache.forget_failures();
+    assert!(cache.is_empty());
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!((report.scanned, report.failed.len()), (1, 0));
+    assert_eq!(registry.plugins().len(), 1);
+}

@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -118,7 +119,8 @@ impl Scanner {
         kind: &PluginFormatKind,
         bundle: &Path,
     ) -> Result<Vec<PluginDescriptor>, ScanError> {
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.args)
             .arg(SCAN_ARG)
             .arg(kind_name(kind))
@@ -126,8 +128,19 @@ impl Scanner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-            .map_err(ScanError::Spawn)?;
+            // Its own process group, so a timeout also kills any helpers the plugin started.
+            .process_group(0);
+        // Out of the terminal's process group the scanner no longer sees Ctrl-C, so tie its
+        // life to this thread instead, which always outlives it.
+        #[cfg(target_os = "linux")]
+        // SAFETY: `prctl` is async-signal-safe and touches no memory.
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().map_err(ScanError::Spawn)?;
 
         // Read on a thread so a chatty child cannot block on a full pipe. A process the plugin
         // started may inherit the pipe and hold it open after the scanner exits, so the bytes are
@@ -151,6 +164,10 @@ impl Scanner {
             match child.try_wait().map_err(ScanError::Spawn)? {
                 Some(status) => break status,
                 None if start.elapsed() >= self.timeout => {
+                    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+                        // SAFETY: plain syscall; the child is unreaped, so its group id is ours.
+                        unsafe { libc::kill(-pid, libc::SIGKILL) };
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(ScanError::TimedOut(self.timeout));
@@ -158,16 +175,20 @@ impl Scanner {
                 None => std::thread::sleep(Duration::from_millis(5)),
             }
         };
-        match status.code() {
-            Some(0) => {}
-            Some(c) if i32::from(EXIT_UNSUPPORTED) == c => return Err(ScanError::Unsupported),
-            _ => return Err(ScanError::Crashed(status)),
+        if status.code() == Some(i32::from(EXIT_UNSUPPORTED)) {
+            return Err(ScanError::Unsupported);
         }
         // The scanner has exited, so everything it wrote is in the pipe; whether EOF arrives
         // depends only on other holders of the pipe.
         let _ = eof_rx.recv_timeout(Duration::from_millis(500));
         let out = out.lock().unwrap();
-        serde_json::from_slice(&out).map_err(|e| ScanError::BadOutput(e.to_string()))
+        // Plugins often crash at exit, in destructors that run after the result was written, so
+        // a complete result counts even from a scanner that crashed.
+        match serde_json::from_slice(&out) {
+            Ok(found) => Ok(found),
+            Err(e) if status.success() => Err(ScanError::BadOutput(e.to_string())),
+            Err(_) => Err(ScanError::Crashed(status)),
+        }
     }
 }
 
@@ -221,9 +242,11 @@ struct StdoutRedirect {
 impl StdoutRedirect {
     fn to_stderr() -> Option<Self> {
         let _ = std::io::stdout().flush();
-        // SAFETY: `dup` returns a fresh descriptor (or -1), which `OwnedFd` then owns and closes.
+        // Close-on-exec, so programs the plugin starts do not inherit the result pipe.
+        // SAFETY: `F_DUPFD_CLOEXEC` returns a fresh descriptor (or -1), which `OwnedFd` then owns
+        // and closes.
         let saved = unsafe {
-            let fd = libc::dup(libc::STDOUT_FILENO);
+            let fd = libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 0);
             if fd < 0 {
                 return None;
             }
@@ -250,5 +273,19 @@ impl Drop for StdoutRedirect {
         unsafe {
             libc::dup2(self.saved.as_raw_fd(), libc::STDOUT_FILENO);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_saved_stdout_is_not_inherited_by_helpers() {
+        let redirect = StdoutRedirect::to_stderr().unwrap();
+        // SAFETY: `saved` is an open descriptor owned by `redirect`.
+        let flags = unsafe { libc::fcntl(redirect.saved.as_raw_fd(), libc::F_GETFD) };
+        drop(redirect);
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "flags {flags}");
     }
 }

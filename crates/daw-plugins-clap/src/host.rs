@@ -182,11 +182,12 @@ pub(crate) struct Timer {
     pub(crate) next: Instant,
 }
 
-/// Host state only touched on the main thread.
+/// Host state only touched on the main thread. clack does not check which thread a plugin calls
+/// from, so the callbacks that touch the `RefCell`s check it themselves, and the flags are atomics.
 pub(crate) struct HostMainThread<'a> {
     pub(crate) shared: &'a HostShared,
-    pub(crate) latency_changed: Cell<bool>,
-    pub(crate) params_rescan: Cell<bool>,
+    pub(crate) latency_changed: AtomicBool,
+    pub(crate) params_rescan: AtomicBool,
     pub(crate) timers: RefCell<Vec<Timer>>,
     next_timer_id: Cell<u32>,
     pub(crate) fds: RefCell<Vec<(RawFd, FdFlags)>>,
@@ -196,11 +197,23 @@ impl<'a> HostMainThread<'a> {
     fn new(shared: &'a HostShared) -> Self {
         Self {
             shared,
-            latency_changed: Cell::new(false),
-            params_rescan: Cell::new(false),
+            latency_changed: AtomicBool::new(false),
+            params_rescan: AtomicBool::new(false),
             timers: RefCell::new(Vec::new()),
             next_timer_id: Cell::new(0),
             fds: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl HostMainThread<'_> {
+    /// Fails for a plugin that breaks the CLAP rule that these callbacks come from the main
+    /// thread, rather than racing the main thread for the `RefCell`s.
+    fn check_main_thread(&self) -> Result<(), HostError> {
+        if self.shared.is_main_thread() {
+            Ok(())
+        } else {
+            Err(HostError::Message("called off the main thread"))
         }
     }
 }
@@ -230,7 +243,7 @@ impl HostNotePortsImpl for HostMainThread<'_> {
 
 impl HostParamsImplMainThread for HostMainThread<'_> {
     fn rescan(&self, _flags: ParamRescanFlags) {
-        self.params_rescan.set(true);
+        self.params_rescan.store(true, Ordering::Release);
     }
 
     fn clear(&self, _param_id: ClapId, _flags: ParamClearFlags) {}
@@ -238,7 +251,7 @@ impl HostParamsImplMainThread for HostMainThread<'_> {
 
 impl HostLatencyImpl for HostMainThread<'_> {
     fn changed(&self) {
-        self.latency_changed.set(true);
+        self.latency_changed.store(true, Ordering::Release);
     }
 }
 
@@ -250,6 +263,7 @@ impl HostStateImpl for HostMainThread<'_> {
 
 impl HostTimerImpl for HostMainThread<'_> {
     fn register_timer(&self, period_ms: u32) -> Result<TimerId, HostError> {
+        self.check_main_thread()?;
         let id = TimerId(self.next_timer_id.get());
         self.next_timer_id.set(id.0.wrapping_add(1));
         // CLAP allows the host to clamp periods; 15 ms keeps a 60 Hz pump meaningful.
@@ -263,6 +277,7 @@ impl HostTimerImpl for HostMainThread<'_> {
     }
 
     fn unregister_timer(&self, timer_id: TimerId) -> Result<(), HostError> {
+        self.check_main_thread()?;
         let mut timers = self.timers.borrow_mut();
         let before = timers.len();
         timers.retain(|t| t.id != timer_id);
@@ -276,6 +291,7 @@ impl HostTimerImpl for HostMainThread<'_> {
 
 impl HostPosixFdImpl for HostMainThread<'_> {
     fn register_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.check_main_thread()?;
         let mut fds = self.fds.borrow_mut();
         if fds.iter().any(|(f, _)| *f == fd) {
             return Err(HostError::Message("fd already registered"));
@@ -285,6 +301,7 @@ impl HostPosixFdImpl for HostMainThread<'_> {
     }
 
     fn modify_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        self.check_main_thread()?;
         match self.fds.borrow_mut().iter_mut().find(|(f, _)| *f == fd) {
             Some(entry) => {
                 entry.1 = flags;
@@ -295,6 +312,7 @@ impl HostPosixFdImpl for HostMainThread<'_> {
     }
 
     fn unregister_fd(&self, fd: RawFd) -> Result<(), HostError> {
+        self.check_main_thread()?;
         let mut fds = self.fds.borrow_mut();
         let before = fds.len();
         fds.retain(|(f, _)| *f != fd);
@@ -303,5 +321,45 @@ impl HostPosixFdImpl for HostMainThread<'_> {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lets a test call main-thread callbacks from another thread, as a misbehaving plugin can
+    /// through the C API.
+    struct AnyThread<'a>(&'a HostMainThread<'a>);
+    // SAFETY: only used to check that the callbacks refuse to touch main-thread state.
+    unsafe impl Send for AnyThread<'_> {}
+    unsafe impl Sync for AnyThread<'_> {}
+
+    impl<'a> AnyThread<'a> {
+        fn get(&self) -> &'a HostMainThread<'a> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn main_thread_callbacks_refuse_other_threads() {
+        let shared = HostShared::new();
+        let host = HostMainThread::new(&shared);
+        let any = AnyThread(&host);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let h = any.get();
+                assert!(h.register_timer(20).is_err());
+                assert!(h.register_fd(0, FdFlags::READ).is_err());
+                HostParamsImplMainThread::rescan(h, ParamRescanFlags::VALUES);
+                h.changed();
+            });
+        });
+        assert!(host.timers.borrow().is_empty());
+        assert!(host.fds.borrow().is_empty());
+        // Flags are atomics, so a plugin that sets them from the wrong thread is still heard.
+        assert!(host.params_rescan.swap(false, Ordering::AcqRel));
+        assert!(host.latency_changed.swap(false, Ordering::AcqRel));
+        assert!(host.register_timer(20).is_ok());
     }
 }
