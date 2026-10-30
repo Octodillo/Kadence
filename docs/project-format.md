@@ -106,6 +106,8 @@ denominator a power of two.
 | `volume_db`  | number               | fader                                          |
 | `pan`        | number               |                                                |
 | `mute`, `solo` | bool               |                                                |
+| `armed`      | bool                 | optional, default false; armed for recording (audio and instrument tracks only) |
+| `audio_input` | `{channels, monitor}` | optional; audio tracks only. `channels` is `{"mono": n}` or `{"stereo": n}` (inputs `n`, `n+1`), counted from 0, default `{"mono": 0}`; `monitor` is `"off"` (default) or `"auto"` |
 | `output`     | `"master"` or `{"bus": id}` | target must be a bus; no loops          |
 | `clips`      | Clip[]               | sorted by `start`; audio clips on audio tracks, MIDI clips on instrument tracks |
 | `devices`    | Device[]             | processing order                               |
