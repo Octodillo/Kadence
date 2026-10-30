@@ -94,13 +94,24 @@ impl AutomationLane {
 
     /// Pushes events for the block starting at `start` that is `frames` long:
     /// the current value at frame 0, then every change inside the block.
-    /// RT-safe; events that don't fit are dropped.
-    pub(crate) fn emit(&self, param: ParamId, start: i64, frames: usize, out: &mut EventList) {
+    /// Stops once `out` holds `limit` events. RT-safe; events that don't fit
+    /// are dropped.
+    pub(crate) fn emit(
+        &self,
+        param: ParamId,
+        start: i64,
+        frames: usize,
+        out: &mut EventList,
+        limit: usize,
+    ) {
         let Some(mut seg) = self.segment(start) else {
             return;
         };
         let end = start + frames as i64;
         let push = |out: &mut EventList, t: i64, value: f64| {
+            if out.len() >= limit {
+                return;
+            }
             let kind = EventKind::ParamValue { param, value };
             let _ = out.push(Event {
                 frame: (t - start) as u32,
@@ -156,7 +167,7 @@ mod tests {
 
     fn events(lane: &AutomationLane, start: i64, frames: usize) -> Vec<(u32, f64)> {
         let mut out = EventList::with_capacity(256);
-        lane.emit(7, start, frames, &mut out);
+        lane.emit(7, start, frames, &mut out, usize::MAX);
         out.iter()
             .map(|e| match e.kind {
                 EventKind::ParamValue { param: 7, value } => (e.frame, value),

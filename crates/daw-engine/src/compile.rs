@@ -431,8 +431,20 @@ impl CompiledGraph {
             }
             step.params.clear();
             if transport.playing {
+                // A dense ramp must not fill the list and crowd out the notes
+                // added below (a lost note-off hangs the note), so leave room
+                // for them.
+                let mut reserve = 0;
+                if step.external_events {
+                    reserve += external.len();
+                }
+                for &src in &step.event_sources {
+                    reserve += done[src].events_out.len();
+                }
+                let limit = step.events_in.capacity().saturating_sub(reserve);
                 for (param, lane) in &step.automation {
-                    lane.emit(*param, transport.position.0, frames, &mut step.events_in);
+                    let now = transport.position.0;
+                    lane.emit(*param, now, frames, &mut step.events_in, limit);
                 }
             }
             if step.external_events {

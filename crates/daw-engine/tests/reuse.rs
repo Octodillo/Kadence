@@ -136,6 +136,41 @@ fn meters_follow_reused_nodes() {
     assert_eq!(meter.take(), vec![0.25]);
 }
 
+#[test]
+fn automation_does_not_crowd_out_notes() {
+    use support::{EventProbe, NoteSource};
+    // 32 linear lanes emit about 1024 events per 1024-frame block, twice the
+    // default event capacity.
+    let mut g = GraphDesc::new(0, 1);
+    let src = g.add_device("notes", Box::new(NoteSource { frame: 500 }));
+    let probe = g.add_device("probe", Box::new(EventProbe));
+    g.connect_events(src, probe);
+    g.connect(probe, g.master());
+    for p in 0..32 {
+        let pt = |t, value, curve| AutomationPoint {
+            time: SampleTime(t),
+            value,
+            curve,
+        };
+        g.automate(
+            probe,
+            100 + p,
+            AutomationLane::new(vec![
+                pt(0, 0.0, Curve::Linear),
+                pt(100_000, 1.0, Curve::Step),
+            ]),
+        );
+    }
+    let opts = RenderOptions {
+        block_size: 1024,
+        frames: 1024,
+        ..Default::default()
+    };
+    let out = render(g, &opts).unwrap();
+    // The note plus any automation events that land on the same frame.
+    assert!(out[500] >= 1.0, "the note was dropped");
+}
+
 fn automated(block_size: u32, curve: Curve) -> Vec<f32> {
     let mut g = GraphDesc::new(0, 1);
     let dc = g.add_device("dc", Box::new(Dc(1.0)));
