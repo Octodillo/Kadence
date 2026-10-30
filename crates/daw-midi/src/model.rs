@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use daw_core::time::{SegmentTempoMap, TempoMap, TickTime};
+use daw_core::time::{SegmentTempoMap, TempoMap, TickTime, Timeline};
 use daw_model::commands::{AddNotes, Batch, EditNotes, RemoveNotes};
 use daw_model::{ClipContent, ClipId, Command, MidiClip, Note, NoteUid, Project, TempoData, Track};
 
@@ -55,6 +55,13 @@ pub fn meter(tempo: &TempoData) -> Meter {
         numerator: m.numerator,
         denominator: m.denominator,
     }))
+}
+
+/// The project's tempo map and time signatures, for
+/// `EngineController::set_timeline` and anything else that needs bars and
+/// beats to agree with the engine's.
+pub fn timeline(tempo: &TempoData) -> Timeline {
+    Timeline::new(tempo_map(tempo), meter(tempo))
 }
 
 /// The tempo map for the project's tempo changes. Invalid points (a bpm
@@ -373,6 +380,19 @@ mod tests {
 
     fn n(start: i64, len: i64, key: u8) -> Note {
         new_note(NoteData::new(start, len, key, 0.8))
+    }
+
+    #[test]
+    fn timeline_has_the_project_tempo_and_meter() {
+        let mut data = TempoData::default();
+        data.tempos[0].bpm = 90.0;
+        data.meters[0].numerator = 7;
+        data.meters[0].denominator = 8;
+        let tl = timeline(&data);
+        let p = tl.position(daw_core::time::SampleTime(48_000), 48_000.0);
+        assert_eq!(p.beats, 1.5);
+        assert_eq!((p.numerator, p.denominator), (7, 8));
+        assert_eq!(tl.bpm_at(daw_core::time::SampleTime(0), 48_000.0), 90.0);
     }
 
     #[test]

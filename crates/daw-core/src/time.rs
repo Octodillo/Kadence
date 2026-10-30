@@ -1,6 +1,13 @@
-//! Sample time, musical time, and the conversion between them.
+//! Sample time, musical time, and the conversion between them: tempo maps,
+//! time signatures, and the [`Timeline`] that combines the two.
 
 use serde::{Deserialize, Serialize};
+
+mod meter;
+mod timeline;
+
+pub use meter::{Bar, BarBeat, MAX_TICK, Meter, MeterPoint, beat_ticks};
+pub use timeline::{MusicalPosition, Timeline};
 
 /// Ticks per quarter note used everywhere in the project model.
 pub const PPQ: i64 = 960;

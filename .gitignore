@@ -5,3 +5,4 @@ build-ci
 .qmlls.ini
 /packaging/flatpak/cargo-sources.json
 /dist
+/third_party/livi/target

@@ -2,6 +2,8 @@
 
 use std::ffi::CStr;
 
+use daw_core::node::TransportState;
+
 /// URIDs mapped once at instantiation so the audio thread never maps.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Urids {
@@ -190,35 +192,40 @@ impl<'a> ObjectWriter<'a> {
 }
 
 /// The host's transport as a `time:Position` object body, in the shape jalv
-/// and Ardour send. The contract's transport has no musical position, so bars
-/// and beats assume a constant tempo in 4/4 from the project start.
-pub(crate) fn time_position(
-    u: &Urids,
-    buf: &mut [u8; 192],
-    position: i64,
-    playing: bool,
-    bpm: f64,
-    sample_rate: f64,
-) -> usize {
-    let beats = if sample_rate > 0.0 {
-        position as f64 / sample_rate * bpm / 60.0
-    } else {
-        0.0
-    };
-    let bar = (beats / 4.0).floor();
+/// and Ardour send. `bar` is 0-based, `barBeat` counts beats of the time
+/// signature (eighths in 6/8) since the downbeat, and so does the tempo.
+pub(crate) fn time_position(u: &Urids, buf: &mut [u8; 192], t: &TransportState) -> usize {
+    let m = &t.music;
     let mut w = ObjectWriter::new(buf, u.time_position);
-    w.long(u.time_frame, u.atom_long, position);
-    w.float(u.time_speed, u.atom_float, if playing { 1.0 } else { 0.0 });
+    w.long(u.time_frame, u.atom_long, t.position.0);
+    w.float(
+        u.time_speed,
+        u.atom_float,
+        if t.playing { 1.0 } else { 0.0 },
+    );
+    // LV2 counts tempo in `beatUnit` notes, not quarters: 6/8 at quarter =
+    // 120 is 240 eighths a minute, which keeps `barBeat` advancing right.
+    let bpm = t.bpm * f64::from(m.denominator.max(1)) / 4.0;
     w.float(u.time_bpm, u.atom_float, bpm as f32);
-    w.long(u.time_bar, u.atom_long, bar as i64);
-    w.float(u.time_bar_beat, u.atom_float, (beats - bar * 4.0) as f32);
-    w.float(u.time_beats_per_bar, u.atom_float, 4.0);
-    w.int(u.time_beat_unit, u.atom_int, 4);
+    w.long(u.time_bar, u.atom_long, m.bar);
+    w.float(u.time_bar_beat, u.atom_float, m.bar_beat() as f32);
+    w.float(
+        u.time_beats_per_bar,
+        u.atom_float,
+        f32::from(m.numerator.max(1)),
+    );
+    w.int(
+        u.time_beat_unit,
+        u.atom_int,
+        i32::from(m.denominator.max(1)),
+    );
     w.finish()
 }
 
 #[cfg(test)]
 mod tests {
+    use daw_core::time::{SampleTime, Timeline};
+
     use super::*;
 
     fn u32_at(b: &[u8], at: usize) -> u32 {
@@ -323,8 +330,72 @@ mod tests {
         };
         let mut buf = [0; 192];
         // 2 bars and 1 beat at 120 bpm, 48 kHz: 9 beats = 4.5 s.
-        let len = time_position(&u, &mut buf, 216_000, true, 120.0, 48_000.0);
+        let t = TransportState::at(&Timeline::default(), true, SampleTime(216_000), 48_000.0);
+        let len = time_position(&u, &mut buf, &t);
         assert!(len <= buf.len());
         assert_eq!(len % 8, 0);
+    }
+
+    /// Reads the object's properties back as (key, f64 value).
+    fn properties(buf: &[u8], len: usize) -> Vec<(u32, f64)> {
+        let mut out = Vec::new();
+        let mut at = 8;
+        while at < len {
+            let key = u32_at(buf, at);
+            let size = u32_at(buf, at + 8) as usize;
+            let v = &buf[at + 16..at + 16 + size];
+            let value = match size {
+                8 => i64::from_ne_bytes(v.try_into().unwrap()) as f64,
+                _ if u32_at(buf, at + 12) == 6 => {
+                    f64::from(f32::from_ne_bytes(v.try_into().unwrap()))
+                }
+                _ => f64::from(i32::from_ne_bytes(v.try_into().unwrap())),
+            };
+            out.push((key, value));
+            at += (16 + size).next_multiple_of(8);
+        }
+        out
+    }
+
+    #[test]
+    fn position_follows_the_time_signature() {
+        let u = Urids {
+            midi_event: 1,
+            atom_object: 2,
+            atom_sequence: 3,
+            atom_long: 4,
+            atom_int: 5,
+            atom_float: 6,
+            event_transfer: 7,
+            time_position: 8,
+            time_frame: 9,
+            time_speed: 10,
+            time_bpm: 11,
+            time_bar: 12,
+            time_bar_beat: 13,
+            time_beats_per_bar: 14,
+            time_beat_unit: 15,
+        };
+        // 6/8 at 120: quarter 12.5 is bar 4 (0-based), three eighths in.
+        let t = TransportState::at(
+            &Timeline::constant(120.0, 6, 8),
+            true,
+            SampleTime(300_000),
+            48_000.0,
+        );
+        let mut buf = [0; 192];
+        let len = time_position(&u, &mut buf, &t);
+        assert_eq!(
+            properties(&buf, len),
+            vec![
+                (9, 300_000.0),
+                (10, 1.0),
+                (11, 240.0),
+                (12, 4.0),
+                (13, 1.0),
+                (14, 6.0),
+                (15, 8.0),
+            ]
+        );
     }
 }
