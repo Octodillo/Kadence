@@ -142,6 +142,139 @@ fn interpolate(a: &AutomationPoint, b: &AutomationPoint, t: i64) -> f64 {
     a.value + (b.value - a.value) * x
 }
 
+/// Records a parameter while the user moves it during playback ("touch"
+/// writing), then merges the take into a lane.
+///
+/// Feed it the value whenever the control moves and on a regular clock while
+/// it is held, then [`finish`](Self::finish) when the user lets go. The take
+/// is thinned so that no recorded value is more than `tolerance` away from
+/// the line through the points kept.
+#[derive(Clone, Debug)]
+pub struct AutomationRecorder {
+    take: Vec<(i64, f64)>,
+    tolerance: f64,
+}
+
+impl AutomationRecorder {
+    pub fn new(tolerance: f64) -> Self {
+        Self {
+            take: Vec::new(),
+            tolerance: tolerance.max(0.0),
+        }
+    }
+
+    /// Records `value` at `t`. Times that go backwards (a loop wrapped, the
+    /// user located) are ignored; finish the take and start another instead.
+    pub fn record(&mut self, t: SampleTime, value: f64) {
+        match self.take.last_mut() {
+            Some(last) if t.0 < last.0 => {}
+            Some(last) if t.0 == last.0 => last.1 = value,
+            _ => self.take.push((t.0, value)),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.take.is_empty()
+    }
+
+    /// The time range recorded so far.
+    pub fn range(&self) -> Option<(SampleTime, SampleTime)> {
+        let first = self.take.first()?;
+        let last = self.take.last()?;
+        Some((SampleTime(first.0), SampleTime(last.0)))
+    }
+
+    /// Replaces `lane` between the first and last recorded time with the
+    /// take. After the take, the lane goes back to what it was: a point at
+    /// the release time restores the old value. Returns `lane` unchanged if
+    /// nothing was recorded.
+    pub fn finish(self, lane: &AutomationLane) -> AutomationLane {
+        let Some((start, end)) = self.range() else {
+            return lane.clone();
+        };
+        let kept = thin(&self.take, self.tolerance);
+        let mut points: Vec<AutomationPoint> = lane
+            .points
+            .iter()
+            .filter(|p| p.time < start || p.time > end)
+            .copied()
+            .collect();
+        let after = lane.value_at(SampleTime(end.0 + 1));
+        // A ramp running into the take would now aim at the take's first
+        // value; pin it on its old line just before the take.
+        if let Some(i) = lane.segment(start.0 - 1)
+            && let (Curve::Linear, Some(next)) = (lane.points[i].curve, lane.points.get(i + 1))
+            && lane.points[i].time.0 < start.0 - 1
+        {
+            points.push(AutomationPoint {
+                time: SampleTime(start.0 - 1),
+                value: interpolate(&lane.points[i], next, start.0 - 1),
+                curve: Curve::Step,
+            });
+        }
+        points.extend(kept.iter().map(|&(t, value)| AutomationPoint {
+            time: SampleTime(t),
+            value,
+            curve: Curve::Linear,
+        }));
+        // Snap back to the old curve right after the take.
+        if let Some(old) = after
+            && !lane.points.iter().any(|p| p.time.0 == end.0 + 1)
+        {
+            points.push(AutomationPoint {
+                time: SampleTime(end.0 + 1),
+                value: old,
+                curve: lane
+                    .segment(end.0 + 1)
+                    .map_or(Curve::Step, |i| lane.points[i].curve),
+            });
+        }
+        if let Some(last) = points.iter_mut().filter(|p| p.time == end).last() {
+            // The take's last point holds until the restore point.
+            last.curve = Curve::Step;
+        }
+        AutomationLane::new(points)
+    }
+}
+
+/// Ramer–Douglas–Peucker: keeps the first and last point, and every point
+/// needed so the rest are within `tolerance` of the polyline.
+fn thin(points: &[(i64, f64)], tolerance: f64) -> Vec<(i64, f64)> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+    let mut stack = vec![(0, points.len() - 1)];
+    while let Some((a, b)) = stack.pop() {
+        let (ta, va) = points[a];
+        let (tb, vb) = points[b];
+        let mut worst = (0.0, 0);
+        for (i, &(t, v)) in points.iter().enumerate().take(b).skip(a + 1) {
+            let line = if tb == ta {
+                va
+            } else {
+                va + (vb - va) * (t - ta) as f64 / (tb - ta) as f64
+            };
+            let d = (v - line).abs();
+            if d > worst.0 {
+                worst = (d, i);
+            }
+        }
+        if worst.0 > tolerance {
+            keep[worst.1] = true;
+            stack.push((a, worst.1));
+            stack.push((worst.1, b));
+        }
+    }
+    points
+        .iter()
+        .zip(keep)
+        .filter_map(|(p, k)| k.then_some(*p))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +325,72 @@ mod tests {
         assert_eq!(lane.points().len(), 1);
         assert_eq!(lane.value_at(SampleTime(10)), Some(2.0));
         assert_eq!(AutomationLane::default().value_at(SampleTime(0)), None);
+    }
+
+    #[test]
+    fn recording_replaces_the_touched_range_and_restores_after() {
+        let lane = AutomationLane::new(vec![pt(0, 1.0, Curve::Step), pt(5000, 0.2, Curve::Step)]);
+        let mut rec = AutomationRecorder::new(0.01);
+        // A straight fade from 1.0 to 0.0 between 1000 and 2000, sampled
+        // densely: thinning keeps only its ends.
+        for i in 0..=100 {
+            rec.record(SampleTime(1000 + i * 10), 1.0 - i as f64 / 100.0);
+        }
+        rec.record(SampleTime(500), 9.0); // backwards: ignored
+        let out = rec.finish(&lane);
+        let times: Vec<i64> = out.points().iter().map(|p| p.time.0).collect();
+        assert_eq!(times, vec![0, 1000, 2000, 2001, 5000]);
+        assert_eq!(out.value_at(SampleTime(999)), Some(1.0));
+        assert_eq!(out.value_at(SampleTime(2000)), Some(0.0));
+        assert_eq!(
+            out.value_at(SampleTime(2001)),
+            Some(1.0),
+            "old curve resumes"
+        );
+        assert_eq!(out.value_at(SampleTime(5000)), Some(0.2));
+        let mid = out.value_at(SampleTime(1500)).unwrap();
+        // Within the ramp grid (32 samples) of the exact 0.5.
+        assert!((mid - 0.5).abs() < 0.04, "{mid}");
+    }
+
+    #[test]
+    fn recording_keeps_corners_and_handles_empty_lanes() {
+        let mut rec = AutomationRecorder::new(0.05);
+        for (t, v) in [(0, 0.0), (100, 0.5), (200, 1.0), (300, 0.5), (400, 0.0)] {
+            rec.record(SampleTime(t), v);
+        }
+        let out = rec.finish(&AutomationLane::default());
+        let kept: Vec<(i64, f64)> = out.points().iter().map(|p| (p.time.0, p.value)).collect();
+        assert_eq!(kept, vec![(0, 0.0), (200, 1.0), (400, 0.0)]);
+        let empty = AutomationRecorder::new(0.1).finish(&AutomationLane::default());
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn recording_leaves_the_curve_before_the_take_alone() {
+        let ramp = AutomationLane::new(vec![pt(0, 0.0, Curve::Linear), pt(4000, 1.0, Curve::Step)]);
+        let mut rec = AutomationRecorder::new(0.01);
+        rec.record(SampleTime(1000), 0.9);
+        rec.record(SampleTime(2000), 0.9);
+        let out = rec.finish(&ramp);
+        for t in [0, 500, 960] {
+            assert_eq!(
+                out.value_at(SampleTime(t)),
+                ramp.value_at(SampleTime(t)),
+                "at {t}"
+            );
+        }
+        assert_eq!(out.value_at(SampleTime(1500)), Some(0.9));
+        assert_eq!(out.value_at(SampleTime(4000)), Some(1.0));
+
+        // A lane whose first point comes after the take: nothing before it
+        // to keep, the take simply starts the lane.
+        let late = AutomationLane::new(vec![pt(5000, 0.2, Curve::Step)]);
+        let mut rec = AutomationRecorder::new(0.01);
+        rec.record(SampleTime(1000), 0.7);
+        rec.record(SampleTime(2000), 0.7);
+        let out = rec.finish(&late);
+        assert_eq!(out.points()[0].time, SampleTime(1000));
+        assert_eq!(out.value_at(SampleTime(2001)), Some(0.2));
     }
 }

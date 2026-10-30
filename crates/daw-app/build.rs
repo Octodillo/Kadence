@@ -18,6 +18,9 @@ const QML_FILES: &[&str] = &[
     "qml/Main.qml",
     "qml/ArrangePage.qml",
     "qml/MixPage.qml",
+    "qml/ChannelStrip.qml",
+    "qml/LevelMeter.qml",
+    "qml/GainReductionMeter.qml",
     "qml/EditPage.qml",
     "qml/SettingsPage.qml",
     "qml/AudioSettings.qml",
@@ -68,6 +71,7 @@ fn main() {
     )
     .files([
         "src/bridge.rs",
+        "src/mixer_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",
