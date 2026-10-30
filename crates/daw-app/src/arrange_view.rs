@@ -54,6 +54,10 @@ pub mod qobject {
         #[qproperty(f64, content_height)]
         /// A Qt::CursorShape for the pointer's position.
         #[qproperty(i32, cursor_shape)]
+        /// While the gain handle of a clip is dragged: true, with the
+        /// clip's gain in dB, for QML to show by the pointer.
+        #[qproperty(bool, gain_dragging)]
+        #[qproperty(f64, dragged_gain)]
         type ArrangeView = super::ArrangeViewRust;
 
         #[cxx_override]
@@ -137,6 +141,8 @@ pub struct ArrangeViewRust {
     content_width: f64,
     content_height: f64,
     cursor_shape: i32,
+    gain_dragging: bool,
+    dragged_gain: f64,
     /// The last scene, flattened for the painter.
     ops: Vec<PaintOp>,
     texts: Vec<String>,
@@ -163,6 +169,8 @@ impl Default for ArrangeViewRust {
             content_width: 0.0,
             content_height: 0.0,
             cursor_shape: 0,
+            gain_dragging: false,
+            dragged_gain: 0.0,
             ops: Vec::new(),
             texts: Vec::new(),
             waves: Vec::new(),
@@ -225,6 +233,7 @@ pub(crate) fn cursor_shape(c: Cursor) -> i32 {
         Cursor::Arrow => 0,
         Cursor::Move => 17,
         Cursor::ResizeHorizontal => 6,
+        Cursor::ResizeVertical => 5,
         Cursor::Pointing => 13,
     }
 }
@@ -301,7 +310,14 @@ impl qobject::ArrangeView {
         let menu = out.context_menu;
         let open = out.open_clip.is_some();
         let any = out.document || out.view || out.locate.is_some() || out.set_loop.is_some();
-        state::with(|s| s.apply(out));
+        let gain = state::with(|s| {
+            s.apply(out);
+            s.arrange.dragged_gain(s.doc.project())
+        });
+        self.as_mut().set_gain_dragging(gain.is_some());
+        if let Some(db) = gain {
+            self.as_mut().set_dragged_gain(db);
+        }
         if any {
             self.as_mut().refresh();
             self.as_mut().edited();

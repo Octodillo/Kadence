@@ -12,7 +12,8 @@ use daw_model::commands::{
     AddClip, AddTrack, ClipField, MoveClip, SetClip, SetTempo, SetTrack, TrackField,
 };
 use daw_model::{
-    AudioClip, Clip, ClipContent, ClipId, Document, Project, Track, TrackId, TrackKind,
+    AudioClip, Clip, ClipContent, ClipId, Document, Fade, FadeShape, Project, Track, TrackId,
+    TrackKind,
 };
 use daw_session::{Session, SessionConfig, Warning, effective_mutes};
 
@@ -90,11 +91,7 @@ impl Rig {
             "clip",
             TickTime(start_beats * PPQ),
             TickTime(length_beats * PPQ),
-            ClipContent::Audio(AudioClip {
-                source: file.into(),
-                offset: SampleTime(0),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new(file, SampleTime(0))),
         );
         let id = clip.id;
         self.doc.execute(AddClip::new(self.track, clip)).unwrap();
@@ -621,6 +618,128 @@ fn switching_the_instrument_off_and_on_leaves_no_hanging_note() {
         peak(&out[BEAT as usize / 2..]) < 1e-4,
         "no voice left sounding"
     );
+}
+
+/// Gain of a fade `d` samples into a fade of `len` samples, as the player
+/// samples it (at the middle of each sample).
+fn fade_at(shape: FadeShape, d: i64, len: i64) -> f32 {
+    shape.gain((d as f32 + 0.5) / len as f32)
+}
+
+fn set_fades(rig: &mut Rig, clip: ClipId, fade_in: Fade, fade_out: Fade) {
+    rig.doc
+        .execute(SetClip::new(clip, ClipField::FadeIn(fade_in)))
+        .unwrap();
+    rig.doc
+        .execute(SetClip::new(clip, ClipField::FadeOut(fade_out)))
+        .unwrap();
+    rig.sync();
+}
+
+#[test]
+fn fades_and_clip_gain_shape_a_memory_clip() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 2 * BEAT as usize, 0.5);
+    let clip = rig.add_clip("a.wav", 0, 2);
+    let swaps = rig.session.controller().graphs_swapped();
+    // Half a beat of linear fade-in, half a beat of equal-power fade-out.
+    set_fades(
+        &mut rig,
+        clip,
+        Fade::new(TickTime(PPQ / 2), FadeShape::Linear),
+        Fade::new(TickTime(PPQ / 2), FadeShape::EqualPower),
+    );
+    rig.doc
+        .execute(SetClip::new(clip, ClipField::AudioGainDb(-6.0)))
+        .unwrap();
+    rig.sync();
+    assert_eq!(
+        rig.session.controller().graphs_swapped(),
+        swaps,
+        "fade and gain edits reach the player without a graph rebuild"
+    );
+    rig.session.play().unwrap();
+    let out = rig.run(3 * BEAT as usize);
+
+    let level = 0.5 * 10f32.powf(-6.0 / 20.0);
+    let half = BEAT / 2;
+    for d in [100, half / 2, half - 1] {
+        let want = level * fade_at(FadeShape::Linear, d, half);
+        assert!(
+            (out[d as usize] - want).abs() < 1e-4,
+            "fade-in at {d}: {} vs {want}",
+            out[d as usize]
+        );
+    }
+    assert!((out[(half + 10) as usize] - level).abs() < 1e-5);
+    assert!((out[(2 * BEAT - half - 10) as usize] - level).abs() < 1e-5);
+    let end = 2 * BEAT;
+    for d in [100, half / 2, half - 1] {
+        let at = (end - 1 - d) as usize;
+        let want = level * fade_at(FadeShape::EqualPower, d, half);
+        assert!(
+            (out[at] - want).abs() < 1e-4,
+            "fade-out {d} before the end: {} vs {want}",
+            out[at]
+        );
+    }
+    // Rises and falls without a step anywhere.
+    for w in out[..end as usize].windows(2) {
+        assert!((w[1] - w[0]).abs() < 0.01, "{} -> {}", w[0], w[1]);
+    }
+}
+
+#[test]
+fn fades_longer_than_the_clip_shrink_together() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 2 * BEAT as usize, 0.5);
+    let clip = rig.add_clip("a.wav", 0, 2);
+    // Two beats each on a two-beat clip (as after a trim): one beat each.
+    set_fades(
+        &mut rig,
+        clip,
+        Fade::new(TickTime(2 * PPQ), FadeShape::Linear),
+        Fade::new(TickTime(2 * PPQ), FadeShape::Linear),
+    );
+    rig.session.play().unwrap();
+    let out = rig.run(2 * BEAT as usize);
+    let mid = BEAT / 2;
+    let want = 0.5 * fade_at(FadeShape::Linear, mid, BEAT);
+    assert!(
+        (out[mid as usize] - want).abs() < 1e-4,
+        "{}",
+        out[mid as usize]
+    );
+    let peak = out.iter().copied().fold(0.0f32, f32::max);
+    assert!(
+        peak > 0.49 && peak <= 0.5,
+        "peaks where the fades meet: {peak}"
+    );
+}
+
+#[test]
+fn fades_shape_a_streamed_clip() {
+    let mut rig = Rig::new(0.0);
+    dc_file(rig.dir(), "long.wav", 4 * BEAT as usize, 0.25);
+    let clip = rig.add_clip("long.wav", 1, 2);
+    set_fades(
+        &mut rig,
+        clip,
+        Fade::new(TickTime(PPQ), FadeShape::SCurve),
+        Fade::default(),
+    );
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(200));
+    rig.session.play().unwrap();
+    let out = rig.run_paced(3 * BEAT as usize);
+    let b = BEAT as usize;
+    assert!(out[..b].iter().all(|&x| x == 0.0));
+    for d in [BEAT / 4, BEAT / 2, 3 * BEAT / 4] {
+        let want = 0.25 * fade_at(FadeShape::SCurve, d, BEAT);
+        let got = out[b + d as usize];
+        assert!((got - want).abs() < 1e-4, "{d}: {got} vs {want}");
+    }
+    assert!((out[2 * b + 100] - 0.25).abs() < 1e-5);
 }
 
 #[test]

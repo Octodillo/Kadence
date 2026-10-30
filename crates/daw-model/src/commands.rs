@@ -669,6 +669,10 @@ pub enum ClipField {
     AudioOffset(SampleTime),
     /// Audio clips only.
     AudioGainDb(f64),
+    /// Audio clips only.
+    FadeIn(Fade),
+    /// Audio clips only.
+    FadeOut(Fade),
 }
 
 /// Sets one property of a clip. Consecutive edits of the same property on the
@@ -692,6 +696,8 @@ impl SetClip {
             (ClipField::Muted(v), _) => mem::swap(&mut c.muted, v),
             (ClipField::AudioOffset(v), ClipContent::Audio(a)) => mem::swap(&mut a.offset, v),
             (ClipField::AudioGainDb(v), ClipContent::Audio(a)) => mem::swap(&mut a.gain_db, v),
+            (ClipField::FadeIn(v), ClipContent::Audio(a)) => mem::swap(&mut a.fade_in, v),
+            (ClipField::FadeOut(v), ClipContent::Audio(a)) => mem::swap(&mut a.fade_out, v),
             _ => return Err(invalid("that property only applies to audio clips")),
         }
         Ok(ChangeSet::one(Change::Clip(self.id)))
@@ -706,6 +712,8 @@ impl Command for SetClip {
             ClipField::Muted(_) => "Mute Clip",
             ClipField::AudioOffset(_) => "Slip Clip",
             ClipField::AudioGainDb(_) => "Change Clip Gain",
+            ClipField::FadeIn(_) => "Change Fade In",
+            ClipField::FadeOut(_) => "Change Fade Out",
         }
         .into()
     }
@@ -722,11 +730,17 @@ impl Command for SetClip {
                 return Err(invalid("audio offset must not be negative"));
             }
             ClipField::AudioGainDb(g) => check_finite(g, "clip gain")?,
+            ClipField::FadeIn(f) | ClipField::FadeOut(f) if f.length.0 < 0 => {
+                return Err(invalid("fade length must not be negative"));
+            }
             _ => {}
         }
         let audio_only = matches!(
             self.field,
-            ClipField::AudioOffset(_) | ClipField::AudioGainDb(_)
+            ClipField::AudioOffset(_)
+                | ClipField::AudioGainDb(_)
+                | ClipField::FadeIn(_)
+                | ClipField::FadeOut(_)
         );
         if audio_only && !matches!(clip.content, ClipContent::Audio(_)) {
             return Err(invalid("that property only applies to audio clips"));

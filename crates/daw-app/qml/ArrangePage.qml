@@ -2,6 +2,7 @@
 
 import QtQuick
 import QtQuick.Controls as QQC2
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
@@ -76,6 +77,31 @@ Kirigami.Page {
         }
     }
 
+    readonly property Kirigami.Action importAction: Kirigami.Action {
+        text: i18nc("@action:button", "Import Audio…")
+        icon.name: "document-import"
+        shortcut: "Ctrl+I"
+        enabled: page.visible
+        displayHint: Kirigami.DisplayHint.AlwaysHide
+        tooltip: i18nc("@info:tooltip", "Add audio files at the playhead: the first on the selected audio track, the rest on new tracks.")
+        onTriggered: importDialog.open()
+    }
+
+    FileDialog {
+        id: importDialog
+        title: i18nc("@title:window", "Import Audio")
+        fileMode: FileDialog.OpenFiles
+        nameFilters: [
+            i18nc("@item:inlistbox", "Audio files (*.wav *.flac *.ogg *.oga *.mp3 *.aif *.aiff)"),
+            i18nc("@item:inlistbox", "All files (*)")
+        ]
+        onAccepted: {
+            for (let i = 0; i < selectedFiles.length; ++i) {
+                Project.importAudio(selectedFiles[i], i);
+            }
+        }
+    }
+
     // Gated on page.visible: the Edit page uses the same shortcuts, and two
     // enabled actions on one key make Qt treat it as ambiguous.
     readonly property list<Kirigami.Action> editActions: [
@@ -146,6 +172,7 @@ Kirigami.Page {
         page.transportActions[0],
         page.loopAction,
         page.addTrackAction,
+        page.importAction,
         page.editActions[0],
         page.editActions[1],
         page.editActions[2],
@@ -233,9 +260,24 @@ Kirigami.Page {
                     interactive: false
                     model: Project.trackCount
                     contentY: view.scrollY
+                    // The track whose handle is being dragged, and the row
+                    // it would land on (see TrackHeader).
+                    property int dragFrom: -1
+                    property int dragTo: -1
                     delegate: TrackHeader {
                         width: headers.width
                         height: view.trackHeight
+                    }
+
+                    // Where a dragged track will land.
+                    Rectangle {
+                        visible: headers.dragFrom >= 0 && headers.dragTo !== headers.dragFrom
+                        z: 1
+                        x: 0
+                        width: headers.width
+                        height: 2
+                        color: Kirigami.Theme.highlightColor
+                        y: (headers.dragTo > headers.dragFrom ? headers.dragTo + 1 : headers.dragTo) * view.trackHeight - 1
                     }
 
                     WheelHandler {
@@ -320,6 +362,16 @@ Kirigami.Page {
                     Keys.onRightPressed: Project.nudge(1)
                 }
 
+                // The clip gain while its handle is dragged.
+                QQC2.ToolTip {
+                    parent: pointer
+                    visible: view.gainDragging && pointer.pressed
+                    x: pointer.mouseX + Kirigami.Units.gridUnit
+                    y: pointer.mouseY - height - Kirigami.Units.smallSpacing
+                    text: i18nc("@info:tooltip clip gain in decibels", "%1 dB",
+                                (view.draggedGain > 0 ? "+" : "") + view.draggedGain.toLocaleString(Qt.locale(), "f", 1))
+                }
+
                 // Two-finger zoom on touch screens.
                 PinchHandler {
                     target: null
@@ -353,7 +405,7 @@ Kirigami.Page {
                     visible: Project.trackCount === 0
                     icon.name: "view-media-track"
                     text: i18nc("@info:placeholder", "No tracks yet")
-                    explanation: i18nc("@info:placeholder", "Add a track, or drop audio files here.")
+                    explanation: i18nc("@info:placeholder", "Add a track, import audio, or drop audio files here.")
                     helpfulAction: Kirigami.Action {
                         text: i18nc("@action:button", "Add Audio Track")
                         icon.name: "list-add"
@@ -408,6 +460,34 @@ Kirigami.Page {
         QQC2.MenuItem { action: page.editActions[0] }
         QQC2.MenuItem { action: page.editActions[1] }
         QQC2.MenuItem { action: page.editActions[2] }
+        QQC2.MenuSeparator { visible: Project.audioSelected }
+        QQC2.Menu {
+            title: i18nc("@title:menu", "Fade Shape")
+            enabled: Project.audioSelected
+            QQC2.MenuItem {
+                text: i18nc("@action:inmenu fade shape", "Linear")
+                onTriggered: Project.setFadeShape(0)
+            }
+            QQC2.MenuItem {
+                text: i18nc("@action:inmenu fade shape", "Equal Power")
+                onTriggered: Project.setFadeShape(1)
+            }
+            QQC2.MenuItem {
+                text: i18nc("@action:inmenu fade shape", "S-Curve")
+                onTriggered: Project.setFadeShape(2)
+            }
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Remove Fades")
+            enabled: Project.audioSelected
+            onTriggered: Project.removeFades()
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Reset Clip Gain")
+            icon.name: "edit-reset"
+            enabled: Project.audioSelected
+            onTriggered: Project.resetClipGain()
+        }
     }
 
     QQC2.Menu {
@@ -422,5 +502,7 @@ Kirigami.Page {
             icon.name: "audio-midi"
             onTriggered: page.addTrack(1)
         }
+        QQC2.MenuSeparator {}
+        QQC2.MenuItem { action: page.importAction }
     }
 }
