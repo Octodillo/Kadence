@@ -44,6 +44,39 @@ Item {
             shoot(window.title, "arrange");
         },
         () => {
+            const arrange = window.pageStack.currentItem;
+            check(Project.trackCount === 0, "new project is empty");
+            Project.addTrack(1);
+            check(Project.trackCount === 1, "add instrument track");
+            // Double-click the first lane: a one-bar MIDI clip appears.
+            const v = arrange.view;
+            v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
+            check(Project.canUndo && Project.undoText !== "", "clip added");
+            Project.undo();
+            Project.undo();
+            check(Project.trackCount === 0, "undo back to empty");
+        },
+        () => {
+            check(TestHelper.loadDemoProject(), "load demo project");
+        },
+        () => {
+            check(Project.trackCount === 3, "demo has three tracks");
+            // Peaks load in the background; give them a step, then shoot.
+            window.pageStack.currentItem.view.refresh();
+            shoot(window.title, "arrange-demo");
+        },
+        () => {
+            Project.toggleLoop();
+            check(Project.looping, "loop on");
+            Project.togglePlay();
+        },
+        () => {
+            check(Project.timeText !== "0:00.0", "playhead moves while playing");
+            Project.togglePlay();
+            Project.toggleLoop();
+            shoot(window.title, "arrange-played");
+        },
+        () => {
             window.pageActions[1].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Mix"), "switch to Mix");
             check(Mixer.levels.length >= 10 && Mixer.effectNames.length > 0, "mixer has strips and effects");
@@ -70,9 +103,9 @@ Item {
         },
         () => {
             window.playAction.trigger();
-            check(Engine.playing, "play");
+            check(Project.playing, "play");
             window.playAction.trigger();
-            check(!Engine.playing, "stop");
+            check(!Project.playing, "stop");
         },
         () => {
             settingsPage = window.openSettings();
@@ -85,14 +118,23 @@ Item {
             if (!window.smokeTest) {
                 return;
             }
-            check(Engine.applyAudioSettings(2, 96000, 128) === "", "apply good audio settings");
-            check(Engine.deviceIndex === 2 && Engine.sampleRate === 96000 && Engine.bufferSize === 128,
+            // Pick from what the engine offers: the stub has several devices,
+            // the real engine (silent without a server) has one.
+            const device = Engine.deviceNames.length - 1;
+            const rate = Engine.sampleRates[Engine.sampleRates.length - 1];
+            const size = Engine.bufferSizes[1];
+            check(Engine.applyAudioSettings(device, rate, size) === "", "apply good audio settings");
+            check(Engine.deviceIndex === device && Engine.sampleRate === rate && Engine.bufferSize === size,
                   "settings took effect");
-            check(Engine.applyAudioSettings(0, 12345, 128) !== "", "bad sample rate refused");
-            check(Engine.sampleRate === 96000, "old settings kept after refusal");
+            check(Engine.applyAudioSettings(0, 12345, size) !== "", "bad sample rate refused");
+            check(Engine.sampleRate === rate, "old settings kept after refusal");
             check(Engine.errorText !== "", "error shown");
-            // Leave a known state in the config file for the test to read.
-            check(Engine.applyAudioSettings(1, 44100, 512) === "", "apply final settings");
+            // Leave a known state in the config file for the test to read
+            // (the stub offers 44100 and 512; a running server may not).
+            const finalRate = Engine.sampleRates.includes(44100) ? 44100 : rate;
+            const finalSize = Engine.bufferSizes.includes(512) ? 512 : size;
+            check(Engine.applyAudioSettings(Math.min(1, device), finalRate, finalSize) === "",
+                  "apply final settings");
         },
         () => {
             // Older Kirigami (KF 6.13 in Debian 13) has no PageStack.closeDialog();

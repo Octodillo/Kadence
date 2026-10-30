@@ -2,10 +2,17 @@
 //!
 //! [`EngineHandle`] is the only door from the front end into audio. It uses
 //! plain Rust types so a second front end (a GNOME one is planned) can share
-//! it unchanged; nothing here may mention Qt. The real implementation arrives
-//! with the audio backend (WU2). Until then [`StubEngine`] stands in.
+//! it unchanged; nothing here may mention Qt.
+//!
+//! [`SessionEngine`] is the real one: JACK (PipeWire on Plasma) through
+//! `daw-session`'s [`AudioHost`], falling back to a silent backend when no
+//! audio server answers. [`StubEngine`] pretends to have two devices, for
+//! tests of the settings UI; it still plays silently so the transport works.
 
 use std::fmt;
+
+use daw_session::Session;
+use daw_session::host::{AudioHost, HostConfig, HostKind};
 
 /// An audio device the user can pick in the settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +50,6 @@ pub enum EngineStatus {
     /// Audio is running with this configuration.
     Running { sample_rate: u32, buffer_size: u32 },
     /// The backend refused to start; the message is for the user.
-    #[allow(dead_code, reason = "only the real backend (WU2) fails")]
     Failed(String),
 }
 
@@ -80,20 +86,182 @@ pub trait EngineHandle: Send {
     fn play(&mut self);
     fn stop(&mut self);
     fn is_playing(&self) -> bool;
+
+    /// The session playing the project. After
+    /// [`apply_audio_config`](Self::apply_audio_config) it may be a new one
+    /// that has to be synced with the document again.
+    fn session(&self) -> Option<&Session>;
+    fn session_mut(&mut self) -> Option<&mut Session>;
 }
 
-/// The engine the app starts with. WU2 swaps this for the real backend.
+/// The engine the app starts with: the real one, or the stub when the
+/// environment says `KADENCE_AUDIO=stub` (the UI tests do).
 pub fn default_engine() -> Box<dyn EngineHandle> {
-    Box::new(StubEngine::default())
+    if std::env::var("KADENCE_AUDIO").as_deref() == Ok("stub") {
+        Box::new(StubEngine::default())
+    } else {
+        Box::new(SessionEngine::new())
+    }
 }
 
-/// A pretend engine with two devices and no sound, so the UI can be built
-/// and tested before the audio backend exists.
-#[derive(Debug, Default)]
+/// The real engine. See the module docs.
+pub struct SessionEngine {
+    host: AudioHost,
+    config: AudioConfig,
+}
+
+impl SessionEngine {
+    const JACK: &'static str = "jack";
+    const SILENT: &'static str = "silent";
+
+    pub fn new() -> Self {
+        let host = AudioHost::start(HostConfig::default());
+        let config = AudioConfig {
+            device: None,
+            sample_rate: host.sample_rate(),
+            buffer_size: host.buffer_size(),
+        };
+        Self { host, config }
+    }
+
+    fn device(&self) -> AudioDevice {
+        match self.host.kind() {
+            HostKind::Jack => AudioDevice {
+                id: Self::JACK.into(),
+                name: "JACK / PipeWire".into(),
+            },
+            HostKind::Silent => AudioDevice {
+                id: Self::SILENT.into(),
+                name: "No audio server (silent)".into(),
+            },
+        }
+    }
+}
+
+impl Default for SessionEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EngineHandle for SessionEngine {
+    fn backend_name(&self) -> String {
+        match self.host.kind() {
+            HostKind::Jack => "JACK (PipeWire)".into(),
+            HostKind::Silent => "Silent (no audio server)".into(),
+        }
+    }
+
+    fn audio_devices(&self) -> Vec<AudioDevice> {
+        vec![self.device()]
+    }
+
+    fn supported_sample_rates(&self) -> Vec<u32> {
+        match self.host.kind() {
+            // The server decides; offer only what it runs at.
+            HostKind::Jack => vec![self.host.sample_rate()],
+            HostKind::Silent => vec![44_100, 48_000, 88_200, 96_000],
+        }
+    }
+
+    fn supported_buffer_sizes(&self) -> Vec<u32> {
+        vec![64, 128, 256, 512, 1024, 2048]
+    }
+
+    fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
+        if let Some(id) = &config.device
+            && *id != self.device().id
+        {
+            return Err(EngineError::UnknownDevice(id.clone()));
+        }
+        if !self.supported_sample_rates().contains(&config.sample_rate) {
+            return Err(EngineError::Unsupported(format!(
+                "sample rate {} Hz",
+                config.sample_rate
+            )));
+        }
+        if !self.supported_buffer_sizes().contains(&config.buffer_size) {
+            return Err(EngineError::Unsupported(format!(
+                "buffer size {}",
+                config.buffer_size
+            )));
+        }
+        let wanted = HostConfig {
+            sample_rate: config.sample_rate,
+            buffer_size: config.buffer_size,
+            use_server: true,
+        };
+        if wanted != *self.host.config() {
+            self.host.restart(wanted);
+        }
+        self.config = config.clone();
+        Ok(())
+    }
+
+    fn audio_config(&self) -> AudioConfig {
+        self.config.clone()
+    }
+
+    fn status(&self) -> EngineStatus {
+        match (self.host.kind(), self.host.last_error()) {
+            (HostKind::Silent, Some(e)) => EngineStatus::Failed(e.to_owned()),
+            _ => EngineStatus::Running {
+                sample_rate: self.host.sample_rate(),
+                buffer_size: self.host.buffer_size(),
+            },
+        }
+    }
+
+    fn play(&mut self) {
+        let _ = self.host.session_mut().play();
+    }
+
+    fn stop(&mut self) {
+        let _ = self.host.session_mut().stop();
+    }
+
+    fn is_playing(&self) -> bool {
+        self.host.session().is_playing()
+    }
+
+    fn session(&self) -> Option<&Session> {
+        Some(self.host.session())
+    }
+
+    fn session_mut(&mut self) -> Option<&mut Session> {
+        Some(self.host.session_mut())
+    }
+}
+
+/// A pretend engine with two devices, for testing the settings UI without
+/// an audio server. It plays through a silent backend so the transport and
+/// arrange view behave as with real audio.
 pub struct StubEngine {
     config: AudioConfig,
     running: bool,
-    playing: bool,
+    host: AudioHost,
+}
+
+impl Default for StubEngine {
+    fn default() -> Self {
+        Self {
+            config: AudioConfig::default(),
+            running: false,
+            host: AudioHost::start(HostConfig {
+                use_server: false,
+                ..Default::default()
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for StubEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StubEngine")
+            .field("config", &self.config)
+            .field("running", &self.running)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StubEngine {
@@ -165,15 +333,23 @@ impl EngineHandle for StubEngine {
     }
 
     fn play(&mut self) {
-        self.playing = true;
+        let _ = self.host.session_mut().play();
     }
 
     fn stop(&mut self) {
-        self.playing = false;
+        let _ = self.host.session_mut().stop();
     }
 
     fn is_playing(&self) -> bool {
-        self.playing
+        self.host.session().is_playing()
+    }
+
+    fn session(&self) -> Option<&Session> {
+        Some(self.host.session())
+    }
+
+    fn session_mut(&mut self) -> Option<&mut Session> {
+        Some(self.host.session_mut())
     }
 }
 

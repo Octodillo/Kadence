@@ -2,6 +2,7 @@
 
 import QtQuick
 import QtQuick.Controls as QQC2
+import QtQuick.Dialogs
 import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
@@ -14,7 +15,8 @@ Kirigami.ApplicationWindow {
     required property bool smokeTest
     required property string screenshotDir
 
-    title: i18nc("@title:window", "Kadence")
+    title: Project.modified ? i18nc("@title:window %1 is the project name", "%1 [modified] — Kadence", Project.name)
+                            : i18nc("@title:window %1 is the project name", "%1 — Kadence", Project.name)
     width: Kirigami.Units.gridUnit * 55
     height: Kirigami.Units.gridUnit * 35
     minimumWidth: Kirigami.Units.gridUnit * 22
@@ -55,13 +57,111 @@ Kirigami.ApplicationWindow {
 
     // Shared by every page's toolbar.
     readonly property Kirigami.Action playAction: Kirigami.Action {
-        text: Engine.playing ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Play")
-        icon.name: Engine.playing ? "media-playback-stop" : "media-playback-start"
+        text: Project.playing ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Play")
+        icon.name: Project.playing ? "media-playback-stop" : "media-playback-start"
         // A window shortcut gets Space before the focused control does, so
         // step aside while a button has keyboard focus and let Space press it.
         shortcut: root.buttonHasKeyboardFocus ? "" : "Space"
         displayHint: Kirigami.DisplayHint.KeepVisible
-        onTriggered: Engine.togglePlayback()
+        onTriggered: Project.togglePlay()
+    }
+
+    Kirigami.Action {
+        id: goToStartAction
+        text: i18nc("@action", "Go to Start")
+        icon.name: "media-skip-backward"
+        shortcut: "Home"
+        onTriggered: Project.goToStart()
+    }
+
+    readonly property list<Kirigami.Action> fileActions: [
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "New Project")
+            icon.name: "document-new"
+            shortcut: StandardKey.New
+            onTriggered: Project.newProject()
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Open Project…")
+            icon.name: "document-open"
+            shortcut: StandardKey.Open
+            onTriggered: openDialog.open()
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Save")
+            icon.name: "document-save"
+            shortcut: StandardKey.Save
+            onTriggered: root.save()
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Save As…")
+            icon.name: "document-save-as"
+            shortcut: StandardKey.SaveAs
+            onTriggered: saveDialog.open()
+        }
+    ]
+
+    readonly property list<Kirigami.Action> historyActions: [
+        Kirigami.Action {
+            text: Project.canUndo ? i18nc("@action:inmenu %1 is an edit, like Move Clip", "Undo %1", Project.undoText)
+                                  : i18nc("@action:inmenu", "Undo")
+            icon.name: "edit-undo"
+            shortcut: StandardKey.Undo
+            enabled: Project.canUndo
+            onTriggered: Project.undo()
+        },
+        Kirigami.Action {
+            text: Project.canRedo ? i18nc("@action:inmenu %1 is an edit, like Move Clip", "Redo %1", Project.redoText)
+                                  : i18nc("@action:inmenu", "Redo")
+            icon.name: "edit-redo"
+            shortcut: StandardKey.Redo
+            enabled: Project.canRedo
+            onTriggered: Project.redo()
+        }
+    ]
+
+    function save(): void {
+        if (!Project.savedBefore) {
+            saveDialog.open();
+            return;
+        }
+        const error = Project.save();
+        if (error !== "") {
+            showPassiveNotification(i18nc("@info", "Could not save: %1", error));
+        }
+    }
+
+    FileDialog {
+        id: openDialog
+        title: i18nc("@title:window", "Open Project")
+        nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
+        onAccepted: {
+            const error = Project.openProject(selectedFile);
+            if (error !== "") {
+                root.showPassiveNotification(i18nc("@info", "Could not open: %1", error));
+            }
+        }
+    }
+
+    FileDialog {
+        id: saveDialog
+        title: i18nc("@title:window", "Save Project As")
+        fileMode: FileDialog.SaveFile
+        nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
+        onAccepted: {
+            const error = Project.saveAs(selectedFile);
+            if (error !== "") {
+                root.showPassiveNotification(i18nc("@info", "Could not save: %1", error));
+            }
+        }
+    }
+
+    // Engine position, peak loading, autosave.
+    Timer {
+        interval: 33
+        repeat: true
+        running: true
+        onTriggered: Project.tick()
     }
 
     Kirigami.Action {
@@ -96,6 +196,15 @@ Kirigami.ApplicationWindow {
         collapsible: true
         showHeaderWhenCollapsed: true
         actions: [
+            root.fileActions[0],
+            root.fileActions[1],
+            root.fileActions[2],
+            root.fileActions[3],
+            separatorAction,
+            root.historyActions[0],
+            root.historyActions[1],
+            goToStartAction,
+            separatorAction,
             arrangeAction,
             mixAction,
             editAction,
