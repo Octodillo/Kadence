@@ -14,7 +14,7 @@
 
 use std::ops::Range;
 
-use daw_core::event::EventKind;
+use daw_core::event::{EventKind, NoteId};
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 
 use crate::note::{EditNote, NoteData};
@@ -34,6 +34,7 @@ pub struct RecordedNote {
 struct Held {
     start: i64,
     velocity: f32,
+    note_id: NoteId,
 }
 
 /// Pairs captured note-ons and note-offs into notes.
@@ -51,8 +52,21 @@ impl Default for Recorder {
 }
 
 enum Edge {
-    On { channel: u8, key: u8, velocity: f32 },
-    Off { channel: u8, key: u8 },
+    On {
+        channel: u8,
+        key: u8,
+        velocity: f32,
+        note_id: NoteId,
+    },
+    Off {
+        channel: u8,
+        key: u8,
+    },
+    /// A wildcard note off: every key on the channel, or with an id of 0 or more, that note.
+    OffAny {
+        channel: u8,
+        note_id: NoteId,
+    },
 }
 
 fn edge(kind: &EventKind) -> Option<Edge> {
@@ -61,15 +75,25 @@ fn edge(kind: &EventKind) -> Option<Edge> {
             channel,
             key,
             velocity,
-            ..
+            note_id,
         } if velocity > 0.0 => Some(Edge::On {
             channel,
             key,
             velocity: velocity.min(1.0),
+            note_id,
         }),
-        EventKind::NoteOn { channel, key, .. } | EventKind::NoteOff { channel, key, .. } => {
-            Some(Edge::Off { channel, key })
-        }
+        EventKind::NoteOn { channel, key, .. }
+        | EventKind::NoteOff {
+            channel,
+            key: Some(key),
+            ..
+        } => Some(Edge::Off { channel, key }),
+        EventKind::NoteOff {
+            channel,
+            key: None,
+            note_id,
+            ..
+        } => Some(Edge::OffAny { channel, note_id }),
         EventKind::Midi([status, key, vel]) => {
             let channel = status & 0x0f;
             let key = key & 0x7f;
@@ -78,6 +102,7 @@ fn edge(kind: &EventKind) -> Option<Edge> {
                     channel,
                     key,
                     velocity: (vel & 0x7f) as f32 / 127.0,
+                    note_id: -1,
                 }),
                 0x80 | 0x90 => Some(Edge::Off { channel, key }),
                 _ => None,
@@ -127,12 +152,14 @@ impl Recorder {
                         channel,
                         key,
                         velocity,
+                        note_id,
                     }) => {
                         if let Some(slot) = Self::slot(channel, key) {
                             self.close(slot, time.0);
                             self.held[slot] = Some(Held {
                                 start: time.0,
                                 velocity,
+                                note_id,
                             });
                         }
                     }
@@ -141,6 +168,16 @@ impl Recorder {
                             self.close(slot, time.0);
                         }
                     }
+                    Some(Edge::OffAny { channel, note_id }) if channel < 16 => {
+                        let keys = channel as usize * 128..(channel as usize + 1) * 128;
+                        for slot in keys {
+                            if self.held[slot].is_some_and(|h| note_id < 0 || h.note_id == note_id)
+                            {
+                                self.close(slot, time.0);
+                            }
+                        }
+                    }
+                    Some(Edge::OffAny { .. }) => {}
                     None => {}
                 }
             }
@@ -148,10 +185,7 @@ impl Recorder {
                 for slot in 0..self.held.len() {
                     if let Some(h) = self.held[slot] {
                         self.close(slot, from.0);
-                        self.held[slot] = Some(Held {
-                            start: to.0,
-                            velocity: h.velocity,
-                        });
+                        self.held[slot] = Some(Held { start: to.0, ..h });
                     }
                 }
                 self.last_time = to.0;
@@ -285,7 +319,7 @@ mod tests {
             time: SampleTime(time),
             kind: EventKind::NoteOff {
                 channel: 0,
-                key,
+                key: Some(key),
                 velocity: 0.0,
                 note_id: -1,
             },
@@ -314,6 +348,52 @@ mod tests {
         assert_eq!(spans(&take), [(10, 30, 60), (20, 40, 64), (40, 100, 64)]);
         assert_eq!(take[2].velocity, 0.2);
         assert!(r.finish(None).is_empty());
+    }
+
+    #[test]
+    fn wildcard_note_offs_end_every_key_or_one_note_id() {
+        let ev = |time: i64, kind| Captured::Event {
+            time: SampleTime(time),
+            kind,
+        };
+        let on_id = |time, key, note_id| {
+            ev(
+                time,
+                EventKind::NoteOn {
+                    channel: 0,
+                    key,
+                    velocity: 1.0,
+                    note_id,
+                },
+            )
+        };
+        let off_any = |time, channel, note_id| {
+            ev(
+                time,
+                EventKind::NoteOff {
+                    channel,
+                    key: None,
+                    velocity: 0.0,
+                    note_id,
+                },
+            )
+        };
+        let mut r = Recorder::new();
+        for c in [
+            on_id(0, 60, 1),
+            on_id(0, 64, 2),
+            on_id(0, 67, -1),
+            // Note 2 whatever its key.
+            off_any(10, 0, 2),
+            // Another channel holds nothing.
+            off_any(15, 1, -1),
+            // Every key.
+            off_any(20, 0, -1),
+        ] {
+            r.feed(c);
+        }
+        assert_eq!(spans(r.notes()), [(0, 10, 64), (0, 20, 60), (0, 20, 67)]);
+        assert_eq!(r.held().count(), 0);
     }
 
     #[test]

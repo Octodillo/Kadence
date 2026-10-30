@@ -83,7 +83,10 @@ pub trait PluginInstance: Node {
 pub trait PluginFormat: Send + Sync {
     fn kind(&self) -> PluginFormatKind;
     fn default_search_paths(&self) -> Vec<PathBuf>;
-    fn scan(&self, path: &Path) -> Vec<PluginDescriptor>;
+    /// Describes the plugins at `path`. A bundle that holds no plugins gives an empty list; one
+    /// that cannot be loaded (a missing library, no entry point, a factory that fails) gives
+    /// [`PluginError::Load`] saying why, so the host can show the user.
+    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError>;
     fn instantiate(
         &self,
         d: &PluginDescriptor,

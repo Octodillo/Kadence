@@ -164,7 +164,12 @@ fn main() {
         for e in cycle.midi_in.iter() {
             match e.kind {
                 EventKind::NoteOn { key, .. } => synth.note(key, true),
-                EventKind::NoteOff { key, .. } => synth.note(key, false),
+                EventKind::NoteOff { key: Some(key), .. } => synth.note(key, false),
+                EventKind::NoteOff { key: None, .. } => {
+                    for key in 0..128 {
+                        synth.note(key, false);
+                    }
+                }
                 _ => {}
             }
         }

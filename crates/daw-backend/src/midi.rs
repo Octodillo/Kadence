@@ -1,7 +1,7 @@
 //! Conversion between raw MIDI bytes and [`daw_core::event`] events.
 //! Everything here is allocation-free and safe on the real-time thread.
 
-use daw_core::event::{Event, EventKind};
+use daw_core::event::{Event, EventKind, all_notes_off};
 
 /// Length of a MIDI message from its status byte, or `None` for SysEx,
 /// undefined system common bytes and data bytes.
@@ -36,7 +36,7 @@ pub fn decode(frame: u32, bytes: &[u8]) -> Option<Event> {
         },
         (0x80 | 0x90, 3) => EventKind::NoteOff {
             channel,
-            key: bytes[1],
+            key: Some(bytes[1]),
             velocity: if status & 0xF0 == 0x80 {
                 f32::from(bytes[2]) / 127.0
             } else {
@@ -78,11 +78,18 @@ pub fn encode(kind: &EventKind, out: &mut [u8; 3]) -> Option<usize> {
         }
         EventKind::NoteOff {
             channel,
-            key,
+            key: Some(key),
             velocity,
             ..
         } => {
             *out = [0x80 | (channel & 0x0F), key & 0x7F, to_7bit(velocity)];
+            Some(3)
+        }
+        // MIDI has no wildcard note off.
+        EventKind::NoteOff {
+            channel, key: None, ..
+        } => {
+            *out = all_notes_off(channel);
             Some(3)
         }
         EventKind::Midi(raw) => {
@@ -135,7 +142,7 @@ mod tests {
             kind(&[0x80, 61, 0]),
             Some(EventKind::NoteOff {
                 channel: 0,
-                key: 61,
+                key: Some(61),
                 velocity: 0.0,
                 note_id: -1
             })
@@ -148,7 +155,7 @@ mod tests {
             kind(&[0x9F, 10, 0]),
             Some(EventKind::NoteOff {
                 channel: 15,
-                key: 10,
+                key: Some(10),
                 ..
             })
         ));
@@ -197,12 +204,20 @@ mod tests {
         assert_eq!(out, [0x90, 60, 1]);
         let loud = EventKind::NoteOff {
             channel: 0,
-            key: 60,
+            key: Some(60),
             velocity: 4.0,
             note_id: -1,
         };
         encode(&loud, &mut out);
         assert_eq!(out, [0x80, 60, 127]);
+        let any = EventKind::NoteOff {
+            channel: 9,
+            key: None,
+            velocity: 1.0,
+            note_id: 2,
+        };
+        assert_eq!(encode(&any, &mut out), Some(3));
+        assert_eq!(out, [0xB9, 123, 0]);
         let param = EventKind::ParamValue {
             param: 1,
             value: 0.5,

@@ -176,7 +176,7 @@ impl MidiPlayer {
             frame,
             EventKind::NoteOff {
                 channel: a.channel,
-                key: a.key,
+                key: Some(a.key),
                 velocity: 0.0,
                 note_id: a.note_id,
             },

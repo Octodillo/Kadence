@@ -54,16 +54,30 @@ impl PluginFormat for Vst3Format {
     /// Scans one `.vst3` module, or every module found under a directory.
     ///
     /// This loads plugin code, so the registry runs it in a separate process.
-    fn scan(&self, path: &Path) -> Vec<PluginDescriptor> {
-        let mut out = Vec::new();
+    ///
+    /// A module that does not load fails the scan. Under a directory, modules that load still
+    /// count; the scan fails only when every module failed, with the first one's error.
+    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
         if is_module(path) {
-            out.extend(instance::scan_module(path));
-        } else if path.is_dir() {
+            return instance::scan_module(path);
+        }
+        let mut out = Vec::new();
+        let mut first_error = None;
+        if path.is_dir() {
             for module in find_modules(path) {
-                out.extend(instance::scan_module(&module));
+                match instance::scan_module(&module) {
+                    Ok(found) => out.extend(found),
+                    Err(e) => {
+                        log::warn!("vst3 scan: {e}");
+                        first_error.get_or_insert(e);
+                    }
+                }
             }
         }
-        out
+        match first_error {
+            Some(e) if out.is_empty() => Err(e),
+            _ => Ok(out),
+        }
     }
 
     fn instantiate(
@@ -130,10 +144,20 @@ mod tests {
         );
     }
 
+    /// A module that does not load is a failure that says why, not an empty bundle.
     #[test]
-    fn scanning_garbage_finds_nothing() {
+    fn scanning_garbage_reports_why() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Broken.vst3"), b"not an elf").unwrap();
-        assert!(Vst3Format.scan(dir.path()).is_empty());
+        let module = dir.path().join("Broken.vst3");
+        std::fs::write(&module, b"not an elf").unwrap();
+        for path in [&module, &dir.path().to_path_buf()] {
+            match Vst3Format.scan(path) {
+                Err(PluginError::Load(msg)) => assert!(msg.contains("Broken.vst3"), "{msg}"),
+                other => panic!("expected a load error, got {other:?}"),
+            }
+        }
+        // A directory with no modules is just empty.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(Vst3Format.scan(empty.path()).unwrap().is_empty());
     }
 }

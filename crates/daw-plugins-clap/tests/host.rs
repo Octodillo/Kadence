@@ -7,7 +7,9 @@ use std::sync::OnceLock;
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{ProcessContext, TransportState};
-use daw_core::plugin::{PluginDescriptor, PluginFormat, PluginFormatKind, PluginInstance};
+use daw_core::plugin::{
+    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+};
 use daw_plugins_clap::ClapFormat;
 
 #[global_allocator]
@@ -52,7 +54,7 @@ fn build_test_plugin() -> PathBuf {
 
 fn descriptor() -> PluginDescriptor {
     let path = test_plugin();
-    let mut found = ClapFormat.scan(&path);
+    let mut found = ClapFormat.scan(&path).expect("the test plugin loads");
     assert_eq!(found.len(), 1, "one plugin in the test bundle");
     found.remove(0)
 }
@@ -119,12 +121,17 @@ fn scan_describes_the_plugin() {
     assert!(!d.is_instrument);
 }
 
+/// A file that does not load is a failure that says why, not a plugin-less bundle.
 #[test]
-fn scanning_a_non_plugin_finds_nothing() {
+fn scanning_a_non_plugin_reports_why() {
     let path = std::env::temp_dir().join(format!("not-a-plugin-{}.clap", std::process::id()));
     std::fs::write(&path, b"nope").unwrap();
-    assert!(ClapFormat.scan(&path).is_empty());
-    std::fs::remove_file(path).unwrap();
+    let result = ClapFormat.scan(&path);
+    std::fs::remove_file(&path).unwrap();
+    match result {
+        Err(PluginError::Load(msg)) => assert!(msg.contains("not-a-plugin"), "{msg}"),
+        other => panic!("expected a load error, got {other:?}"),
+    }
 }
 
 #[test]

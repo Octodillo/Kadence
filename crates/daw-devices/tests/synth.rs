@@ -67,12 +67,36 @@ fn note_off_with_id_releases_note_without_id() {
     let mut synth = Synth::new();
     let off = EventKind::NoteOff {
         channel: 0,
-        key: 60,
+        key: Some(60),
         velocity: 0.0,
         note_id: 7,
     };
     let events = [(0, EventKind::Midi([0x90, 60, 100])), (1000, off)];
     render(&mut synth, 48000, &[], &events, s);
+    assert_eq!(synth.active_voices(), 0);
+}
+
+/// A note off with no key releases the note with its id, or with no id every note.
+#[test]
+fn wildcard_note_off_releases_by_id_or_everything() {
+    let s = Setup::default();
+    let mut synth = Synth::new();
+    let on = |key, note_id| EventKind::NoteOn {
+        channel: 0,
+        key,
+        velocity: 1.0,
+        note_id,
+    };
+    let off_any = |note_id| EventKind::NoteOff {
+        channel: 0,
+        key: None,
+        velocity: 0.0,
+        note_id,
+    };
+    let events = [(0, on(60, 1)), (0, on(64, 2)), (1000, off_any(1))];
+    render(&mut synth, 48000, &[], &events, s);
+    assert_eq!(synth.active_voices(), 1);
+    render_prepared(&mut synth, 48000, &[], &[(0, off_any(-1))], s, |_| s.bpm);
     assert_eq!(synth.active_voices(), 0);
 }
 

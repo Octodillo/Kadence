@@ -106,7 +106,7 @@ fn note_off_with_id_releases_note_without_id() {
     sampler.set_param(RELEASE, 10.0);
     let off = EventKind::NoteOff {
         channel: 0,
-        key: 60,
+        key: Some(60),
         velocity: 0.0,
         note_id: 7,
     };
