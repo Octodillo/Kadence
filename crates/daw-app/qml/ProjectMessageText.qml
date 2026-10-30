@@ -99,6 +99,9 @@ QtObject {
         case Project.PositionJumped:
             return i18nc("@info %1 is a track name",
                          "The play position jumped while recording “%1”; the take carries on straight past the jump.", m.name);
+        case Project.TrackGoneWhileRecording:
+            return i18nc("@info %1 is a track name",
+                         "“%1” was deleted while recording, so its take was not kept.", m.name);
         case Project.RecordXruns:
             return i18ncp("@info",
                           "The audio system missed %1 cycle while recording, so the take may have a gap or click.",

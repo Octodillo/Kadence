@@ -1,5 +1,6 @@
 //! Recording: the Record action records every armed track, audio and
-//! MIDI, and on stop adds everything recorded as one undoable edit.
+//! MIDI, and on stop adds the audio takes as one undoable edit and the
+//! MIDI take as another.
 //!
 //! Audio takes are recorded by `daw-session` ([`AudioTakes`]) into the
 //! project bundle's audio folder, or a recordings folder in the user's data
@@ -17,7 +18,7 @@ use daw_midi::model::{meter, midi_clip, new_note, take_command, tempo_map};
 use daw_midi::record::{RecordedNote, Recorder, TakeMode, merge_take, to_clip_notes};
 use std::path::PathBuf;
 
-use daw_model::commands::{AddClip, Batch};
+use daw_model::commands::AddClip;
 use daw_model::{Clip, ClipContent, ClipId, Command, MidiClip, Project, TrackId, TrackKind};
 use daw_session::record::{AudioTakes, armed_audio_tracks};
 
@@ -258,7 +259,8 @@ impl AppState {
         }
     }
 
-    /// Stops recording and playback and adds every take as one undo step.
+    /// Stops recording and playback and adds the takes: all audio takes as
+    /// one undo step, the MIDI take as another.
     pub fn stop_recording(&mut self) {
         if !self.is_recording() {
             return;
@@ -280,15 +282,13 @@ impl AppState {
                 }
             }
         }
-        let cmd = match commands.len() {
-            0 => None,
-            1 => commands.pop(),
-            _ => Some(Box::new(Batch::new("Record", commands)) as Box<dyn Command>),
-        };
-        if let Some(cmd) = cmd
-            && let Err(e) = self.doc.execute_boxed(cmd)
-        {
-            self.report(Message::Record(RecordProblem::Refused(e)));
+        // Each kind of take is its own undo step, so a take the model
+        // refuses can't take the other kind down with it.
+        for cmd in commands {
+            if let Err(e) = self.doc.execute_boxed(cmd) {
+                self.report(Message::Record(RecordProblem::Refused(e)));
+            }
+            self.doc.seal();
         }
         self.doc.seal();
     }

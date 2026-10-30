@@ -95,6 +95,8 @@ pub enum Reason {
     AudioDropped,
     /// The play position jumped while recording track `name`.
     PositionJumped,
+    /// Track `name` was deleted while recording.
+    TrackGoneWhileRecording,
     /// The audio system missed `number` cycles while recording.
     RecordXruns,
 }
@@ -238,6 +240,7 @@ fn take_fields(t: &TakeProblem) -> Fields {
             ..new(R::AudioDropped).name(track)
         },
         TakeProblem::Jumped { track } => new(R::PositionJumped).name(track),
+        TakeProblem::TrackGone { track } => new(R::TrackGoneWhileRecording).name(track),
     }
 }
 

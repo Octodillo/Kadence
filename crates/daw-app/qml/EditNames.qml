@@ -51,7 +51,6 @@ QtObject {
         "Mute Track": i18nc("@item:inmenu name of an edit", "Mute Track"),
         "Nudge": i18nc("@item:inmenu name of an edit", "Nudge"),
         "Quantize": i18nc("@item:inmenu name of an edit", "Quantize"),
-        "Record": i18nc("@item:inmenu name of an edit", "Record"),
         "Record Audio": i18nc("@item:inmenu name of an edit", "Record Audio"),
         "Record Notes": i18nc("@item:inmenu name of an edit", "Record Notes"),
         "Remove Automation Lane": i18nc("@item:inmenu name of an edit", "Remove Automation Lane"),

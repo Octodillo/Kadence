@@ -123,31 +123,35 @@ QQC2.ItemDelegate {
             QQC2.Menu {
                 id: inputMenu
 
+                // Each input on its own, then the pairs 1–2, 3–4 and so on,
+                // in one model so they stay in order above the separator.
                 Instantiator {
-                    model: header.inputCount
+                    model: {
+                        const choices = [];
+                        for (let i = 0; i < header.inputCount; ++i) {
+                            choices.push({ first: i, stereo: false });
+                        }
+                        for (let i = 0; i + 1 < header.inputCount; i += 2) {
+                            choices.push({ first: i, stereo: true });
+                        }
+                        return choices;
+                    }
                     delegate: QQC2.MenuItem {
-                        required property int index
-                        text: i18nc("@item:inmenu one audio input, %1 is its number", "Input %1", index + 1)
+                        required property var modelData
+                        text: modelData.stereo
+                            ? i18nc("@item:inmenu a pair of audio inputs recorded as stereo, %1 and %2 are input numbers",
+                                    "Inputs %1–%2 (Stereo)", modelData.first + 1, modelData.first + 2)
+                            : i18nc("@item:inmenu one audio input, %1 is its number", "Input %1", modelData.first + 1)
                         checkable: true
-                        checked: !header.inputStereo && header.input === index
-                        onTriggered: Project.setTrackInput(header.index, index, false)
+                        checked: header.inputStereo === modelData.stereo && header.input === modelData.first
+                        // Re-picking the current choice keeps it checked.
+                        onTriggered: {
+                            Project.setTrackInput(header.index, modelData.first, modelData.stereo);
+                            checked = Qt.binding(() => header.inputStereo === modelData.stereo
+                                                       && header.input === modelData.first);
+                        }
                     }
                     onObjectAdded: (i, item) => inputMenu.insertItem(i, item)
-                    onObjectRemoved: (i, item) => inputMenu.removeItem(item)
-                }
-
-                // Pairs 1–2, 3–4 and so on.
-                Instantiator {
-                    model: Math.floor(header.inputCount / 2)
-                    delegate: QQC2.MenuItem {
-                        required property int index
-                        text: i18nc("@item:inmenu a pair of audio inputs recorded as stereo, %1 and %2 are input numbers",
-                                    "Inputs %1–%2 (Stereo)", 2 * index + 1, 2 * index + 2)
-                        checkable: true
-                        checked: header.inputStereo && header.input === 2 * index
-                        onTriggered: Project.setTrackInput(header.index, 2 * index, true)
-                    }
-                    onObjectAdded: (i, item) => inputMenu.insertItem(header.inputCount + i, item)
                     onObjectRemoved: (i, item) => inputMenu.removeItem(item)
                 }
 

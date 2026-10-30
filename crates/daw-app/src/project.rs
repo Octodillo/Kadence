@@ -74,6 +74,7 @@ pub mod qobject {
         RecordingStopped,
         AudioDropped,
         PositionJumped,
+        TrackGoneWhileRecording,
         RecordXruns,
     }
 
@@ -322,6 +323,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::RecordingStopped => QR::RecordingStopped,
         Reason::AudioDropped => QR::AudioDropped,
         Reason::PositionJumped => QR::PositionJumped,
+        Reason::TrackGoneWhileRecording => QR::TrackGoneWhileRecording,
         Reason::RecordXruns => QR::RecordXruns,
     };
     let text = |s: &str| QVariant::from(&QString::from(s));
@@ -680,11 +682,15 @@ impl qobject::Project {
         let Some(mut input) = state::with(|s| track_at(s, index).map(|t| t.audio_input)) else {
             return;
         };
-        input.channels = if stereo {
+        let channels = if stereo {
             InputChannels::Stereo(first)
         } else {
             InputChannels::Mono(first)
         };
+        if input.channels == channels {
+            return;
+        }
+        input.channels = channels;
         self.set_track_field(index, TrackField::AudioInput(input));
     }
 

@@ -20,7 +20,9 @@
 //! So the take's first frame belongs at `p - (input + output + graph)`.
 //! Clips start on whole ticks; the clip starts on the first tick at or
 //! after that point and skips the frames before it with its file offset,
-//! which keeps every sample where it belongs.
+//! which keeps every sample where it belongs. A take longer than one WAV
+//! file holds (hours) becomes one clip per file; up to a tick of audio at
+//! each file boundary falls between the two clips.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +35,7 @@ use daw_model::{
 };
 
 use crate::Session;
+use crate::capture::TakeProgress;
 
 /// How long the disk may stall before recorded frames are dropped.
 const BUFFER_SECONDS: f32 = 4.0;
@@ -62,6 +65,9 @@ pub enum TakeProblem {
     /// take is early by that much.
     #[error("{frames} frames of {track} were lost")]
     Dropped { track: String, frames: u64 },
+    /// The track was deleted while recording; its take is thrown away.
+    #[error("track {track} was deleted while recording")]
+    TrackGone { track: String },
     /// The transport jumped (loop wrap, locate) while recording; the take
     /// runs straight on, so what came after the jump is placed after the
     /// part before it.
@@ -73,6 +79,7 @@ struct Take {
     track: TrackId,
     name: String,
     recorder: Recorder,
+    progress: TakeProgress,
     /// Reported so far, so each problem shows once.
     failed: bool,
     dropped: u64,
@@ -129,7 +136,7 @@ impl AudioTakes {
         for id in armed_audio_tracks(project).collect::<Vec<_>>() {
             let track = project.track(id).expect("listed above");
             let channels: InputChannels = track.audio_input.channels;
-            if channels.first() + channels.count() > inputs {
+            if u32::from(channels.first()) + u32::from(channels.count()) > u32::from(inputs) {
                 problems.push(TakeProblem::NoSuchInput {
                     track: track.name.clone(),
                 });
@@ -167,10 +174,12 @@ impl AudioTakes {
                 let _ = std::fs::remove_file(&path);
                 continue;
             }
+            let progress = tap.progress();
             takes.push(Take {
                 track: id,
                 name: track.name.clone(),
                 recorder,
+                progress,
                 failed: false,
                 dropped: 0,
             });
@@ -225,22 +234,20 @@ impl AudioTakes {
         let mut problems = Vec::new();
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
         for t in self.takes {
-            let (started, jumped) = match session.tap_mut(t.track) {
-                Some(tap) => {
-                    // A full queue only happens if stop is called in a burst;
-                    // a few tries are plenty. If it still fails, the tap
-                    // writes into a recorder nobody drains, which is harmless.
-                    for _ in 0..3 {
-                        if tap.stop() {
-                            break;
-                        }
+            if let Some(tap) = session.tap_mut(t.track) {
+                // A full queue only happens if stop is called in a burst; a
+                // few tries are plenty. If it still fails, the tap writes
+                // into a recorder nobody drains, which is harmless.
+                for _ in 0..3 {
+                    if tap.stop() {
+                        break;
                     }
-                    (tap.started_at(), tap.jumped())
                 }
-                // The track was deleted, or the graph rebuilt from scratch:
-                // the tap is gone and so is its start position.
-                None => (None, false),
-            };
+            }
+            // Read from the take's own record: if the track was deleted and
+            // brought back by undo, its tap is a new one, but the audio
+            // recorded until the deletion still belongs where it started.
+            let (started, jumped) = (t.progress.started_at(), t.progress.jumped());
             let stats = match t.recorder.finish() {
                 Ok(s) => s,
                 Err(e) => {
@@ -269,6 +276,11 @@ impl AudioTakes {
                 });
             }
             let alive = project.track(t.track).is_some();
+            if !alive && started.is_some() {
+                problems.push(TakeProblem::TrackGone {
+                    track: t.name.clone(),
+                });
+            }
             let mut at = started.map(|s| s - self.latency);
             for file in &stats.files {
                 let placed = at.and_then(|t0| place(session, t0, file.frames));

@@ -2,14 +2,13 @@
 //! outputs back into the inputs late by the latency it reports, and checks
 //! that the take lands where the played audio was.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use daw_backend::{AudioBackend, BackendConfig, DummyBackend, Latency, Pacing};
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
 use daw_media::{AudioData, WavFormat, decode_file, write_wav};
-use daw_model::commands::{AddClip, AddTrack, SetTrack, TrackField};
+use daw_model::commands::{AddClip, AddTrack, RemoveTrack, SetTrack, TrackField};
 use daw_model::{
     AudioClip, AudioInput, Clip, ClipContent, Document, InputChannels, Monitoring, Project, Track,
     TrackId, TrackKind,
@@ -153,6 +152,11 @@ fn impulses_on(rig: &Rig, track: TrackId) -> Vec<(i64, f32)> {
 }
 
 fn record_and_check(latency: Latency) {
+    record_and_check_with(latency, |_| {});
+}
+
+/// Records with `latency`, calling `during` once the take is under way.
+fn record_and_check_with(latency: Latency, during: impl FnOnce(&mut Rig)) {
     let mut rig = rig(latency);
     assert_eq!(rig.backend.latency().total(), latency.total());
     let (mut takes, problems) = AudioTakes::start(
@@ -165,11 +169,16 @@ fn record_and_check(latency: Latency) {
     assert_eq!(takes.tracks().collect::<Vec<_>>(), [rig.mic]);
     rig.session.play().unwrap();
     let beat = i64::from(RATE) / 2;
+    wait_past(&rig.session, beat);
+    during(&mut rig);
+    // Record on well past whatever `during` did, and past the source.
+    let after = rig.session.controller().position().0 + 24_000;
     wait_past(
         &rig.session,
-        beat + 20_000 + i64::from(latency.total()) + 4096,
+        after.max(beat + 20_000 + i64::from(latency.total()) + 4096),
     );
     assert!(takes.poll().is_empty());
+    let stopped_at = rig.session.controller().position().0;
     let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
     rig.session.stop().unwrap();
     rig.backend.stop().unwrap();
@@ -187,17 +196,25 @@ fn record_and_check(latency: Latency) {
     let ClipContent::Audio(a) = &clips[0].content else {
         panic!()
     };
-    assert!(a.source.starts_with("audio"), "{:?}", a.source);
-    assert!(Path::new(&rig.dir.path().join(&a.source)).exists());
+    assert!(rig.dir.path().join(&a.source).exists());
 
     // The source plays impulse i at beat + IMPULSES[i].0; the take must
     // have it at the same timeline position, within a sample.
+    // The take ran until it was stopped: its last frame belongs no earlier
+    // than a few periods before the stop, minus the latency.
+    let data = decode_file(rig.dir.path().join(&a.source)).unwrap();
+    let start = rig.session.ticks_to_samples(clips[0].start).0;
+    let file_end = start - a.offset.0 + data.frames() as i64;
+    assert!(
+        file_end >= stopped_at - i64::from(latency.total()) - 4 * i64::from(PERIOD),
+        "the take ends at {file_end}, stopped at {stopped_at}"
+    );
     let got = impulses_on(&rig, rig.mic);
     assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
     for ((t, v), (at, want)) in got.iter().zip(IMPULSES) {
         let expected = beat + at as i64;
         assert!(
-            (t - expected).abs() <= 1,
+            *t == expected,
             "impulse at {t}, played at {expected} (latency {latency:?})"
         );
         // The centre-panned strip scales it, but the ratio between
@@ -303,4 +320,68 @@ fn auto_monitoring_follows_arm_and_transport() {
     rig.session.sync(&rig.doc.snapshot()).unwrap();
     assert!(!rig.session.is_monitoring(rig.mic), "disarmed");
     rig.backend.stop().unwrap();
+}
+
+#[test]
+fn saving_to_a_new_place_mid_take_keeps_the_take() {
+    // Save As moves the project root, which rebuilds the graph.
+    record_and_check_with(
+        Latency {
+            input: 300,
+            output: 200,
+        },
+        |rig| {
+            let elsewhere = rig.dir.path().join("elsewhere");
+            // As Save As copies the project's audio along.
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::copy(
+                rig.dir.path().join("source.wav"),
+                elsewhere.join("source.wav"),
+            )
+            .unwrap();
+            rig.session.set_root(Some(elsewhere));
+            rig.session.sync(&rig.doc.snapshot()).unwrap();
+        },
+    );
+}
+
+#[test]
+fn deleting_the_track_mid_take_is_reported_and_undo_keeps_the_take() {
+    let mut rig = rig(Latency {
+        input: 300,
+        output: 200,
+    });
+    let audio = rig.dir.path().join("audio");
+    let (takes, _) = AudioTakes::start(&mut rig.session, rig.doc.project(), &audio, 500);
+    rig.session.play().unwrap();
+    wait_past(&rig.session, 5_000);
+    rig.doc.execute(RemoveTrack::new(rig.mic)).unwrap();
+    rig.session.sync(&rig.doc.snapshot()).unwrap();
+    let done = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
+    assert!(done.command.is_none());
+    assert!(
+        done.problems
+            .iter()
+            .any(|p| matches!(p, daw_session::record::TakeProblem::TrackGone { .. })),
+        "{:?}",
+        done.problems
+    );
+    assert_eq!(std::fs::read_dir(&audio).unwrap().count(), 0);
+
+    // Deleted and brought back by undo before stopping: the audio up to the
+    // deletion is kept where it was played.
+    let (takes, _) = AudioTakes::start(&mut rig.session, rig.doc.project(), &audio, 500);
+    assert!(takes.is_empty(), "the track is gone");
+    rig.doc.undo().unwrap();
+    rig.session.sync(&rig.doc.snapshot()).unwrap();
+    let (takes, _) = AudioTakes::start(&mut rig.session, rig.doc.project(), &audio, 500);
+    wait_past(&rig.session, rig.session.controller().position().0 + 5_000);
+    rig.doc.execute(RemoveTrack::new(rig.mic)).unwrap();
+    rig.session.sync(&rig.doc.snapshot()).unwrap();
+    rig.doc.undo().unwrap();
+    rig.session.sync(&rig.doc.snapshot()).unwrap();
+    let done = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
+    rig.backend.stop().unwrap();
+    assert!(done.problems.is_empty(), "{:?}", done.problems);
+    assert!(done.command.is_some());
 }

@@ -201,8 +201,14 @@ impl Session {
             return;
         }
         self.media.set_root(root);
-        // Paths may resolve differently now; rebuild everything.
-        self.built = None;
+        // Paths may resolve differently now; rebuild everything but the
+        // input taps, whose nodes hold takes being recorded (saving a new
+        // project while recording moves its root).
+        let taps = self.built.take().map(|b| b.taps).unwrap_or_default();
+        self.built = Some(Built {
+            taps,
+            ..Default::default()
+        });
     }
 
     /// Problems found by the last sync, such as audio files that could not

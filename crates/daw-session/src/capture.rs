@@ -76,6 +76,7 @@ pub(crate) fn input_tap(inputs: u16) -> (InputTap, TapHandle) {
             back: back_tx,
             recording: None,
             next: None,
+            pending: None,
         },
         TapHandle {
             shared,
@@ -161,9 +162,30 @@ impl TapHandle {
         self.shared.jumped.load(Ordering::Relaxed)
     }
 
+    /// Where the current take started and whether it jumped, readable even
+    /// after this handle and its node are gone (the track was deleted).
+    pub fn progress(&self) -> TakeProgress {
+        TakeProgress(self.shared.clone())
+    }
+
     /// Frees recording inputs the tap has given back.
     pub fn collect_garbage(&mut self) {
         while self.back.pop().is_some() {}
+    }
+}
+
+/// See [`TapHandle::progress`].
+pub struct TakeProgress(Arc<Shared>);
+
+impl TakeProgress {
+    /// Transport position, in samples, of the take's first frame.
+    pub fn started_at(&self) -> Option<i64> {
+        let s = self.0.started.load(Ordering::Acquire);
+        (s != NOWHERE).then_some(s)
+    }
+
+    pub fn jumped(&self) -> bool {
+        self.0.jumped.load(Ordering::Relaxed)
     }
 }
 
@@ -178,12 +200,30 @@ pub struct InputTap {
     /// Transport position the next recorded frame should have; a different
     /// one means the transport jumped.
     next: Option<i64>,
+    /// A command that waits for the previous input to be given back.
+    pending: Option<Command>,
 }
 
 impl InputTap {
     fn drain_commands(&mut self) {
-        while let Some(cmd) = self.commands.pop() {
+        // An input waiting for room in the back queue is retried every block.
+        if matches!(self.recording, Some((_, _, 0))) {
             self.give_back();
+        }
+        loop {
+            // A command waits while the old input can't be given back, so
+            // replacing it never drops it here.
+            if self.recording.as_ref().is_some_and(|r| r.2 == 0) {
+                return;
+            }
+            let Some(cmd) = self.pending.take().or_else(|| self.commands.pop()) else {
+                return;
+            };
+            self.give_back();
+            if self.recording.is_some() {
+                self.pending = Some(cmd);
+                return;
+            }
             if let Command::Start(input, ch) = cmd {
                 self.recording = Some((input, ch.first() as usize, ch.count() as usize));
             }
@@ -191,13 +231,12 @@ impl InputTap {
     }
 
     /// Sends the current input back to be dropped off the audio thread. If
-    /// the queue is full it is kept (and not written to) until there is
-    /// room.
+    /// the queue is full it is kept, muted (count 0 writes nothing), and
+    /// retried every block.
     fn give_back(&mut self) {
         if let Some((input, ..)) = self.recording.take() {
             self.next = None;
             if let Err(input) = self.back.push(input) {
-                // Keep it, muted: count 0 writes nothing. Retried next time.
                 self.recording = Some((input, 0, 0));
             }
         }
