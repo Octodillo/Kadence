@@ -148,6 +148,12 @@ impl From<ModelError> for Message {
     }
 }
 
+impl From<daw_session::SessionError> for Message {
+    fn from(e: daw_session::SessionError) -> Self {
+        Self::Playback(e)
+    }
+}
+
 fn file_fields(context: Context, e: &FormatError) -> Fields {
     use Reason as R;
     match e {

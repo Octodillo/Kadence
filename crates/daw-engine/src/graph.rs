@@ -175,8 +175,9 @@ impl GraphDesc {
     /// attach them again with [`automate`](Self::automate).
     ///
     /// The node's latency is the value it reported when it was first
-    /// compiled. A node whose latency changes needs a fresh instance (with
-    /// its state restored) for compensation to follow.
+    /// compiled, and it is not prepared again. Don't reuse plugins: add a
+    /// fresh [`PluginHandle::node`](crate::PluginHandle::node) to each graph,
+    /// so compensation follows their latency changes.
     ///
     /// Returns `None` if the graph was not made by
     /// [`EngineController::graph`](crate::EngineController::graph), no node

@@ -5,7 +5,8 @@
 //! Changing one needs a note in the architecture doc and a heads-up to the
 //! threads that depend on it. Adding a helper or a variant does not.
 //!
-//! The rest are real-time safe tools: [`queue`] for crossing threads,
+//! The rest are real-time safe tools: [`queue`] for crossing threads, [`exclusive`] for
+//! sharing one object between the audio thread and the main thread,
 //! [`dispose`] for freeing memory off the audio thread, [`rtlog`] for logging
 //! from it and [`meter`] for peak meters.
 //!
@@ -13,6 +14,7 @@
 
 pub mod dispose;
 pub mod event;
+pub mod exclusive;
 pub mod meter;
 pub mod node;
 pub mod plugin;

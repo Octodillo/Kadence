@@ -68,7 +68,8 @@ QtObject {
         "Split": i18nc("@item:inmenu name of an edit", "Split"),
         "Split Notes": i18nc("@item:inmenu name of an edit", "Split Notes"),
         "Toggle Automation": i18nc("@item:inmenu name of an edit", "Toggle Automation"),
-        "Transpose": i18nc("@item:inmenu name of an edit", "Transpose")
+        "Transpose": i18nc("@item:inmenu name of an edit", "Transpose"),
+        "Write Automation": i18nc("@item:inmenu name of an edit", "Write Automation")
     })
 
     function name(label: string): string {
