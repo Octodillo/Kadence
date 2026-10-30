@@ -8,9 +8,10 @@ use cxx_qt_lib::{
     QColor, QList, QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant,
 };
 use daw_core::time::{PPQ, TickTime};
-use daw_model::commands::{AddTrack, MoveTrack, RemoveTrack, SetTrack, TrackField};
+use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
 use daw_model::{FadeShape, Track, TrackKind};
 
+use crate::instrument;
 use crate::message::{Context, Fields, Message, Reason};
 use crate::recovery::Candidate;
 use crate::state::{self, AppState};
@@ -237,6 +238,16 @@ pub mod qobject {
         fn set_track_soloed(self: Pin<&mut Project>, index: i32, soloed: bool);
         #[qinvokable]
         fn rename_track(self: Pin<&mut Project>, index: i32, name: &QString);
+        /// The name of the track's instrument; empty when it has none.
+        #[qinvokable]
+        fn track_instrument(self: &Project, index: i32) -> QString;
+        /// The row in `Instruments` of the track's instrument, or -1.
+        #[qinvokable]
+        fn track_instrument_choice(self: &Project, index: i32) -> i32;
+        /// Swaps the track's instrument for row `choice` of `Instruments`
+        /// at its `revision`.
+        #[qinvokable]
+        fn set_track_instrument(self: Pin<&mut Project>, index: i32, choice: i32, revision: i32);
         #[qinvokable]
         fn select_track(self: Pin<&mut Project>, index: i32);
         /// Moves the track at `from` to index `to`, as one undo step.
@@ -911,7 +922,8 @@ impl qobject::Project {
                 .map_or(p.tracks.len(), |i| i + 1);
             let track = Track::new(kind, name);
             let id = track.id;
-            match s.doc.execute(AddTrack::new(at, track)) {
+            let command = instrument::add_track(at, track, s.instruments.default_choice());
+            match s.doc.execute_boxed(command) {
                 Ok(_) => s.arrange.selected_track = Some(id),
                 Err(e) => s.report(e.into()),
             }
@@ -979,6 +991,46 @@ impl qobject::Project {
 
     fn set_track_soloed(self: Pin<&mut Self>, index: i32, soloed: bool) {
         self.set_track_field(index, TrackField::Solo(soloed));
+    }
+
+    fn track_instrument(&self, index: i32) -> QString {
+        state::with(|s| {
+            track_at(s, index)
+                .and_then(|t| instrument::instrument_of(t))
+                .map(|d| QString::from(d.name.as_str()))
+        })
+        .unwrap_or_default()
+    }
+
+    fn track_instrument_choice(&self, index: i32) -> i32 {
+        state::with(|s| {
+            track_at(s, index)
+                .and_then(|t| instrument::instrument_of(t))
+                .and_then(|d| s.instruments.position(&d.source))
+                .and_then(|i| i32::try_from(i).ok())
+                .unwrap_or(-1)
+        })
+    }
+
+    fn set_track_instrument(self: Pin<&mut Self>, index: i32, choice: i32, revision: i32) {
+        // Read before `edit`, which holds the state.
+        let Some(choice) = crate::instruments_bridge::choice_at(choice, revision) else {
+            return;
+        };
+        self.edit(|s| {
+            let choice = &choice;
+            let Some(track) = track_at(s, index) else {
+                return;
+            };
+            let Some(command) = instrument::set_instrument(s.doc.project(), track.id, choice)
+            else {
+                return;
+            };
+            if let Err(e) = s.doc.execute_boxed(command) {
+                s.report(e.into());
+            }
+            s.doc.seal();
+        });
     }
 
     fn rename_track(self: Pin<&mut Self>, index: i32, name: &QString) {

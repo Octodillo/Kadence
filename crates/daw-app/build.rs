@@ -32,6 +32,7 @@ const QML_FILES: &[&str] = &[
     "qml/TrackHeader.qml",
     "qml/RecoveryDialog.qml",
     "qml/RelinkDialog.qml",
+    "qml/InstrumentButton.qml",
 ];
 
 /// Ask qmake (`QMAKE`, else `qmake6`, else `qmake`) for a Qt install path.
@@ -77,6 +78,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/mixer_bridge.rs",
+        "src/instruments_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",
