@@ -93,10 +93,14 @@ jobs:
         run: cargo nextest run --workspace --no-tests=warn
       - name: CMake install layout
         run: ci/check-install.sh
+      # Built in its own step: building daw-app alone unifies features
+      # differently from the workspace test build, so it recompiles most of
+      # the tree, which can take longer than the screenshot timeout allows.
+      - name: Build kadence (debug)
+        run: cargo build -p daw-app
       - name: Screenshots (Breeze light and dark, 100% and 200%)
         timeout-minutes: 10
         run: |
-          cargo build -p daw-app
           for scheme in BreezeLight BreezeDark; do
             for scale in 1 2; do
               XDG_CONFIG_HOME=$(mktemp -d) QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=$scale \

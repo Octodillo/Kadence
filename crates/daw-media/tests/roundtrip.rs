@@ -2,8 +2,8 @@ mod common;
 
 use common::{estimate_freq, max_abs_diff, test_signal};
 use daw_media::{
-    AudioData, Decoder, FlacBits, WavFormat, decode_file, load_file, resample, write_flac,
-    write_wav,
+    AudioData, Decoder, FlacBits, PeakCache, WavFormat, decode_file, load_file, resample,
+    write_flac, write_wav,
 };
 
 fn data_dir() -> std::path::PathBuf {
@@ -197,4 +197,34 @@ fn missing_and_garbage_files_are_errors() {
     let junk = dir.path().join("junk.wav");
     std::fs::write(&junk, b"definitely not audio").unwrap();
     assert!(decode_file(&junk).is_err());
+}
+
+/// Issue #28: rewriting a file with the same length inside the filesystem's mtime
+/// granularity (2 s on exFAT) left the old waveform cache looking current.
+#[test]
+fn rewriting_a_file_drops_its_peak_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bounce.wav");
+    let loud = AudioData {
+        sample_rate: 48_000,
+        channels: vec![vec![0.9; 48_000]],
+    };
+    let quiet = AudioData {
+        sample_rate: 48_000,
+        channels: vec![vec![0.1; 48_000]],
+    };
+    write_wav(&path, &loud, WavFormat::Pcm16).unwrap();
+    let old = PeakCache::load_or_build(&path).unwrap();
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    write_wav(&path, &quiet, WavFormat::Pcm16).unwrap();
+    // Simulate a coarse clock: same length, same mtime.
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    let new = PeakCache::load_or_build(&path).unwrap();
+    assert_ne!(new, old, "stale peaks served for the rewritten file");
+    assert_eq!(new, PeakCache::build(&path).unwrap());
 }

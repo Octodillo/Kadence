@@ -575,6 +575,7 @@ dependencies = [
  "daw-core",
  "daw-devices",
  "daw-engine",
+ "daw-model",
  "proptest",
 ]
 

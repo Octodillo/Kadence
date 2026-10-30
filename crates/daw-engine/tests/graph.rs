@@ -162,6 +162,28 @@ fn set_param_reaches_node() {
 }
 
 #[test]
+fn set_param_without_event_input_is_counted_as_dropped() {
+    let mut g = GraphDesc::new(1, 1);
+    let sine = g.add_device("sine", Box::new(Sine::new(1)));
+    g.connect(sine, g.master());
+    let input = g.input();
+    let (mut ctl, mut proc) = EngineController::new(config(64));
+    ctl.set_graph(g).unwrap();
+    // Neither the Input node nor a node without an event input can take a
+    // parameter change, so both must show up as dropped.
+    ctl.set_param(sine, 0, 1.0).unwrap();
+    ctl.set_param(input, 0, 1.0).unwrap();
+    let mut out = vec![0.0; 32];
+    proc.process(
+        32,
+        &[&[0.0; 32]],
+        &mut [&mut out],
+        &EventList::with_capacity(0),
+    );
+    assert_eq!(ctl.dropped_params(), 2);
+}
+
+#[test]
 fn transport_loops_inside_a_block() {
     let mut g = GraphDesc::new(0, 1);
     let pos = g.add_device("pos", Box::new(Position));
@@ -338,4 +360,70 @@ fn strip_ignores_nan_params() {
     );
     assert_eq!(l, input);
     assert_eq!(r, input);
+}
+
+/// Passes audio through and reports whatever latency it is given, like a
+/// misbehaving plugin, without allocating a buffer of that size.
+struct ReportsLatency(u32);
+
+impl daw_core::node::Node for ReportsLatency {
+    fn ports(&self) -> daw_core::node::PortLayout {
+        daw_core::node::PortLayout {
+            audio_in: 1,
+            audio_out: 1,
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+
+    fn process(&mut self, ctx: &mut daw_core::node::ProcessContext) {
+        let n = ctx.frames as usize;
+        ctx.audio_out[0][..n].copy_from_slice(&ctx.audio_in[0][..n]);
+    }
+
+    fn latency(&self) -> u32 {
+        self.0
+    }
+}
+
+/// A source feeding the master both directly and through a node with
+/// `latency`, so the direct edge needs a delay line of that length.
+fn parallel_paths(latency: u32) -> GraphDesc {
+    let mut g = GraphDesc::new(0, 1);
+    let sine = g.add_device("sine", Box::new(Sine::new(1)));
+    let late = g.add_device("late", Box::new(ReportsLatency(latency)));
+    g.connect(sine, late);
+    g.connect(sine, g.master());
+    g.connect(late, g.master());
+    g
+}
+
+#[test]
+fn clamps_unbounded_plugin_latency() {
+    // 0xFFFFFFFF from getLatencySamples would otherwise ask for a 16 GiB
+    // delay line on the direct edge and abort the process. The graph must
+    // still compile so the project keeps playing.
+    let max = (48_000.0 * daw_engine::MAX_LATENCY_SECONDS) as u32;
+    let g = parallel_paths(u32::MAX);
+    let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
+    assert_eq!(compiled.latency(), max);
+
+    // Latency that only adds up past the limit along a chain is clamped too,
+    // so a delay line for a parallel edge stays bounded.
+    let mut g = GraphDesc::new(0, 1);
+    let sine = g.add_device("sine", Box::new(Sine::new(1)));
+    let a = g.add_device("a", Box::new(ReportsLatency(max / 2 + 1)));
+    let b = g.add_device("b", Box::new(ReportsLatency(max / 2 + 1)));
+    g.connect(sine, a);
+    g.connect(a, b);
+    g.connect(b, g.master());
+    g.connect(sine, g.master());
+    let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
+    assert_eq!(compiled.latency(), max);
+
+    // A large but plausible latency is compensated exactly.
+    let g = parallel_paths(max - 1);
+    let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
+    assert_eq!(compiled.latency(), max - 1);
 }

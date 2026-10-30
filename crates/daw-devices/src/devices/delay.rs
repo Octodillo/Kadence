@@ -105,6 +105,9 @@ pub struct Delay {
     damping: [OnePole; 2],
     damping_coef: f32,
     time: Smoother,
+    /// Jump the delay time to the transport's tempo on the next render
+    /// instead of gliding, after a reset or a state load.
+    snap_time: bool,
     mix: Smoother,
     feedback: Smoother,
 }
@@ -124,6 +127,7 @@ impl Delay {
             damping: [OnePole::default(); 2],
             damping_coef: 1.0,
             time: Smoother::new(0.0),
+            snap_time: true,
             mix: Smoother::new(0.35),
             feedback: Smoother::new(0.4),
         }
@@ -154,7 +158,13 @@ impl Delay {
     }
 }
 
-impl_device!(Delay, INFO, PARAMS);
+impl_device!(Delay, INFO, PARAMS, {
+    fn snap_smoothing(&mut self) {
+        self.mix.reset(self.mix.target());
+        self.feedback.reset(self.feedback.target());
+        self.snap_time = true;
+    }
+});
 
 impl Segmented for Delay {
     fn param_event(&mut self, param: ParamId, value: f64) {
@@ -162,8 +172,13 @@ impl Segmented for Delay {
     }
 
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
-        self.time
-            .set_target(self.delay_samples(ctx.transport.bpm) as f32);
+        let time = self.delay_samples(ctx.transport.bpm) as f32;
+        if self.snap_time {
+            self.time.reset(time);
+            self.snap_time = false;
+        } else {
+            self.time.set_target(time);
+        }
         let ping_pong = self.params.get_bool(PING_PONG);
         let coef = self.damping_coef;
         for i in start..end {
@@ -229,8 +244,9 @@ impl Node for Delay {
         for d in &mut self.damping {
             d.reset();
         }
-        // Start at the current tempo's delay instead of gliding up from zero.
-        self.time.reset(self.delay_samples(120.0) as f32);
+        // Start at the transport tempo's delay instead of gliding to it; the
+        // tempo is only known once rendering starts.
+        self.snap_time = true;
     }
 }
 

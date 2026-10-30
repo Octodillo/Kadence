@@ -89,7 +89,11 @@ impl Utility {
     }
 }
 
-impl_device!(Utility, INFO, PARAMS);
+impl_device!(Utility, INFO, PARAMS, {
+    fn snap_smoothing(&mut self) {
+        self.snap();
+    }
+});
 
 impl Segmented for Utility {
     fn param_event(&mut self, param: ParamId, value: f64) {

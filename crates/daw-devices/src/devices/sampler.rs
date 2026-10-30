@@ -155,6 +155,7 @@ pub struct Zone {
     pub sample: Arc<SampleBuffer>,
     /// The sample's file as saved in the sampler's state, for example relative
     /// to a project. A zone without one is saved as a silent placeholder.
+    /// Update it along with `sample`, or the saved state names the old file.
     pub source: Option<PathBuf>,
     /// Key at which the sample plays at its recorded pitch (key-mapped mode).
     pub root_key: u8,
@@ -314,16 +315,20 @@ impl Sampler {
             return;
         };
         let zone = &self.zones[zone_index];
-        if zone.sample.is_empty() {
+        // A rate of 0 or NaN would leave a voice stuck on one sample forever.
+        let source_rate = zone.sample.sample_rate;
+        if zone.sample.is_empty() || !(source_rate.is_finite() && source_rate > 0.0) {
             return;
         }
         let mut semis = self.params.get(TUNE);
         if !self.one_shot() {
             semis += key as f64 - zone.root_key as f64;
         }
-        let rate = zone.sample.sample_rate / self.sample_rate * (semis / 12.0).exp2();
+        let rate = source_rate / self.sample_rate * (semis / 12.0).exp2();
         let sens = self.params.get_f32(VELOCITY);
-        let gain = db_to_gain(self.params.get(GAIN) + zone.gain_db as f64) as f32
+        // Multiply rather than add dB, so Gain at its -inf minimum stays silent
+        // whatever the zone's own gain.
+        let gain = (db_to_gain(self.params.get(GAIN)) * db_to_gain(zone.gain_db as f64)) as f32
             * (1.0 - sens + sens * velocity);
 
         if self.active_voices() >= VOICES {
@@ -459,6 +464,7 @@ impl Sampler {
         if let Some(zones) = zones {
             self.set_zones(zones);
         }
+        crate::Device::snap_smoothing(self);
         Ok(())
     }
 
@@ -533,6 +539,12 @@ impl Segmented for Sampler {
             Note::AllOff => {
                 for v in &mut self.voices {
                     v.env.gate_off();
+                }
+            }
+            Note::SoundOff => {
+                for v in self.voices.iter_mut().filter(|v| v.active && !v.stolen) {
+                    v.stolen = true;
+                    v.fade = 1.0;
                 }
             }
             Note::Bend(_) => {}
@@ -643,6 +655,37 @@ mod tests {
         s.note_on(101, 1.0, -1);
         assert!(!held(&s).contains(&0));
         assert!(held(&s).contains(&101));
+    }
+
+    /// Issue #27: the bound test only counted voices. Check which survive a
+    /// burst and that the stolen ones fade rather than stop.
+    #[test]
+    fn burst_keeps_the_newest_voices_and_fades_the_rest() {
+        let mut s = Sampler::new();
+        s.set_zones(vec![Zone::full(Arc::new(SampleBuffer::mono(
+            vec![0.5; 48000],
+            48000.0,
+        )))]);
+        for k in 0..(VOICES + 4) as u8 {
+            s.note_on(k, 1.0, -1);
+        }
+        let held: Vec<u8> = s
+            .voices
+            .iter()
+            .filter(|v| v.active && !v.stolen)
+            .map(|v| v.key)
+            .collect();
+        let mut sorted = held.clone();
+        sorted.sort();
+        assert_eq!(sorted, (4..(VOICES + 4) as u8).collect::<Vec<_>>());
+        let fading: Vec<u8> = s
+            .voices
+            .iter()
+            .filter(|v| v.active && v.stolen)
+            .map(|v| v.key)
+            .collect();
+        assert_eq!(fading.len(), 4);
+        assert!(fading.iter().all(|&k| k < 4));
     }
 
     #[test]

@@ -45,6 +45,13 @@ pub enum CompileError {
     StaleGraph,
 }
 
+/// The most latency compile compensates on any path through the graph, in
+/// seconds. Each early edge gets a delay line of up to this length, so a
+/// plugin reporting a huge latency must not make compile allocate gigabytes.
+/// Latency past the limit is clamped: the graph still plays, only that
+/// path's compensation is off.
+pub const MAX_LATENCY_SECONDS: f64 = 10.0;
+
 /// One summing input of a step: a source channel, optionally through a
 /// latency compensation delay.
 struct Source {
@@ -249,6 +256,7 @@ impl CompiledGraph {
         // Latency in topological order: a node's output is late by the
         // latest of its audio inputs plus its own latency. Every edge that
         // arrives early is delayed to match the latest one.
+        let max_latency = (sample_rate * MAX_LATENCY_SECONDS).min(u32::MAX as f64) as u32;
         let mut out_latency = vec![0u32; steps.len()];
         let mut in_latency = vec![0u32; steps.len()];
         for s in 0..steps.len() {
@@ -260,7 +268,7 @@ impl CompiledGraph {
                 .unwrap_or(0);
             in_latency[s] = latest;
             steps[s].in_latency = latest;
-            out_latency[s] = latest.saturating_add(steps[s].latency);
+            out_latency[s] = latest.saturating_add(steps[s].latency).min(max_latency);
         }
 
         let mut delays = Vec::new();
@@ -359,17 +367,20 @@ impl CompiledGraph {
     }
 
     /// Queues a parameter change for `node`, applied at the start of the next
-    /// cycle. RT-safe. Returns `false` if the node is unknown or its queue is
-    /// full.
+    /// cycle. RT-safe. Returns `false` if the node is unknown, has no event
+    /// input to deliver the change to, or its queue is full.
     pub(crate) fn queue_param(&mut self, node: NodeId, param: u32, value: f64) -> bool {
         let Some(&step) = self.index.get(node.0 as usize) else {
             return false;
         };
+        let step = &mut self.steps[step];
+        // The Input node is never processed, and a node without an event
+        // input has no room in `events_in`, so the change would be lost.
+        if step.kind == NodeKind::Input || !step.ports.event_in {
+            return false;
+        }
         let kind = daw_core::event::EventKind::ParamValue { param, value };
-        self.steps[step]
-            .params
-            .push(Event { frame: 0, kind })
-            .is_ok()
+        step.params.push(Event { frame: 0, kind }).is_ok()
     }
 
     /// The master's output for the last processed block.

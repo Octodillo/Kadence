@@ -73,6 +73,9 @@ struct Shared {
     seek_generation: AtomicU64,
     seek_frame: AtomicI64,
     failed: AtomicBool,
+    /// Test hook: make the next fill of this stream panic, as a broken decoder might.
+    #[cfg(test)]
+    panic_next_fill: AtomicBool,
 }
 
 /// Owns the fill thread. Dropping it stops the thread; readers then underrun.
@@ -128,6 +131,8 @@ impl DiskStreamer {
             seek_generation: AtomicU64::new(0),
             seek_frame: AtomicI64::new(0),
             failed: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_next_fill: AtomicBool::new(false),
         });
         let frames = info.frames.map(|f| {
             (u128::from(f) * u128::from(rate) / u128::from(info.sample_rate.max(1))) as u64
@@ -150,6 +155,7 @@ impl DiskStreamer {
             scratch: vec![0.0; self.config.block_frames * ch],
             src_eof: false,
             eof_sent: false,
+            poisoned: false,
         };
         self.tx
             .as_ref()
@@ -438,16 +444,68 @@ struct WorkerStream {
     scratch: Vec<f32>,
     src_eof: bool,
     eof_sent: bool,
+    /// A fill panicked (a decoder bug on a corrupt file). The decoder state can't be
+    /// trusted, so the stream only reports its end until the reader drops it.
+    poisoned: bool,
 }
 
 impl WorkerStream {
+    /// Fill one block, containing a panic to this stream so one bad file can't stop
+    /// the shared fill thread and silence every other track.
+    fn fill_guarded(&mut self, block_frames: usize) -> bool {
+        if self.poisoned {
+            // Answer a seek with an immediate end at the target, so the reader is not
+            // left waiting for data that will never come.
+            let g = self.shared.seek_generation.load(Ordering::Acquire);
+            if g != self.generation {
+                self.generation = g;
+                let target = self.shared.seek_frame.load(Ordering::Relaxed).max(0);
+                self.next_frame = target;
+                self.skip_to = target;
+                self.eof_sent = false;
+            }
+            self.announce_failed_end();
+            return false;
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if self.shared.panic_next_fill.swap(false, Ordering::Relaxed) {
+                panic!("test: decoder panicked");
+            }
+            self.fill_once(block_frames)
+        }));
+        r.unwrap_or_else(|_| {
+            self.poisoned = true;
+            self.shared.failed.store(true, Ordering::Relaxed);
+            self.announce_failed_end();
+            true
+        })
+    }
+
+    /// Tell the reader the stream ended at the last pushed frame, retrying while the
+    /// segment queue is full.
+    fn announce_failed_end(&mut self) {
+        if self.eof_sent || self.segs.slots() == 0 {
+            return;
+        }
+        let _ = self.segs.push(Segment {
+            generation: self.generation,
+            start: self.next_frame.max(self.skip_to),
+            frames: 0,
+            eof: true,
+        });
+        self.eof_sent = true;
+    }
+
     /// Push at most one block. Returns true if it did anything.
     fn fill_once(&mut self, block_frames: usize) -> bool {
         let g = self.shared.seek_generation.load(Ordering::Acquire);
         if g != self.generation {
-            self.generation = g;
             let target = self.shared.seek_frame.load(Ordering::Relaxed);
             self.seek(target);
+            // Only after the seek: if it panics, the poisoned path still sees the
+            // pending seek and reports the end at its target.
+            self.generation = g;
         }
         if self.eof_sent || self.segs.slots() == 0 {
             return false;
@@ -597,7 +655,7 @@ fn worker(rx: mpsc::Receiver<WorkerStream>, stop: Arc<AtomicBool>, config: Strea
         loop {
             let mut busy = false;
             for s in &mut streams {
-                busy |= s.fill_once(config.block_frames);
+                busy |= s.fill_guarded(config.block_frames);
             }
             if !busy || stop.load(Ordering::Relaxed) {
                 break;
@@ -606,5 +664,65 @@ fn worker(rx: mpsc::Receiver<WorkerStream>, stop: Arc<AtomicBool>, config: Strea
         // The reader went away: drop our end, which frees the buffers here, not on the RT thread.
         streams.retain(|s| !s.data.is_abandoned());
         std::thread::sleep(config.poll_interval);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AudioData, WavFormat, write_wav};
+    use daw_core::SampleTime;
+
+    fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
+        let t = std::time::Instant::now();
+        while !f() {
+            assert!(t.elapsed() < Duration::from_secs(10), "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Issue #28: a panic inside one stream's decoder killed the shared fill thread,
+    /// silencing every streamed track with no failure signal.
+    #[test]
+    fn decoder_panic_fails_only_that_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.wav");
+        let data = AudioData {
+            sample_rate: 48_000,
+            channels: vec![vec![0.5; 48_000 * 4]],
+        };
+        write_wav(&path, &data, WavFormat::Float32).unwrap();
+        let streamer = DiskStreamer::new(StreamerConfig {
+            buffer_seconds: 0.2,
+            ..StreamerConfig::default()
+        });
+        let mut bad = streamer.open(&path).unwrap();
+        let mut good = streamer.open(&path).unwrap();
+        wait_for("both ready", || bad.is_ready() && good.is_ready());
+        bad.shared.panic_next_fill.store(true, Ordering::Relaxed);
+        wait_for("panic reported", || bad.failed());
+        assert!(!good.failed());
+
+        // The healthy stream keeps being filled well past its 0.2 s buffer. Read at
+        // about twice real time; with a dead fill thread nearly every read underruns.
+        let mut buf = vec![0.0f32; 256];
+        let mut ok = 0;
+        let reads = 48_000 * 2 / 256;
+        for k in 0..reads {
+            let status = good.read(SampleTime(k as i64 * 256), &mut [&mut buf[..]]);
+            if status == ReadStatus::Ok && buf.iter().all(|&s| s == 0.5) {
+                ok += 1;
+            }
+            std::thread::sleep(Duration::from_micros(2500));
+        }
+        assert!(ok * 10 >= reads * 9, "only {ok} of {reads} reads had audio");
+        // The failed one reads as silence, including after a seek.
+        bad.cue(SampleTime(48_000 * 3));
+        wait_for("failed stream answers a seek", || bad.is_ready());
+        assert_eq!(
+            bad.read(SampleTime(48_000 * 3), &mut [&mut buf[..]]),
+            ReadStatus::Ok
+        );
+        assert!(buf.iter().all(|&s| s == 0.0));
     }
 }

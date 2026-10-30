@@ -29,7 +29,7 @@ mod render;
 mod transport;
 
 pub use automation::{AutomationLane, AutomationPoint, AutomationRecorder, Curve, RAMP_INTERVAL};
-pub use compile::{CompileError, CompiledGraph, MAX_CHANNELS};
+pub use compile::{CompileError, CompiledGraph, MAX_CHANNELS, MAX_LATENCY_SECONDS};
 pub use engine::{EngineConfig, EngineController, EngineError, EngineProcessor, SendError};
 pub use graph::{AudioEdge, EventEdge, GraphDesc, NodeId, NodeKey, NodeKind};
 pub use meter::NodeMeter;
