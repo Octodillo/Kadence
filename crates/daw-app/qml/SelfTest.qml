@@ -178,8 +178,14 @@ Item {
             if (!window.smokeTest) {
                 return;
             }
-            check(Plugins.installedCount >= 1, "the test plugin is found");
+            // smoke.rs puts the CLAP test plugin in CLAP_PATH; a packaged
+            // smoke test runs with whatever plugins the system has.
             Plugins.setFilter("test gain", 1, 2);
+            if (Plugins.count === 0) {
+                console.info("smoke test: no test plugin; skipping the plugin checks");
+                return;
+            }
+            console.info("smoke test: checking the test plugin");
             check(Plugins.count === 1, "search finds it");
             Plugins.setFilter("test gain", 0, 1);
             check(Plugins.count === 0, "it is not an instrument");
@@ -191,7 +197,7 @@ Item {
         },
         () => {
             test.browser.close();
-            if (window.smokeTest) {
+            if (window.smokeTest && test.picked !== null) {
                 Project.tick();
                 check(Project.undoText === "Add Device", "the plugin was inserted");
                 Project.undo();

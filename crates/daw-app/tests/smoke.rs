@@ -16,26 +16,33 @@ fn plugin_folder() -> &'static Path {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let target = root.join("target").join("clap-test-plugin");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let status = Command::new(cargo)
-            .args([
-                "build",
-                "--quiet",
-                "--package",
-                "daw-clap-test-plugin",
-                "--lib",
-            ])
-            .arg("--target-dir")
-            .arg(&target)
-            .current_dir(&root)
-            .status()
-            .expect("run cargo");
-        assert!(status.success(), "building the test plugin failed");
+        let lib = target.join("debug").join("libdaw_clap_test_plugin.so");
+        let build = |command: &str| {
+            let mut cmd = Command::new(&cargo);
+            cmd.args([command, "--quiet", "--package", "daw-clap-test-plugin"]);
+            if command == "build" {
+                cmd.arg("--lib");
+            }
+            let status = cmd
+                .arg("--target-dir")
+                .arg(&target)
+                .current_dir(&root)
+                .status()
+                .expect("run cargo");
+            assert!(
+                status.success(),
+                "cargo {command} of the test plugin failed"
+            );
+        };
+        build("build");
+        if !lib.exists() {
+            // A CI cache can keep the build's fingerprints but drop the
+            // library itself, so cargo sees nothing to rebuild.
+            build("clean");
+            build("build");
+        }
         let dir = tempdir("plugins");
-        std::fs::copy(
-            target.join("debug").join("libdaw_clap_test_plugin.so"),
-            dir.join("test-gain.clap"),
-        )
-        .expect("copy the test plugin");
+        std::fs::copy(&lib, dir.join("test-gain.clap")).expect("copy the test plugin");
         dir
     })
 }
@@ -117,6 +124,10 @@ fn smoke_test_passes_and_saves_settings() {
     let log = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "smoke test failed:\n{log}");
     assert!(log.contains("smoke test: passed"), "no pass line:\n{log}");
+    assert!(
+        log.contains("smoke test: checking the test plugin"),
+        "the plugin browser checks did not run:\n{log}"
+    );
     assert!(
         log.contains("startup audio: 0 48000 256"),
         "fresh config should start on defaults:\n{log}"
