@@ -166,11 +166,7 @@ impl Rig {
             "dc",
             TickTime(0),
             TickTime(16 * PPQ),
-            ClipContent::Audio(AudioClip {
-                source: path,
-                offset: SampleTime(0),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new(path, SampleTime(0))),
         );
         let device = gain_plugin();
         let device_id = device.id;
