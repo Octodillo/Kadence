@@ -66,7 +66,6 @@ pub fn run_host_child(
         stream,
         plugin: Arc::new(Mutex::new(None)),
         audio: None,
-        instantiated_with: None,
         layout_changed: Cell::new(false),
         rt_priority: None,
     };
@@ -114,9 +113,6 @@ struct Host<'a> {
     stream: UnixStream,
     plugin: SharedPlugin,
     audio: Option<AudioThread>,
-    /// Sample rate and max frames the plugin was instantiated, and so prepared, with, until the
-    /// first `Prepare`.
-    instantiated_with: Option<(f64, u32)>,
     /// The plugin asked to be prepared again, and the application has not been told yet.
     layout_changed: Cell<bool>,
     rt_priority: Option<i32>,
@@ -227,7 +223,6 @@ impl Host<'_> {
                                 has_editor: p.has_editor(),
                             };
                             *lock(&self.plugin) = Some(p);
-                            self.instantiated_with = Some((sample_rate, max_frames));
                             Reply::Instantiated(info)
                         })
                 }
@@ -236,7 +231,8 @@ impl Host<'_> {
                 sample_rate,
                 max_frames,
                 shm,
-            } => self.prepare(sample_rate, max_frames, shm.as_deref()),
+                prepare,
+            } => self.prepare(sample_rate, max_frames, shm.as_deref(), prepare),
             Request::Params => self.with_plugin(|p| {
                 Ok(Reply::Params(
                     p.params().iter().map(WireParam::from).collect(),
@@ -285,6 +281,7 @@ impl Host<'_> {
         sample_rate: f64,
         max_frames: u32,
         shm: Option<&Path>,
+        prepare: bool,
     ) -> Result<Reply, PluginError> {
         if lock(&self.plugin).is_none() {
             return Err(PluginError::Load("no plugin loaded".into()));
@@ -292,20 +289,27 @@ impl Host<'_> {
         // No audio cycle may run while the plugin is re-prepared or the block changes.
         let old = self.stop_audio();
         let block = match shm {
-            Some(path) => Some(Arc::new(Shm::open(path).map_err(|e| {
-                PluginError::Load(format!("cannot map the audio block: {e}"))
-            })?)),
+            Some(path) => {
+                let new =
+                    Arc::new(Shm::open(path).map_err(|e| {
+                        PluginError::Load(format!("cannot map the audio block: {e}"))
+                    })?);
+                // A change reported on the old block and not yet taken carries over.
+                if let Some(old) = &old
+                    && old.header().layout_changed.load(Ordering::Acquire) != 0
+                {
+                    new.header().layout_changed.store(1, Ordering::Release);
+                }
+                Some(new)
+            }
             None => old,
         };
-        // Preparing again is how the application answers a layout change, so only the prepare
-        // that instantiating already did is skipped.
-        let already = self.instantiated_with.take() == Some((sample_rate, max_frames));
         // The audio thread is stopped, so flag the block it restarts with: a cycle the
         // application posts meanwhile waits for this.
         let ports = {
             let mut inside = InsidePlugin::lock(&self.plugin, block.clone());
             let p = inside.as_mut().expect("checked above");
-            if !already {
+            if prepare {
                 p.prepare(sample_rate, max_frames);
                 // This prepare is the one the plugin asked for.
                 p.take_layout_changed();
@@ -672,7 +676,6 @@ mod tests {
             stream,
             plugin: plugin.clone(),
             audio: Some(AudioThread::start(shm.clone(), plugin, None)),
-            instantiated_with: None,
             layout_changed: Cell::new(false),
             rt_priority: None,
         };
@@ -709,7 +712,6 @@ mod tests {
                     stream,
                     plugin: plugin.clone(),
                     audio: Some(AudioThread::start(shm.clone(), plugin.clone(), None)),
-                    instantiated_with: None,
                     layout_changed: Cell::new(false),
                     rt_priority: None,
                 };
@@ -774,7 +776,6 @@ mod tests {
             stream,
             plugin: Arc::new(Mutex::new(None)),
             audio: None,
-            instantiated_with: None,
             layout_changed: Cell::new(false),
             rt_priority: None,
         };

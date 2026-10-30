@@ -667,3 +667,15 @@ fn layout_changes_in_the_host_reach_the_application() {
     let (out, _) = run(&mut plugin, 64, 0.5, &[]);
     assert!(out[0].iter().all(|x| x.is_finite()));
 }
+
+/// A prepare with unchanged settings still reaches the plugin when the host has reported a
+/// change that `on_main_thread` has not picked up yet.
+#[test]
+fn a_prepare_answers_a_change_not_yet_picked_up() {
+    let mut plugin = instance();
+    plugin.load_state(&latency_state(b"DAWL", 64)).unwrap();
+    // The host publishes the flag after answering; give it a moment.
+    std::thread::sleep(Duration::from_millis(100));
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 64);
+}

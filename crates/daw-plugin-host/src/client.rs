@@ -420,7 +420,9 @@ impl Link {
                 max_frames: max_frames.max(1),
                 event_capacity: EVENT_CAPACITY,
             };
-            let (shm, latency, _) = map_block(&control, layout, sample_rate, max_frames, config)?;
+            // Instantiating prepared the plugin with these settings already.
+            let (shm, latency, _) =
+                map_block(&control, layout, sample_rate, max_frames, false, config)?;
             Ok((control, info, shm, latency))
         })();
         let (control, info, shm, latency) = match started {
@@ -495,13 +497,14 @@ impl Link {
     }
 }
 
-/// Creates a block for `layout`, has the host map it (and prepare), then removes its file.
-/// Returns the block, the plugin's latency and its ports.
+/// Creates a block for `layout`, has the host map it (and prepare the plugin, if `prepare`),
+/// then removes its file. Returns the block, the plugin's latency and its ports.
 fn map_block(
     control: &UnixStream,
     layout: Layout,
     sample_rate: f64,
     max_frames: u32,
+    prepare: bool,
     config: &SandboxConfig,
 ) -> Result<(Shm, u32, PortLayout), PluginError> {
     let (shm, path) = Shm::create(&shm_dir(), layout)
@@ -513,6 +516,7 @@ fn map_block(
             sample_rate,
             max_frames,
             shm: Some(path.0.clone()),
+            prepare,
         },
         &[],
         config.call_timeout,
@@ -702,6 +706,9 @@ pub struct SandboxedInstance {
     /// The host reported that the plugin wants to be prepared again; see
     /// [`PluginInstance::take_layout_changed`].
     layout_changed: bool,
+    /// The settings the plugin in the host is prepared with, while nothing has asked for
+    /// another prepare since. A prepare with them has nothing to do.
+    prepared_with: Option<(f64, u32)>,
     sample_rate: f64,
     max_frames: u32,
     /// The last state saved from or loaded into the plugin.
@@ -739,6 +746,8 @@ impl SandboxedInstance {
             editor_open: false,
             latency,
             layout_changed: false,
+            // Instantiating prepared it.
+            prepared_with: Some((sample_rate, max_frames.max(1))),
             sample_rate,
             max_frames,
             state: None,
@@ -815,9 +824,16 @@ impl SandboxedInstance {
             self.editor_open = false;
             let _ = self.open_editor();
         }
-        // The new host's plugin may not match what the engine last prepared.
+        // The new host's plugin may not match what the engine last prepared. Ports and latency
+        // stay as the engine has them until it prepares again; `process` copes with a block
+        // of other channel counts meanwhile.
+        // The new host prepared its plugin with the current settings.
+        self.prepared_with = Some((self.sample_rate, self.max_frames));
         if self.ports != old_ports || self.latency != old_latency {
+            self.ports = old_ports;
+            self.latency = old_latency;
             self.layout_changed = true;
+            self.prepared_with = None;
         }
         restored
     }
@@ -854,6 +870,7 @@ impl SandboxedInstance {
                 layout,
                 self.sample_rate,
                 self.max_frames,
+                true,
                 &self.config,
             )?;
             (Some(shm), latency, ports)
@@ -862,6 +879,7 @@ impl SandboxedInstance {
                 sample_rate: self.sample_rate,
                 max_frames: self.max_frames,
                 shm: None,
+                prepare: true,
             };
             match self.control(request, &[])? {
                 (Reply::Prepared(ports), _, latency) => (None, latency, (&ports).into()),
@@ -891,11 +909,13 @@ impl SandboxedInstance {
                 audio_out,
                 ..block
             };
+            // The plugin is prepared already; this only swaps the block.
             let (shm, latency, ports) = map_block(
                 &link.control,
                 layout,
                 self.sample_rate,
                 self.max_frames,
+                false,
                 &self.config,
             )?;
             self.install_block(shm);
@@ -1170,12 +1190,22 @@ impl Node for SandboxedInstance {
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
         self.layout_changed = false;
+        let settings = (sample_rate, self.max_frames);
+        // Skipping this is safe because a layout change clears `prepared_with`, and one the
+        // host reported that `on_main_thread` has not picked up yet is still in the block.
+        let reported = self
+            .running()
+            .is_some_and(|link| link.shm.header().layout_changed.load(Ordering::Acquire) != 0);
+        if self.prepared_with.take() == Some(settings) && !reported {
+            self.prepared_with = Some(settings);
+            return;
+        }
         let Some(link) = self.running() else {
             return;
         };
         let generation = link.generation;
         match self.prepare_host() {
-            Ok(()) => {}
+            Ok(()) => self.prepared_with = Some(settings),
             Err(e) => {
                 // `prepare` cannot fail; a host that cannot prepare is as good as crashed.
                 if self
@@ -1361,6 +1391,7 @@ impl PluginInstance for SandboxedInstance {
             && link.shm.header().layout_changed.swap(0, Ordering::AcqRel) != 0
         {
             self.layout_changed = true;
+            self.prepared_with = None;
         }
     }
 

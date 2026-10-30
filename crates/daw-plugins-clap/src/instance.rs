@@ -583,6 +583,11 @@ impl plugin::PluginInstance for ClapInstance {
         self.params = self.read_params();
         if self.processor.is_some() && self.read_latency() != self.latency {
             self.layout_changed = true;
+            // The prepare this asks for is also the restart, or reads the latency, that the
+            // plugin may have asked for while loading: one report covers them.
+            self.take_flag(|s| &s.restart_requested);
+            self.inst()
+                .access_handler(|h| HostShared::take(&h.latency_changed));
         }
         Ok(())
     }
@@ -705,8 +710,12 @@ impl plugin::PluginInstance for ClapInstance {
         });
         if rescan {
             self.params = self.read_params();
-            // Gaining the first parameter or losing the last changes the event ports.
-            if self.params.is_empty() == self.layout.has_params {
+            // Gaining the first parameter or losing the last changes the event ports. Counted
+            // as `read_layout` counts them, hidden ones included.
+            let params = self.ext.params;
+            let handle = self.inst().plugin_handle();
+            let has_params = params.is_some_and(|p| p.count(&handle) > 0);
+            if has_params != self.layout.has_params {
                 self.layout_changed = true;
             }
         }

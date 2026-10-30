@@ -23,13 +23,14 @@ pub enum Request {
         max_frames: u32,
         rt_priority: Option<i32>,
     },
-    /// Calls `Node::prepare`, except for the first request after `Instantiate` with the same
-    /// settings, which the plugin was already prepared with. With `shm`, the host maps that block
-    /// and processes through it from now on. Answered with [`Reply::Prepared`].
+    /// With `shm`, the host maps that block and processes through it from now on. With
+    /// `prepare`, it calls `Node::prepare` with the settings; without, it only swaps the block,
+    /// for a plugin already prepared with them. Answered with [`Reply::Prepared`].
     Prepare {
         sample_rate: f64,
         max_frames: u32,
         shm: Option<PathBuf>,
+        prepare: bool,
     },
     Params,
     ParamValue(ParamId),

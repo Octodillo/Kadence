@@ -358,20 +358,31 @@ fn latency_changes_wait_for_the_next_prepare() {
 #[test]
 fn restart_requests_wait_for_the_next_prepare() {
     let mut plugin = instance();
-    plugin.load_state(&latency_state(b"DAWR", 48)).unwrap();
-    // Also flagged by the latency change; take it so only the restart request is left.
-    plugin.take_layout_changed();
+    // Same latency: only the restart request is left to report.
+    plugin.load_state(&latency_state(b"DAWR", 32)).unwrap();
+    assert!(!plugin.take_layout_changed());
     plugin.on_main_thread();
     assert!(plugin.take_layout_changed());
-    assert_eq!(plugin.latency(), 32);
     // Still processing with the old activation meanwhile.
     let (out, _) = run(plugin.as_mut(), 64, 0.5, &[]);
     assert!(out[0].iter().any(|&x| x != 0.0));
 
     plugin.prepare(SR, MAX);
-    assert_eq!(plugin.latency(), 48);
     plugin.on_main_thread();
     assert!(!plugin.take_layout_changed());
+}
+
+/// State that changes the latency and also asks for a restart is one report, not two.
+#[test]
+fn a_latency_change_and_restart_from_one_load_are_reported_once() {
+    let mut plugin = instance();
+    plugin.load_state(&latency_state(b"DAWR", 48)).unwrap();
+    assert!(plugin.take_layout_changed());
+    assert_eq!(plugin.latency(), 32);
+    plugin.on_main_thread();
+    assert!(!plugin.take_layout_changed(), "reported twice");
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 48);
 }
 
 /// A restart request that a prepare got to first is answered by that prepare.
