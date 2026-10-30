@@ -65,6 +65,17 @@ pub trait PluginInstance: Node {
     fn close_editor(&mut self);
     /// Host idle / main-thread callback pump.
     fn on_main_thread(&mut self) {}
+    /// Returns true, once, after the plugin asked for another port layout or latency, as
+    /// noticed by [`on_main_thread`](Self::on_main_thread). The host should then recompile
+    /// the graph that holds the instance, which prepares it again and picks up the new
+    /// `ports` and `latency`.
+    ///
+    /// Formats that implement this keep `ports` and `latency` unchanged until that
+    /// [`Node::prepare`]; a plugin that cannot go on with its old layout outputs silence
+    /// until then. The default never reports a change.
+    fn take_layout_changed(&mut self) -> bool {
+        false
+    }
 }
 
 /// One plugin format: knows where its plugins live, how to scan them and how

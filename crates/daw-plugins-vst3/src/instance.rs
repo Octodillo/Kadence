@@ -228,6 +228,13 @@ pub struct Vst3Instance {
     latency: u32,
     active: bool,
     processing: bool,
+    /// The plugin asked for a new port layout or latency since the last `prepare`. Reported
+    /// once through `take_layout_changed`.
+    layout_changed: bool,
+    /// The plugin's buses no longer match `rt`, so `process` outputs silence until `prepare`.
+    io_stale: bool,
+    /// The speaker arrangements `prepare` settled on, inputs then outputs.
+    arrangements: (Vec<SpeakerArrangement>, Vec<SpeakerArrangement>),
 
     /// Edits from the plugin's editor, read by `process`.
     edits_rx: rtrb::Consumer<Edit>,
@@ -441,6 +448,9 @@ impl Vst3Instance {
                 latency: 0,
                 active: false,
                 processing: false,
+                layout_changed: false,
+                io_stale: false,
+                arrangements: Default::default(),
                 edits_rx,
                 to_controller_tx,
                 to_controller_rx: Mutex::new(to_controller_rx),
@@ -593,7 +603,8 @@ impl Vst3Instance {
     /// instance includes them. `&mut self` means the audio thread is not using it. Edits
     /// flushed this way are not reported to the host as `ParamValue` events.
     fn flush_edits(&mut self) {
-        if !self.processing {
+        // While stale, `rt`'s buffers no longer match the plugin's buses.
+        if !self.processing || self.io_stale {
             return;
         }
         let Some(rt) = self.rt.as_deref_mut() else {
@@ -627,19 +638,47 @@ impl Vst3Instance {
         }
     }
 
+    /// Asks the plugin to go back to the arrangements from `prepare` after it changed its
+    /// buses. Returns whether its buses match `rt` again.
+    fn keep_layout(&mut self) -> bool {
+        let old = (self.buses.inputs.clone(), self.buses.outputs.clone());
+        let (mut ins, mut outs) = self.arrangements.clone();
+        self.deactivate();
+        let now = read_buses(&self.component);
+        let kept = now.inputs.len() == ins.len()
+            && now.outputs.len() == outs.len()
+            && unsafe {
+                self.processor.setBusArrangements(
+                    ins.as_mut_ptr(),
+                    ins.len() as i32,
+                    outs.as_mut_ptr(),
+                    outs.len() as i32,
+                )
+            } == kResultTrue
+            && {
+                let now = read_buses(&self.component);
+                (now.inputs, now.outputs) == old
+            };
+        // Back to processing either way; `process` stays silent while the layout differs.
+        self.activate();
+        kept
+    }
+
     fn handle_restart(&mut self) {
         let flags = self.handler.take_restart_flags();
         if flags == 0 {
             return;
         }
+        // The engine reads ports and latency once per prepare, so neither changes here: the
+        // host learns through `take_layout_changed` and may prepare again, which renegotiates
+        // the buses and does the deactivate/activate cycle the spec asks for before reading
+        // the new latency. Until then the plugin is asked to keep the layout the engine has.
         if flags & (RestartFlags_::kIoChanged as i32) != 0 && self.rt.is_some() {
-            self.buses = read_buses(&self.component);
-            let (sr, frames) = (self.sample_rate, self.max_frames);
-            self.prepare(sr, frames);
-        } else if flags & (RestartFlags_::kLatencyChanged as i32) != 0 && self.active {
-            // The spec asks for a deactivate/activate cycle before reading the new latency.
-            self.deactivate();
-            self.activate();
+            self.layout_changed = true;
+            self.io_stale = !self.keep_layout();
+        }
+        if flags & (RestartFlags_::kLatencyChanged as i32) != 0 && self.active {
+            self.layout_changed = true;
         }
         if flags
             & (RestartFlags_::kParamValuesChanged as i32
@@ -727,6 +766,10 @@ impl Node for Vst3Instance {
 
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
         self.deactivate();
+        self.layout_changed = false;
+        self.io_stale = false;
+        // The plugin may have added or removed buses since they were last read.
+        self.buses = read_buses(&self.component);
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
         unsafe {
@@ -757,6 +800,10 @@ impl Node for Vst3Instance {
                 outs.len() as i32,
             );
             self.buses = read_buses(&self.component);
+            self.arrangements = (
+                arrangements(BusDirections_::kInput as i32, self.buses.inputs.len()),
+                arrangements(BusDirections_::kOutput as i32, self.buses.outputs.len()),
+            );
 
             for (media, dir, n) in [
                 (
@@ -790,7 +837,8 @@ impl Node for Vst3Instance {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        let Some(rt) = self.rt.as_deref_mut() else {
+        let rt = self.rt.as_deref_mut().filter(|_| !self.io_stale);
+        let Some(rt) = rt else {
             for out in ctx.audio_out.iter_mut() {
                 out.fill(0.0);
             }
@@ -1031,7 +1079,7 @@ impl Node for Vst3Instance {
 
     /// Runs on the audio thread, so only cycles `setProcessing`, which the spec allows there
     /// and plugins treat as a state reset. `setActive` and the latency re-read stay on the
-    /// main thread, in `prepare` and `handle_restart`.
+    /// main thread, in `prepare` (and `handle_restart` for a changed layout).
     fn reset(&mut self) {
         if self.processing {
             unsafe {
@@ -1183,6 +1231,10 @@ impl PluginInstance for Vst3Instance {
             self.editor = None;
         }
     }
+
+    fn take_layout_changed(&mut self) -> bool {
+        std::mem::take(&mut self.layout_changed)
+    }
 }
 
 impl Drop for Vst3Instance {
@@ -1215,6 +1267,7 @@ mod tests {
 
     const FRAMES: u32 = 16;
     const GAIN: ParamID = 0;
+    const ACTIVATIONS: ParamID = 2;
 
     /// The `testgain` example wrapped in a bundle, as `tests/vst3.rs` does.
     fn testgain() -> PluginDescriptor {
@@ -1344,6 +1397,92 @@ mod tests {
             1.0,
             "the stale edit overrode the loaded state"
         );
+    }
+
+    /// Makes the plugin switch its output to `channels` and report it the way plugins do. A
+    /// `locked` plugin refuses to switch back.
+    fn switch_outputs(p: &Vst3Instance, channels: i64, locked: bool) {
+        use vst3::Steinberg::Vst::{
+            IAttributeListTrait, IHostApplicationTrait, IMessage, IMessageTrait,
+        };
+        let mut cid: TUID = unsafe { std::mem::transmute(IMessage::IID) };
+        let mut iid = cid;
+        let mut obj = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                host().createInstance(&mut cid, &mut iid, &mut obj),
+                kResultOk
+            );
+            let msg = ComPtr::<IMessage>::from_raw(obj as *mut IMessage).unwrap();
+            msg.setMessageID(c"set_outputs".as_ptr());
+            let attrs = vst3::ComRef::from_raw(msg.getAttributes()).unwrap();
+            attrs.setInt(c"channels".as_ptr(), channels);
+            attrs.setInt(c"locked".as_ptr(), locked as i64);
+            let (component, _) = p.connection.as_ref().unwrap();
+            assert_eq!(component.notify(msg.as_ptr()), kResultOk);
+            p.handler.restartComponent(RestartFlags_::kIoChanged as i32);
+        }
+    }
+
+    #[test]
+    fn io_changes_keep_the_engines_layout_when_the_plugin_agrees() {
+        let mut p = instance();
+        switch_outputs(&p, 1, false);
+        main_thread(&mut p);
+        assert_eq!(p.ports().audio_out, 2, "ports changed behind the engine");
+        assert!(p.take_layout_changed());
+        // The plugin took the stereo layout back, so it keeps playing without a prepare.
+        assert_eq!(gain_heard(&mut p), 1.0);
+        p.prepare(48_000.0, FRAMES);
+        assert_eq!(p.ports().audio_out, 2);
+    }
+
+    #[test]
+    fn io_changes_wait_for_the_host_to_prepare_again() {
+        let mut p = instance();
+        assert_eq!(p.ports().audio_out, 2);
+        switch_outputs(&p, 1, true);
+        main_thread(&mut p);
+
+        // The compiled graph still has two output channels wired, so the layout must not
+        // change under it, and the plugin must not run on buffers it no longer agrees with.
+        assert_eq!(p.ports().audio_out, 2, "ports changed behind the engine");
+        assert!(p.take_layout_changed());
+        assert!(!p.take_layout_changed(), "reported twice");
+        assert_eq!(gain_heard(&mut p), 0.0);
+
+        p.prepare(48_000.0, FRAMES);
+        assert_eq!(p.ports().audio_out, 1);
+        assert!(!p.take_layout_changed());
+        assert_eq!(gain_heard(&mut p), 1.0);
+    }
+
+    #[test]
+    fn latency_changes_are_reported_to_the_host() {
+        let mut p = instance();
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kLatencyChanged as i32)
+        };
+        main_thread(&mut p);
+        assert!(p.take_layout_changed());
+        assert_eq!(p.latency(), 32);
+        assert_eq!(
+            gain_heard(&mut p),
+            1.0,
+            "a latency change silenced the plugin"
+        );
+        // The deactivate/activate cycle that reads the new latency waits for `prepare`.
+        main_thread(&mut p);
+        assert_eq!(
+            p.param_value(ACTIVATIONS),
+            0.01,
+            "reactivated behind the engine"
+        );
+        p.prepare(48_000.0, FRAMES);
+        gain_heard(&mut p);
+        main_thread(&mut p);
+        assert_eq!(p.param_value(ACTIVATIONS), 0.02);
     }
 
     #[test]
