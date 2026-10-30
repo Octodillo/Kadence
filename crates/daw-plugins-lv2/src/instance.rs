@@ -194,9 +194,17 @@ impl Lv2Instance {
                     id: p.index.0 as ParamId,
                     name: p.name.clone(),
                     // Unbounded ports get a range that at least holds the
-                    // default.
-                    min: f64::from(p.min_value.unwrap_or(p.default_value.min(0.0))),
-                    max: f64::from(p.max_value.unwrap_or(p.default_value.max(1.0))),
+                    // default (scaling can also overflow a huge bound).
+                    min: f64::from(
+                        p.min_value
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(p.default_value.min(0.0)),
+                    ),
+                    max: f64::from(
+                        p.max_value
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(p.default_value.max(1.0)),
+                    ),
                     default: f64::from(p.default_value),
                     automatable: !lp.has_property(&not_automatic),
                 })

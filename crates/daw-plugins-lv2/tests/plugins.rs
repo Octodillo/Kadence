@@ -569,7 +569,8 @@ fn sample_rate_ports_are_scaled() {
     assert_eq!(p.param_value(out), 1000.0);
 
     // A new rate re-instantiates the plugin: the range follows the rate and
-    // the value survives.
+    // the value, which is stored as an absolute value as in jalv and Ardour,
+    // survives while it fits the new range.
     p.prepare(2.0 * SR, BLOCK);
     let info = p.params().into_iter().find(|i| i.id == out).unwrap();
     assert!((info.max - 0.45 * 2.0 * SR).abs() < 0.1, "{info:?}");
