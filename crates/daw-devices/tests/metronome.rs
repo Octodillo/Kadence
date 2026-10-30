@@ -158,3 +158,67 @@ fn a_jump_back_clicks_again() {
     assert_eq!(clicks(&first), vec![0, 24000]);
     assert_eq!(clicks(&second), vec![0, 24000]);
 }
+
+#[test]
+fn long_blocks_across_a_meter_change_click_on_the_new_beats() {
+    // One bar of 6/8, then 4/4, in blocks longer than a quarter note: the
+    // block that crosses the change must not keep clicking eighths.
+    let meter = Meter::new([
+        MeterPoint {
+            tick: TickTime(0),
+            numerator: 6,
+            denominator: 8,
+        },
+        MeterPoint {
+            tick: TickTime(3 * PPQ),
+            numerator: 4,
+            denominator: 4,
+        },
+    ]);
+    let timeline = Timeline::new(SegmentTempoMap::new(120.0), meter);
+    let s = Setup {
+        block: 30_000,
+        ..Setup::default()
+    };
+    let mut m = Metronome::new();
+    m.prepare(s.sample_rate, s.block as u32);
+    let r = render_prepared(&mut m, 130_000, &[], &[], s, &timeline);
+    // Eighths for the 6/8 bar, then quarters (at most a block late).
+    let found = clicks(&r);
+    assert_eq!(
+        &found[..7],
+        &[0, 12_000, 24_000, 36_000, 48_000, 60_000, 72_000]
+    );
+    assert!(found[7..].iter().all(|&at| at >= 96_000), "{found:?}");
+    assert_eq!(found.len(), 9, "{found:?}");
+}
+
+#[test]
+fn silent_before_the_project_start() {
+    let s = Setup::default();
+    let timeline = Timeline::default();
+    let mut m = Metronome::new();
+    m.prepare(s.sample_rate, s.block as u32);
+    let mut out = [vec![0.0f32; 64], vec![0.0f32; 64]];
+    for block in 0..10 {
+        let t = daw_core::node::TransportState::at(
+            &timeline,
+            true,
+            daw_core::time::SampleTime(-24_000 + block * 64),
+            s.sample_rate,
+        );
+        let [l, r] = &mut out;
+        let mut outs: [&mut [f32]; 2] = [l, r];
+        let events_in = daw_core::event::EventList::with_capacity(0);
+        let mut events_out = daw_core::event::EventList::with_capacity(0);
+        m.process(&mut daw_core::node::ProcessContext {
+            frames: 64,
+            transport: &t,
+            audio_in: &[],
+            audio_out: &mut outs,
+            events_in: &events_in,
+            events_out: &mut events_out,
+        });
+        assert!(out[0].iter().all(|&x| x == 0.0), "block {block}");
+    }
+}

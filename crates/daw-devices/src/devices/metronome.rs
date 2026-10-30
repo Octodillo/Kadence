@@ -143,7 +143,7 @@ impl Segmented for Metronome {
         let per_sample = t.beats_per_sample();
         for i in start..end {
             let pos = t.position.0 + i as i64;
-            if !t.playing {
+            if !t.playing || pos < 0 {
                 self.last_beat = None;
                 self.expected = None;
             } else {
@@ -180,26 +180,25 @@ impl Segmented for Metronome {
 }
 
 /// The beat that `beats` (quarter notes) falls in, as (bar, beat in bar), with
-/// `m` the position at the start of the block. Bars after the block's first
-/// keep its time signature, which only matters for a block that crosses a
-/// time-signature change.
+/// `m` the position at the start of the block.
+///
+/// Past the end of the block's first bar the time signature may change, so
+/// only the next downbeat is known: later beats count as that downbeat, and
+/// they click from the next block, which starts from the exact position.
+/// That only happens in blocks longer than a beat.
 fn beat_at(m: &MusicalPosition, beats: f64) -> (i64, i64) {
     let beat_len = m.beat_len();
-    let full = f64::from(m.numerator.max(1)) * beat_len;
     // Rounding in the tempo map can leave a position a hair before the
     // beat it is on, which would click a sample late.
     let into = beats - m.bar_start + BEAT_EPSILON;
-    let (bar, into) = if into >= m.bar_len && m.bar_len > 0.0 {
-        let over = into - m.bar_len;
-        let more = (over / full).floor();
-        (m.bar + 1 + more as i64, over - more * full)
-    } else if into < 0.0 {
-        let back = (-into / full).ceil();
-        (m.bar - back as i64, into + back * full)
-    } else {
-        (m.bar, into)
-    };
-    (bar, (into / beat_len).floor() as i64)
+    if m.bar_len > 0.0 && into >= m.bar_len {
+        return (m.bar + 1, 0);
+    }
+    if into < 0.0 {
+        // Only after a jump, one sample back from a bar start.
+        return (m.bar - 1, i64::MAX);
+    }
+    (m.bar, (into / beat_len).floor() as i64)
 }
 
 impl Node for Metronome {

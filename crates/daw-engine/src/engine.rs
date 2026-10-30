@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
 use daw_core::event::{Event, EventList, ParamId};
@@ -85,6 +85,9 @@ struct Shared {
     latency: AtomicU32,
     swaps: AtomicU64,
     dropped: AtomicU64,
+    /// Timelines a dropped controller still held. The audio thread may
+    /// still swap them in, so they live until the processor is dropped.
+    orphans: Mutex<Vec<Arc<Timeline>>>,
 }
 
 impl EngineController {
@@ -326,6 +329,17 @@ impl EngineController {
     }
 }
 
+impl Drop for EngineController {
+    fn drop(&mut self) {
+        // Timelines still queued for the audio thread must not be freed when
+        // it replaces them; the processor's `shared` keeps them alive.
+        let timelines = std::mem::take(&mut self.timelines);
+        if let Ok(mut orphans) = self.shared.orphans.lock() {
+            orphans.extend(timelines);
+        }
+    }
+}
+
 /// The RT half. [`process`](Self::process) does not allocate, lock or free.
 ///
 /// Drop it off the audio thread: dropping frees the running graph.
@@ -546,6 +560,20 @@ mod tests {
         // Every replaced graph comes back to be freed here.
         assert_eq!(ctl.collect_garbage(), 3);
         drop(proc);
+    }
+
+    #[test]
+    fn timelines_outlive_a_dropped_controller() {
+        let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+            max_frames: 32,
+            ..Default::default()
+        });
+        ctl.set_timeline(Timeline::constant(90.0, 3, 4)).unwrap();
+        ctl.set_timeline(Timeline::constant(100.0, 5, 4)).unwrap();
+        drop(ctl);
+        let mut out = [0.0f32; 32];
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(proc.transport().state().bpm, 100.0);
     }
 
     #[test]
