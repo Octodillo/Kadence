@@ -15,6 +15,11 @@ Item {
     property int step: 0
     property Item settingsPage
     property int failures: 0
+    // Times steps have asked to be run again.
+    property int waits: 0
+    // What the export dialog reported last, and where it exported to.
+    property var exportMessage: ({})
+    property url exportUrl
 
     EngineErrorText {
         id: engineError
@@ -26,6 +31,13 @@ Item {
 
     ProjectMessageText {
         id: projectMessage
+    }
+
+    Connections {
+        target: Exporter
+        function onFinished(message: var): void {
+            test.exportMessage = message;
+        }
     }
 
     function check(ok: bool, what: string): void {
@@ -104,6 +116,21 @@ Item {
             // Peaks load in the background; give them a step, then shoot.
             window.pageStack.currentItem.view.refresh();
             shoot(window.title, "arrange-demo");
+        },
+        () => {
+            const dialog = window.openExport();
+            check(dialog.opened || dialog.visible, "open the export dialog");
+            check(Exporter.songBars === 12, "demo is twelve bars long");
+        },
+        () => {
+            shoot(window.title, "export");
+            // Export as the dialog's Export… button does once a file is
+            // chosen, with the dialog's defaults (24-bit WAV). The file name
+            // has no extension, so the format's is added.
+            const dialog = window.openExport();
+            exportUrl = TestHelper.tempFileUrl("demo-export");
+            dialog.start(exportUrl);
+            check(Exporter.running, "export started");
         },
         () => {
             Project.toggleLoop();
@@ -209,6 +236,23 @@ Item {
             check(!Project.playing, "stop");
         },
         () => {
+            // The export ran in the background meanwhile; give a slow
+            // machine more time.
+            if (Exporter.running && test.waits < 75) {
+                return false;
+            }
+            check(!Exporter.running, "export finished");
+            check(exportMessage.context === Project.ExportContext && exportMessage.reason === Project.Exported,
+                  "export reported done: " + projectMessage.text(exportMessage));
+            check(TestHelper.fileExists(exportUrl + ".wav"), "exported file has its extension");
+            console.info("export message:", projectMessage.text(exportMessage));
+            // Nothing to export from an empty range: refused up front.
+            const refused = Exporter.start(exportUrl, Exporter.Bars, 3, 2, 0, 0, 48000, false);
+            check(refused.context === Project.ExportContext && refused.reason === Project.EmptyRange,
+                  "empty range refused");
+            window.openExport().close();
+        },
+        () => {
             settingsPage = window.openSettings();
             check(settingsPage !== null, "open settings");
         },
@@ -293,7 +337,11 @@ Item {
                 const current = test.step;
                 test.step += 1;
                 try {
-                    test.steps[current]();
+                    // A step returning false isn't ready: run it again.
+                    if (test.steps[current]() === false) {
+                        test.step = current;
+                        test.waits += 1;
+                    }
                 } catch (error) {
                     test.check(false, "step " + current + " threw: " + error);
                 }
