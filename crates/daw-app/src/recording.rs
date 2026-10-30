@@ -73,8 +73,9 @@ impl AppState {
         self.recording.is_some()
     }
 
-    /// Arms the target track and starts playback. Fails when there is no
-    /// instrument track or no running session.
+    /// Arms the target track and starts playback, after a count-in when one
+    /// is set. Fails when there is no instrument track or no running
+    /// session.
     pub fn start_recording(&mut self) -> Result<(), Message> {
         if self.recording.is_some() {
             return Ok(());
@@ -104,7 +105,9 @@ impl AppState {
             tempo,
             sample_rate,
         });
-        self.engine.play();
+        // Capture waits for the count-in: the player only records while
+        // the transport moves.
+        self.play_for_recording();
         Ok(())
     }
 

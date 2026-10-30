@@ -106,6 +106,41 @@ Item {
             shoot(window.title, "arrange-demo");
         },
         () => {
+            // Tempo and time signature: edits in a row are one undo step.
+            check(Project.bpm === 120 && Project.meterNumerator === 4 && Project.meterDenominator === 4,
+                  "demo starts at 120 bpm in 4/4");
+            Project.setTempo(96);
+            Project.setTempo(98.5);
+            check(Project.bpm === 98.5, "tempo set");
+            check(Project.undoText === "Change Tempo" && Project.undoText in editNames.names, "tempo edit undoes");
+            Project.setTimeSignature(6, 7);
+            check(Project.meterNumerator === 6 && Project.meterDenominator === 4, "time signature set, rounded");
+            check(Project.undoText === "Change Time Signature" && Project.undoText in editNames.names,
+                  "time signature edit undoes");
+            Project.undo();
+            check(Project.meterNumerator === 4 && Project.bpm === 98.5, "undo the time signature");
+            Project.undo();
+            check(Project.bpm === 120, "undo the tempo drag in one step");
+            Project.redo();
+            check(Project.bpm === 98.5, "redo");
+            Project.setTimeSignature(3, 4);
+            // The metronome, with its settings open, for a screenshot.
+            Project.setMetronomeEnabled(true);
+            Project.setCountIn(1);
+            check(Project.metronome && Project.countInBars === 1, "metronome settings");
+            const arrange = window.pageStack.currentItem;
+            arrange.transportBar.openClickSettings();
+        },
+        () => {
+            shoot(window.title, "arrange-metronome");
+            window.pageStack.currentItem.transportBar.closeClickSettings();
+            Project.setMetronomeEnabled(false);
+            Project.setCountIn(0);
+            Project.undo();
+            Project.undo();
+            check(Project.bpm === 120 && Project.meterNumerator === 4, "back to the demo's tempo");
+        },
+        () => {
             Project.toggleLoop();
             check(Project.looping, "loop on");
             Project.togglePlay();

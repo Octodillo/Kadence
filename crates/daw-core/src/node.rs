@@ -23,6 +23,57 @@ pub struct TransportState {
     /// position is before its end. The wrap falls on a block boundary, so a
     /// block never runs past the end.
     pub looping: Option<TransportLoop>,
+    /// A count-in is running: the transport was told to play, but holds
+    /// `position` (and reports `playing` false) until it ends. Only the
+    /// metronome acts on it.
+    pub count_in: Option<CountIn>,
+}
+
+/// A count-in before playback: `beats` clicks, `beat_len` samples apart,
+/// accented every `beats_per_bar`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct CountIn {
+    /// Samples of the count-in already played at the start of the block.
+    pub elapsed: i64,
+    /// Samples between clicks.
+    pub beat_len: f64,
+    /// How many clicks in all.
+    pub beats: u32,
+    pub beats_per_bar: u32,
+}
+
+impl CountIn {
+    /// A count-in of `bars` bars in the time signature and tempo at the
+    /// start of `music`, or `None` for zero bars or an unknown tempo.
+    pub fn bars(bars: u32, music: &MusicalPosition, bpm: f64, sample_rate: f64) -> Option<Self> {
+        if bars == 0 || !(bpm > 0.0 && sample_rate > 0.0) {
+            return None;
+        }
+        let beats_per_bar = u32::from(music.numerator.max(1));
+        Some(Self {
+            elapsed: 0,
+            beat_len: music.beat_len() * 60.0 / bpm * sample_rate,
+            beats: bars * beats_per_bar,
+            beats_per_bar,
+        })
+    }
+
+    /// Total length in samples.
+    pub fn len(&self) -> i64 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            (f64::from(self.beats) * self.beat_len).round() as i64
+        }
+    }
+
+    /// Samples left before playback starts.
+    pub fn remaining(&self) -> i64 {
+        (self.len() - self.elapsed).max(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.remaining() == 0
+    }
 }
 
 /// A loop from `start` (inclusive) to `end` (exclusive), in samples and in
@@ -57,6 +108,7 @@ impl TransportState {
             sample_rate,
             music: timeline.position(position, sample_rate),
             looping: None,
+            count_in: None,
         }
     }
 
@@ -115,6 +167,9 @@ impl TransportState {
     /// A stopped transport stays where it is.
     pub fn advanced(&self, frames: u32) -> Self {
         let mut t = *self;
+        if let Some(c) = &mut t.count_in {
+            c.elapsed += i64::from(frames);
+        }
         if !self.playing || frames == 0 {
             return t;
         }

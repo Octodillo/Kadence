@@ -30,6 +30,7 @@ const QML_FILES: &[&str] = &[
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
     "qml/TrackHeader.qml",
+    "qml/TransportBar.qml",
 ];
 
 /// Ask qmake (`QMAKE`, else `qmake6`, else `qmake`) for a Qt install path.

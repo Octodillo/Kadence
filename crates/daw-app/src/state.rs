@@ -43,6 +43,11 @@ pub struct AppState {
     /// Counts documents opened, so views can tell a new document from an
     /// edit (document revisions start over).
     pub doc_serial: u64,
+    /// The metronome and count-in.
+    pub(crate) click: crate::settings::ClickSettings,
+    /// The document revision right after the last tempo change and when it
+    /// was made, so the next one in a row merges into it.
+    pub(crate) tempo_edit: Option<(u64, Instant)>,
 }
 
 thread_local! {
@@ -61,9 +66,13 @@ pub fn with<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
 
 impl AppState {
     fn new() -> Self {
+        Self::with_engine(default_engine())
+    }
+
+    pub(crate) fn with_engine(engine: Box<dyn EngineHandle>) -> Self {
         let mut s = Self {
             doc: Document::new(Project::default()),
-            engine: default_engine(),
+            engine,
             arrange: Arrange::new(),
             piano: PianoRoll::new(),
             recording: None,
@@ -74,6 +83,8 @@ impl AppState {
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
+            click: Default::default(),
+            tempo_edit: None,
         };
         s.sync();
         s
@@ -96,6 +107,7 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        self.apply_click();
         self.view_revision += 1;
     }
 

@@ -15,6 +15,7 @@ Kirigami.Page {
 
     property list<Kirigami.Action> transportActions
     readonly property alias view: view
+    readonly property alias transportBar: transportBar
 
     title: i18nc("@title", "Arrange")
     padding: 0
@@ -193,6 +194,11 @@ Kirigami.Page {
             }
         }
 
+        TransportBar {
+            id: transportBar
+            Layout.fillWidth: true
+        }
+
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -212,22 +218,6 @@ Kirigami.Page {
                     Layout.preferredHeight: view.rulerHeight
                     color: Kirigami.Theme.alternateBackgroundColor
 
-                    QQC2.Label {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.leftMargin: Kirigami.Units.largeSpacing
-                        text: Project.positionText
-                        font: Kirigami.Theme.smallFont
-                        Accessible.name: i18nc("@info:accessible", "Playhead position")
-                    }
-                    QQC2.Label {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.right: parent.right
-                        anchors.rightMargin: Kirigami.Units.largeSpacing
-                        text: Project.timeText
-                        font: Kirigami.Theme.smallFont
-                        opacity: 0.7
-                    }
                     Kirigami.Separator {
                         anchors.left: parent.left
                         anchors.right: parent.right

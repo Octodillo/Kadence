@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use daw_core::node::{TransportLoop, TransportState};
+use daw_core::node::{CountIn, TransportLoop, TransportState};
 use daw_core::time::{SampleTime, Timeline};
 
 /// A loop from `start` (inclusive) to `end` (exclusive).
@@ -13,6 +13,10 @@ pub struct LoopRange {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum TransportCommand {
     Play,
+    /// Plays after counting in this many bars of the time signature at the
+    /// play position. The position holds still meanwhile; see
+    /// [`TransportState::count_in`]. Zero bars plays straight away.
+    PlayWithCountIn(u32),
     Stop,
     Locate(SampleTime),
     /// `None`, or a range with `end <= start`, turns looping off.
@@ -28,6 +32,8 @@ pub struct Transport {
     playing: bool,
     position: i64,
     loop_range: Option<LoopRange>,
+    /// The count-in under way, if any. Never empty while set.
+    count_in: Option<CountIn>,
     timeline: Arc<Timeline>,
     sample_rate: f64,
 }
@@ -43,6 +49,7 @@ impl Transport {
             playing: false,
             position: 0,
             loop_range: None,
+            count_in: None,
             timeline,
             sample_rate,
         }
@@ -62,7 +69,23 @@ impl Transport {
     pub fn apply(&mut self, cmd: TransportCommand) {
         match cmd {
             TransportCommand::Play => self.playing = true,
-            TransportCommand::Stop => self.playing = false,
+            TransportCommand::PlayWithCountIn(bars) => {
+                if !self.playing {
+                    let here = TransportState::at(
+                        &self.timeline,
+                        false,
+                        SampleTime(self.position),
+                        self.sample_rate,
+                    );
+                    self.count_in = CountIn::bars(bars, &here.music, here.bpm, self.sample_rate)
+                        .filter(|c| !c.is_empty());
+                }
+                self.playing = true;
+            }
+            TransportCommand::Stop => {
+                self.playing = false;
+                self.count_in = None;
+            }
             TransportCommand::Locate(t) => self.position = t.0,
             TransportCommand::SetLoop(r) => self.loop_range = r.filter(|r| r.end > r.start),
         }
@@ -71,8 +94,13 @@ impl Transport {
     /// The state at the current position, with bars and beats. RT-safe.
     pub fn state(&self) -> TransportState {
         let position = SampleTime(self.position);
-        let mut state =
-            TransportState::at(&self.timeline, self.playing, position, self.sample_rate);
+        let mut state = TransportState::at(
+            &self.timeline,
+            self.playing && self.count_in.is_none(),
+            position,
+            self.sample_rate,
+        );
+        state.count_in = self.count_in;
         // Past the end the loop no longer wraps (see `advance`), so plugins
         // must not expect it to.
         state.looping = self
@@ -82,8 +110,15 @@ impl Transport {
         state
     }
 
+    /// Whether the transport was told to play; also true while it counts
+    /// in.
     pub fn is_playing(&self) -> bool {
         self.playing
+    }
+
+    /// Whether a count-in is under way.
+    pub fn is_counting_in(&self) -> bool {
+        self.count_in.is_some()
     }
 
     pub fn position(&self) -> SampleTime {
@@ -96,6 +131,10 @@ impl Transport {
 
     /// How many of the next `frames` samples run before the position jumps.
     pub fn block_len(&self, frames: usize) -> usize {
+        if let Some(c) = &self.count_in {
+            // Ends on a block boundary, so playback starts on the right sample.
+            return frames.min(usize::try_from(c.remaining()).unwrap_or(usize::MAX));
+        }
         match self.loop_range {
             Some(r) if self.playing && self.position < r.end.0 => {
                 frames.min((r.end.0 - self.position) as usize)
@@ -108,6 +147,13 @@ impl Transport {
     /// the loop end.
     pub fn advance(&mut self, frames: usize) {
         if !self.playing {
+            return;
+        }
+        if let Some(c) = &mut self.count_in {
+            c.elapsed += frames as i64;
+            if c.is_empty() {
+                self.count_in = None;
+            }
             return;
         }
         let old = self.position;
@@ -161,6 +207,46 @@ mod tests {
         assert_eq!(t.block_len(64), 64);
         t.advance(64);
         assert_eq!(t.position(), SampleTime(564));
+    }
+
+    #[test]
+    fn count_in_holds_the_position_then_plays() {
+        // One bar of 3/4 at 120 bpm: three beats of 24 000 samples.
+        let tl = Arc::new(Timeline::constant(120.0, 3, 4));
+        let mut t = Transport::with_timeline(48_000.0, tl);
+        t.apply(TransportCommand::Locate(SampleTime(1_000)));
+        t.apply(TransportCommand::PlayWithCountIn(1));
+        assert!(t.is_playing() && t.is_counting_in());
+        let s = t.state();
+        assert!(!s.playing);
+        let c = s.count_in.unwrap();
+        assert_eq!((c.beats, c.beats_per_bar, c.len()), (3, 3, 72_000));
+        // Blocks end where the count-in does.
+        let mut counted = 0;
+        while t.is_counting_in() {
+            let len = t.block_len(4096);
+            counted += len;
+            t.advance(len);
+            assert_eq!(t.position(), SampleTime(1_000));
+        }
+        assert_eq!(counted, 72_000);
+        assert!(t.state().playing && t.state().count_in.is_none());
+        t.advance(64);
+        assert_eq!(t.position(), SampleTime(1_064));
+    }
+
+    #[test]
+    fn stop_cancels_a_count_in_and_zero_bars_plays_at_once() {
+        let mut t = Transport::new(48_000.0);
+        t.apply(TransportCommand::PlayWithCountIn(2));
+        assert_eq!(t.state().count_in.unwrap().beats, 8);
+        t.apply(TransportCommand::Stop);
+        assert!(!t.is_counting_in() && !t.is_playing());
+        t.apply(TransportCommand::PlayWithCountIn(0));
+        assert!(t.state().playing && !t.is_counting_in());
+        // Already playing: no count-in in the middle of the song.
+        t.apply(TransportCommand::PlayWithCountIn(1));
+        assert!(!t.is_counting_in());
     }
 
     #[test]

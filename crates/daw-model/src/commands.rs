@@ -174,6 +174,30 @@ impl Command for SetTempo {
     }
 }
 
+/// Replaces the tempo and meter map, as an edit of the time signature: the
+/// same change as [`SetTempo`] under its own name, and never merged.
+#[derive(Debug)]
+pub struct SetTimeSignature {
+    pub tempo: TempoData,
+}
+
+impl Command for SetTimeSignature {
+    fn label(&self) -> String {
+        "Change Time Signature".into()
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
+        self.tempo.validate()?;
+        mem::swap(&mut project.tempo, &mut self.tempo);
+        Ok(ChangeSet::one(Change::Tempo))
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
+        mem::swap(&mut project.tempo, &mut self.tempo);
+        Ok(ChangeSet::one(Change::Tempo))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tracks
 

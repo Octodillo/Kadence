@@ -27,7 +27,7 @@ use daw_midi::player::midi_player;
 use crate::Warning;
 use crate::media::Loaded;
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
-use crate::{Built, Session, db_to_gain};
+use crate::{Built, MetronomeSettings, Session, db_to_gain};
 
 /// Every channel strip in the graph is stereo.
 const STRIP_CHANNELS: u16 = 2;
@@ -51,6 +51,22 @@ fn player_key(track: TrackId) -> NodeKey {
 /// The key of an instrument track's MIDI player.
 fn midi_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 2)
+}
+
+/// The key of the metronome. Model ids are random (version 4) UUIDs, which
+/// never have every bit set but the last.
+pub const METRONOME_KEY: NodeKey = NodeKey(u128::MAX - 1);
+
+/// The metronome's parameters for `settings`.
+pub(crate) fn metronome_params(settings: &MetronomeSettings) -> [((NodeKey, u32), f64); 2] {
+    use daw_devices::devices::metronome::{PLAYBACK, VOLUME};
+    [
+        (
+            (METRONOME_KEY, PLAYBACK),
+            if settings.enabled { 1.0 } else { 0.0 },
+        ),
+        ((METRONOME_KEY, VOLUME), settings.volume_db),
+    ]
 }
 
 /// How many captured input events can wait for the recorder.
@@ -345,6 +361,26 @@ pub(crate) fn graph(
             g.connect(node, head);
         }
     }
+
+    // The click goes through the master, so its meter shows it, and stays
+    // in every graph so turning it on and off needs no rebuild.
+    let click = match g.reuse(METRONOME_KEY) {
+        Some(id) => {
+            carry_params(&mut built, &old, METRONOME_KEY);
+            id
+        }
+        None => {
+            let mut node = daw_devices::Metronome::new();
+            for ((key, param), value) in metronome_params(&session.metronome) {
+                daw_devices::Device::set_param(&mut node, param, value);
+                built.params.insert((key, param), value);
+            }
+            let id = g.add_device("metronome", Box::new(node));
+            g.set_key(id, METRONOME_KEY);
+            id
+        }
+    };
+    g.connect(click, g.master());
 
     automate(session, snapshot, &mut g, &strips);
     (g, built)

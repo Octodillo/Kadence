@@ -21,6 +21,7 @@ pub mod session_mixer;
 pub mod settings;
 pub mod state;
 mod test_helper;
+mod transport;
 
 /// Run the application with the process arguments. Returns the exit code.
 pub fn run() -> i32 {
