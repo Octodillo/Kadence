@@ -389,20 +389,21 @@ fn automate(
             .iter()
             .filter(|l| l.enabled && !l.points.is_empty() && !session.suspended.contains(&l.id))
         {
+            let (node, param, to_value): (Option<NodeId>, u32, fn(f64) -> f64) = match lane.target {
+                AutomationTarget::Volume => (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain),
+                AutomationTarget::Pan => (strips.get(&t.id).copied(), Strip::PAN, |v| v),
+                AutomationTarget::SendLevel { send } => {
+                    (find(g, send_key(send)), Strip::GAIN, db_to_gain)
+                }
+                AutomationTarget::DeviceParam { device, param } => {
+                    (find(g, device_key(device)), param, |v| v)
+                }
+            };
             // Levels are drawn in dB: play their ramps in dB too.
-            let (node, param, to_value, dense): (Option<NodeId>, u32, fn(f64) -> f64, bool) =
-                match lane.target {
-                    AutomationTarget::Volume => {
-                        (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain, true)
-                    }
-                    AutomationTarget::Pan => (strips.get(&t.id).copied(), Strip::PAN, |v| v, false),
-                    AutomationTarget::SendLevel { send } => {
-                        (find(g, send_key(send)), Strip::GAIN, db_to_gain, true)
-                    }
-                    AutomationTarget::DeviceParam { device, param } => {
-                        (find(g, device_key(device)), param, |v| v, false)
-                    }
-                };
+            let dense = matches!(
+                lane.target,
+                AutomationTarget::Volume | AutomationTarget::SendLevel { .. }
+            );
             let Some(node) = node else { continue };
             if let Some(key) = g.key(node) {
                 built.automated.insert((key, param));

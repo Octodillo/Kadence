@@ -79,6 +79,9 @@ struct Take {
 /// session itself, since it changes playback without changing the document.
 pub struct SessionMixer {
     write: bool,
+    /// Lanes in write mode (set from the track headers): their controls
+    /// record even with `write` off.
+    pub write_lanes: HashSet<LaneId>,
     takes: Vec<Take>,
     effects: Vec<EffectChoice>,
 }
@@ -87,6 +90,7 @@ impl Default for SessionMixer {
     fn default() -> Self {
         Self {
             write: false,
+            write_lanes: HashSet::new(),
             takes: Vec::new(),
             effects: effect_choices(),
         }
@@ -366,8 +370,14 @@ impl SessionMixer {
             .takes
             .iter()
             .position(|t| t.track == track.id && t.control == control);
+        let armed = |m: &Self| {
+            m.write
+                || target_of(&track, control)
+                    .and_then(|(target, _)| lane_of(&track, target))
+                    .is_some_and(|l| l.enabled && m.write_lanes.contains(&l.id))
+        };
         match (pressed, running) {
-            (true, None) if self.write && session.is_playing() => {
+            (true, None) if armed(self) && session.is_playing() => {
                 let Some((target, value)) = target_of(&track, control) else {
                     return Ok(());
                 };
@@ -650,6 +660,7 @@ impl AppMixer {
     ) -> R {
         state::with(|s| {
             s.end_drag();
+            self.inner.write_lanes.clone_from(&s.lanes.write);
             let r = f(&mut self.inner, &mut s.doc, s.engine.session_mut());
             s.sync();
             r

@@ -6,10 +6,12 @@
 //! second, non-Qt front end can reuse the same engine API ([`engine`]).
 
 pub mod arrange_view;
+pub mod automation_bridge;
 pub mod bridge;
 mod demo;
 pub mod engine;
 mod ffi;
+pub mod lanes;
 pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_media::{AudioData, WavFormat, write_wav};
 use daw_model::{
-    AudioClip, Clip, ClipContent, Color, Device, DeviceSource, Document, Fade, FadeShape, MidiClip,
-    Note, Project, Track, TrackKind,
+    AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Color, Device,
+    DeviceSource, Document, Fade, FadeShape, MidiClip, Note, Project, Track, TrackKind,
 };
 
 const RATE: u32 = 48_000;
@@ -59,6 +59,19 @@ pub fn build() -> Result<Document, String> {
         audio_clip("Bass", "bass.wav", 4, 2, 0),
         audio_clip("Bass", "bass.wav", 8, 4, 0),
     ];
+    // A swell in, then a fade out, so the screenshots show a lane.
+    let mut swell = AutomationLane::new(AutomationTarget::Volume);
+    let point = |bar: i64, db: f64, curve: f64| AutomationPoint {
+        curve,
+        ..AutomationPoint::new(TickTime(bar * BAR), db)
+    };
+    swell.points = vec![
+        point(0, -24.0, 1.5),
+        point(4, 0.0, 0.0),
+        point(10, 0.0, -1.5),
+        point(12, -40.0, 0.0),
+    ];
+    drums.automation.push(swell);
     let mut leads = Track::new(TrackKind::Audio, "Lead");
     leads.color = Some(Color(0xf6, 0x74, 0x00));
     // A faded, quieter take so the screenshots show fades and clip gain.
@@ -77,6 +90,13 @@ pub fn build() -> Result<Document, String> {
             kind: "daw.synth".into(),
         },
     ));
+    let mut pan = AutomationLane::new(AutomationTarget::Pan);
+    pan.points = vec![
+        AutomationPoint::new(TickTime(4 * BAR), -0.6),
+        AutomationPoint::new(TickTime(5 * BAR), 0.6),
+        AutomationPoint::new(TickTime(6 * BAR), -0.6),
+    ];
+    keys.automation.push(pan);
     let mut m = MidiClip::default();
     for (i, key) in [60u8, 64, 67, 72, 67, 64, 62, 65, 69, 74, 69, 65]
         .into_iter()

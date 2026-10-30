@@ -26,6 +26,8 @@ pub struct AppState {
     pub piano: PianoRoll,
     /// The MIDI take in progress.
     pub recording: Option<crate::recording::Recording>,
+    /// Automation lane modes and device parameter names.
+    pub lanes: crate::lanes::Lanes,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -61,12 +63,16 @@ pub fn with<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
 
 impl AppState {
     fn new() -> Self {
+        let lanes = crate::lanes::Lanes::default();
+        let mut arrange = Arrange::new();
+        arrange.params = Some(lanes.params.clone());
         let mut s = Self {
             doc: Document::new(Project::default()),
             engine: default_engine(),
-            arrange: Arrange::new(),
+            arrange,
             piano: PianoRoll::new(),
             recording: None,
+            lanes,
             synced: None,
             view_revision: 0,
             status: None,
@@ -96,6 +102,7 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        self.prune_lane_modes();
         self.view_revision += 1;
     }
 
@@ -253,6 +260,8 @@ impl AppState {
         self.autosave_failed = None;
         self.doc_serial += 1;
         self.arrange.selection.clear();
+        self.arrange.points = None;
+        self.arrange.expanded.clear();
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;
         self.arrange.scroll_y = 0.0;

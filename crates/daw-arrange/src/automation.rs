@@ -312,7 +312,7 @@ impl Arrange {
         }
     }
 
-    fn lane_of<'a>(project: &'a Project, lane: LaneId) -> Option<(&'a Track, &'a AutomationLane)> {
+    fn lane_of(project: &Project, lane: LaneId) -> Option<(&Track, &AutomationLane)> {
         let (track, index) = project.lane_location(lane)?;
         let t = project.track(track)?;
         Some((t, t.automation.get(index)?))
