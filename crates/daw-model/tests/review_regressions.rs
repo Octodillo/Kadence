@@ -469,6 +469,31 @@ fn save_as_never_overwrites_audio_in_the_target() {
     assert!(doc.bundle().unwrap().root().ends_with("Old"));
 }
 
+#[test]
+fn a_failed_save_as_can_be_retried_into_the_same_folder() {
+    let (p, _) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Old")).unwrap();
+    let src = dir.path().join("take1.wav");
+    std::fs::write(&src, b"take").unwrap();
+    doc.bundle().unwrap().import_audio(&src).unwrap();
+    // A directory where the temp file goes makes writing the project fail
+    // after the audio is copied.
+    let target = dir.path().join("New");
+    let blocker = target.join("New.kadence.tmp");
+    std::fs::create_dir_all(&blocker).unwrap();
+    assert!(doc.save_as(&target).is_err());
+    assert!(!target.join("audio/take1.wav").exists());
+    assert!(doc.bundle().unwrap().root().ends_with("Old"));
+    std::fs::remove_dir(&blocker).unwrap();
+    doc.save_as(&target).unwrap();
+    assert_eq!(
+        std::fs::read(target.join("audio/take1.wav")).unwrap(),
+        b"take"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn save_keeps_the_project_file_permissions() {

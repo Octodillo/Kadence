@@ -1,6 +1,6 @@
 //! An open project: the model, its history and where it is saved.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::bundle::Bundle;
 use crate::change::ChangeSet;
@@ -183,10 +183,15 @@ impl Document {
     /// Audio in the old bundle's `audio/` folder is copied across.
     pub fn save_as(&mut self, dir: impl AsRef<Path>) -> Result<(), FormatError> {
         let new = Bundle::create(dir)?;
-        if let Some(old) = &self.bundle {
-            copy_dir_files(&old.audio_dir(), &new.audio_dir())?;
+        let copied = match &self.bundle {
+            Some(old) => copy_dir_files(&old.audio_dir(), &new.audio_dir())?,
+            None => Vec::new(),
+        };
+        if let Err(e) = new.save(&self.project) {
+            // Leave the target as it was, so the user can retry there.
+            remove_files(&copied);
+            return Err(e);
         }
-        new.save(&self.project)?;
         if let Some(old) = self.bundle.replace(new) {
             // The unsaved edits it held now live in the new bundle. Failing
             // to delete it only means a stale recovery offer later.
@@ -230,10 +235,12 @@ impl Document {
 }
 
 /// Copies the files in `from` into `to`, refusing before copying anything if
-/// a file of the same name is already there, since clips may use it.
-fn copy_dir_files(from: &Path, to: &Path) -> Result<(), FormatError> {
+/// a file of the same name is already there, since clips may use it. Returns
+/// the files it made. On failure it removes them again, so a retry into the
+/// same folder isn't refused over a half-finished copy.
+fn copy_dir_files(from: &Path, to: &Path) -> Result<Vec<PathBuf>, FormatError> {
     if !from.is_dir() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     std::fs::create_dir_all(to).map_err(FormatError::io(to))?;
     let mut copies = Vec::new();
@@ -249,8 +256,23 @@ fn copy_dir_files(from: &Path, to: &Path) -> Result<(), FormatError> {
             copies.push((path, dest));
         }
     }
+    let mut made = Vec::with_capacity(copies.len());
     for (path, dest) in copies {
-        std::fs::copy(&path, &dest).map_err(FormatError::io(&dest))?;
+        // Pushed first: a failed copy can leave part of the file behind.
+        made.push(dest);
+        let dest = made.last().expect("just pushed");
+        if let Err(e) = std::fs::copy(&path, dest) {
+            remove_files(&made);
+            return Err(FormatError::io(dest)(e));
+        }
     }
-    Ok(())
+    Ok(made)
+}
+
+/// Removes files [`copy_dir_files`] made. Each was checked not to exist
+/// before, so nothing of the user's is lost.
+fn remove_files(files: &[PathBuf]) {
+    for f in files {
+        let _ = std::fs::remove_file(f);
+    }
 }
