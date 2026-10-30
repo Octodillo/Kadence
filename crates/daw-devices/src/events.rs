@@ -42,6 +42,10 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
             key: Some(key.min(127)),
             id: note_id,
         }),
+        // A wildcard with no id is all notes off, which also ends one-shot voices, as CC 123 does.
+        EventKind::NoteOff {
+            key: None, note_id, ..
+        } if note_id < 0 => Some(Note::AllOff),
         EventKind::NoteOff { key, note_id, .. } => Some(Note::Off {
             key: key.map(|k| k.min(127)),
             id: note_id,
@@ -203,6 +207,18 @@ mod tests {
                 id: 3
             })
         );
+    }
+
+    #[test]
+    fn wildcard_note_off_without_id_is_all_notes_off() {
+        let off = |note_id| EventKind::NoteOff {
+            channel: 0,
+            key: None,
+            velocity: 0.0,
+            note_id,
+        };
+        assert_eq!(note(&off(-1)), Some(Note::AllOff));
+        assert_eq!(note(&off(4)), Some(Note::Off { key: None, id: 4 }));
     }
 
     #[test]
