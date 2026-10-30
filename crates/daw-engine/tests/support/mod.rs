@@ -221,3 +221,126 @@ impl Node for Dc {
         ctx.audio_out[0].fill(self.0);
     }
 }
+
+/// What a test can ask of a [`FakePlugin`] from outside.
+#[derive(Default)]
+pub struct FakeControl {
+    /// Latency and output count to take at the next prepare.
+    pub next_latency: std::sync::atomic::AtomicU32,
+    pub next_outputs: std::sync::atomic::AtomicU32,
+    /// Set to make the next `on_main_thread` report a layout change.
+    pub request: std::sync::atomic::AtomicBool,
+    pub prepares: std::sync::atomic::AtomicU32,
+}
+
+/// A plugin that outputs a sample counter on every channel. The counter is its state: it
+/// survives prepares, and `load_state` sets it.
+pub struct FakePlugin {
+    pub control: std::sync::Arc<FakeControl>,
+    descriptor: daw_core::plugin::PluginDescriptor,
+    outputs: u16,
+    latency: u32,
+    count: f32,
+    changed: bool,
+}
+
+impl FakePlugin {
+    pub fn new(outputs: u16) -> Self {
+        let control = FakeControl::default();
+        control
+            .next_outputs
+            .store(outputs.into(), std::sync::atomic::Ordering::Relaxed);
+        Self {
+            control: std::sync::Arc::new(control),
+            descriptor: daw_core::plugin::PluginDescriptor {
+                format: daw_core::plugin::PluginFormatKind::Clap,
+                id: "fake".into(),
+                name: "fake".into(),
+                vendor: String::new(),
+                path: Default::default(),
+                is_instrument: true,
+                ports: (0, outputs),
+            },
+            outputs,
+            latency: 0,
+            count: 0.0,
+            changed: false,
+        }
+    }
+}
+
+impl Node for FakePlugin {
+    fn ports(&self) -> PortLayout {
+        PortLayout {
+            audio_out: self.outputs,
+            event_in: true,
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let c = &self.control;
+        c.prepares.fetch_add(1, Relaxed);
+        self.outputs = c.next_outputs.load(Relaxed) as u16;
+        self.latency = c.next_latency.load(Relaxed);
+    }
+
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        assert_eq!(ctx.audio_out.len(), self.outputs as usize);
+        for i in 0..ctx.frames as usize {
+            self.count += 1.0;
+            for ch in ctx.audio_out.iter_mut() {
+                ch[i] = self.count;
+            }
+        }
+    }
+
+    fn latency(&self) -> u32 {
+        self.latency
+    }
+}
+
+impl daw_core::plugin::PluginInstance for FakePlugin {
+    fn descriptor(&self) -> &daw_core::plugin::PluginDescriptor {
+        &self.descriptor
+    }
+    fn params(&self) -> Vec<daw_core::plugin::ParamInfo> {
+        Vec::new()
+    }
+    fn param_value(&self, _id: daw_core::event::ParamId) -> f64 {
+        0.0
+    }
+    fn save_state(&mut self) -> Result<Vec<u8>, daw_core::plugin::PluginError> {
+        Ok(self.count.to_le_bytes().to_vec())
+    }
+    /// Takes the counter and, like a plugin whose latency depends on its settings, asks for
+    /// a new layout.
+    fn load_state(&mut self, data: &[u8]) -> Result<(), daw_core::plugin::PluginError> {
+        let bytes = data
+            .try_into()
+            .map_err(|_| daw_core::plugin::PluginError::State("4 bytes".into()))?;
+        self.count = f32::from_le_bytes(bytes);
+        self.changed = true;
+        Ok(())
+    }
+    fn has_editor(&self) -> bool {
+        false
+    }
+    fn open_editor(&mut self) -> Result<(), daw_core::plugin::PluginError> {
+        Err(daw_core::plugin::PluginError::Editor("none".into()))
+    }
+    fn close_editor(&mut self) {}
+    fn on_main_thread(&mut self) {
+        if self
+            .control
+            .request
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.changed = true;
+        }
+    }
+    fn take_layout_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+}

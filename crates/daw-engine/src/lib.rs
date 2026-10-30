@@ -15,7 +15,9 @@
 //! voices, a plugin's internals, a strip's fader) across an edit, give it a
 //! [`NodeKey`] and build the next graph with [`EngineController::graph`] and
 //! [`GraphDesc::reuse`]: the audio thread moves the live node into the new
-//! graph when it swaps it in.
+//! graph when it swaps it in. Plugins are the exception: keep them in a
+//! [`PluginHandle`], which keeps their state across graphs and follows their
+//! layout and latency changes.
 
 mod automation;
 mod compile;
@@ -25,6 +27,7 @@ mod graph;
 mod meter;
 pub mod mixer;
 pub mod nodes;
+pub mod plugin;
 mod render;
 mod transport;
 
@@ -33,5 +36,6 @@ pub use compile::{CompileError, CompiledGraph, MAX_CHANNELS, MAX_LATENCY_SECONDS
 pub use engine::{EngineConfig, EngineController, EngineError, EngineProcessor, SendError};
 pub use graph::{AudioEdge, EventEdge, GraphDesc, NodeId, NodeKey, NodeKind};
 pub use meter::NodeMeter;
+pub use plugin::{PluginHandle, PluginNode};
 pub use render::{RenderError, RenderOptions, render, render_to_wav};
 pub use transport::{LoopRange, Transport, TransportCommand};

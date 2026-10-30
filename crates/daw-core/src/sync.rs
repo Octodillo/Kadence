@@ -39,3 +39,19 @@ impl<T> std::ops::Deref for CachePadded<T> {
         &self.0
     }
 }
+
+/// Waits a little before retrying a spin loop: a few CPU pause hints, then yielding the
+/// thread so a holder that was preempted can finish.
+#[cfg(not(loom))]
+pub(crate) fn backoff(spins: u32) {
+    if spins < 64 {
+        std::hint::spin_loop();
+    } else {
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(loom)]
+pub(crate) fn backoff(_spins: u32) {
+    loom::thread::yield_now();
+}
