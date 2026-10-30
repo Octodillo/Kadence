@@ -84,6 +84,9 @@ pub trait PluginFormat: Send + Sync {
     fn kind(&self) -> PluginFormatKind;
     fn default_search_paths(&self) -> Vec<PathBuf>;
     fn scan(&self, path: &Path) -> Vec<PluginDescriptor>;
+    /// Called once before the process exits, after every instance of this format is gone.
+    /// A format that keeps plugin code loaded (VST3) lets the plugins clean up here.
+    fn shutdown(&self) {}
     fn instantiate(
         &self,
         d: &PluginDescriptor,

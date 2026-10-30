@@ -26,4 +26,4 @@ pub use node::{Node, PortLayout, ProcessContext, TransportState};
 pub use plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
-pub use time::{PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime};
+pub use time::{MusicalPosition, PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline};
