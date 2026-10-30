@@ -221,7 +221,7 @@ fn mapping(s: &Sampler) -> Vec<Mapping> {
         .iter()
         .map(|z| {
             (
-                z.sample.source.clone(),
+                z.source.clone(),
                 z.root_key,
                 z.key_lo,
                 z.key_hi,
@@ -349,11 +349,18 @@ fn resolved_paths_are_saved_as_stored() {
     .unwrap();
     for s in [&b, &c] {
         assert_eq!(
-            s.zones()[0].sample.source.as_deref(),
+            s.zones()[0].source.as_deref(),
             Some(std::path::Path::new("kick.wav"))
         );
     }
     assert_eq!(mapping(&c), mapping(&a));
+
+    // A buffer from a shared pool is used as is, not copied.
+    let pooled = Arc::new(SampleBuffer::load(dir.path().join("kick.wav")).unwrap());
+    let mut d = Sampler::new();
+    d.load_state_with(&blob, |_| Some(pooled.clone())).unwrap();
+    assert!(Arc::ptr_eq(&d.zones()[0].sample, &pooled));
+    assert_eq!(mapping(&d), mapping(&a));
 }
 
 #[cfg(unix)]
