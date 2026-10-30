@@ -124,11 +124,49 @@ struct EditorState {
     resizable: bool,
 }
 
+/// What `process` uses: the plugin's audio processor and the buffers it fills. Present while
+/// the plugin is active. [`PluginInstance::split`](plugin::PluginInstance::split) hands it
+/// to the audio thread as a [`ClapProcessor`].
+struct AudioHalf {
+    processor: PluginAudioProcessor<DawHost>,
+    buffers: Buffers,
+    main_in: Option<usize>,
+    main_out: Option<usize>,
+    notes_as_midi: bool,
+    steady_time: u64,
+}
+
+/// The audio-thread half of a [`ClapInstance`]. CLAP lets the main thread call the plugin
+/// while it processes, so the instance serves state, editors and callbacks meanwhile.
+pub struct ClapProcessor(AudioHalf);
+
+// SAFETY: only the audio-thread functions of the plugin (`process`, `reset`, and starting
+// processing) are reached through this half, as CLAP allows from the audio thread while the
+// main thread uses the instance.
+unsafe impl Send for ClapProcessor {}
+
+impl plugin::PluginProcessor for ClapProcessor {
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        self.0.process(ctx);
+    }
+
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
 /// A CLAP plugin instance. See the crate docs for which thread may call what.
 pub struct ClapInstance {
     descriptor: PluginDescriptor,
-    /// Present while the plugin is active. Dropped (deactivated) before `instance`.
-    processor: Option<PluginAudioProcessor<DawHost>>,
+    /// Present while the plugin is active and the half is not split off. Dropped
+    /// (deactivated) before `instance`.
+    audio: Option<AudioHalf>,
+    /// The plugin is active; its audio half may be out on the audio thread.
+    active: bool,
     /// In a `RefCell` only so that `param_value(&self)` can reach the main-thread handle.
     instance: RefCell<clack_host::plugin::PluginInstance<DawHost>>,
     ext: Extensions,
@@ -137,8 +175,6 @@ pub struct ClapInstance {
     sample_rate: f64,
     max_frames: u32,
     latency: u32,
-    buffers: Option<Buffers>,
-    steady_time: u64,
     editor: EditorState,
     params: Vec<ParamInfo>,
     /// Set when the plugin asked for a restart or reported new latency while active; reported
@@ -147,9 +183,9 @@ pub struct ClapInstance {
 }
 
 // SAFETY: the CLAP threading rules are upheld by the contract documented on the crate: every
-// method other than `process` and `reset` runs on the thread that created the instance, and
-// `&mut self` keeps `process` from overlapping with them. The plugin's audio-thread functions
-// are only reached through `process` and `reset`.
+// method other than `process` and `reset` runs on the thread that created the instance. The
+// plugin's audio-thread functions are only reached through `process` and `reset`, here or on
+// the split-off `ClapProcessor`; CLAP allows those to run alongside main-thread calls.
 unsafe impl Send for ClapInstance {}
 
 impl ClapInstance {
@@ -182,7 +218,8 @@ impl ClapInstance {
         };
         let mut this = Self {
             descriptor,
-            processor: None,
+            audio: None,
+            active: false,
             instance: RefCell::new(instance),
             ext,
             editor_mode,
@@ -190,8 +227,6 @@ impl ClapInstance {
             sample_rate: 0.0,
             max_frames: 0,
             latency: 0,
-            buffers: None,
-            steady_time: 0,
             editor: EditorState::default(),
             params: Vec::new(),
             layout_changed: false,
@@ -277,7 +312,15 @@ impl ClapInstance {
     }
 
     fn deactivate(&mut self) {
-        if let Some(processor) = self.processor.take() {
+        if self.active && self.audio.is_none() {
+            // Deactivating needs the audio half, which the host must `join` first.
+            eprintln!(
+                "{}: deactivated while its audio half is out; leaking it",
+                self.descriptor.id
+            );
+        }
+        self.active = false;
+        if let Some(AudioHalf { processor, .. }) = self.audio.take() {
             // `stop_processing` is an audio-thread call. The engine has stopped calling `process`
             // by the time the main thread deactivates, so the main thread stands in for it.
             let stopped = {
@@ -294,7 +337,6 @@ impl ClapInstance {
         self.layout_changed = false;
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
-        self.steady_time = 0;
         self.activate()
     }
 
@@ -311,8 +353,15 @@ impl ClapInstance {
             .inst()
             .activate(|_, _| (), config)
             .map_err(|e| PluginError::Load(format!("activate {}: {e}", self.descriptor.id)))?;
-        self.processor = Some(PluginAudioProcessor::Stopped(stopped));
-        self.buffers = Some(Buffers::new(&self.layout, self.max_frames as usize));
+        self.audio = Some(AudioHalf {
+            processor: PluginAudioProcessor::Stopped(stopped),
+            buffers: Buffers::new(&self.layout, self.max_frames as usize),
+            main_in: self.layout.main_in,
+            main_out: self.layout.main_out,
+            notes_as_midi: self.layout.notes_as_midi,
+            steady_time: 0,
+        });
+        self.active = true;
         self.latency = self.read_latency();
         // This activation is the restart a pending request asked for, and a plugin may report
         // its latency while activating, which is read just above: neither must ask for yet
@@ -391,36 +440,22 @@ impl ClapInstance {
             }
         }
     }
+}
 
-    fn silence(ctx: &mut ProcessContext) {
-        let frames = ctx.frames as usize;
-        for out in ctx.audio_out.iter_mut() {
-            let n = frames.min(out.len());
-            out[..n].fill(0.0);
-        }
+fn silence(ctx: &mut ProcessContext) {
+    let frames = ctx.frames as usize;
+    for out in ctx.audio_out.iter_mut() {
+        let n = frames.min(out.len());
+        out[..n].fill(0.0);
     }
 }
 
-impl Node for ClapInstance {
-    fn ports(&self) -> PortLayout {
-        self.layout.ports()
-    }
-
-    fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
-        if let Err(e) = self.try_prepare(sample_rate, max_frames) {
-            // `Node::prepare` cannot fail; an inactive plugin outputs silence.
-            eprintln!("{e}");
-        }
-    }
-
+impl AudioHalf {
     fn process(&mut self, ctx: &mut ProcessContext) {
         let _scope = AudioThreadScope::enter();
-        let (Some(processor), Some(bufs)) = (self.processor.as_mut(), self.buffers.as_mut()) else {
-            Self::silence(ctx);
-            return;
-        };
-        let Ok(processor) = processor.ensure_processing_started() else {
-            Self::silence(ctx);
+        let bufs = &mut self.buffers;
+        let Ok(processor) = self.processor.ensure_processing_started() else {
+            silence(ctx);
             return;
         };
 
@@ -434,7 +469,7 @@ impl Node for ClapInstance {
 
             // Audio in: the context's channels feed the main input port. Other ports keep the
             // silence they were allocated with.
-            if let Some(port) = self.layout.main_in.and_then(|i| bufs.audio_in.get_mut(i)) {
+            if let Some(port) = self.main_in.and_then(|i| bufs.audio_in.get_mut(i)) {
                 for (ch, chan) in port.chunks_exact_mut(bufs.max_frames).enumerate() {
                     match ctx.audio_in.get(ch) {
                         Some(src) if src.len() >= end => {
@@ -453,7 +488,7 @@ impl Node for ClapInstance {
                 }
                 if (bufs.events_in.len() as usize) < EVENT_CAPACITY {
                     let at = u32::try_from(frame.saturating_sub(offset).min(n - 1)).unwrap_or(0);
-                    events::push_clap(&mut bufs.events_in, e, at, self.layout.notes_as_midi);
+                    events::push_clap(&mut bufs.events_in, e, at, self.notes_as_midi);
                 }
                 pending.next();
             }
@@ -497,7 +532,7 @@ impl Node for ClapInstance {
 
             // Audio out: the main output port goes to the context's channels.
             let mut ch = 0;
-            if let Some(port) = self.layout.main_out.and_then(|i| bufs.audio_out.get(i)) {
+            if let Some(port) = self.main_out.and_then(|i| bufs.audio_out.get(i)) {
                 for chan in port.chunks_exact(bufs.max_frames) {
                     if let Some(dst) = ctx.audio_out.get_mut(ch)
                         && dst.len() >= end
@@ -522,14 +557,38 @@ impl Node for ClapInstance {
         }
     }
 
+    fn reset(&mut self) {
+        let _scope = AudioThreadScope::enter();
+        self.processor.reset();
+    }
+}
+
+impl Node for ClapInstance {
+    fn ports(&self) -> PortLayout {
+        self.layout.ports()
+    }
+
+    fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
+        if let Err(e) = self.try_prepare(sample_rate, max_frames) {
+            // `Node::prepare` cannot fail; an inactive plugin outputs silence.
+            eprintln!("{e}");
+        }
+    }
+
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        match self.audio.as_mut() {
+            Some(audio) => audio.process(ctx),
+            None => silence(ctx),
+        }
+    }
+
     fn latency(&self) -> u32 {
         self.latency
     }
 
     fn reset(&mut self) {
-        if let Some(processor) = self.processor.as_mut() {
-            let _scope = AudioThreadScope::enter();
-            processor.reset();
+        if let Some(audio) = self.audio.as_mut() {
+            audio.reset();
         }
     }
 }
@@ -581,7 +640,7 @@ impl plugin::PluginInstance for ClapInstance {
         // Loading state can change parameters, latency and even ports. Ports and latency stay
         // as the engine has them until it prepares again.
         self.params = self.read_params();
-        if self.processor.is_some() && self.read_latency() != self.latency {
+        if self.active && self.read_latency() != self.latency {
             self.layout_changed = true;
             // The prepare this asks for is also the restart, or reads the latency, that the
             // plugin may have asked for while loading: one report covers them.
@@ -695,7 +754,7 @@ impl plugin::PluginInstance for ClapInstance {
             plugin::PluginInstance::close_editor(self);
         }
         if flush
-            && self.processor.is_none()
+            && !self.active
             && let (Some(params), Some(mut handle)) =
                 (self.ext.params, self.inst().inactive_plugin_handle())
         {
@@ -723,7 +782,7 @@ impl plugin::PluginInstance for ClapInstance {
         // host learns through `take_layout_changed` and prepares again, which is the restart
         // the plugin asked for and reads the new ports and latency. Until then the plugin keeps
         // processing with its current activation.
-        if (restart || latency_changed) && self.processor.is_some() {
+        if (restart || latency_changed) && self.active {
             self.layout_changed = true;
         }
         self.service_timers_and_fds();
@@ -732,6 +791,16 @@ impl plugin::PluginInstance for ClapInstance {
 
     fn take_layout_changed(&mut self) -> bool {
         std::mem::take(&mut self.layout_changed)
+    }
+
+    fn split(&mut self) -> Option<Box<dyn plugin::PluginProcessor>> {
+        Some(Box::new(ClapProcessor(self.audio.take()?)))
+    }
+
+    fn join(&mut self, processor: Box<dyn plugin::PluginProcessor>) {
+        if let Ok(half) = processor.into_any().downcast::<ClapProcessor>() {
+            self.audio = Some(half.0);
+        }
     }
 }
 

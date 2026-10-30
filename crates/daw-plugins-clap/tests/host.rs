@@ -72,6 +72,16 @@ fn run(
     level: f32,
     events: &[Event],
 ) -> ([Vec<f32>; 2], Vec<Event>) {
+    run_with(&mut |ctx| plugin.process(ctx), frames, level, events)
+}
+
+/// [`run`] on whatever `process` calls, such as a split-off audio half.
+fn run_with(
+    process: &mut dyn FnMut(&mut ProcessContext),
+    frames: usize,
+    level: f32,
+    events: &[Event],
+) -> ([Vec<f32>; 2], Vec<Event>) {
     let input = vec![level; frames];
     let mut left = vec![0.0; frames];
     let mut right = vec![0.0; frames];
@@ -97,7 +107,7 @@ fn run(
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        plugin.process(&mut ctx);
+        process(&mut ctx);
     }
     let out = events_out.iter().copied().collect();
     ([left, right], out)
@@ -394,4 +404,53 @@ fn a_prepare_answers_a_pending_restart_request() {
     assert_eq!(plugin.latency(), 48);
     plugin.on_main_thread();
     assert!(!plugin.take_layout_changed());
+}
+
+/// The audio half plays on another thread while the main thread saves state and runs
+/// callbacks, as CLAP allows; parameter changes it receives reach the main side's state.
+#[test]
+fn a_split_instance_processes_while_the_main_thread_works() {
+    let mut plugin = instance();
+    let mut half = plugin.split().expect("an active CLAP instance splits");
+    let ([l, _], _) = run(plugin.as_mut(), 8, 1.0, &[]);
+    assert!(
+        l.iter().all(|&s| s == 0.0),
+        "the instance is silent while split"
+    );
+    assert!(plugin.split().is_none(), "only one half at a time");
+
+    let audio = std::thread::spawn(move || {
+        let ([l, _], _) = run_with(
+            &mut |ctx| half.process(ctx),
+            64,
+            1.0,
+            &[param(GAIN, 0.5, 0)],
+        );
+        assert!(l.iter().all(|&s| s == 0.5));
+        for _ in 0..200 {
+            let ([l, _], _) = run_with(&mut |ctx| half.process(ctx), 64, 1.0, &[]);
+            assert!(l.iter().all(|&s| s == 0.5));
+        }
+        half
+    });
+    for _ in 0..50 {
+        plugin.on_main_thread();
+        plugin.save_state().unwrap();
+        let _ = plugin.param_value(GAIN);
+    }
+    let half = audio.join().expect("the audio thread");
+    plugin.join(half);
+
+    let state = plugin.save_state().unwrap();
+    let mut other = instance();
+    other.load_state(&state).unwrap();
+    assert_eq!(other.param_value(GAIN), 0.5);
+    // Joined, the instance plays again and can be prepared again.
+    let ([l, _], _) = run(plugin.as_mut(), 8, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 0.5));
+    plugin.prepare(SR, MAX);
+    assert!(plugin.split().is_some_and(|h| {
+        plugin.join(h);
+        true
+    }));
 }

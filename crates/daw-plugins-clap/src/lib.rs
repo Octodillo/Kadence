@@ -13,6 +13,10 @@
 //! call [`PluginInstance::on_main_thread`](daw_core::plugin::PluginInstance::on_main_thread)
 //! regularly (about 60 times a second) so that plugin callbacks, timers, file descriptors and
 //! editor events are serviced.
+//!
+//! [`PluginInstance::split`](daw_core::plugin::PluginInstance::split) hands an active
+//! instance's audio half out as a [`ClapProcessor`], which the audio thread can run while the
+//! main thread goes on using the instance, as CLAP allows.
 
 mod editor;
 mod events;
@@ -28,7 +32,7 @@ use daw_core::plugin::{
     PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 
-pub use instance::ClapInstance;
+pub use instance::{ClapInstance, ClapProcessor};
 
 /// The CLAP plugin format.
 #[derive(Debug, Default, Clone, Copy)]
