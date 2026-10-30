@@ -619,6 +619,67 @@ fn names_taken_in_the_socket_directory_do_not_stop_plugins_loading() {
     assert!(l.iter().all(|&s| s == 1.0));
 }
 
+fn latency_state(magic: &[u8; 4], latency: u32) -> Vec<u8> {
+    let mut state = magic.to_vec();
+    state.extend_from_slice(&latency.to_le_bytes());
+    state
+}
+
+/// Pumps the main thread until the instance reports a layout change, or `timeout` passes.
+fn layout_changed_within(plugin: &mut SandboxedInstance, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        plugin.on_main_thread();
+        if plugin.take_layout_changed() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// A plugin in the host that asks for a restart reaches the application as a layout change,
+/// and a prepare with unchanged settings still prepares it again.
+#[test]
+fn layout_changes_in_the_host_reach_the_application() {
+    let mut plugin = instance();
+    assert!(!layout_changed_within(
+        &mut plugin,
+        Duration::from_millis(200)
+    ));
+
+    plugin.load_state(&latency_state(b"DAWR", 48)).unwrap();
+    assert!(layout_changed_within(&mut plugin, Duration::from_secs(5)));
+    assert_eq!(
+        plugin.latency(),
+        32,
+        "changed before the engine prepared again"
+    );
+
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 48);
+    assert_eq!(plugin.ports().audio_out, 2);
+    // Reported once: the prepare was the restart the plugin asked for.
+    assert!(!layout_changed_within(
+        &mut plugin,
+        Duration::from_millis(300)
+    ));
+    let (out, _) = run(&mut plugin, 64, 0.5, &[]);
+    assert!(out[0].iter().all(|x| x.is_finite()));
+}
+
+/// A prepare with unchanged settings still reaches the plugin when the host has reported a
+/// change that `on_main_thread` has not picked up yet.
+#[test]
+fn a_prepare_answers_a_change_not_yet_picked_up() {
+    let mut plugin = instance();
+    plugin.load_state(&latency_state(b"DAWL", 64)).unwrap();
+    // The host publishes the flag after answering; give it a moment.
+    std::thread::sleep(Duration::from_millis(100));
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 64);
+}
+
 /// mda Delay's metadata, using the installed binary, with its Output port
 /// declared under lv2:sampleRate, so its range is a fraction of the rate.
 /// None when mda-lv2 is not installed (CI requires it).

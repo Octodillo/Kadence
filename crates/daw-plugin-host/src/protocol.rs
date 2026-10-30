@@ -23,12 +23,14 @@ pub enum Request {
         max_frames: u32,
         rt_priority: Option<i32>,
     },
-    /// Calls `Node::prepare` if the settings changed. With `shm`, the host maps that block and
-    /// processes through it from now on.
+    /// With `shm`, the host maps that block and processes through it from now on. With
+    /// `prepare`, it calls `Node::prepare` with the settings; without, it only swaps the block,
+    /// for a plugin already prepared with them. Answered with [`Reply::Prepared`].
     Prepare {
         sample_rate: f64,
         max_frames: u32,
         shm: Option<PathBuf>,
+        prepare: bool,
     },
     Params,
     ParamValue(ParamId),
@@ -50,6 +52,8 @@ pub struct Response {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Reply {
     Instantiated(InstanceInfo),
+    /// The plugin's ports after a `Prepare`, which can change them.
+    Prepared(WirePorts),
     Ok,
     Params(Vec<WireParam>),
     Value(f64),
