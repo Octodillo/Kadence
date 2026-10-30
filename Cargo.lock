@@ -502,6 +502,8 @@ dependencies = [
  "daw-midi",
  "daw-model",
  "daw-pianoroll",
+ "daw-plugin-host",
+ "daw-plugins",
  "daw-session",
  "tempfile",
 ]
@@ -708,6 +710,9 @@ dependencies = [
  "daw-media",
  "daw-midi",
  "daw-model",
+ "daw-plugin-host",
+ "daw-plugins",
+ "libc",
  "tempfile",
  "thiserror 2.0.21",
 ]
