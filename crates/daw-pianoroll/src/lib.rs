@@ -98,12 +98,17 @@ pub struct PianoRoll {
     pub palette: Palette,
     pub snap: Snap,
     pub selection: BTreeSet<NoteUid>,
+    /// Notes of a take being recorded into the open clip, drawn over
+    /// the clip's own notes. Set by the front end.
+    pub live: Vec<NoteData>,
     /// Velocity of drawn notes, 0 to 1.
     pub new_velocity: f64,
     /// Length of drawn notes in ticks; `None` is one grid step.
     pub new_length: Option<i64>,
     gesture: Option<Gesture>,
     menu_requested: bool,
+    /// Fit the view to the clip's notes once the item has a size.
+    fit_pending: bool,
 }
 
 impl Default for PianoRoll {
@@ -156,6 +161,8 @@ impl PianoRoll {
             new_velocity: 0.8,
             new_length: None,
             gesture: None,
+            fit_pending: false,
+            live: Vec::new(),
             menu_requested: false,
         }
     }
@@ -257,19 +264,37 @@ impl PianoRoll {
         self.clip = Some(clip);
         self.selection.clear();
         self.gesture = None;
+        self.fit_pending = true;
+        self.fit(project);
+    }
+
+    /// Scrolls to the clip start and fits its notes' key range, shrinking
+    /// the rows if they do not fit. Waits for a size if there is none yet.
+    fn fit(&mut self, project: &Project) {
         let Some((c, m)) = self.clip(project) else {
+            self.fit_pending = false;
             return;
         };
-        let start = c.start;
-        let center = if m.notes.is_empty() {
-            60.0
-        } else {
-            m.notes.iter().map(|n| f64::from(n.key)).sum::<f64>() / m.notes.len() as f64
+        let h = self.notes_rect().h;
+        if h <= 0.0 || self.width <= self.keyboard_width {
+            return;
+        }
+        self.fit_pending = false;
+        let keys = m.notes.iter().map(|n| n.key);
+        let (lo, hi) = match (keys.clone().min(), keys.max()) {
+            (Some(lo), Some(hi)) => (f64::from(lo), f64::from(hi)),
+            _ => (60.0, 60.0),
         };
+        // A row of room above and below.
+        let needed = hi - lo + 3.0;
+        if needed * self.key_height > h {
+            self.key_height = (h / needed).clamp(MIN_KEY_HEIGHT, MAX_KEY_HEIGHT);
+        }
         // A little room before the clip start.
-        self.view.scroll_x = (start.0 as f64 * self.view.px_per_tick() - 16.0).max(0.0);
-        let rows = self.notes_rect().h / self.key_height;
-        self.scroll_y = ((127.0 - center) - rows / 2.0) * self.key_height;
+        self.view.scroll_x = (c.start.0 as f64 * self.view.px_per_tick() - 16.0).max(0.0);
+        let center = (lo + hi) / 2.0;
+        let rows = h / self.key_height;
+        self.scroll_y = ((127.5 - center) - rows / 2.0) * self.key_height;
         self.clamp_scroll();
     }
 
@@ -278,6 +303,13 @@ impl PianoRoll {
         self.width = width.max(0.0);
         self.height = height.max(0.0);
         self.clamp_scroll();
+    }
+
+    /// Finishes fitting a clip that was opened before the item had a size.
+    pub fn fit_if_pending(&mut self, project: &Project) {
+        if self.fit_pending {
+            self.fit(project);
+        }
     }
 
     /// Whether the last input asked for a context menu (cleared on read).

@@ -137,8 +137,49 @@ impl AppState {
         if first_drop {
             self.report(Message::Record(RecordProblem::InputDropped));
         }
+        self.show_live_take();
         if !self.engine.is_playing() {
             self.stop_recording();
+        }
+    }
+
+    /// Shows the take so far in the piano roll when it has a clip of the
+    /// recorded track open, held keys growing up to the playhead.
+    fn show_live_take(&mut self) {
+        let Some(rec) = self.recording.as_ref() else {
+            return;
+        };
+        let project = self.doc.project();
+        let Some(clip) = self
+            .piano
+            .clip
+            .filter(|&c| {
+                project
+                    .clip_location(c)
+                    .is_some_and(|(t, _)| t == rec.track)
+            })
+            .and_then(|c| project.clip(c))
+        else {
+            return;
+        };
+        let now = rec.tempo.ticks_to_samples(self.playhead(), rec.sample_rate);
+        let mut notes = rec.recorder.notes().to_vec();
+        notes.extend(
+            rec.recorder
+                .held()
+                .map(|(channel, key, start, velocity)| RecordedNote {
+                    start,
+                    end: now.max(start),
+                    key,
+                    channel,
+                    velocity,
+                }),
+        );
+        let range = clip.start..TickTime(clip.start.0 + clip.length.0);
+        let live = to_clip_notes(&notes, &rec.tempo, rec.sample_rate, range);
+        if live != self.piano.live {
+            self.piano.live = live;
+            self.touch();
         }
     }
 
@@ -162,6 +203,7 @@ impl AppState {
             }
         }
         self.engine.stop();
+        self.piano.live.clear();
         let take = rec.recorder.finish(stop_at);
         if take.is_empty() {
             return;
@@ -183,6 +225,7 @@ impl AppState {
         let Some(rec) = self.recording.take() else {
             return;
         };
+        self.piano.live.clear();
         if let Some(player) = self
             .engine
             .session_mut()
