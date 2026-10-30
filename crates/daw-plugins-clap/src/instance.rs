@@ -141,6 +141,9 @@ pub struct ClapInstance {
     steady_time: u64,
     editor: EditorState,
     params: Vec<ParamInfo>,
+    /// Set when the plugin asked for a restart or reported new latency while active; reported
+    /// once through `take_layout_changed`.
+    layout_changed: bool,
 }
 
 // SAFETY: the CLAP threading rules are upheld by the contract documented on the crate: every
@@ -191,6 +194,7 @@ impl ClapInstance {
             steady_time: 0,
             editor: EditorState::default(),
             params: Vec::new(),
+            layout_changed: false,
         };
         this.layout = this.read_layout();
         this.params = this.read_params();
@@ -287,6 +291,7 @@ impl ClapInstance {
     /// What [`Node::prepare`] does, but reporting activation failure instead of leaving the
     /// plugin silent.
     pub fn try_prepare(&mut self, sample_rate: f64, max_frames: u32) -> Result<(), PluginError> {
+        self.layout_changed = false;
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
         self.steady_time = 0;
@@ -309,6 +314,12 @@ impl ClapInstance {
         self.processor = Some(PluginAudioProcessor::Stopped(stopped));
         self.buffers = Some(Buffers::new(&self.layout, self.max_frames as usize));
         self.latency = self.read_latency();
+        // This activation is the restart a pending request asked for, and a plugin may report
+        // its latency while activating, which is read just above: neither must ask for yet
+        // another prepare.
+        self.take_flag(|s| &s.restart_requested);
+        self.inst()
+            .access_handler(|h| HostShared::take(&h.latency_changed));
         Ok(())
     }
 
@@ -567,10 +578,11 @@ impl plugin::PluginInstance for ClapInstance {
         state
             .load(&self.inst().plugin_handle(), &mut reader)
             .map_err(|e| PluginError::State(e.to_string()))?;
-        // Loading state can change parameters, latency and even ports.
+        // Loading state can change parameters, latency and even ports. Ports and latency stay
+        // as the engine has them until it prepares again.
         self.params = self.read_params();
-        if self.processor.is_some() {
-            self.latency = self.read_latency();
+        if self.processor.is_some() && self.read_latency() != self.latency {
+            self.layout_changed = true;
         }
         Ok(())
     }
@@ -693,16 +705,24 @@ impl plugin::PluginInstance for ClapInstance {
         });
         if rescan {
             self.params = self.read_params();
-        }
-        if restart && self.processor.is_some() {
-            if let Err(e) = self.activate() {
-                eprintln!("{e}");
+            // Gaining the first parameter or losing the last changes the event ports.
+            if self.params.is_empty() == self.layout.has_params {
+                self.layout_changed = true;
             }
-        } else if latency_changed && self.processor.is_some() {
-            self.latency = self.read_latency();
+        }
+        // The engine reads ports and latency once per prepare, so neither changes here: the
+        // host learns through `take_layout_changed` and prepares again, which is the restart
+        // the plugin asked for and reads the new ports and latency. Until then the plugin keeps
+        // processing with its current activation.
+        if (restart || latency_changed) && self.processor.is_some() {
+            self.layout_changed = true;
         }
         self.service_timers_and_fds();
         self.pump_editor_window();
+    }
+
+    fn take_layout_changed(&mut self) -> bool {
+        std::mem::take(&mut self.layout_changed)
     }
 }
 

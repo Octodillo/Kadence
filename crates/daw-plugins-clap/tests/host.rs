@@ -326,3 +326,61 @@ fn only_the_main_ports_reach_the_graph() {
     let ([l, r], _) = run(plugin.as_mut(), 100, 0.5, &[]);
     assert!(l.iter().chain(&r).all(|&s| s == 0.5));
 }
+
+fn latency_state(magic: &[u8; 4], latency: u32) -> Vec<u8> {
+    let mut state = magic.to_vec();
+    state.extend_from_slice(&latency.to_le_bytes());
+    state
+}
+
+/// New latency from loading state reaches the engine through `take_layout_changed` and the
+/// next prepare, not behind its back.
+#[test]
+fn latency_changes_wait_for_the_next_prepare() {
+    let mut plugin = instance();
+    assert!(!plugin.take_layout_changed());
+    plugin.load_state(&latency_state(b"DAWL", 64)).unwrap();
+    assert_eq!(
+        plugin.latency(),
+        32,
+        "changed before the engine prepared again"
+    );
+    assert!(plugin.take_layout_changed());
+    assert!(!plugin.take_layout_changed(), "reported twice");
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 64);
+    plugin.on_main_thread();
+    assert!(!plugin.take_layout_changed());
+}
+
+/// A restart request is passed to the host instead of re-activating the plugin under the
+/// engine, and the prepare that follows does not ask for another one.
+#[test]
+fn restart_requests_wait_for_the_next_prepare() {
+    let mut plugin = instance();
+    plugin.load_state(&latency_state(b"DAWR", 48)).unwrap();
+    // Also flagged by the latency change; take it so only the restart request is left.
+    plugin.take_layout_changed();
+    plugin.on_main_thread();
+    assert!(plugin.take_layout_changed());
+    assert_eq!(plugin.latency(), 32);
+    // Still processing with the old activation meanwhile.
+    let (out, _) = run(plugin.as_mut(), 64, 0.5, &[]);
+    assert!(out[0].iter().any(|&x| x != 0.0));
+
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 48);
+    plugin.on_main_thread();
+    assert!(!plugin.take_layout_changed());
+}
+
+/// A restart request that a prepare got to first is answered by that prepare.
+#[test]
+fn a_prepare_answers_a_pending_restart_request() {
+    let mut plugin = instance();
+    plugin.load_state(&latency_state(b"DAWR", 48)).unwrap();
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 48);
+    plugin.on_main_thread();
+    assert!(!plugin.take_layout_changed());
+}

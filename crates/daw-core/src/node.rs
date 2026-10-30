@@ -138,7 +138,7 @@ impl TransportState {
 
 /// How many audio channels a node takes and produces, and whether it uses
 /// events. Fixed between [`Node::prepare`] calls.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PortLayout {
     pub audio_in: u16,
     pub audio_out: u16,

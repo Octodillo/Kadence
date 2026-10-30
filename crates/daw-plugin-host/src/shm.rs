@@ -65,6 +65,12 @@ pub struct Header {
     /// usual, but the watchdog gives a stalled cycle the call timeout rather than the hang
     /// timeout, so slow main-thread work in a healthy plugin is not mistaken for a hang.
     pub main_in_plugin: AtomicU32,
+    /// Set by the host when the plugin reported, through
+    /// [`PluginInstance::take_layout_changed`], that it wants to be prepared again; taken by
+    /// the application's main thread. Cleared by the host when it prepares the plugin.
+    ///
+    /// [`PluginInstance::take_layout_changed`]: daw_core::plugin::PluginInstance::take_layout_changed
+    pub layout_changed: AtomicU32,
     /// Time-signature numerator in the low byte, denominator in the next.
     time_sig: AtomicU32,
     /// Nonzero when a loop is set.

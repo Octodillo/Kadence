@@ -618,3 +618,52 @@ fn names_taken_in_the_socket_directory_do_not_stop_plugins_loading() {
     let ([l, _], _) = run(&mut plugin, 16, 1.0, &[]);
     assert!(l.iter().all(|&s| s == 1.0));
 }
+
+fn latency_state(magic: &[u8; 4], latency: u32) -> Vec<u8> {
+    let mut state = magic.to_vec();
+    state.extend_from_slice(&latency.to_le_bytes());
+    state
+}
+
+/// Pumps the main thread until the instance reports a layout change, or `timeout` passes.
+fn layout_changed_within(plugin: &mut SandboxedInstance, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        plugin.on_main_thread();
+        if plugin.take_layout_changed() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// A plugin in the host that asks for a restart reaches the application as a layout change,
+/// and a prepare with unchanged settings still prepares it again.
+#[test]
+fn layout_changes_in_the_host_reach_the_application() {
+    let mut plugin = instance();
+    assert!(!layout_changed_within(
+        &mut plugin,
+        Duration::from_millis(200)
+    ));
+
+    plugin.load_state(&latency_state(b"DAWR", 48)).unwrap();
+    assert!(layout_changed_within(&mut plugin, Duration::from_secs(5)));
+    assert_eq!(
+        plugin.latency(),
+        32,
+        "changed before the engine prepared again"
+    );
+
+    plugin.prepare(SR, MAX);
+    assert_eq!(plugin.latency(), 48);
+    assert_eq!(plugin.ports().audio_out, 2);
+    // Reported once: the prepare was the restart the plugin asked for.
+    assert!(!layout_changed_within(
+        &mut plugin,
+        Duration::from_millis(300)
+    ));
+    let (out, _) = run(&mut plugin, 64, 0.5, &[]);
+    assert!(out[0].iter().all(|x| x.is_finite()));
+}

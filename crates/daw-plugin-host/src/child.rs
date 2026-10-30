@@ -1,6 +1,7 @@
 //! The host process side: loads one plugin, answers control requests on the main thread, pumps
 //! the plugin's main-thread callbacks, and runs audio cycles on its own audio thread.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -16,8 +17,8 @@ use daw_core::plugin::{PluginError, PluginInstance};
 use daw_plugins::PluginRegistry;
 
 use crate::protocol::{
-    FrameReader, InstanceInfo, Reply, Request, Response, WireError, WireParam, blob_fits,
-    write_frame,
+    FrameReader, InstanceInfo, Reply, Request, Response, WireError, WireParam, WirePorts,
+    blob_fits, write_frame,
 };
 use crate::shm::{
     self, DONE, FLAG_RESET, MAX_CHANNELS, REQUEST, Shm, decode_event, encode_event, futex_wait,
@@ -65,7 +66,8 @@ pub fn run_host_child(
         stream,
         plugin: Arc::new(Mutex::new(None)),
         audio: None,
-        prepared: (0.0, 0),
+        instantiated_with: None,
+        layout_changed: Cell::new(false),
         rt_priority: None,
     };
     let result = host.run();
@@ -112,8 +114,11 @@ struct Host<'a> {
     stream: UnixStream,
     plugin: SharedPlugin,
     audio: Option<AudioThread>,
-    /// Sample rate and max frames the plugin was last prepared with.
-    prepared: (f64, u32),
+    /// Sample rate and max frames the plugin was instantiated, and so prepared, with, until the
+    /// first `Prepare`.
+    instantiated_with: Option<(f64, u32)>,
+    /// The plugin asked to be prepared again, and the application has not been told yet.
+    layout_changed: Cell<bool>,
     rt_priority: Option<i32>,
 }
 
@@ -143,6 +148,7 @@ impl Host<'_> {
                     if shutdown {
                         return Ok(());
                     }
+                    self.publish_layout_change();
                 }
                 Ok(None) => {}
                 // The application closed the socket: it is done with us, or it died.
@@ -152,9 +158,28 @@ impl Host<'_> {
             if last_pump.elapsed() >= PUMP_INTERVAL {
                 if let Some(p) = self.lock_inside().as_mut() {
                     p.on_main_thread();
+                    if p.take_layout_changed() {
+                        self.layout_changed.set(true);
+                    }
                 }
+                self.publish_layout_change();
                 last_pump = Instant::now();
             }
+        }
+    }
+
+    /// Tells the application, through the audio block, that the plugin wants to be prepared
+    /// again. Without a block yet, it waits for one.
+    fn publish_layout_change(&self) {
+        if self.layout_changed.get()
+            && let Some(audio) = &self.audio
+        {
+            audio
+                .shm
+                .header()
+                .layout_changed
+                .store(1, Ordering::Release);
+            self.layout_changed.set(false);
         }
     }
 
@@ -202,7 +227,7 @@ impl Host<'_> {
                                 has_editor: p.has_editor(),
                             };
                             *lock(&self.plugin) = Some(p);
-                            self.prepared = (sample_rate, max_frames);
+                            self.instantiated_with = Some((sample_rate, max_frames));
                             Reply::Instantiated(info)
                         })
                 }
@@ -243,7 +268,14 @@ impl Host<'_> {
         f: impl FnOnce(&mut dyn PluginInstance) -> Result<T, PluginError>,
     ) -> Result<T, PluginError> {
         match self.lock_inside().as_mut() {
-            Some(p) => f(p.as_mut()),
+            Some(p) => {
+                let result = f(p.as_mut());
+                // Loading state, say, can change the plugin's layout.
+                if p.take_layout_changed() {
+                    self.layout_changed.set(true);
+                }
+                result
+            }
             None => Err(PluginError::Load("no plugin loaded".into())),
         }
     }
@@ -265,14 +297,25 @@ impl Host<'_> {
             })?)),
             None => old,
         };
-        if self.prepared != (sample_rate, max_frames) {
-            // The audio thread is stopped, so flag the block it restarts with: a cycle the
-            // application posts meanwhile waits for this.
-            if let Some(p) = InsidePlugin::lock(&self.plugin, block.clone()).as_mut() {
+        // Preparing again is how the application answers a layout change, so only the prepare
+        // that instantiating already did is skipped.
+        let already = self.instantiated_with.take() == Some((sample_rate, max_frames));
+        // The audio thread is stopped, so flag the block it restarts with: a cycle the
+        // application posts meanwhile waits for this.
+        let ports = {
+            let mut inside = InsidePlugin::lock(&self.plugin, block.clone());
+            let p = inside.as_mut().expect("checked above");
+            if !already {
                 p.prepare(sample_rate, max_frames);
+                // This prepare is the one the plugin asked for.
+                p.take_layout_changed();
+                self.layout_changed.set(false);
+                if let Some(block) = &block {
+                    block.header().layout_changed.store(0, Ordering::Release);
+                }
             }
-            self.prepared = (sample_rate, max_frames);
-        }
+            WirePorts::from(&p.ports())
+        };
         if let Some(block) = block {
             self.audio = Some(AudioThread::start(
                 block,
@@ -280,7 +323,7 @@ impl Host<'_> {
                 self.rt_priority,
             ));
         }
-        Ok(Reply::Ok)
+        Ok(Reply::Prepared(ports))
     }
 
     /// Stops the audio thread, if any, and returns its block.
@@ -629,7 +672,8 @@ mod tests {
             stream,
             plugin: plugin.clone(),
             audio: Some(AudioThread::start(shm.clone(), plugin, None)),
-            prepared: (48_000.0, 64),
+            instantiated_with: None,
+            layout_changed: Cell::new(false),
             rt_priority: None,
         };
         // The host pumps between reads; close the socket once it has pumped at least once.
@@ -665,7 +709,8 @@ mod tests {
                     stream,
                     plugin: plugin.clone(),
                     audio: Some(AudioThread::start(shm.clone(), plugin.clone(), None)),
-                    prepared: (48_000.0, 64),
+                    instantiated_with: None,
+                    layout_changed: Cell::new(false),
                     rt_priority: None,
                 };
                 host.run().unwrap();
@@ -729,7 +774,8 @@ mod tests {
             stream,
             plugin: Arc::new(Mutex::new(None)),
             audio: None,
-            prepared: (48_000.0, 64),
+            instantiated_with: None,
+            layout_changed: Cell::new(false),
             rt_priority: None,
         };
         for (value, want) in [

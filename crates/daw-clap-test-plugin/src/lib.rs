@@ -3,6 +3,9 @@
 //! It is a stereo gain with a 32-sample reported latency. Note and MIDI events are echoed to the
 //! note output, and each note on also sets the read-only "Last note" parameter, which the plugin
 //! reports back to the host as an output parameter event.
+//!
+//! Loading the state `b"DAWL"` followed by a little-endian `u32` changes the reported latency;
+//! `b"DAWR"` does the same and asks the host to restart the plugin.
 
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
@@ -25,7 +28,7 @@ use clack_plugin::stream::{InputStream, OutputStream};
 use std::ffi::CStr;
 use std::fmt::Write as _;
 use std::io::{Read, Write as _};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub const PLUGIN_ID: &str = "org.daw.test.gain";
 pub const PARAM_GAIN: u32 = 1;
@@ -61,20 +64,22 @@ impl DefaultPluginFactory for TestPlugin {
         Ok(Shared {
             gain: AtomicF64::new(1.0),
             last_note: AtomicF64::new(0.0),
+            latency: AtomicU32::new(LATENCY),
         })
     }
 
     fn new_main_thread<'a>(
-        _host: HostMainThreadHandle<'a>,
+        host: HostMainThreadHandle<'a>,
         shared: &'a Shared,
     ) -> Result<MainThread<'a>, PluginError> {
-        Ok(MainThread { shared })
+        Ok(MainThread { host, shared })
     }
 }
 
 pub struct Shared {
     gain: AtomicF64,
     last_note: AtomicF64,
+    latency: AtomicU32,
 }
 
 impl Shared {
@@ -93,6 +98,7 @@ impl Shared {
 impl PluginShared<'_> for Shared {}
 
 pub struct MainThread<'a> {
+    host: HostMainThreadHandle<'a>,
     shared: &'a Shared,
 }
 
@@ -251,7 +257,7 @@ impl PluginNotePortsImpl for MainThread<'_> {
 
 impl PluginLatencyImpl for MainThread<'_> {
     fn get(&self) -> u32 {
-        LATENCY
+        self.shared.latency.load(Ordering::Relaxed)
     }
 }
 
@@ -263,8 +269,22 @@ impl PluginStateImpl for MainThread<'_> {
     }
 
     fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
+        let mut magic = [0; 4];
+        input.read_exact(&mut magic)?;
+        if &magic == b"DAWL" || &magic == b"DAWR" {
+            let mut latency = [0; 4];
+            input.read_exact(&mut latency)?;
+            self.shared
+                .latency
+                .store(u32::from_le_bytes(latency), Ordering::Relaxed);
+            if &magic == b"DAWR" {
+                self.host.request_restart();
+            }
+            return Ok(());
+        }
         let mut buf = [0; 12];
-        input.read_exact(&mut buf)?;
+        buf[..4].copy_from_slice(&magic);
+        input.read_exact(&mut buf[4..])?;
         if &buf[..4] != b"DAWT" {
             return Err(PluginError::Message("bad state magic"));
         }
