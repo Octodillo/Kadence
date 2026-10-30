@@ -20,7 +20,8 @@ inside the sandbox and checks that libjack is visible there.
 ## Runtime requirements
 
 - Qt 6.8 or newer: QtBase (Gui, Widgets), QtDeclarative (Quick,
-  QuickControls2). Before Qt 6.10 the Wayland client plugin is a separate
+  QuickControls2, Quick Dialogs; on Debian and Ubuntu the last is the
+  separate `qml6-module-qtquick-dialogs`). Before Qt 6.10 the Wayland client plugin is a separate
   package (`qt6-wayland`), needed for native Wayland windows.
 - KDE Frameworks 6.13 or newer: Kirigami, qqc2-desktop-style, KCoreAddons,
   KI18n, KCrash, KConfig, KColorScheme, KIconThemes. Breeze icons are
@@ -91,10 +92,12 @@ gets the PipeWire socket. Plugins come from two places:
 - `~/.clap`, `~/.lv2` and `~/.vst3`, read only.
 
 `CLAP_PATH` and `VST3_PATH` point at the extension's directories, and the
-CLAP and VST3 hosts search them before the standard locations. LV2 is not
-wired up yet: `LV2_PATH` would replace lilv's defaults rather than add to
-them, so the LV2 host will need to add `/app/extensions/Plugins/lv2` itself
-when it runs inside Flatpak (`/.flatpak-info` exists).
+CLAP and VST3 hosts search them before the standard locations. `LV2_PATH` is
+left unset, since it would replace lilv's defaults rather than add to them;
+instead the LV2 host adds `/app/extensions/Plugins/lv2` (and the app's own
+`/app/lib/lv2`) itself when it runs inside Flatpak (`/.flatpak-info` exists). It searches
+them after `~/.lv2`, so for LV2 (unlike CLAP and VST3) a copy of a plugin in
+the home directory wins over the extension's.
 
 Plugins installed system-wide (`/usr/lib/{clap,lv2,vst3}`) are not visible
 inside the sandbox, so the native packages remain the better choice for

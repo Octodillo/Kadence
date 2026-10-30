@@ -403,7 +403,11 @@ fn set_envelopes(p: &ParamStore, sr: f64, v: &mut Voice) {
     );
 }
 
-impl_device!(Synth, INFO, PARAMS);
+impl_device!(Synth, INFO, PARAMS, {
+    fn snap_smoothing(&mut self) {
+        self.gain.reset(self.gain.target());
+    }
+});
 
 impl Segmented for Synth {
     fn param_event(&mut self, param: ParamId, value: f64) {
@@ -419,6 +423,13 @@ impl Segmented for Synth {
                     v.amp_env.gate_off();
                     v.filter_env.gate_off();
                 }
+            }
+            Note::SoundOff => {
+                for v in self.voices.iter_mut().filter(|v| v.active && !v.stolen) {
+                    v.stolen = true;
+                    v.fade = 1.0;
+                }
+                self.bend = 0.0;
             }
             Note::Bend(b) => self.bend = b,
         }

@@ -36,14 +36,21 @@ fn records_rt_blocks_to_wav_with_peaks() {
     }
     // The peak cache was saved next to the file and is current.
     assert!(PeakCache::path_for(&path).exists());
-    assert_eq!(PeakCache::load_or_build(&path).unwrap(), stats.peaks);
+    assert_eq!(stats.files.len(), 1);
+    assert_eq!(stats.files[0].path, path);
+    assert_eq!(
+        PeakCache::load_or_build(&path).unwrap(),
+        stats.files[0].peaks
+    );
+    assert!(stats.error.is_none());
 }
 
 #[test]
-fn overflow_drops_whole_blocks_and_counts_them() {
+fn overflow_drops_and_counts_what_does_not_fit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("burst.wav");
-    // Tiny ring (the minimum, 4096 frames); push 10 x 1000 frames instantly.
+    // Tiny ring (the minimum, 4096 frames); push 10 x 1000 frames instantly. The
+    // block that straddles the end is queued in part.
     let (rec, mut input) = Recorder::start(&path, 1, 48_000, WavFormat::Pcm24, 0.0).unwrap();
     let block = vec![0.25f32; 1000];
     let mut queued = 0;
@@ -84,6 +91,43 @@ fn failed_peak_save_does_not_fail_the_take() {
     drop(input);
     let stats = rec.finish().unwrap();
     assert_eq!(stats.frames, 1000);
-    assert!(stats.peaks_error.is_some());
+    assert!(stats.files[0].peaks_error.is_some());
+    assert!(stats.error.is_none());
     assert_eq!(decode_file(&path).unwrap().frames(), 1000);
+}
+
+/// Issue #28: recording to an existing path truncated the earlier take.
+#[test]
+fn start_never_overwrites_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Vox-3.wav");
+    std::fs::write(&path, b"earlier take").unwrap();
+    assert!(Recorder::start(&path, 1, 48_000, WavFormat::Pcm16, 1.0).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"earlier take");
+}
+
+/// Issue #28: a block bigger than the ring was dropped whole, every time, and a block
+/// with a missing channel was ignored without being counted.
+#[test]
+fn oversized_blocks_are_queued_in_part_and_missing_channels_are_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.wav");
+    // The ring holds 4096 frames; blocks are 8192.
+    let (rec, mut input) = Recorder::start(&path, 1, 48_000, WavFormat::Pcm16, 0.0).unwrap();
+    let block = vec![0.25f32; 8192];
+    assert_eq!(input.write(&[&block]), 4096);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(input.write(&[&block]), 4096);
+    drop(input);
+    let stats = rec.finish().unwrap();
+    assert_eq!(stats.frames, 8192);
+    assert_eq!(stats.dropped_frames, 8192);
+
+    let path = dir.path().join("stereo.wav");
+    let (rec, mut input) = Recorder::start(&path, 2, 48_000, WavFormat::Pcm16, 1.0).unwrap();
+    assert_eq!(input.write(&[&block[..512]]), 0);
+    drop(input);
+    let stats = rec.finish().unwrap();
+    assert_eq!(stats.frames, 0);
+    assert_eq!(stats.dropped_frames, 512);
 }

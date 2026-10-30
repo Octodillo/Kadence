@@ -18,7 +18,7 @@ pub use data::AudioData;
 pub use decode::{AudioFileInfo, Decoder, decode_file, load_file};
 pub use error::MediaError;
 pub use peaks::{BASE_FRAMES_PER_PEAK, PeakBuilder, PeakCache, PeakLevel};
-pub use record::{RecordInput, Recorder, RecordingStats};
+pub use record::{RecordInput, RecordedFile, Recorder, RecordingStats};
 pub use resample::{ChunkResampler, resample};
 pub use stream::{ClipReader, DiskStreamer, ReadStatus, StreamerConfig};
 pub use write::{FlacBits, WavFormat, write_flac, write_wav};

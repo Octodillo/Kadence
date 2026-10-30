@@ -13,14 +13,37 @@ const DOAP_MAINTAINER: &str = "http://usefulinc.com/ns/doap#maintainer";
 const FOAF_NAME: &str = "http://xmlns.com/foaf/0.1/name";
 
 /// `LV2_PATH` if set, otherwise the usual per-user and system locations
-/// (Arch, Fedora/openSUSE lib64 and Debian/Ubuntu layouts). Only existing
-/// directories are returned.
+/// (Arch, Fedora/openSUSE lib64 and Debian/Ubuntu layouts). Inside Flatpak
+/// the plugin extension (`org.freedesktop.LinuxAudio.Plugins`) and plugins
+/// bundled with the app are searched after the others, even with `LV2_PATH`
+/// set: the manifest cannot set `LV2_PATH` without dropping the standard
+/// locations. Only existing directories are returned.
 pub(crate) fn default_search_paths() -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = match std::env::var_os("LV2_PATH") {
+    let mut paths = candidate_paths(
+        std::env::var_os("LV2_PATH"),
+        std::env::var_os("HOME"),
+        Path::new("/.flatpak-info").is_file(),
+    );
+    // The same directory can be listed twice or reached through a symlink
+    // (/usr/lib64 -> /usr/lib on Arch); scan it once.
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| p.is_dir() && seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
+    paths
+}
+
+/// Where Flatpak's plugin extension point and the app's own plugins live.
+const FLATPAK_PATHS: [&str; 2] = ["/app/extensions/Plugins/lv2", "/app/lib/lv2"];
+
+fn candidate_paths(
+    lv2_path: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    flatpak: bool,
+) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = match lv2_path {
         Some(p) if !p.is_empty() => std::env::split_paths(&p).collect(),
         _ => {
             let mut v = Vec::new();
-            if let Some(home) = std::env::var_os("HOME") {
+            if let Some(home) = home {
                 v.push(Path::new(&home).join(".lv2"));
             }
             for p in [
@@ -36,11 +59,10 @@ pub(crate) fn default_search_paths() -> Vec<PathBuf> {
             v
         }
     };
-    // The same directory can be listed twice or reached through a symlink
-    // (/usr/lib64 -> /usr/lib on Arch); scan it once.
-    let mut seen = std::collections::HashSet::new();
-    paths.retain(|p| p.is_dir() && seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
-    paths
+    if flatpak {
+        v.extend(FLATPAK_PATHS.iter().map(PathBuf::from));
+    }
+    v
 }
 
 /// Bundles at `path`: the directory itself when it is a bundle, otherwise its
@@ -149,5 +171,34 @@ mod tests {
         assert_eq!(bundles(&b), vec![b.clone()]);
         assert_eq!(bundles(dir.path()), vec![b]);
         assert!(bundles(&dir.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn flatpak_adds_its_plugin_directories() {
+        let home = Some("/home/me".into());
+        let native = candidate_paths(None, home.clone(), false);
+        assert_eq!(native[0], Path::new("/home/me/.lv2"));
+        assert!(!native.iter().any(|p| p.starts_with("/app")));
+
+        let flatpak = candidate_paths(None, home, true);
+        assert_eq!(&flatpak[..native.len()], &native[..]);
+        assert_eq!(
+            &flatpak[native.len()..],
+            &[
+                PathBuf::from("/app/extensions/Plugins/lv2"),
+                PathBuf::from("/app/lib/lv2")
+            ]
+        );
+
+        // LV2_PATH replaces the standard locations but not Flatpak's.
+        let custom = candidate_paths(Some("/a:/b".into()), None, true);
+        assert_eq!(
+            custom,
+            ["/a", "/b", "/app/extensions/Plugins/lv2", "/app/lib/lv2"].map(PathBuf::from)
+        );
+        assert_eq!(
+            candidate_paths(Some("/a".into()), None, false),
+            [PathBuf::from("/a")]
+        );
     }
 }

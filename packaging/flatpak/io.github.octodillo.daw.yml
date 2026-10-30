@@ -35,8 +35,8 @@ finish-args:
   - --filesystem=~/.lv2:ro
   - --filesystem=~/.vst3:ro
   # The CLAP and VST3 hosts search these before the standard locations.
-  # LV2_PATH would replace lilv's defaults instead, so the LV2 host will have
-  # to add /app/extensions/Plugins/lv2 itself (not done yet).
+  # LV2_PATH would replace lilv's defaults instead, so it is left unset: the
+  # LV2 host adds /app/extensions/Plugins/lv2 itself inside Flatpak.
   - --env=CLAP_PATH=/app/extensions/Plugins/clap
   - --env=VST3_PATH=/app/extensions/Plugins/vst3
 

@@ -129,8 +129,12 @@ Item {
             check(Engine.applyAudioSettings(0, 12345, size) !== "", "bad sample rate refused");
             check(Engine.sampleRate === rate, "old settings kept after refusal");
             check(Engine.errorText !== "", "error shown");
-            // Leave a known state in the config file for the test to read.
-            check(Engine.applyAudioSettings(1, 44100, 512) === "", "apply final settings");
+            // Leave a known state in the config file for the test to read
+            // (the stub offers 44100 and 512; a running server may not).
+            const finalRate = Engine.sampleRates.includes(44100) ? 44100 : rate;
+            const finalSize = Engine.bufferSizes.includes(512) ? 512 : size;
+            check(Engine.applyAudioSettings(Math.min(1, device), finalRate, finalSize) === "",
+                  "apply final settings");
         },
         () => {
             // Older Kirigami (KF 6.13 in Debian 13) has no PageStack.closeDialog();

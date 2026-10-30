@@ -190,7 +190,12 @@ impl Reverb {
     }
 }
 
-impl_device!(Reverb, INFO, PARAMS);
+impl_device!(Reverb, INFO, PARAMS, {
+    fn snap_smoothing(&mut self) {
+        self.mix.reset(self.mix.target());
+        self.width.reset(self.width.target());
+    }
+});
 
 impl Segmented for Reverb {
     fn param_event(&mut self, param: ParamId, value: f64) {

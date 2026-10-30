@@ -233,7 +233,11 @@ impl ParametricEq {
     }
 }
 
-impl_device!(ParametricEq, INFO, PARAMS);
+impl_device!(ParametricEq, INFO, PARAMS, {
+    fn snap_smoothing(&mut self) {
+        self.output.reset(self.output.target());
+    }
+});
 
 impl Segmented for ParametricEq {
     fn param_event(&mut self, param: ParamId, value: f64) {

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3716748afc824b7c8d230bf8a33cea4400be5743cfcf78c80f77ac44dfbcf0df # shrinks to m = Meter { points: [MeterPoint { tick: TickTime(0), numerator: 2, denominator: 1 }], first_bar: [0] }, g = Grid { division: Bar, feel: Straight, swing: 0.0 }, d = 0
+cc 86aaa9c20ecbd2ab8b7e32d518406f00bee7f206ea5f62c56c494ae9f15385ea # shrinks to m = Meter { points: [MeterPoint { tick: TickTime(0), numerator: 4, denominator: 4 }], first_bar: [0] }, g = Grid { division: Note(1922), feel: Straight, swing: 0.936514469302215 }, start = 0, len = 1922
