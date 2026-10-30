@@ -32,6 +32,9 @@ daw-devices = { path = "../daw-devices" }
 daw-engine = { path = "../daw-engine" }
 daw-backend = { path = "../daw-backend" }
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 cxx-qt-build = "0.10"
 

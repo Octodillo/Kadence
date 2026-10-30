@@ -21,6 +21,7 @@
 
 mod build;
 pub mod capture;
+pub mod export;
 pub mod host;
 mod media;
 pub mod player;
@@ -170,6 +171,8 @@ pub struct Session {
     gates: Vec<(TrackId, bool, Option<u8>)>,
     /// The track that takes live MIDI when none is armed.
     input_focus: Option<TrackId>,
+    /// Rendering to a file rather than playing: players wait for the disk.
+    pub(crate) offline: Option<Arc<player::Offline>>,
     plugins: Plugins,
     /// The snapshot last synced, for rebuilds the plugins ask for.
     last: Option<ProjectSnapshot>,
@@ -223,6 +226,7 @@ impl Session {
             midi_sources_changed: false,
             gates: Vec::new(),
             input_focus: None,
+            offline: None,
             plugins: Plugins::default(),
             last: None,
             force_rebuild: false,
