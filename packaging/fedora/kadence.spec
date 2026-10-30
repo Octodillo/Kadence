@@ -44,6 +44,8 @@ BuildRequires:  kf6-kcolorscheme-devel
 BuildRequires:  kf6-kiconthemes-devel
 BuildRequires:  kf6-kirigami-devel
 BuildRequires:  pkgconfig(jack)
+# LV2 plugin hosting; the library dependency is found automatically.
+BuildRequires:  pkgconfig(lilv-0)
 # %%check runs the real UI offscreen, which needs the QML style.
 BuildRequires:  kf6-qqc2-desktop-style
 

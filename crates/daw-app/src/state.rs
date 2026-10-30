@@ -291,6 +291,60 @@ impl AppState {
         (!ours && recovery::is_locked(&root)).then_some(root)
     }
 
+    /// Runs the plugins' main-thread work and frees what the audio thread
+    /// is done with. Called by the UI's refresh timer, about 60 times a
+    /// second.
+    pub fn tick_engine(&mut self) {
+        let Some(session) = self.engine.session_mut() else {
+            return;
+        };
+        let report = session.tick();
+        if let Some(w) = report.warnings.into_iter().next() {
+            self.report(Message::Warning(w));
+        }
+        if let Some(e) = report.error {
+            // Retried on later ticks; shown once.
+            let fields = Message::Playback(e).fields();
+            if self.status.as_ref() != Some(&fields) {
+                self.status = Some(fields);
+                self.touch();
+            }
+        }
+    }
+
+    /// Stores each plugin's current state in the document, so saving keeps
+    /// it. Not an undo step: the plugin changed, not the project, so undo
+    /// must not throw a plugin's own changes away.
+    pub fn store_plugin_states(&mut self) {
+        let Some(session) = self.engine.session_mut() else {
+            return;
+        };
+        let mut stored = false;
+        for s in session.plugin_states() {
+            match s.state {
+                // The device was synced moments ago; if it is gone anyway, there is nothing
+                // to keep its state for.
+                Ok(state) => stored |= self.doc.store_plugin_state(s.device, Some(state)).is_ok(),
+                Err(detail) => {
+                    let device = self
+                        .doc
+                        .project()
+                        .all_tracks()
+                        .flat_map(|t| t.devices.iter())
+                        .find(|d| d.id == s.device)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_default();
+                    self.report(Message::Warning(
+                        daw_session::Warning::PluginStateNotSaved { device, detail },
+                    ));
+                }
+            }
+        }
+        if stored {
+            self.sync();
+        }
+    }
+
     /// Forces a full resync, after the engine was restarted.
     pub fn resync(&mut self) {
         self.synced = None;
@@ -493,6 +547,9 @@ impl AppState {
             let _ = s.stop();
             let _ = s.locate(TickTime(0));
             let _ = s.set_loop(None);
+            // The new document's plugins start from its own saved state, even where it
+            // has the same devices (reopening a project).
+            s.clear_plugins();
         }
         self.doc = doc;
         self.autosave_failed = None;

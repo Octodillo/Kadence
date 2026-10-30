@@ -10,9 +10,11 @@
 //! tests of the settings UI; it still plays silently so the transport works.
 
 use std::fmt;
+use std::path::PathBuf;
 
-use daw_session::Session;
+use daw_plugin_host::{HostLauncher, SandboxConfig};
 use daw_session::host::{AudioHost, HostConfig, HostKind};
+use daw_session::{PluginLoader, SandboxLoader, Session};
 
 /// An audio device the user can pick in the settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,8 +99,9 @@ impl fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
-/// The engine as the UI sees it. Called on the UI thread only.
-pub trait EngineHandle: Send {
+/// The engine as the UI sees it. Called on the UI thread only: the session
+/// keeps its plugins on the thread that created them, so it is not `Send`.
+pub trait EngineHandle {
     fn backend_kind(&self) -> BackendKind;
     fn audio_devices(&self) -> Vec<AudioDevice>;
     fn supported_sample_rates(&self) -> Vec<u32>;
@@ -131,6 +134,33 @@ pub trait EngineHandle: Send {
     fn session_mut(&mut self) -> Option<&mut Session>;
 }
 
+/// Loads plugins in sandbox host processes: this executable again, which
+/// answers `--plugin-host` and `--scan` before Qt starts (see
+/// [`run_plugin_child`](crate::run_plugin_child)). Scan results are cached
+/// in `$XDG_CACHE_HOME/kadence/plugins.json`.
+fn plugin_loader() -> Option<Box<dyn PluginLoader>> {
+    let launcher = HostLauncher::current_exe().ok()?;
+    let mut loader = SandboxLoader::new(SandboxConfig::new(launcher));
+    if let Some(dir) = cache_dir() {
+        loader = loader.with_cache_file(dir.join("kadence").join("plugins.json"));
+    }
+    Some(Box::new(loader))
+}
+
+fn cache_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+}
+
+/// Starts audio with plugins loading through [`plugin_loader`].
+fn start_host(config: HostConfig) -> AudioHost {
+    let mut host = AudioHost::start(config);
+    host.session_mut().set_plugin_loader(plugin_loader());
+    host
+}
+
 /// The engine the app starts with: the real one, or the stub when the
 /// environment says `KADENCE_AUDIO=stub` (the UI tests do).
 pub fn default_engine() -> Box<dyn EngineHandle> {
@@ -152,7 +182,7 @@ impl SessionEngine {
     const SILENT: &'static str = "silent";
 
     pub fn new() -> Self {
-        let host = AudioHost::start(HostConfig::default());
+        let host = start_host(HostConfig::default());
         let config = AudioConfig {
             device: None,
             sample_rate: host.sample_rate(),
@@ -286,7 +316,7 @@ impl Default for StubEngine {
         Self {
             config: AudioConfig::default(),
             running: false,
-            host: AudioHost::start(HostConfig {
+            host: start_host(HostConfig {
                 use_server: false,
                 ..Default::default()
             }),
