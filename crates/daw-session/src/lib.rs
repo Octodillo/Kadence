@@ -106,6 +106,10 @@ pub enum Warning {
     /// one it had. `detail` is the plugin's or the format's own message.
     #[error("{device} did not save its plugin state ({detail})")]
     PluginStateNotSaved { device: String, detail: String },
+    /// A plugin's own editor would not open. `detail` is the plugin's or
+    /// the format's own message.
+    #[error("the editor of {device} would not open ({detail})")]
+    PluginEditorFailed { device: String, detail: String },
     /// An audio file could not be streamed; its clips are silent.
     #[error("can't stream {}: {detail}", path.display())]
     CannotStream { path: PathBuf, detail: String },
@@ -187,6 +191,10 @@ pub struct TickReport {
     pub warnings: Vec<Warning>,
     /// The rebuild failed; it is retried on later ticks.
     pub error: Option<SessionError>,
+    /// Plugin devices whose plugin said its state changed while its editor was open, or whose
+    /// editor was closed, since the last tick. The app can record their new state
+    /// ([`plugin_state`](Session::plugin_state)) as an edit.
+    pub state_changed: Vec<DeviceId>,
 }
 
 impl Session {
@@ -346,13 +354,25 @@ impl Session {
             && self
                 .retry
                 .is_none_or(|(_, at)| std::time::Instant::now() >= at);
-        for slot in self.plugins.slots.values_mut() {
+        let mut state_changed = Vec::new();
+        for (&device, slot) in &mut self.plugins.slots {
             let plugins::Slot::Live(l) = slot else {
                 continue;
             };
             // Also runs a reload that was asked for.
             if l.handle.pump() {
                 rebuild = true;
+            }
+            let (changed, open) = l
+                .handle
+                .with(|p| (p.take_state_changed(), p.is_editor_open()));
+            // Closing the editor is when a plugin that never reports changes is checked.
+            // Without an editor, a report is more likely the host's doing (automation) than
+            // the user's, and saving the document picks the state up anyway.
+            let was_open = std::mem::replace(&mut l.editor_open, open);
+            let closed = was_open && !open;
+            if ((changed && was_open) || closed) && !l.crashed {
+                state_changed.push(device);
             }
             let crashed = l.monitor.as_ref().is_some_and(|m| m.is_crashed());
             if crashed != l.crashed {
@@ -377,9 +397,11 @@ impl Session {
                 Err(e) => error = Some(e),
             }
         }
+        state_changed.sort_by_key(|d| d.0);
         TickReport {
             warnings: news,
             error,
+            state_changed,
         }
     }
 
@@ -458,6 +480,69 @@ impl Session {
             return None;
         }
         Some(l.handle.with(f))
+    }
+
+    /// Whether a device's plugin has an editor of its own. False for a plugin that is not
+    /// running (crashed, missing) and for built-in devices.
+    pub fn plugin_has_editor(&self, device: DeviceId) -> bool {
+        self.with_plugin(device, |p| p.has_editor())
+            .unwrap_or(false)
+    }
+
+    /// Opens a device's plugin editor in its own window, titled `title`. An editor that is
+    /// open already stays as it is. The error is the plugin's or the format's own, in English.
+    pub fn open_plugin_editor(&mut self, device: DeviceId, title: &str) -> Result<(), String> {
+        let Some(l) = self.plugins.live_mut(device).filter(|l| !l.crashed) else {
+            return Err("the plugin is not running".into());
+        };
+        let opened = l.handle.with(|p| {
+            p.set_editor_title(title);
+            if p.is_editor_open() {
+                return Ok(());
+            }
+            p.open_editor()
+        });
+        match opened {
+            Ok(()) => {
+                l.editor_open = true;
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Closes a device's plugin editor. The next [`tick`](Self::tick) reports the device in
+    /// [`TickReport::state_changed`], as when the user closes the window.
+    pub fn close_plugin_editor(&mut self, device: DeviceId) {
+        self.with_plugin(device, |p| p.close_editor());
+    }
+
+    /// Whether a device's plugin editor is open.
+    pub fn plugin_editor_open(&self, device: DeviceId) -> bool {
+        self.with_plugin(device, |p| p.is_editor_open())
+            .unwrap_or(false)
+    }
+
+    /// Retitles a device's plugin editor window, for a renamed device or track. Cheap when
+    /// the title is unchanged.
+    pub fn set_plugin_editor_title(&mut self, device: DeviceId, title: &str) {
+        self.with_plugin(device, |p| p.set_editor_title(title));
+    }
+
+    /// Saves one device's plugin state, if it differs from the document's, for the app to
+    /// record as an edit (`SetDevice` with `DeviceField::State`). Like
+    /// [`plugin_states`](Self::plugin_states), the plugin is not given the state back when
+    /// the document comes back with it.
+    pub fn plugin_state(
+        &mut self,
+        device: DeviceId,
+    ) -> Option<Result<daw_model::StateBlob, String>> {
+        let l = self.plugins.live_mut(device)?;
+        let state = l.changed_state()?;
+        if let Ok(s) = &state {
+            l.saved = Some(s.clone());
+        }
+        Some(state)
     }
 
     /// Saves every running plugin's state and returns those that differ

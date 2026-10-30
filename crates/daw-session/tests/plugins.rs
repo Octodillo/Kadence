@@ -118,6 +118,8 @@ struct Rig {
     dir: tempfile::TempDir,
     /// What ticks reported.
     news: Vec<Warning>,
+    /// Devices ticks reported a state change of.
+    changed: Vec<DeviceId>,
 }
 
 impl Rig {
@@ -166,6 +168,7 @@ impl Rig {
             device,
             dir,
             news: Vec::new(),
+            changed: Vec::new(),
         };
         rig.sync();
         rig.session.play().unwrap();
@@ -194,8 +197,40 @@ impl Rig {
             let report = self.session.tick();
             assert!(report.error.is_none(), "{:?}", report.error);
             self.news.extend(report.warnings);
+            self.changed.extend(report.state_changed);
         }
         out
+    }
+
+    /// Runs until a tick reports a state change of the device.
+    fn reports_change(&mut self) {
+        let start = Instant::now();
+        self.changed.clear();
+        while !self.changed.contains(&self.device) {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "no change reported"
+            );
+            self.run(BLOCK);
+        }
+        self.changed.clear();
+    }
+
+    /// Records the plugin's state as an undo step, as the app does when a change is reported.
+    fn record_state(&mut self) {
+        let state = self
+            .session
+            .plugin_state(self.device)
+            .expect("a changed state");
+        self.doc.seal();
+        self.doc
+            .execute(SetDevice {
+                id: self.device,
+                field: DeviceField::State(Some(state.unwrap())),
+            })
+            .unwrap();
+        self.doc.seal();
+        self.sync();
     }
 
     /// Runs until the output settles at `level` (the plugin and graph swaps take a few
@@ -525,4 +560,110 @@ fn undoing_a_device_removal_brings_its_plugin_back_as_it_was() {
     rig.doc.undo().unwrap();
     rig.sync();
     rig.settles_at(LEVEL * 0.75);
+}
+
+#[test]
+fn an_editor_change_becomes_an_undo_step() {
+    let mut rig = Rig::new();
+    assert!(rig.session.plugin_has_editor(rig.device));
+    assert!(!rig.session.plugin_editor_open(rig.device));
+    rig.session
+        .open_plugin_editor(rig.device, "Gain — Audio 1")
+        .expect("open the editor");
+    assert!(rig.session.plugin_editor_open(rig.device));
+    // Opening an open editor again changes nothing.
+    rig.session
+        .open_plugin_editor(rig.device, "Gain — Audio 1")
+        .unwrap();
+    // The test plugin says its state changed when its editor shows.
+    rig.reports_change();
+    rig.record_state();
+    assert_eq!(
+        rig.session.plugin_state(rig.device).map(|s| s.is_ok()),
+        None
+    );
+
+    // The user turns the gain down in the editor, then closes it.
+    let set = rig
+        .session
+        .with_plugin(rig.device, |p| p.load_state(&gain_state(0.5)));
+    set.unwrap().unwrap();
+    rig.settles_at(LEVEL * 0.5);
+    let closed = rig
+        .session
+        .with_plugin(rig.device, |p| p.load_state(b"DAWC"));
+    closed.unwrap().unwrap();
+    rig.reports_change();
+    assert!(!rig.session.plugin_editor_open(rig.device));
+    let steps = rig.doc.history().undo_len();
+    rig.record_state();
+    assert_eq!(rig.doc.history().undo_len(), steps + 1);
+    // The plugin is not handed its own state back.
+    rig.settles_at(LEVEL * 0.5);
+    assert_eq!(
+        rig.session.plugin_state(rig.device).map(|s| s.is_ok()),
+        None
+    );
+
+    // Undo puts the plugin back to where the editor started.
+    rig.doc.undo().unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL);
+    rig.doc.redo().unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 0.5);
+}
+
+#[test]
+fn without_an_editor_a_change_is_not_reported() {
+    let mut rig = Rig::new();
+    rig.session.open_plugin_editor(rig.device, "Gain").unwrap();
+    rig.reports_change();
+    rig.session.close_plugin_editor(rig.device);
+    // Closing it is reported: the plugin may have changed without saying so.
+    rig.reports_change();
+    rig.run(BLOCK * 8);
+    assert!(rig.changed.is_empty(), "{:?}", rig.changed);
+}
+
+#[test]
+fn removing_the_device_closes_its_editor() {
+    let mut rig = Rig::new();
+    rig.session.open_plugin_editor(rig.device, "Gain").unwrap();
+    rig.doc.execute(RemoveDevice::new(rig.device)).unwrap();
+    rig.sync();
+    assert!(!rig.session.plugin_editor_open(rig.device));
+    assert!(!rig.session.plugin_has_editor(rig.device));
+    // Undo brings the device back with its editor closed.
+    rig.doc.undo().unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL);
+    assert!(!rig.session.plugin_editor_open(rig.device));
+    assert!(rig.session.open_plugin_editor(rig.device, "Gain").is_ok());
+}
+
+#[test]
+fn a_crashed_plugin_has_no_editor_to_open() {
+    let mut rig = Rig::new();
+    rig.session.open_plugin_editor(rig.device, "Gain").unwrap();
+    let pid = rig.session.plugin_monitor(rig.device).unwrap().pid();
+    // SAFETY: plain syscall on a process this test started.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let start = Instant::now();
+    while rig.status() != Some(PluginStatus::Crashed) {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "crash not noticed"
+        );
+        rig.run(BLOCK);
+    }
+    assert!(!rig.session.plugin_editor_open(rig.device));
+    assert!(rig.session.open_plugin_editor(rig.device, "Gain").is_err());
+    // A reload opens the editor again.
+    assert!(rig.session.reload_plugin(rig.device));
+    while rig.status() != Some(PluginStatus::Running) {
+        assert!(start.elapsed() < Duration::from_secs(20), "not reloaded");
+        rig.run(BLOCK);
+    }
+    assert!(rig.session.plugin_editor_open(rig.device));
 }

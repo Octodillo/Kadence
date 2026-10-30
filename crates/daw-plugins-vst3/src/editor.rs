@@ -26,9 +26,29 @@ struct Window {
     conn: RustConnection,
     id: u32,
     resizable: bool,
+    net_wm_name: u32,
+    utf8: u32,
 }
 
 impl Window {
+    fn set_title(&self, title: &str) {
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.id,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        );
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.id,
+            self.net_wm_name,
+            self.utf8,
+            title.as_bytes(),
+        );
+        let _ = self.conn.flush();
+    }
+
     fn resize(&self, width: u32, height: u32) {
         if !self.resizable {
             let _ = fixed_size_hints(width, height).set_normal_hints(&self.conn, self.id);
@@ -184,6 +204,8 @@ impl Editor {
             conn,
             id,
             resizable,
+            net_wm_name,
+            utf8,
         });
         if !resizable {
             let _ = fixed_size_hints(width, height).set_normal_hints(&window.conn, id);
@@ -217,6 +239,10 @@ impl Editor {
             wm_protocols,
             wm_delete,
         })
+    }
+
+    pub fn set_title(&self, title: &str) {
+        self.window.set_title(title);
     }
 
     /// Handles window events and the plugin's run-loop callbacks. Returns false once the user

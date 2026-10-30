@@ -187,6 +187,8 @@ pub(crate) struct Live {
     /// Created since the last build: its parameters have not been sent yet.
     pub fresh: bool,
     pub params: Vec<ParamInfo>,
+    /// Whether the plugin's editor was open at the last tick.
+    pub editor_open: bool,
 }
 
 impl Plugins {
@@ -295,6 +297,7 @@ impl Plugins {
             saved: None,
             fresh: true,
             params,
+            editor_open: false,
         }))
     }
 
@@ -327,9 +330,12 @@ impl Plugins {
         for id in gone {
             if let Some(Slot::Live(l)) = self.slots.remove(&id)
                 && !l.crashed
-                && let Ok(state) = l.handle.with(|p| p.save_state())
             {
-                self.carried.insert(id, (l.source.clone(), state));
+                // The device is gone, so is its window.
+                l.handle.with(|p| p.close_editor());
+                if let Ok(state) = l.handle.with(|p| p.save_state()) {
+                    self.carried.insert(id, (l.source.clone(), state));
+                }
             }
         }
     }

@@ -77,6 +77,7 @@ fn main() {
         "src/bridge.rs",
         "src/mixer_bridge.rs",
         "src/instruments_bridge.rs",
+        "src/plugin_editors_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",

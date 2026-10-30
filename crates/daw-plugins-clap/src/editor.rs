@@ -25,6 +25,8 @@ pub(crate) struct HostWindow {
     id: u32,
     wm_protocols: u32,
     wm_delete: u32,
+    net_wm_name: u32,
+    utf8: u32,
     size: (u32, u32),
 }
 
@@ -109,6 +111,8 @@ impl HostWindow {
             id,
             wm_protocols,
             wm_delete,
+            net_wm_name,
+            utf8,
             size: (u32::from(w), u32::from(h)),
         };
         if !resizable {
@@ -126,6 +130,24 @@ impl HostWindow {
 
     pub(crate) fn show(&self) {
         let _ = self.conn.map_window(self.id);
+        let _ = self.conn.flush();
+    }
+
+    pub(crate) fn set_title(&self, title: &str) {
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.id,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        );
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.id,
+            self.net_wm_name,
+            self.utf8,
+            title.as_bytes(),
+        );
         let _ = self.conn.flush();
     }
 
