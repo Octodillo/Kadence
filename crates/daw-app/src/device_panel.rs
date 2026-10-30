@@ -444,40 +444,88 @@ pub struct PluginParams(Rc<RefCell<Option<PluginSnapshot>>>);
 struct PluginSnapshot {
     device: DeviceId,
     params: Vec<ParamDesc>,
-    /// The plugin's own values when the snapshot was taken.
+    /// The plugin's own values when last read, empty if it couldn't be
+    /// read (crashed, or too many parameters).
     values: HashMap<ParamId, f64>,
+    /// When the values were read, and the document revision then.
+    read_at: Instant,
+    revision: u64,
+}
+
+/// How often a plugin's own values are read again while the document
+/// changes (an undo, its editor's state stored) or the plugin is down.
+const PLUGIN_REREAD: Duration = Duration::from_millis(500);
+
+/// Plugins with more parameters than this don't have their own values
+/// read: each read is a round trip to the sandbox, and the plugin plays
+/// silence while it runs.
+const MAX_PLUGIN_READS: usize = 256;
+
+fn read_plugin_values(
+    session: &daw_session::Session,
+    device: DeviceId,
+    params: &[daw_core::plugin::ParamInfo],
+) -> HashMap<ParamId, f64> {
+    if params.len() > MAX_PLUGIN_READS {
+        return HashMap::new();
+    }
+    session
+        .with_plugin(device, |p| {
+            params.iter().map(|i| (i.id, p.param_value(i.id))).collect()
+        })
+        .unwrap_or_default()
 }
 
 impl PluginParams {
-    /// Describes `device` from `session` unless it is already described.
-    /// Returns true if the description changed (the plugin loaded or
-    /// went away).
-    pub fn update(&self, session: Option<&daw_session::Session>, device: Option<DeviceId>) -> bool {
+    /// Describes `device` from `session`, reading the plugin's own values
+    /// again (at most every [`PLUGIN_REREAD`]) when the document has
+    /// changed since `revision` or they couldn't be read. Returns true if
+    /// what the panel shows changed.
+    pub fn update(
+        &self,
+        session: Option<&daw_session::Session>,
+        device: Option<DeviceId>,
+        revision: u64,
+    ) -> bool {
         let mut cache = self.0.borrow_mut();
-        let params = device.zip(session).and_then(|(d, s)| s.plugin_params(d));
-        match (&*cache, params) {
-            (Some(c), Some(_)) if Some(c.device) == device => false,
-            (None, None) => false,
-            (_, None) => {
-                *cache = None;
+        let found = device
+            .zip(session)
+            .and_then(|(d, s)| Some((d, s, s.plugin_params(d)?)));
+        let Some((device, session, params)) = found else {
+            return cache.take().is_some();
+        };
+        match &mut *cache {
+            Some(c) if c.device == device => {
+                let stale = c.revision != revision
+                    || (c.values.is_empty() && params.len() <= MAX_PLUGIN_READS);
+                if !stale || c.read_at.elapsed() < PLUGIN_REREAD {
+                    return false;
+                }
+                let values = read_plugin_values(session, device, params);
+                c.read_at = Instant::now();
+                c.revision = revision;
+                if values == c.values {
+                    return false;
+                }
+                c.values = values;
                 true
             }
-            (_, Some(params)) => {
-                let (device, session) = (device.unwrap(), session.unwrap());
-                let ids: Vec<ParamId> = params.iter().map(|p| p.id).collect();
-                let values = session
-                    .with_plugin(device, |p| {
-                        ids.iter().map(|&id| (id, p.param_value(id))).collect()
-                    })
-                    .unwrap_or_default();
+            _ => {
                 *cache = Some(PluginSnapshot {
                     device,
                     params: params.iter().map(ParamDesc::from_info).collect(),
-                    values,
+                    values: read_plugin_values(session, device, params),
+                    read_at: Instant::now(),
+                    revision,
                 });
                 true
             }
         }
+    }
+
+    /// Forgets the snapshot, so the next update reads the plugin afresh.
+    pub fn clear(&self) {
+        self.0.borrow_mut().take();
     }
 }
 
@@ -499,8 +547,8 @@ impl ParamSource for PluginParams {
 pub struct AppDevicePanel {
     pub inner: DevicePanel,
     plugins: PluginParams,
-    /// Counts plugin descriptions, so the view refreshes when a plugin
-    /// finishes loading.
+    /// Counts plugin snapshot changes, so the view refreshes when a plugin
+    /// loads or its own values change.
     loads: Cell<u64>,
 }
 
@@ -534,7 +582,7 @@ impl AppDevicePanel {
                 self.inner.open(d);
                 // Read the plugin's values afresh: they may have changed
                 // since it was last open.
-                self.plugins.update(None, None);
+                self.plugins.clear();
                 self.update_plugins();
                 true
             }
@@ -549,7 +597,11 @@ impl AppDevicePanel {
     /// Describes the open device's plugin once it has loaded.
     fn update_plugins(&self) {
         let device = self.inner.device();
-        if crate::state::with(|s| self.plugins.update(s.engine.session(), device)) {
+        let changed = crate::state::with(|s| {
+            let revision = (s.doc_serial << 40) ^ s.doc.revision();
+            self.plugins.update(s.engine.session(), device, revision)
+        });
+        if changed {
             self.loads.set(self.loads.get() + 1);
         }
     }
