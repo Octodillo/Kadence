@@ -71,8 +71,9 @@ pub fn run_host_child(
     };
     let result = host.run();
     host.stop_audio();
-    // Destroy the plugin here, on the thread that created it.
+    // Destroy the plugin here, on the thread that created it, then let its format clean up.
     drop(lock(&host.plugin).take());
+    registry.shutdown();
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
