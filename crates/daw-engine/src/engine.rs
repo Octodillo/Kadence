@@ -334,9 +334,11 @@ impl Drop for EngineController {
         // Timelines still queued for the audio thread must not be freed when
         // it replaces them; the processor's `shared` keeps them alive.
         let timelines = std::mem::take(&mut self.timelines);
-        if let Ok(mut orphans) = self.shared.orphans.lock() {
-            orphans.extend(timelines);
-        }
+        self.shared
+            .orphans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(timelines);
     }
 }
 

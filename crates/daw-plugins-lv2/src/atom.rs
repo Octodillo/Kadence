@@ -136,7 +136,7 @@ impl<'a> ObjectWriter<'a> {
 
 /// The host's transport as a `time:Position` object body, in the shape jalv
 /// and Ardour send. `bar` is 0-based, `barBeat` counts beats of the time
-/// signature (eighths in 6/8) since the downbeat.
+/// signature (eighths in 6/8) since the downbeat, and so does the tempo.
 pub(crate) fn time_position(u: &Urids, buf: &mut [u8; 192], t: &TransportState) -> usize {
     let m = &t.music;
     let mut w = ObjectWriter::new(buf, u.time_position);
@@ -146,7 +146,10 @@ pub(crate) fn time_position(u: &Urids, buf: &mut [u8; 192], t: &TransportState) 
         u.atom_float,
         if t.playing { 1.0 } else { 0.0 },
     );
-    w.float(u.time_bpm, u.atom_float, t.bpm as f32);
+    // LV2 counts tempo in `beatUnit` notes, not quarters: 6/8 at quarter =
+    // 120 is 240 eighths a minute, which keeps `barBeat` advancing right.
+    let bpm = t.bpm * f64::from(m.denominator.max(1)) / 4.0;
+    w.float(u.time_bpm, u.atom_float, bpm as f32);
     w.long(u.time_bar, u.atom_long, m.bar);
     w.float(u.time_bar_beat, u.atom_float, m.bar_beat() as f32);
     w.float(
@@ -270,7 +273,7 @@ mod tests {
             vec![
                 (9, 300_000.0),
                 (10, 1.0),
-                (11, 120.0),
+                (11, 240.0),
                 (12, 4.0),
                 (13, 1.0),
                 (14, 6.0),

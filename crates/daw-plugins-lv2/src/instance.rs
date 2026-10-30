@@ -65,7 +65,7 @@ pub struct Lv2Instance {
     /// Parameter changes waiting for their segment boundary; preallocated.
     pending: Vec<(ParamId, f64)>,
     latency_port: Option<usize>,
-    /// (playing, bpm, position expected at the next block) last sent.
+    /// What the plugin expects at the next block from the last position sent.
     last_transport: Option<Expected>,
     pending_reset: bool,
 }
