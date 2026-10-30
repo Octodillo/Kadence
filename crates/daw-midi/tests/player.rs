@@ -249,7 +249,7 @@ fn recording_round_trip() {
     };
     let off = |key| EventKind::NoteOff {
         channel: 0,
-        key,
+        key: Some(key),
         velocity: 0.0,
         note_id: -1,
     };

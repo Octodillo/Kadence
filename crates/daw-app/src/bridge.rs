@@ -8,8 +8,9 @@ use std::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList};
 
-use crate::engine::{AudioConfig, EngineError, EngineHandle, EngineStatus, default_engine};
+use crate::engine::{AudioConfig, EngineError, EngineHandle, EngineStatus};
 use crate::settings::{self, KConfigStore};
+use crate::state;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -34,7 +35,8 @@ pub mod qobject {
         StartupFallback,
         /// Audio could not start at all, not even with the defaults.
         StartupFailed,
-        /// Audio was running and stopped.
+        /// The engine reports audio as failed: it stopped, or (without an
+        /// audio server) it plays silently.
         AudioFailed,
     }
 
@@ -102,6 +104,7 @@ pub mod qobject {
     impl cxx_qt::Initialize for Engine {}
 }
 
+#[derive(Default)]
 pub struct EngineRust {
     backend_name: QString,
     running: bool,
@@ -118,29 +121,6 @@ pub struct EngineRust {
     buffer_size: i32,
     /// Device ids, parallel to `device_names` (minus the default entry).
     device_ids: Vec<String>,
-    engine: Box<dyn EngineHandle>,
-}
-
-impl Default for EngineRust {
-    fn default() -> Self {
-        Self {
-            backend_name: QString::default(),
-            running: false,
-            error_context: qobject::ErrorContext::NoError.repr,
-            error_kind: 0,
-            error_number: 0,
-            error_detail: QString::default(),
-            playing: false,
-            device_names: QStringList::default(),
-            device_index: 0,
-            sample_rates: QList::default(),
-            sample_rate: 0,
-            buffer_sizes: QList::default(),
-            buffer_size: 0,
-            device_ids: Vec::new(),
-            engine: default_engine(),
-        }
-    }
 }
 
 /// Something the UI has to tell the user about, as data. Kept free of Qt
@@ -236,26 +216,36 @@ fn to_qlist(values: &[u32]) -> QList<i32> {
 
 impl cxx_qt::Initialize for qobject::Engine {
     fn initialize(mut self: Pin<&mut Self>) {
-        let engine = &self.engine;
-        let devices = engine.audio_devices();
+        let (devices, backend, rates, sizes) = state::with(|s| {
+            let e = &s.engine;
+            (
+                e.audio_devices(),
+                e.backend_name(),
+                e.supported_sample_rates(),
+                e.supported_buffer_sizes(),
+            )
+        });
         let mut names = QStringList::default();
         // QML replaces this entry with a translated label.
         names.append(QString::from(""));
         for device in &devices {
             names.append(QString::from(device.name.as_str()));
         }
-        let backend = QString::from(engine.backend_name().as_str());
-        let rates = to_qlist(&engine.supported_sample_rates());
-        let sizes = to_qlist(&engine.supported_buffer_sizes());
         self.as_mut().rust_mut().device_ids = devices.into_iter().map(|d| d.id).collect();
-        self.as_mut().set_backend_name(backend);
+        self.as_mut()
+            .set_backend_name(QString::from(backend.as_str()));
         self.as_mut().set_device_names(names);
-        self.as_mut().set_sample_rates(rates);
-        self.as_mut().set_buffer_sizes(sizes);
+        self.as_mut().set_sample_rates(to_qlist(&rates));
+        self.as_mut().set_buffer_sizes(to_qlist(&sizes));
 
         // Most likely failure: the saved device was unplugged.
         let saved = settings::load_audio_config(&KConfigStore);
-        let error = start_audio(self.as_mut().rust_mut().engine.as_mut(), &saved);
+        let error = state::with(|s| {
+            let error = start_audio(s.engine.as_mut(), &saved);
+            // The engine may have restarted with a new session.
+            s.resync();
+            error
+        });
         if let Some((context, e)) = error {
             self.as_mut().set_error(context, Some(&Problem::Engine(e)));
         }
@@ -264,18 +254,23 @@ impl cxx_qt::Initialize for qobject::Engine {
 }
 
 impl qobject::Engine {
-    fn toggle_playback(mut self: Pin<&mut Self>) {
-        let engine = &mut self.as_mut().rust_mut().engine;
-        if engine.is_playing() {
-            engine.stop();
-        } else {
-            engine.play();
-        }
+    fn toggle_playback(self: Pin<&mut Self>) {
+        state::with(|s| {
+            if s.engine.is_playing() {
+                s.engine.stop();
+            } else {
+                s.engine.play();
+            }
+            s.touch();
+        });
         self.sync();
     }
 
-    fn stop(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().engine.stop();
+    fn stop(self: Pin<&mut Self>) {
+        state::with(|s| {
+            s.engine.stop();
+            s.touch();
+        });
         self.sync();
     }
 
@@ -289,11 +284,19 @@ impl qobject::Engine {
             .as_ref()
             .audio_config_from(device_index, sample_rate, buffer_size);
         let result = result.and_then(|config| {
-            self.as_mut()
-                .rust_mut()
-                .engine
-                .apply_audio_config(&config)
-                .map_err(Problem::Engine)?;
+            state::with(|s| {
+                let position = s.playhead();
+                let r = s.engine.apply_audio_config(&config);
+                // A restart brings a fresh session: give it the project and
+                // the play position back (after the tempo map, so the
+                // position maps to the same bar).
+                s.resync();
+                if let Some(session) = s.engine.session_mut() {
+                    let _ = session.locate(position);
+                }
+                r
+            })
+            .map_err(Problem::Engine)?;
             settings::save_audio_config(&mut KConfigStore, &config);
             Ok(())
         });
@@ -359,11 +362,14 @@ impl qobject::Engine {
 
     /// Copy engine state into the Qt properties.
     fn sync(mut self: Pin<&mut Self>) {
-        let engine = &self.engine;
-        let config = engine.audio_config();
-        let status = engine.status();
+        let (config, status, playing) = state::with(|s| {
+            (
+                s.engine.audio_config(),
+                s.engine.status(),
+                s.engine.is_playing(),
+            )
+        });
         let running = matches!(status, EngineStatus::Running { .. });
-        let playing = engine.is_playing();
         let device_index = config
             .device
             .as_ref()
@@ -564,6 +570,12 @@ mod tests {
         fn stop(&mut self) {}
         fn is_playing(&self) -> bool {
             false
+        }
+        fn session(&self) -> Option<&daw_session::Session> {
+            None
+        }
+        fn session_mut(&mut self) -> Option<&mut daw_session::Session> {
+            None
         }
     }
 

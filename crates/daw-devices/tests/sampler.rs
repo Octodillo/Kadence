@@ -83,6 +83,30 @@ fn one_shot_ignores_note_off_and_key() {
     assert!(sounding(&r.channels[0]).abs_diff(4800) <= 2);
 }
 
+/// A wildcard note off (a CLAP panic or choke) stops one-shot voices, like MIDI all notes off.
+#[test]
+fn one_shot_releases_on_a_wildcard_note_off() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 48000], s.sample_rate);
+    sampler.set_param(MODE, MODE_ONE_SHOT);
+    sampler.set_param(RELEASE, 10.0);
+    let off = EventKind::NoteOff {
+        channel: 0,
+        key: None,
+        velocity: 0.0,
+        note_id: -1,
+    };
+    let r = render(
+        &mut sampler,
+        48000,
+        &[],
+        &[(0, note_on(84, 1.0)), (1000, off)],
+        s,
+    );
+    let len = sounding(&r.channels[0]);
+    assert!(len > 1000 && len < 3000, "{len}");
+}
+
 #[test]
 fn key_mapped_releases_on_note_off() {
     let s = Setup::default();
@@ -106,7 +130,7 @@ fn note_off_with_id_releases_note_without_id() {
     sampler.set_param(RELEASE, 10.0);
     let off = EventKind::NoteOff {
         channel: 0,
-        key: 60,
+        key: Some(60),
         velocity: 0.0,
         note_id: 7,
     };

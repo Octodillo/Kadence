@@ -15,12 +15,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use daw_core::event::{Event, EventKind};
-use daw_core::node::TransportState;
+use daw_core::node::{TransportLoop, TransportState};
 use daw_core::time::{MusicalPosition, SampleTime};
 use memmap2::MmapMut;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"KDSB");
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// Bytes reserved for [`Header`] at the start of the block.
 const HEADER_BYTES: usize = 192;
 /// `u64` words per event record.
@@ -67,6 +67,8 @@ pub struct Header {
     pub main_in_plugin: AtomicU32,
     /// Time-signature numerator in the low byte, denominator in the next.
     time_sig: AtomicU32,
+    /// Nonzero when a loop is set.
+    looping: AtomicU32,
     position: AtomicU64,
     /// `f64` bits.
     bpm: AtomicU64,
@@ -79,6 +81,12 @@ pub struct Header {
     bar_start: AtomicU64,
     /// `f64` bits.
     bar_len: AtomicU64,
+    loop_start: AtomicU64,
+    loop_end: AtomicU64,
+    /// `f64` bits.
+    loop_start_beats: AtomicU64,
+    /// `f64` bits.
+    loop_end_beats: AtomicU64,
     /// Cycles the host has finished, for the hang watchdog.
     pub completed: AtomicU64,
 }
@@ -103,6 +111,16 @@ impl Header {
             u32::from(m.numerator) | u32::from(m.denominator) << 8,
             Ordering::Relaxed,
         );
+        self.looping
+            .store(u32::from(t.looping.is_some()), Ordering::Relaxed);
+        if let Some(l) = &t.looping {
+            self.loop_start.store(l.start.0 as u64, Ordering::Relaxed);
+            self.loop_end.store(l.end.0 as u64, Ordering::Relaxed);
+            self.loop_start_beats
+                .store(l.start_beats.to_bits(), Ordering::Relaxed);
+            self.loop_end_beats
+                .store(l.end_beats.to_bits(), Ordering::Relaxed);
+        }
     }
 
     /// The transport [`write_transport`](Self::write_transport) stored.
@@ -122,6 +140,12 @@ impl Header {
                 numerator: sig as u8,
                 denominator: (sig >> 8) as u8,
             },
+            looping: (self.looping.load(Ordering::Relaxed) != 0).then(|| TransportLoop {
+                start: SampleTime(self.loop_start.load(Ordering::Relaxed) as i64),
+                end: SampleTime(self.loop_end.load(Ordering::Relaxed) as i64),
+                start_beats: f(&self.loop_start_beats),
+                end_beats: f(&self.loop_end_beats),
+            }),
         }
     }
 }
@@ -426,7 +450,8 @@ pub fn encode_event(e: &Event, out: &mut [u64]) {
             note_id,
         } => (
             2,
-            u64::from(channel) | u64::from(key) << 8,
+            // Bit 16 marks a wildcard key.
+            u64::from(channel) | key.map_or(1 << 16, |k| u64::from(k) << 8),
             u64::from(velocity.to_bits()),
             u64::from(note_id as u32),
         ),
@@ -457,7 +482,7 @@ pub fn decode_event(w: &[u64]) -> Option<Event> {
         },
         2 => EventKind::NoteOff {
             channel: byte(w[1], 0),
-            key: byte(w[1], 1),
+            key: (w[1] & 1 << 16 == 0).then(|| byte(w[1], 1)),
             velocity: f32::from_bits(w[2] as u32),
             note_id: w[3] as u32 as i32,
         },
@@ -489,7 +514,15 @@ mod tests {
         tempo.set_tempo(daw_core::time::TickTime(960), 133.0, true);
         let timeline = daw_core::time::Timeline::new(tempo, daw_core::time::Meter::constant(7, 16));
         for pos in [-100_000, 0, 123_457, 9_000_000] {
-            let t = TransportState::at(&timeline, true, SampleTime(pos), 44_100.0);
+            let mut t = TransportState::at(&timeline, true, SampleTime(pos), 44_100.0);
+            if pos > 0 {
+                t.looping = Some(TransportLoop::at(
+                    &timeline,
+                    SampleTime(-pos),
+                    SampleTime(pos * 2),
+                    44_100.0,
+                ));
+            }
             h.write_transport(&t);
             let back = h.read_transport();
             assert_eq!(back.playing, t.playing);
@@ -497,6 +530,7 @@ mod tests {
             assert_eq!(back.bpm.to_bits(), t.bpm.to_bits());
             assert_eq!(back.sample_rate.to_bits(), t.sample_rate.to_bits());
             assert_eq!(back.music, t.music);
+            assert_eq!(back.looping, t.looping);
         }
     }
 
@@ -516,9 +550,27 @@ mod tests {
                 frame: u32::MAX,
                 kind: EventKind::NoteOff {
                     channel: 0,
-                    key: 60,
+                    key: Some(60),
                     velocity: 0.0,
                     note_id: 123_456,
+                },
+            },
+            Event {
+                frame: 1,
+                kind: EventKind::NoteOff {
+                    channel: 15,
+                    key: None,
+                    velocity: 0.5,
+                    note_id: 9,
+                },
+            },
+            Event {
+                frame: 2,
+                kind: EventKind::NoteOff {
+                    channel: 3,
+                    key: Some(0),
+                    velocity: 0.5,
+                    note_id: -1,
                 },
             },
             Event {

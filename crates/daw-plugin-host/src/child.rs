@@ -698,7 +698,7 @@ mod tests {
             frame: 3,
             kind: EventKind::NoteOff {
                 channel: 0,
-                key: 60,
+                key: Some(60),
                 velocity: 0.0,
                 note_id: -1,
             },

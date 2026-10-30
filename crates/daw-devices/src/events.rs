@@ -11,8 +11,9 @@ pub(crate) enum Note {
         velocity: f32,
         id: NoteId,
     },
+    /// `key: None` releases every key, or with an id of 0 or more, that note whatever its key.
     Off {
-        key: u8,
+        key: Option<u8>,
         id: NoteId,
     },
     /// All Notes Off (CC 123): release every voice normally.
@@ -37,12 +38,18 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
             id: note_id,
         }),
         // Clamp like note-on above, so the off finds the voice it started.
-        EventKind::NoteOn { key, note_id, .. } | EventKind::NoteOff { key, note_id, .. } => {
-            Some(Note::Off {
-                key: key.min(127),
-                id: note_id,
-            })
-        }
+        EventKind::NoteOn { key, note_id, .. } => Some(Note::Off {
+            key: Some(key.min(127)),
+            id: note_id,
+        }),
+        // A wildcard with no id is all notes off, which also ends one-shot voices, as CC 123 does.
+        EventKind::NoteOff {
+            key: None, note_id, ..
+        } if note_id < 0 => Some(Note::AllOff),
+        EventKind::NoteOff { key, note_id, .. } => Some(Note::Off {
+            key: key.map(|k| k.min(127)),
+            id: note_id,
+        }),
         EventKind::Midi([status, d1, d2]) => match status & 0xF0 {
             // Data bytes never have bit 7 set; such a message is corrupt.
             0x80 | 0x90 if (d1 | d2) & 0x80 != 0 => None,
@@ -52,7 +59,7 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
                 id: -1,
             }),
             0x80 | 0x90 => Some(Note::Off {
-                key: d1 & 0x7F,
+                key: Some(d1 & 0x7F),
                 id: -1,
             }),
             0xB0 if d1 == 120 => Some(Note::SoundOff),
@@ -64,6 +71,21 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
             _ => None,
         },
         EventKind::ParamValue { .. } => None,
+    }
+}
+
+/// Whether a note off for `key` and `id` releases the voice playing `voice_key` with `voice_id`.
+///
+/// Notes match by id when both sides have one, otherwise by key, so an id-less (raw MIDI) note
+/// still ends on an off that has an id. A wildcard key matches every key, but with an id only the
+/// voice with that id.
+pub(crate) fn releases(key: Option<u8>, id: NoteId, voice_key: u8, voice_id: NoteId) -> bool {
+    if id >= 0 && voice_id == id {
+        return true;
+    }
+    match key {
+        Some(key) => (id < 0 || voice_id < 0) && voice_key == key,
+        None => id < 0,
     }
 }
 
@@ -153,11 +175,17 @@ mod tests {
         );
         assert_eq!(
             note(&EventKind::Midi([0x90, 60, 0])),
-            Some(Note::Off { key: 60, id: -1 })
+            Some(Note::Off {
+                key: Some(60),
+                id: -1
+            })
         );
         assert_eq!(
             note(&EventKind::Midi([0x80, 61, 10])),
-            Some(Note::Off { key: 61, id: -1 })
+            Some(Note::Off {
+                key: Some(61),
+                id: -1
+            })
         );
         assert_eq!(note(&EventKind::Midi([0xB0, 123, 0])), Some(Note::AllOff));
         assert_eq!(note(&EventKind::Midi([0xB0, 120, 0])), Some(Note::SoundOff));
@@ -172,7 +200,41 @@ mod tests {
             velocity: 0.0,
             note_id: 3,
         };
-        assert_eq!(note(&off), Some(Note::Off { key: 5, id: 3 }));
+        assert_eq!(
+            note(&off),
+            Some(Note::Off {
+                key: Some(5),
+                id: 3
+            })
+        );
+    }
+
+    #[test]
+    fn wildcard_note_off_without_id_is_all_notes_off() {
+        let off = |note_id| EventKind::NoteOff {
+            channel: 0,
+            key: None,
+            velocity: 0.0,
+            note_id,
+        };
+        assert_eq!(note(&off(-1)), Some(Note::AllOff));
+        assert_eq!(note(&off(4)), Some(Note::Off { key: None, id: 4 }));
+    }
+
+    #[test]
+    fn wildcard_note_offs_release_by_id_or_everything() {
+        // Every key.
+        assert!(releases(None, -1, 60, -1));
+        assert!(releases(None, -1, 61, 4));
+        // Note 4 whatever its key, and nothing else.
+        assert!(releases(None, 4, 61, 4));
+        assert!(!releases(None, 4, 61, 5));
+        assert!(!releases(None, 4, 61, -1));
+        // Specific keys keep matching as before.
+        assert!(releases(Some(60), -1, 60, 3));
+        assert!(releases(Some(60), 3, 60, -1));
+        assert!(!releases(Some(60), 3, 60, 2));
+        assert!(!releases(Some(60), -1, 61, -1));
     }
 
     #[test]
@@ -185,12 +247,18 @@ mod tests {
         };
         let off = EventKind::NoteOff {
             channel: 0,
-            key: 130,
+            key: Some(130),
             velocity: 0.0,
             note_id: -1,
         };
         assert!(matches!(note(&on), Some(Note::On { key: 127, .. })));
-        assert_eq!(note(&off), Some(Note::Off { key: 127, id: -1 }));
+        assert_eq!(
+            note(&off),
+            Some(Note::Off {
+                key: Some(127),
+                id: -1
+            })
+        );
     }
 
     #[test]

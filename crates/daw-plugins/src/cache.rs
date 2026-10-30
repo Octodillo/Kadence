@@ -66,8 +66,8 @@ impl ScanCache {
     }
 
     /// Drops cached failures so the next scan tries those bundles again, for a "rescan failed
-    /// plugins" action. Bundles that gave no plugins count as failures: formats report a bundle
-    /// that would not load (a missing system library, say) as an empty list.
+    /// plugins" action. Bundles that gave no plugins are retried too, since an LV2 bundle whose
+    /// data did not parse gives an empty list rather than an error.
     pub fn forget_failures(&mut self) {
         self.entries
             .retain(|_, e| e.result.as_ref().is_ok_and(|found| !found.is_empty()));

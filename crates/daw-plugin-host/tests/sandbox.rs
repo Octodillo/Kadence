@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{Node, ProcessContext, TransportState};
-use daw_core::plugin::{PluginDescriptor, PluginFormat, PluginFormatKind, PluginInstance};
+use daw_core::plugin::{
+    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+};
 use daw_plugin_host::{
     CrashReason, HostLauncher, SandboxConfig, SandboxFormat, SandboxStatus, SandboxedInstance,
 };
@@ -71,7 +73,9 @@ fn format() -> SandboxFormat {
 }
 
 fn descriptor() -> PluginDescriptor {
-    let mut found = format().scan(&test_plugin());
+    let mut found = format()
+        .scan(&test_plugin())
+        .expect("the test plugin loads");
     assert_eq!(found.len(), 1, "one plugin in the test bundle");
     found.remove(0)
 }
@@ -161,7 +165,11 @@ fn scanning_through_the_host_describes_the_plugin() {
     assert_eq!(d.format, PluginFormatKind::Clap);
     assert_eq!(d.id, ID);
     assert_eq!(d.ports, (2, 2));
-    assert!(format().scan(Path::new("/nonexistent.clap")).is_empty());
+    // A bundle that does not load says why.
+    match format().scan(Path::new("/nonexistent.clap")) {
+        Err(PluginError::Load(why)) => assert!(why.contains("/nonexistent.clap"), "{why}"),
+        other => panic!("expected a load error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -454,7 +462,7 @@ fn events_sent_while_the_host_is_busy_arrive_late_not_never() {
         frame: 5,
         kind: EventKind::NoteOff {
             channel: 0,
-            key: 60,
+            key: Some(60),
             velocity: 0.0,
             note_id: 3,
         },
@@ -487,7 +495,7 @@ fn events_sent_while_the_host_is_busy_arrive_late_not_never() {
     let keys: Vec<_> = seen
         .iter()
         .filter_map(|e| match e.kind {
-            EventKind::NoteOff { key, .. } | EventKind::NoteOn { key, .. } => Some(key),
+            EventKind::NoteOff { key: Some(key), .. } | EventKind::NoteOn { key, .. } => Some(key),
             _ => None,
         })
         .collect();
@@ -609,4 +617,83 @@ fn names_taken_in_the_socket_directory_do_not_stop_plugins_loading() {
     let mut plugin = result.expect("load despite the taken names");
     let ([l, _], _) = run(&mut plugin, 16, 1.0, &[]);
     assert!(l.iter().all(|&s| s == 1.0));
+}
+
+/// mda Delay's metadata, using the installed binary, with its Output port
+/// declared under lv2:sampleRate, so its range is a fraction of the rate.
+/// None when mda-lv2 is not installed (CI requires it).
+fn sample_rate_lv2_bundle() -> Option<tempfile::TempDir> {
+    let binary = ["/usr/lib/lv2", "/usr/lib64/lv2", "/usr/local/lib/lv2"]
+        .iter()
+        .map(|d| Path::new(d).join("mda.lv2/Delay.so"))
+        .find(|p| p.is_file());
+    let Some(binary) = binary else {
+        assert!(
+            std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
+            "mda-lv2 must be installed"
+        );
+        return None;
+    };
+    let control = |i: u32, symbol: &str, range: &str| {
+        format!(
+            "[ a lv2:InputPort , lv2:ControlPort ; lv2:index {i} ; lv2:symbol \"{symbol}\" ; \
+             lv2:name \"{symbol}\" ; {range} ]"
+        )
+    };
+    let plain = "lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0";
+    let audio = |i: u32, dir: &str, symbol: &str| {
+        format!(
+            "[ a lv2:{dir}Port , lv2:AudioPort ; lv2:index {i} ; lv2:symbol \"{symbol}\" ; \
+             lv2:name \"{symbol}\" ]"
+        )
+    };
+    let ports = [
+        control(0, "l_delay", plain),
+        control(1, "r_delay", plain),
+        control(2, "feedback", plain),
+        control(3, "fb_tone", plain),
+        control(4, "fx_mix", plain),
+        control(
+            5,
+            "output",
+            "lv2:portProperty lv2:sampleRate ; lv2:default 0.1 ; lv2:minimum 0.0 ; lv2:maximum 0.45",
+        ),
+        audio(6, "Input", "left_in"),
+        audio(7, "Input", "right_in"),
+        audio(8, "Output", "left_out"),
+        audio(9, "Output", "right_out"),
+    ];
+    let ttl = format!(
+        "@prefix doap: <http://usefulinc.com/ns/doap#> .\n\
+         @prefix lv2: <http://lv2plug.in/ns/lv2core#> .\n\
+         <http://drobilla.net/plugins/mda/Delay> a lv2:Plugin ; doap:name \"MDA Delay\" ;\n\
+         lv2:binary <file://{}> ;\n lv2:port {} .\n",
+        binary.display(),
+        ports.join(" , ")
+    );
+    let bundle = tempfile::tempdir().unwrap();
+    std::fs::write(bundle.path().join("manifest.ttl"), ttl).unwrap();
+    Some(bundle)
+}
+
+/// A new sample rate re-instantiates an LV2 plugin, whose parameter ranges may
+/// scale with the rate: the sandbox reports the new ranges.
+#[test]
+fn a_new_rate_refreshes_parameter_ranges() {
+    let Some(bundle) = sample_rate_lv2_bundle() else {
+        eprintln!("skipped: mda-lv2 not installed");
+        return;
+    };
+    let format = SandboxFormat::new(PluginFormatKind::Lv2, vec![], config());
+    let d = format
+        .scan(bundle.path())
+        .into_iter()
+        .find(|d| d.id == "http://drobilla.net/plugins/mda/Delay")
+        .expect("scanned");
+    let mut plugin = SandboxedInstance::new(d, config(), SR, MAX).expect("instantiate");
+    let output = |p: &SandboxedInstance| p.params().into_iter().find(|i| i.id == 5).unwrap();
+    assert!((output(&plugin).max - 0.45 * SR).abs() < 0.01);
+    plugin.prepare(2.0 * SR, MAX);
+    let info = output(&plugin);
+    assert!((info.max - 0.45 * 2.0 * SR).abs() < 0.01, "{info:?}");
 }

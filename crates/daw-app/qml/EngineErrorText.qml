@@ -49,7 +49,7 @@ QtObject {
         case Engine.StartupFailed:
             return i18nc("@info %1 is the reason, a full sentence", "Audio could not be started. %1", reason);
         case Engine.AudioFailed:
-            return i18nc("@info %1 is the reason, a full sentence", "Audio stopped working. %1", reason);
+            return i18nc("@info %1 is the reason, a full sentence", "Audio is not working. %1", reason);
         }
         return "";
     }

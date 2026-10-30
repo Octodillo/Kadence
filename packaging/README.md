@@ -20,7 +20,8 @@ inside the sandbox and checks that libjack is visible there.
 ## Runtime requirements
 
 - Qt 6.8 or newer: QtBase (Gui, Widgets), QtDeclarative (Quick,
-  QuickControls2). Before Qt 6.10 the Wayland client plugin is a separate
+  QuickControls2, Quick Dialogs; on Debian and Ubuntu the last is the
+  separate `qml6-module-qtquick-dialogs`). Before Qt 6.10 the Wayland client plugin is a separate
   package (`qt6-wayland`), needed for native Wayland windows.
 - KDE Frameworks 6.13 or newer: Kirigami, qqc2-desktop-style, KCoreAddons,
   KI18n, KCrash, KConfig, KColorScheme, KIconThemes. Breeze icons are

@@ -19,6 +19,32 @@ pub struct TransportState {
     pub sample_rate: f64,
     /// Bars and beats at `position`.
     pub music: MusicalPosition,
+    /// The loop, when playback will wrap at its end: one is set and the
+    /// position is before its end. The wrap falls on a block boundary, so a
+    /// block never runs past the end.
+    pub looping: Option<TransportLoop>,
+}
+
+/// A loop from `start` (inclusive) to `end` (exclusive), in samples and in
+/// quarter notes from tick 0.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TransportLoop {
+    pub start: SampleTime,
+    pub end: SampleTime,
+    pub start_beats: f64,
+    pub end_beats: f64,
+}
+
+impl TransportLoop {
+    /// The loop from `start` to `end` on `timeline`.
+    pub fn at(timeline: &Timeline, start: SampleTime, end: SampleTime, sample_rate: f64) -> Self {
+        Self {
+            start,
+            end,
+            start_beats: timeline.position(start, sample_rate).beats,
+            end_beats: timeline.position(end, sample_rate).beats,
+        }
+    }
 }
 
 impl TransportState {
@@ -30,6 +56,7 @@ impl TransportState {
             bpm: timeline.bpm_at(position, sample_rate),
             sample_rate,
             music: timeline.position(position, sample_rate),
+            looping: None,
         }
     }
 
@@ -45,8 +72,9 @@ impl TransportState {
     }
 
     /// This state, or, when the tempo is unknown, the same position at
-    /// 120 bpm in 4/4 from sample 0. For plugin formats whose plugins expect
-    /// a tempo. `sample_rate` stands in for an unknown rate.
+    /// 120 bpm in 4/4 from sample 0, without a loop. For plugin formats
+    /// whose plugins expect a tempo. `sample_rate` stands in for an unknown
+    /// rate.
     pub fn or_default_tempo(&self, sample_rate: f64) -> Self {
         if self.bpm > 0.0 {
             return *self;
@@ -70,10 +98,13 @@ impl TransportState {
             bar_start: bar * 4.0,
             ..MusicalPosition::default()
         };
+        // Loop beats came from the real (unknown) tempo, so they would not
+        // match the made-up song position.
         Self {
             bpm: 120.0,
             sample_rate: rate,
             music,
+            looping: None,
             ..*self
         }
     }

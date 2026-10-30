@@ -76,7 +76,7 @@ fn midi_in_is_decoded_and_midi_out_is_encoded() {
                 frame: 5,
                 kind: EventKind::NoteOff {
                     channel: 1,
-                    key: 60,
+                    key: Some(60),
                     velocity: 0.0,
                     note_id: -1,
                 },

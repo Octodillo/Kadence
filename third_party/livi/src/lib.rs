@@ -339,6 +339,7 @@ struct CommonUris {
     mod_cv_port_uri: lilv::node::Node,
     worker_schedule_feature_uri: lilv::node::Node,
     load_default_state_feature_uri: lilv::node::Node,
+    sample_rate_property_uri: lilv::node::Node,
 }
 
 impl CommonUris {
@@ -356,6 +357,7 @@ impl CommonUris {
             worker_schedule_feature_uri: world.new_uri("http://lv2plug.in/ns/ext/worker#schedule"),
             load_default_state_feature_uri: world
                 .new_uri("http://lv2plug.in/ns/ext/state#loadDefaultState"),
+            sample_rate_property_uri: world.new_uri("http://lv2plug.in/ns/lv2core#sampleRate"),
         }
     }
 }

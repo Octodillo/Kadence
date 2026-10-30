@@ -27,6 +27,7 @@ const QML_FILES: &[&str] = &[
     "qml/EngineErrorText.qml",
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
+    "qml/TrackHeader.qml",
 ];
 
 /// Ask qmake (`QMAKE`, else `qmake6`, else `qmake`) for a Qt install path.
@@ -74,12 +75,16 @@ fn main() {
         "src/mixer_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",
+        "src/project.rs",
+        "src/arrange_view.rs",
+        "src/paint.rs",
     ])
     .qt_module("Gui")
     .qt_module("Widgets")
     .qt_module("Quick")
     .qt_module("QuickControls2")
-    .cpp_file("src/cpp/kadence.cpp");
+    .cpp_file("src/cpp/kadence.cpp")
+    .cpp_file("src/cpp/scenepainter.cpp");
     let mut include_dirs: Vec<PathBuf> = KF6
         .iter()
         .flat_map(|(dirs, _)| dirs.iter().map(|d| include.join(d)))

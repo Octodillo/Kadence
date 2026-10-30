@@ -163,7 +163,7 @@ pub fn note_on(key: u8, velocity: f32) -> EventKind {
 pub fn note_off(key: u8) -> EventKind {
     EventKind::NoteOff {
         channel: 0,
-        key,
+        key: Some(key),
         velocity: 0.0,
         note_id: -1,
     }

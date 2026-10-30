@@ -391,7 +391,7 @@ impl Sampler {
         }
     }
 
-    fn note_off(&mut self, key: u8, id: NoteId) {
+    fn note_off(&mut self, key: Option<u8>, id: NoteId) {
         if self.one_shot() {
             return;
         }
@@ -400,9 +400,7 @@ impl Sampler {
             .iter_mut()
             .filter(|v| v.active && !v.stolen && !v.env.is_releasing())
         {
-            // Match by id when both sides have one, otherwise by key, so an
-            // id-less (raw MIDI) note still ends on an off that has an id.
-            if (id >= 0 && v.id == id) || ((id < 0 || v.id < 0) && v.key == key) {
+            if crate::events::releases(key, id, v.key, v.id) {
                 v.env.gate_off();
             }
         }
@@ -639,7 +637,7 @@ mod tests {
         for k in 0..VOICES as u8 {
             s.note_on(k, 1.0, -1);
         }
-        s.note_off(5, -1);
+        s.note_off(Some(5), -1);
         s.note_on(100, 1.0, -1);
         let held = |s: &Sampler| -> Vec<u8> {
             s.voices
