@@ -1,16 +1,18 @@
 //! Builds the arrange view's display list.
 
-use daw_core::time::{SampleTime, TempoMap, TickTime};
+use daw_core::time::{TempoMap, TickTime};
 use daw_midi::grid::{LineKind, Meter};
-use daw_model::{Clip, ClipContent, Project, Track};
+use daw_model::{AudioClip, Clip, ClipContent, Project, Track};
 
-use crate::scene::{Align, Prim, Rect, Rgba, Scene, TRACK_COLORS};
+use crate::scene::{Align, Palette, Prim, Rect, Rgba, Scene, TRACK_COLORS};
 use crate::snap::{MIN_LINE_SPACING, adaptive_grid, bar_stride};
 use crate::{Arrange, Env, Peaks};
 
 /// Bar numbers closer together than this are thinned out.
 const LABEL_SPACING: f64 = 48.0;
 const CLIP_RADIUS: f64 = 3.0;
+/// Segments a fade curve is drawn with.
+const FADE_SEGMENTS: usize = 24;
 /// Clips shorter than this get no name header.
 const HEADER_MIN_HEIGHT: f64 = 28.0;
 const HEADER_HEIGHT: f64 = 16.0;
@@ -222,7 +224,14 @@ fn draw_clip(s: &mut Scene, a: &mut Arrange, env: &Env, row: usize, clip: &Clip,
         ClipContent::Audio(audio) => {
             let path = env.resolve(&audio.source);
             if let Peaks::Ready(cache) = a.peaks.get(&path) {
-                waveform(s, a, env, clip, audio.offset, &cache, body, ink);
+                let gain = 10f64.powf(audio.gain_db / 20.0) as f32;
+                waveform(s, a, env, clip, audio, &cache, body, ink, gain);
+            }
+            if let Some(h) = a.handles(row, clip) {
+                fades(s, r, body, &h, audio, pal.background, ink);
+                s.pop_clip();
+                handles(s, &h, audio, pal, ink);
+                return;
             }
         }
         ClipContent::Midi(m) => {
@@ -252,17 +261,86 @@ fn draw_clip(s: &mut Scene, a: &mut Arrange, env: &Env, row: usize, clip: &Clip,
     s.pop_clip();
 }
 
+/// Fade curves over the waveform, with the faded-out part dimmed.
+fn fades(
+    s: &mut Scene,
+    r: Rect,
+    body: Rect,
+    h: &crate::Handles,
+    audio: &AudioClip,
+    background: Rgba,
+    ink: Rgba,
+) {
+    let dim = background.with_alpha(0.45);
+    // (from x, to x, shape, rising)
+    let curves = [
+        (r.x, h.fade_in_x, audio.fade_in.shape, true),
+        (h.fade_out_x, r.right(), audio.fade_out.shape, false),
+    ];
+    for (x0, x1, shape, rising) in curves {
+        let w = x1 - x0;
+        if w < 1.0 {
+            continue;
+        }
+        let y_at = |i: usize| {
+            let t = i as f32 / FADE_SEGMENTS as f32;
+            let g = shape.gain(if rising { t } else { 1.0 - t });
+            body.bottom() - f64::from(g) * body.h
+        };
+        let step = w / FADE_SEGMENTS as f64;
+        for i in 0..FADE_SEGMENTS {
+            let xa = x0 + i as f64 * step;
+            // Dim above the curve: what the fade takes away.
+            let mid = (y_at(i) + y_at(i + 1)) / 2.0;
+            s.rect(Rect::new(xa, body.y, step, mid - body.y), dim);
+            s.push(Prim::Line {
+                x0: xa,
+                y0: y_at(i),
+                x1: xa + step,
+                y1: y_at(i + 1),
+                color: ink,
+                width: 1.5,
+            });
+        }
+    }
+}
+
+/// The fade and gain handles: small squares along the clip's top edge,
+/// filled where they are set to something.
+fn handles(s: &mut Scene, h: &crate::Handles, audio: &AudioClip, pal: Palette, ink: Rgba) {
+    let set = [
+        (h.fade_in, !audio.fade_in.is_none()),
+        (h.fade_out, !audio.fade_out.is_none()),
+        (h.gain, audio.gain_db != 0.0),
+    ];
+    for (r, active) in set {
+        s.push(Prim::RoundRect {
+            r,
+            radius: 2.0,
+            fill: if active {
+                pal.highlight
+            } else {
+                pal.background
+            },
+            stroke: if active { pal.highlight } else { ink },
+            stroke_width: 1.0,
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn waveform(
     s: &mut Scene,
     a: &Arrange,
     env: &Env,
     clip: &Clip,
-    offset: SampleTime,
+    audio: &AudioClip,
     cache: &daw_media::PeakCache,
     body: Rect,
     ink: Rgba,
+    gain: f32,
 ) {
+    let offset = audio.offset;
     // Only the visible part of the clip.
     let x0 = body.x.max(0.0).floor();
     let x1 = body.right().min(a.width).ceil();
@@ -290,6 +368,13 @@ fn waveform(
     let mut columns = Vec::new();
     for ch in 0..channels {
         cache.query(ch, f0, f1, drawn.max(1), &mut columns);
+        // Drawn at the clip's gain so a gain change shows.
+        if gain != 1.0 {
+            for (lo, hi) in &mut columns {
+                *lo = (*lo * gain).clamp(-1.0, 1.0);
+                *hi = (*hi * gain).clamp(-1.0, 1.0);
+            }
+        }
         s.push(Prim::Wave {
             r: Rect::new(
                 x0,

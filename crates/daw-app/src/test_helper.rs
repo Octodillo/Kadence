@@ -181,11 +181,7 @@ fn files_test() -> Result<std::path::PathBuf, String> {
             name,
             TickTime(start),
             TickTime(daw_core::time::PPQ),
-            ClipContent::Audio(AudioClip {
-                source,
-                offset: SampleTime(0),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new(source, SampleTime(0))),
         ))
     };
     let mut t = Track::new(TrackKind::Audio, "Drums");

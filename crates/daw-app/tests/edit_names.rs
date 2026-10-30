@@ -15,6 +15,7 @@ const NAMING_CALLS: &[&str] = &[
     "NoteEdit::new(",
     "edit_selected(",
     "edit_selection(",
+    "edit_selected_audio(",
     "relink(",
 ];
 

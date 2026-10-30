@@ -12,11 +12,7 @@ fn audio_clip(source: impl Into<PathBuf>) -> std::sync::Arc<Clip> {
         "Take",
         TickTime(0),
         TickTime(960),
-        ClipContent::Audio(AudioClip {
-            source: source.into(),
-            offset: SampleTime(0),
-            gain_db: 0.0,
-        }),
+        ClipContent::Audio(AudioClip::new(source, SampleTime(0))),
     )
     .into()
 }
