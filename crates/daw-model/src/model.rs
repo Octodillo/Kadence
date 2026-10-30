@@ -836,7 +836,26 @@ impl AutomationLane {
             points: Vec::new(),
         }
     }
+
+    /// The lane's value at `tick`: the first point's value before it, the
+    /// last one's after it, and in between the segment's shape (see
+    /// [`AutomationPoint::shape`]). `None` without points.
+    pub fn value_at(&self, tick: TickTime) -> Option<f64> {
+        let after = self.points.partition_point(|p| p.tick <= tick);
+        let Some(p) = after.checked_sub(1).map(|i| &self.points[i]) else {
+            return self.points.first().map(|p| p.value);
+        };
+        let Some(next) = self.points.get(after) else {
+            return Some(p.value);
+        };
+        let x = (tick.0 - p.tick.0) as f64 / (next.tick.0 - p.tick.0) as f64;
+        Some(p.value + (next.value - p.value) * p.shape(x))
+    }
 }
+
+/// The strongest bend [`AutomationPoint::curve`] is played with; larger
+/// values count as this.
+pub const MAX_CURVE: f64 = 4.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutomationPoint {
@@ -851,4 +870,30 @@ pub struct AutomationPoint {
     /// Hold this value until the next point, then jump.
     #[serde(default)]
     pub step: bool,
+}
+
+impl AutomationPoint {
+    /// A point starting a straight segment.
+    pub fn new(tick: TickTime, value: f64) -> Self {
+        Self {
+            tick,
+            value,
+            curve: 0.0,
+            step: false,
+        }
+    }
+
+    /// How far the segment from this point has moved toward the next
+    /// point's value, `x` (0 to 1) of the way along it: `x` raised to
+    /// `2^-curve`, so 0 is a straight line, positive curves rise early and
+    /// negative ones late. `curve` is clamped to [`MAX_CURVE`]. A step
+    /// stays at 0 until the end.
+    pub fn shape(&self, x: f64) -> f64 {
+        let x = x.clamp(0.0, 1.0);
+        if self.step {
+            return if x >= 1.0 { 1.0 } else { 0.0 };
+        }
+        let c = self.curve.clamp(-MAX_CURVE, MAX_CURVE);
+        if c == 0.0 { x } else { x.powf((-c).exp2()) }
+    }
 }

@@ -323,6 +323,87 @@ fn volume_automation_plays() {
     );
 }
 
+/// A volume lane from 0 dB at the start to `to_db` two beats later, with
+/// the first segment bent by `curve`.
+fn ramp_lane(to_db: f64, curve: f64) -> daw_model::AutomationLane {
+    use daw_model::{AutomationLane, AutomationPoint, AutomationTarget};
+    let mut lane = AutomationLane::new(AutomationTarget::Volume);
+    let mut start = AutomationPoint::new(TickTime(0), 0.0);
+    start.curve = curve;
+    lane.points = vec![start, AutomationPoint::new(TickTime(2 * PPQ), to_db)];
+    lane
+}
+
+fn db(v: f64) -> f32 {
+    10f64.powf(v / 20.0) as f32
+}
+
+#[test]
+fn level_ramps_play_in_db_as_drawn_and_lane_edits_change_the_output() {
+    use daw_model::commands::{AddLane, LaneField, SetLane};
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 48_000, 0.5);
+    rig.add_clip("a.wav", 0, 2);
+    let lane = ramp_lane(-20.0, 0.0);
+    let id = lane.id;
+    rig.doc
+        .execute(AddLane {
+            track: rig.track,
+            lane,
+        })
+        .unwrap();
+    rig.sync();
+    rig.session.play().unwrap();
+    let beat = BEAT as usize;
+    let out = rig.run(2 * beat - 200);
+    // Half way along a straight line in dB is -10 dB, not the half-way
+    // linear gain the engine's own ramp would give (about -7.2 dB).
+    let mid = out[beat];
+    assert!((mid - 0.5 * db(-10.0)).abs() < 2e-3, "{mid}");
+
+    // Flatten the lane at 0 dB: the same moment plays at full level.
+    let mut flat = ramp_lane(0.0, 0.0).points;
+    flat[0].value = 0.0;
+    rig.doc
+        .execute(SetLane {
+            id,
+            field: LaneField::Points(flat),
+        })
+        .unwrap();
+    rig.sync();
+    rig.session.locate(TickTime(0)).unwrap();
+    let out = rig.run(2 * beat - 200);
+    assert!((out[beat] - 0.5).abs() < 1e-3, "{}", out[beat]);
+
+    // Bend it: rising early means most of the way down by the middle.
+    let mut bent = ramp_lane(-20.0, 2.0).points;
+    bent[0].curve = 2.0;
+    rig.doc
+        .execute(SetLane {
+            id,
+            field: LaneField::Points(bent),
+        })
+        .unwrap();
+    rig.sync();
+    rig.session.locate(TickTime(0)).unwrap();
+    let out = rig.run(2 * beat - 200);
+    // x^(2^-2) at x = 0.5 is 0.84 of the way to -20 dB.
+    let want = 0.5 * db(-20.0 * 0.5f64.powf(0.25));
+    assert!((out[beat] - want).abs() < 2e-3, "{} vs {want}", out[beat]);
+
+    // Switched off, the lane is not heard.
+    rig.doc
+        .execute(SetLane {
+            id,
+            field: LaneField::Enabled(false),
+        })
+        .unwrap();
+    rig.sync();
+    rig.session.locate(TickTime(0)).unwrap();
+    let out = rig.run(2 * beat - 200);
+    assert!((out[beat] - 0.5).abs() < 1e-3, "{}", out[beat]);
+}
+
 #[test]
 fn stream_edited_while_stopped_plays_without_gap() {
     let mut rig = Rig::new(0.0);

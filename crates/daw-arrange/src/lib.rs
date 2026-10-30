@@ -12,6 +12,7 @@
 //! are not part of it; they are ordinary widgets beside it, `track_height`
 //! tall each and scrolled by [`Arrange::scroll_y`].
 
+pub mod automation;
 pub mod commands;
 mod draw;
 pub mod peaks;
@@ -27,10 +28,11 @@ use daw_core::time::{PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::grid::Meter;
 use daw_model::commands::{AddClip, AddTrack, ClipField, RemoveClip, SetClip};
 use daw_model::{
-    AudioClip, Clip, ClipContent, ClipId, Command, Document, Fade, FadeShape, MidiClip, ModelError,
-    Project, Track, TrackId, TrackKind,
+    AudioClip, AutomationPoint, Clip, ClipContent, ClipId, Command, Document, Fade, FadeShape,
+    LaneId, MidiClip, ModelError, Project, Track, TrackId, TrackKind,
 };
 
+pub use automation::{LaneScale, ParamCatalog, PointShape};
 use commands::{Group, PlaceClip, TrimClip};
 pub use draw::track_color;
 pub use peaks::{PeakPool, Peaks};
@@ -135,6 +137,16 @@ pub enum Hit {
         row: usize,
         tick: TickTime,
     },
+    /// An automation lane under a track (see [`Arrange::expanded`]).
+    /// `lane` is `None` on the empty row an expanded track without lanes
+    /// shows; `point` is the index of the point under the pointer.
+    Automation {
+        track: TrackId,
+        row: usize,
+        lane: Option<LaneId>,
+        tick: TickTime,
+        point: Option<usize>,
+    },
     /// Below the last track.
     Empty(TickTime),
 }
@@ -151,6 +163,8 @@ pub enum Cursor {
     ResizeVertical,
     /// Over the ruler: click to move the playhead.
     Pointing,
+    /// Over an automation lane: click to add a point.
+    Crosshair,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -284,6 +298,27 @@ enum Drag {
         db: f64,
         edited: bool,
     },
+    /// Automation points being moved.
+    Points {
+        lane: LaneId,
+        /// Tick and y under the pointer at the press.
+        tick: TickTime,
+        y: f64,
+        /// The point grabbed; its tick is what snaps.
+        lead: usize,
+        /// The lane's points at the press, and the indices being moved.
+        orig: Vec<AutomationPoint>,
+        moving: Vec<usize>,
+        edited: bool,
+    },
+    /// The bend of the segment after point `index`.
+    Curve {
+        lane: LaneId,
+        index: usize,
+        y: f64,
+        orig: Vec<AutomationPoint>,
+        edited: bool,
+    },
     Rubber {
         x0: f64,
         y0: f64,
@@ -336,11 +371,24 @@ pub struct Arrange {
     pub palette: Palette,
     pub selection: BTreeSet<ClipId>,
     pub selected_track: Option<TrackId>,
+    /// Tracks whose automation lanes are shown under them.
+    pub expanded: BTreeSet<TrackId>,
+    /// Height of one automation lane.
+    pub lane_height: f64,
+    /// Selected automation points: a lane and indices into its points.
+    pub points: Option<(LaneId, BTreeSet<usize>)>,
+    /// Ranges and parameter lists of device parameters, for lanes that
+    /// automate them. Without one, device parameter lanes show 0 to 1.
+    pub params: Option<Arc<dyn ParamCatalog>>,
     pub peaks: PeakPool,
     pub names: DefaultNames,
     drag: Option<Drag>,
     /// Sample rates of audio files whose peaks aren't loaded yet.
     rates: HashMap<PathBuf, f64>,
+    /// Top of each track row in content coordinates (from the top of the
+    /// first track), and the bottom of the last: rows are as tall as a
+    /// track plus its shown lanes. See [`Arrange::relayout`].
+    tops: Vec<f64>,
 }
 
 impl Default for Arrange {
@@ -364,33 +412,111 @@ impl Arrange {
             palette: Palette::default(),
             selection: BTreeSet::new(),
             selected_track: None,
+            expanded: BTreeSet::new(),
+            lane_height: 40.0,
+            points: None,
+            params: None,
             peaks: PeakPool::new(),
             names: DefaultNames::default(),
             drag: None,
             rates: HashMap::new(),
+            tops: Vec::new(),
         }
     }
 
     // -----------------------------------------------------------------------
     // Geometry
 
+    /// Works out the row heights again. Call it after the project or
+    /// [`expanded`](Self::expanded) changed and before asking for geometry;
+    /// every input method and [`scene`](Self::scene) call it themselves.
+    pub fn relayout(&mut self, project: &Project) {
+        self.tops.clear();
+        self.tops.reserve(project.tracks.len() + 1);
+        let mut y = 0.0;
+        self.tops.push(y);
+        for t in &project.tracks {
+            y += self.track_height + self.lanes_shown(t) as f64 * self.lane_height;
+            self.tops.push(y);
+        }
+        self.expanded
+            .retain(|id| project.tracks.iter().any(|t| t.id == *id));
+    }
+
+    /// How many lane rows `track` shows under it: none when collapsed, and
+    /// at least one (an empty one to add lanes from) when expanded.
+    pub fn lanes_shown(&self, track: &Track) -> usize {
+        if self.expanded.contains(&track.id) {
+            track.automation.len().max(1)
+        } else {
+            0
+        }
+    }
+
+    /// Top of row `row` in content coordinates.
+    fn row_top(&self, row: usize) -> f64 {
+        match self.tops.get(row) {
+            Some(&y) => y,
+            // Not laid out yet: rows past the known ones are bare tracks.
+            None => {
+                let known = self.tops.len().saturating_sub(1);
+                self.tops.last().copied().unwrap_or(0.0) + (row - known) as f64 * self.track_height
+            }
+        }
+    }
+
     /// Top of track row `row` in view coordinates.
     pub fn row_y(&self, row: usize) -> f64 {
-        self.ruler_height + row as f64 * self.track_height - self.scroll_y
+        self.ruler_height + self.row_top(row) - self.scroll_y
     }
 
-    /// The track row under `y`, if `y` is over a track.
+    /// Height of row `row`: its track and the lanes shown under it.
+    pub fn row_height(&self, row: usize) -> f64 {
+        self.row_top(row + 1) - self.row_top(row)
+    }
+
+    /// Top of lane row `lane` (counting from 0 under the track) of track
+    /// row `row`, in view coordinates.
+    pub fn lane_y(&self, row: usize, lane: usize) -> f64 {
+        self.row_y(row) + self.track_height + lane as f64 * self.lane_height
+    }
+
+    /// The track row under `y`, if `y` is over a track or its lanes.
     pub fn row_at(&self, y: f64, rows: usize) -> Option<usize> {
-        if y < self.ruler_height {
+        if y < self.ruler_height || rows == 0 {
             return None;
         }
-        let r = ((y - self.ruler_height + self.scroll_y) / self.track_height).floor();
-        (r >= 0.0 && (r as usize) < rows).then_some(r as usize)
+        let cy = y - self.ruler_height + self.scroll_y;
+        if cy < 0.0 {
+            return None;
+        }
+        let laid_out = self.tops.len() == rows + 1;
+        let r = if laid_out {
+            self.tops.partition_point(|&t| t <= cy).checked_sub(1)?
+        } else {
+            (cy / self.track_height).floor() as usize
+        };
+        (r < rows).then_some(r)
     }
 
-    /// Height of all tracks together.
+    /// The row whose top is closest above content-y `cy`, clamped to the
+    /// rows there are: where a dragged track header lands.
+    pub fn row_at_content(&self, cy: f64, rows: usize) -> usize {
+        let y = cy + self.ruler_height - self.scroll_y;
+        match self.row_at(y, rows) {
+            Some(r) => r,
+            None if cy < 0.0 => 0,
+            None => rows.saturating_sub(1),
+        }
+    }
+
+    /// Height of all tracks together, with their lanes.
     pub fn content_height(&self, project: &Project) -> f64 {
-        project.tracks.len() as f64 * self.track_height
+        if self.tops.len() == project.tracks.len() + 1 {
+            self.tops.last().copied().unwrap_or(0.0)
+        } else {
+            project.tracks.len() as f64 * self.track_height
+        }
     }
 
     /// Width the timeline content needs: past the last clip, with room to
@@ -428,6 +554,9 @@ impl Arrange {
             return Hit::Empty(tick);
         };
         let track = &project.tracks[row];
+        if y >= self.row_y(row) + self.track_height {
+            return self.lane_hit(track, row, x, y, tick);
+        }
         // Later clips paint over earlier ones, so look from the end.
         for clip in track.clips.iter().rev() {
             let r = self.clip_rect(row, clip);
@@ -470,7 +599,8 @@ impl Arrange {
 
     pub fn cursor(&self, project: &Project, x: f64, y: f64) -> Cursor {
         match &self.drag {
-            Some(Drag::Move { .. }) => return Cursor::Move,
+            Some(Drag::Move { .. } | Drag::Points { .. }) => return Cursor::Move,
+            Some(Drag::Curve { .. }) => return Cursor::ResizeVertical,
             Some(Drag::Trim { .. } | Drag::Fade { .. }) => return Cursor::ResizeHorizontal,
             Some(Drag::Gain { .. }) => return Cursor::ResizeVertical,
             _ => {}
@@ -484,6 +614,8 @@ impl Arrange {
                 zone: Zone::Gain, ..
             } => Cursor::ResizeVertical,
             Hit::Clip { .. } => Cursor::ResizeHorizontal,
+            Hit::Automation { point: Some(_), .. } => Cursor::Move,
+            Hit::Automation { lane: Some(_), .. } => Cursor::Crosshair,
             _ => Cursor::Arrow,
         }
     }
@@ -539,6 +671,7 @@ impl Arrange {
     pub fn resize(&mut self, project: &Project, width: f64, height: f64) {
         self.width = width.max(1.0);
         self.height = height.max(1.0);
+        self.relayout(project);
         self.clamp_scroll(project);
     }
 
@@ -554,6 +687,7 @@ impl Arrange {
     /// zooms time around the pointer, Ctrl+Shift zooms track height, Shift
     /// turns vertical wheel motion into horizontal scrolling.
     pub fn wheel(&mut self, project: &Project, p: Pointer, dx: f64, dy: f64) -> Outcome {
+        self.relayout(project);
         if p.ctrl && p.shift {
             self.zoom_tracks(project, (dy / 240.0).exp2(), p.y);
         } else if p.ctrl {
@@ -580,10 +714,20 @@ impl Arrange {
     }
 
     pub fn zoom_tracks(&mut self, project: &Project, factor: f64, anchor_y: f64) {
+        self.relayout(project);
+        // Keep the same spot of the same row under the anchor.
+        let rows = project.tracks.len();
         let content_y = anchor_y - self.ruler_height + self.scroll_y;
-        let rows = content_y / self.track_height;
+        let row = self.row_at_content(content_y, rows);
+        let frac = if rows == 0 {
+            0.0
+        } else {
+            ((content_y - self.row_top(row)) / self.row_height(row).max(1.0)).clamp(0.0, 1.0)
+        };
         self.track_height = (self.track_height * factor).clamp(MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT);
-        self.scroll_y = rows * self.track_height - (anchor_y - self.ruler_height);
+        self.relayout(project);
+        self.scroll_y =
+            self.row_top(row) + frac * self.row_height(row) - (anchor_y - self.ruler_height);
         self.clamp_scroll(project);
     }
 
@@ -618,8 +762,15 @@ impl Arrange {
     // Pointer input
 
     pub fn press(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        self.relayout(doc.project());
         let project = doc.project();
         let hit = self.hit(project, p.x, p.y);
+        if let Hit::Automation { .. } = hit {
+            return self.press_lane(doc, p, hit);
+        }
+        if p.button != Button::Middle && !matches!(hit, Hit::Ruler(_)) {
+            self.points = None;
+        }
         if p.button == Button::Right {
             if let Hit::Clip { clip, .. } = hit
                 && !self.selection.contains(&clip)
@@ -675,6 +826,7 @@ impl Arrange {
                 self.drag = Some(Drag::Pending { start: p, hit });
                 Outcome::view()
             }
+            Hit::Automation { .. } => unreachable!("handled by press_lane"),
         }
     }
 
@@ -682,6 +834,7 @@ impl Arrange {
         let Some(drag) = self.drag.clone() else {
             return Outcome::default();
         };
+        self.relayout(doc.project());
         match drag {
             Drag::Pending { start, hit } => {
                 if (p.x - start.x).hypot(p.y - start.y) < DRAG_THRESHOLD {
@@ -718,6 +871,30 @@ impl Arrange {
                 clip, out, grab, ..
             } => {
                 let o = self.drag_fade(doc, p, clip, out, grab);
+                self.mark_edited(&o);
+                o
+            }
+            Drag::Points {
+                lane,
+                tick,
+                y,
+                lead,
+                orig,
+                moving,
+                ..
+            } => {
+                let o = self.drag_points(doc, p, lane, tick, y, lead, &orig, &moving);
+                self.mark_edited(&o);
+                o
+            }
+            Drag::Curve {
+                lane,
+                index,
+                y,
+                orig,
+                ..
+            } => {
+                let o = self.drag_curve(doc, p, lane, index, y, &orig);
                 self.mark_edited(&o);
                 o
             }
@@ -797,6 +974,21 @@ impl Arrange {
                 doc.seal();
                 Outcome::view()
             }
+            Some(Drag::Points {
+                lane, lead, edited, ..
+            }) => {
+                doc.seal();
+                // A click (no drag) on one of several selected points
+                // selects only it.
+                if !edited && !p.shift && !p.ctrl {
+                    self.points = Some((lane, BTreeSet::from([lead])));
+                }
+                Outcome::view()
+            }
+            Some(Drag::Curve { .. }) => {
+                doc.seal();
+                Outcome::view()
+            }
             Some(Drag::Rubber { .. }) => Outcome::view(),
             Some(Drag::Scrub) => Outcome {
                 locate: Some(self.view.x_to_tick(p.x).max(TickTime(0))),
@@ -814,7 +1006,9 @@ impl Arrange {
                 Drag::Move { edited: true, .. }
                 | Drag::Trim { edited: true, .. }
                 | Drag::Fade { edited: true, .. }
-                | Drag::Gain { edited: true, .. },
+                | Drag::Gain { edited: true, .. }
+                | Drag::Points { edited: true, .. }
+                | Drag::Curve { edited: true, .. },
             ) => {
                 // The drag is one merged undo step: undo it.
                 doc.seal();
@@ -830,8 +1024,14 @@ impl Arrange {
     /// other edit (a shortcut, undo) while a button may still be held, so the
     /// drag neither merges with that edit nor works on clips it removed.
     pub fn end_drag(&mut self, doc: &mut Document) {
-        if let Some(Drag::Move { .. } | Drag::Trim { .. } | Drag::Fade { .. } | Drag::Gain { .. }) =
-            self.drag.take()
+        if let Some(
+            Drag::Move { .. }
+            | Drag::Trim { .. }
+            | Drag::Fade { .. }
+            | Drag::Gain { .. }
+            | Drag::Points { .. }
+            | Drag::Curve { .. },
+        ) = self.drag.take()
         {
             doc.seal();
         }
@@ -843,7 +1043,9 @@ impl Arrange {
                 Drag::Move { edited, .. }
                 | Drag::Trim { edited, .. }
                 | Drag::Fade { edited, .. }
-                | Drag::Gain { edited, .. },
+                | Drag::Gain { edited, .. }
+                | Drag::Points { edited, .. }
+                | Drag::Curve { edited, .. },
             ) = &mut self.drag
         {
             *edited = true;
@@ -852,7 +1054,17 @@ impl Arrange {
 
     pub fn double_click(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
         self.end_drag(doc);
+        self.relayout(doc.project());
         match self.hit(doc.project(), p.x, p.y) {
+            // Double-clicking an automation point deletes it.
+            Hit::Automation {
+                lane: Some(lane),
+                point: Some(i),
+                ..
+            } => {
+                self.points = Some((lane, BTreeSet::from([i])));
+                self.delete_points(doc)
+            }
             // Double-clicking a handle resets what it sets.
             Hit::Clip {
                 clip,
@@ -1000,7 +1212,7 @@ impl Arrange {
                     base,
                 })
             }
-            Hit::Ruler(_) => None,
+            Hit::Ruler(_) | Hit::Automation { .. } => None,
         };
     }
 
@@ -1261,6 +1473,9 @@ impl Arrange {
 
     pub fn delete_selection(&mut self, doc: &mut Document) -> Outcome {
         self.end_drag(doc);
+        if self.points.as_ref().is_some_and(|(_, p)| !p.is_empty()) {
+            return self.delete_points(doc);
+        }
         let ids: Vec<ClipId> = self
             .selected_clips(doc.project())
             .iter()
@@ -1587,6 +1802,7 @@ impl Arrange {
     /// The display list for the current state. Starts loading the peaks of
     /// any visible audio clip that has none yet.
     pub fn scene(&mut self, project: &Project, env: &Env) -> Scene {
+        self.relayout(project);
         draw::scene(self, project, env)
     }
 

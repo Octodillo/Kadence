@@ -38,6 +38,11 @@ pub use media::{MEMORY_LIMIT_SECONDS, MediaPool};
 use player::{LoopPoints, PlayerHandle};
 pub use tempo::tempo_map;
 
+/// Length of the straight pieces a curved automation segment is played
+/// as, in samples, and the most pieces one segment gets.
+const PIECE_SAMPLES: i64 = 256;
+const MAX_PIECES: i64 = 256;
+
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub engine: EngineConfig,
@@ -98,6 +103,8 @@ pub(crate) struct Built {
     pub players: HashMap<TrackId, PlayerHandle>,
     /// Last value sent per (node, param), so unchanged values aren't resent.
     pub params: HashMap<(NodeKey, u32), f64>,
+    /// Parameters an automation lane drives in this graph.
+    pub automated: HashSet<(NodeKey, u32)>,
     /// The clips each player was last given, to spot clip edits.
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Gain reduction meters of devices that have one.
@@ -295,6 +302,46 @@ impl Session {
                 })
                 .collect(),
         )
+    }
+
+    /// A lane as the engine plays it, values turned into the engine's unit
+    /// by `to_value`. The engine only steps or ramps in straight lines, so
+    /// curved segments are played as short straight pieces, and so is
+    /// every ramp when `dense` is set (levels drawn in dB, which the engine
+    /// would otherwise ramp in linear gain). What plays then follows the
+    /// line the arrange view draws.
+    pub fn playback_lane(
+        &self,
+        lane: &daw_model::AutomationLane,
+        dense: bool,
+        to_value: fn(f64) -> f64,
+    ) -> AutomationLane {
+        let mut out = Vec::with_capacity(lane.points.len());
+        for (i, p) in lane.points.iter().enumerate() {
+            let time = self.ticks_to_samples(p.tick);
+            let next = lane.points.get(i + 1);
+            let ramp = !p.step && next.is_some_and(|n| n.value != p.value);
+            out.push(daw_engine::AutomationPoint {
+                time,
+                value: to_value(p.value),
+                curve: if p.step { Curve::Step } else { Curve::Linear },
+            });
+            let Some(next) = next.filter(|_| ramp && (dense || p.curve != 0.0)) else {
+                continue;
+            };
+            let span = self.ticks_to_samples(next.tick).0 - time.0;
+            let pieces = (span / PIECE_SAMPLES).clamp(1, MAX_PIECES);
+            for k in 1..pieces {
+                let x = k as f64 / pieces as f64;
+                let tick = TickTime(p.tick.0 + ((next.tick.0 - p.tick.0) as f64 * x) as i64);
+                out.push(daw_engine::AutomationPoint {
+                    time: self.ticks_to_samples(tick),
+                    value: to_value(p.value + (next.value - p.value) * p.shape(x)),
+                    curve: Curve::Linear,
+                });
+            }
+        }
+        AutomationLane::new(out)
     }
 
     fn send_params(&mut self, snapshot: &ProjectSnapshot) -> Result<(), SessionError> {

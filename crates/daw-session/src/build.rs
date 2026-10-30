@@ -13,9 +13,7 @@ use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::time::TickTime;
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
-use daw_engine::{
-    AutomationLane, AutomationPoint, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
-};
+use daw_engine::{GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter};
 use daw_model::{
     AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, LaneId, Project,
     ProjectSnapshot, SendId, Track, TrackId, TrackKind, TrackOutput,
@@ -346,7 +344,12 @@ pub(crate) fn graph(
         }
     }
 
-    automate(session, snapshot, &mut g, &strips);
+    automate(session, snapshot, &mut g, &strips, &mut built);
+    // A lane that stopped playing (switched off, removed, emptied) left
+    // its last value behind: send the control's own value again.
+    for k in old.automated.difference(&built.automated) {
+        built.params.remove(k);
+    }
     (g, built)
 }
 
@@ -378,6 +381,7 @@ fn automate(
     project: &Project,
     g: &mut GraphDesc,
     strips: &HashMap<TrackId, NodeId>,
+    built: &mut Built,
 ) {
     for t in project.all_tracks() {
         for lane in t
@@ -385,27 +389,25 @@ fn automate(
             .iter()
             .filter(|l| l.enabled && !l.points.is_empty() && !session.suspended.contains(&l.id))
         {
-            let (node, param, to_value): (Option<NodeId>, u32, fn(f64) -> f64) = match lane.target {
-                AutomationTarget::Volume => (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain),
-                AutomationTarget::Pan => (strips.get(&t.id).copied(), Strip::PAN, |v| v),
-                AutomationTarget::SendLevel { send } => {
-                    (find(g, send_key(send)), Strip::GAIN, db_to_gain)
-                }
-                AutomationTarget::DeviceParam { device, param } => {
-                    (find(g, device_key(device)), param, |v| v)
-                }
-            };
+            // Levels are drawn in dB: play their ramps in dB too.
+            let (node, param, to_value, dense): (Option<NodeId>, u32, fn(f64) -> f64, bool) =
+                match lane.target {
+                    AutomationTarget::Volume => {
+                        (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain, true)
+                    }
+                    AutomationTarget::Pan => (strips.get(&t.id).copied(), Strip::PAN, |v| v, false),
+                    AutomationTarget::SendLevel { send } => {
+                        (find(g, send_key(send)), Strip::GAIN, db_to_gain, true)
+                    }
+                    AutomationTarget::DeviceParam { device, param } => {
+                        (find(g, device_key(device)), param, |v| v, false)
+                    }
+                };
             let Some(node) = node else { continue };
-            let points = session
-                .engine_lane(&lane.points)
-                .points()
-                .iter()
-                .map(|p| AutomationPoint {
-                    value: to_value(p.value),
-                    ..*p
-                })
-                .collect();
-            g.automate(node, param, AutomationLane::new(points));
+            if let Some(key) = g.key(node) {
+                built.automated.insert((key, param));
+            }
+            g.automate(node, param, session.playback_lane(lane, dense, to_value));
         }
     }
 }
