@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 use daw_arrange::{Arrange, Env};
 use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
-use daw_model::commands::{Batch, DeviceField, SetDevice};
-use daw_model::{Command, Document, FormatError, Project};
+use daw_model::{Document, FormatError, Project};
 use daw_pianoroll::PianoRoll;
 use daw_plugins::Scanner;
 use daw_session::catalog::PluginCatalog;
@@ -153,19 +152,16 @@ impl AppState {
         let Some(session) = self.engine.session_mut() else {
             return;
         };
-        match session.tick() {
-            Ok(news) => {
-                if let Some(w) = news.into_iter().next() {
-                    self.report(Message::Warning(w));
-                }
-            }
-            Err(e) => {
-                // Retried every tick; shown once.
-                let fields = Message::Playback(e).fields();
-                if self.status.as_ref() != Some(&fields) {
-                    self.status = Some(fields);
-                    self.touch();
-                }
+        let report = session.tick();
+        if let Some(w) = report.warnings.into_iter().next() {
+            self.report(Message::Warning(w));
+        }
+        if let Some(e) = report.error {
+            // Retried on later ticks; shown once.
+            let fields = Message::Playback(e).fields();
+            if self.status.as_ref() != Some(&fields) {
+                self.status = Some(fields);
+                self.touch();
             }
         }
     }
@@ -197,20 +193,19 @@ impl AppState {
         true
     }
 
-    /// Stores each plugin's current state in the document, as one undo
-    /// step, so saving keeps it. Plugins whose state is unchanged add
-    /// nothing.
+    /// Stores each plugin's current state in the document, so saving keeps
+    /// it. Not an undo step: the plugin changed, not the project, so undo
+    /// must not throw a plugin's own changes away.
     pub fn store_plugin_states(&mut self) {
-        let Some(session) = self.engine.session() else {
+        let Some(session) = self.engine.session_mut() else {
             return;
         };
-        let mut commands: Vec<Box<dyn Command>> = Vec::new();
+        let mut stored = false;
         for s in session.plugin_states() {
             match s.state {
-                Ok(state) => commands.push(Box::new(SetDevice {
-                    id: s.device,
-                    field: DeviceField::State(Some(state)),
-                })),
+                // The device was synced moments ago; if it is gone anyway, there is nothing
+                // to keep its state for.
+                Ok(state) => stored |= self.doc.store_plugin_state(s.device, Some(state)).is_ok(),
                 Err(detail) => {
                     let device = self
                         .doc
@@ -226,17 +221,9 @@ impl AppState {
                 }
             }
         }
-        if commands.is_empty() {
-            return;
+        if stored {
+            self.sync();
         }
-        self.end_drag();
-        if let Err(e) = self
-            .doc
-            .execute(Batch::new("Change Plugin State", commands))
-        {
-            self.report(e.into());
-        }
-        self.sync();
     }
 
     /// Forces a full resync, after the engine was restarted.
