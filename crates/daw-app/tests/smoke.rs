@@ -9,40 +9,35 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// A plugin folder holding only the CLAP test plugin, built in its own
-/// target directory (shared with the session's plugin tests).
+/// target directory under the system temp folder: CI caches restore
+/// `target/` with fingerprints whose libraries were dropped, and cleaning
+/// there would race the other test processes copying the library.
 fn plugin_folder() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let target = root.join("target").join("clap-test-plugin");
+        let target = std::env::temp_dir().join("kadence-clap-test-plugin");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let lib = target.join("debug").join("libdaw_clap_test_plugin.so");
-        let build = |command: &str| {
-            let mut cmd = Command::new(&cargo);
-            cmd.args([command, "--quiet", "--package", "daw-clap-test-plugin"]);
-            if command == "build" {
-                cmd.arg("--lib");
-            }
-            let status = cmd
-                .arg("--target-dir")
-                .arg(&target)
-                .current_dir(&root)
-                .status()
-                .expect("run cargo");
-            assert!(
-                status.success(),
-                "cargo {command} of the test plugin failed"
-            );
-        };
-        build("build");
-        if !lib.exists() {
-            // A CI cache can keep the build's fingerprints but drop the
-            // library itself, so cargo sees nothing to rebuild.
-            build("clean");
-            build("build");
-        }
+        let status = Command::new(cargo)
+            .args([
+                "build",
+                "--quiet",
+                "--package",
+                "daw-clap-test-plugin",
+                "--lib",
+            ])
+            .arg("--target-dir")
+            .arg(&target)
+            .current_dir(&root)
+            .status()
+            .expect("run cargo");
+        assert!(status.success(), "building the test plugin failed");
         let dir = tempdir("plugins");
-        std::fs::copy(&lib, dir.join("test-gain.clap")).expect("copy the test plugin");
+        std::fs::copy(
+            target.join("debug").join("libdaw_clap_test_plugin.so"),
+            dir.join("test-gain.clap"),
+        )
+        .expect("copy the test plugin");
         dir
     })
 }
