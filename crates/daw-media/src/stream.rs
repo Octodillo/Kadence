@@ -276,24 +276,26 @@ impl ClipReader {
     }
 
     /// Like [`read`](Self::read), but waits for the fill thread instead of playing
-    /// silence, for up to `timeout` in all. For offline rendering, which must get every
-    /// frame and can wait; it sleeps, so never call it on a real-time thread. Gives
-    /// [`ReadStatus::Underrun`] (with the missing frames silent) if the time runs out.
+    /// silence, for up to `timeout` in all or until `stop` is set. For offline
+    /// rendering, which must get every frame and can wait; it sleeps, so never call it
+    /// on a real-time thread. Gives [`ReadStatus::Underrun`] (with the missing frames
+    /// silent) if it stops waiting before the data came.
     pub fn read_blocking(
         &mut self,
         position: SampleTime,
         out: &mut [&mut [f32]],
         timeout: Duration,
+        stop: &AtomicBool,
     ) -> ReadStatus {
         let deadline = std::time::Instant::now() + timeout;
-        self.read_inner(position, out, Some(deadline))
+        self.read_inner(position, out, Some((deadline, stop)))
     }
 
     fn read_inner(
         &mut self,
         position: SampleTime,
         out: &mut [&mut [f32]],
-        deadline: Option<std::time::Instant>,
+        wait: Option<(std::time::Instant, &AtomicBool)>,
     ) -> ReadStatus {
         let n = out.iter().map(|c| c.len()).min().unwrap_or(0);
         if position.0 != self.expected {
@@ -325,12 +327,16 @@ impl ClipReader {
                     }
                     continue;
                 }
-                if deadline.is_some_and(|d| std::time::Instant::now() < d) && !self.failed() {
+                if let Some((deadline, stop)) = wait
+                    && std::time::Instant::now() < deadline
+                    && !stop.load(Ordering::Relaxed)
+                    && !self.failed()
+                {
                     std::thread::sleep(Duration::from_micros(200));
                     continue;
                 }
                 silence(out, i, n - i);
-                if self.waiting && deadline.is_none() {
+                if self.waiting && wait.is_none() {
                     status = ReadStatus::Pending;
                 } else {
                     status = ReadStatus::Underrun;
@@ -779,6 +785,7 @@ mod tests {
                 SampleTime(at as i64),
                 &mut [&mut buf[..]],
                 Duration::from_secs(10),
+                &AtomicBool::new(false),
             );
             assert_eq!(status, ReadStatus::Ok, "read at {at}");
             for (i, &x) in buf.iter().enumerate() {
@@ -792,9 +799,22 @@ mod tests {
             SampleTime(frames as i64),
             &mut [&mut buf[..]],
             Duration::from_secs(10),
+            &AtomicBool::new(false),
         );
         assert_eq!(status, ReadStatus::Ok);
         assert!(buf.iter().all(|&x| x == 0.0));
         assert!(t.elapsed() < Duration::from_secs(5));
+
+        // A stop given up front: a seek can't be served, so the read gives up at once
+        // with silence instead of waiting.
+        let t = std::time::Instant::now();
+        let status = reader.read_blocking(
+            SampleTime(1000),
+            &mut [&mut buf[..]],
+            Duration::from_secs(10),
+            &AtomicBool::new(true),
+        );
+        assert_eq!(status, ReadStatus::Underrun);
+        assert!(t.elapsed() < Duration::from_secs(1));
     }
 }

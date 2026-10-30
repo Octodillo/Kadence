@@ -76,6 +76,8 @@ pub mod qobject {
         EmptyRange,
         ExportBusy,
         EncodeFailed,
+        DiskTooSlow,
+        WrongExtension,
     }
 
     #[auto_cxx_name]
@@ -303,6 +305,8 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::EmptyRange => QR::EmptyRange,
         Reason::ExportBusy => QR::ExportBusy,
         Reason::EncodeFailed => QR::EncodeFailed,
+        Reason::DiskTooSlow => QR::DiskTooSlow,
+        Reason::WrongExtension => QR::WrongExtension,
     };
     let text = |s: &str| QVariant::from(&QString::from(s));
     // Numbers are schema versions or lengths in seconds; they fit an i32.

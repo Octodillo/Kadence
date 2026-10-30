@@ -92,6 +92,11 @@ QtObject {
             return i18nc("@info", "The range to export is empty.");
         case Project.ExportBusy:
             return i18nc("@info", "Another export is still running.");
+        case Project.DiskTooSlow:
+            return i18nc("@info", "Audio files could not be read from disk fast enough, so the export would have had gaps.");
+        case Project.WrongExtension:
+            return i18nc("@info %1 is a file name extension like wav",
+                         "The file name ends in “.%1”, which is not the chosen format.", m.detail);
         case Project.EncodeFailed:
             return i18nc("@info %1 is a message which may be in English",
                          "The audio could not be written (%1).", m.detail);

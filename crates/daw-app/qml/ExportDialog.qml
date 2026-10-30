@@ -105,7 +105,8 @@ Kirigami.Dialog {
             value: 2
             editable: true
             textFromValue: (value, locale) => i18ncp("@item:valuesuffix", "%1 second", "%1 seconds", value)
-            valueFromText: (text, locale) => parseInt(text) || 0
+            // The number wherever the translation puts it.
+            valueFromText: (text, locale) => parseInt(text.replace(/[^0-9]/g, "")) || 0
             QQC2.ToolTip.text: i18nc("@info:tooltip", "Time after the end for effects and notes to ring out")
             QQC2.ToolTip.visible: hovered
             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay

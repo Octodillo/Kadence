@@ -99,8 +99,21 @@ impl AppState {
             return Err(Message::Export(ExportProblem::Busy));
         }
         let (start, end) = self.export_span(request.range).map_err(Message::Export)?;
-        if path.extension().is_none() {
-            path.set_extension(extension(request.format));
+        let wanted = extension(request.format);
+        match path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
+            Some(e) if e == wanted => {}
+            // Writing FLAC into "mix.wav" (or the other way round) would make a
+            // file other programs misread.
+            Some(e) if FORMATS.iter().any(|&f| extension(f) == e) => {
+                return Err(Message::Export(ExportProblem::WrongExtension(e)));
+            }
+            // "Song v1.2" has no audio extension yet.
+            _ => {
+                let mut name = path.file_name().unwrap_or_default().to_os_string();
+                name.push(".");
+                name.push(wanted);
+                path.set_file_name(name);
+            }
         }
         let settings = ExportSettings {
             render: RenderSettings {
@@ -308,13 +321,36 @@ mod tests {
     }
 
     #[test]
+    fn file_names_get_the_formats_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        state::with(|s| {
+            s.replace_document(crate::demo::build().unwrap());
+            let mut r = request(Range::Bars { first: 1, last: 1 });
+            r.format = FileFormat::Flac(FlacBits::B24);
+            assert!(matches!(
+                s.start_export(dir.path().join("mix.WAV"), &r),
+                Err(Message::Export(ExportProblem::WrongExtension(e))) if e == "wav"
+            ));
+            s.start_export(dir.path().join("Song v1.2"), &r).unwrap();
+            let f = finish(s).fields();
+            assert_eq!(
+                f.path.as_deref(),
+                Some(dir.path().join("Song v1.2.flac").as_path())
+            );
+            s.start_export(dir.path().join("mix.Flac"), &r).unwrap();
+            assert_eq!(finish(s).fields().reason, Reason::Exported);
+            assert!(dir.path().join("mix.Flac").exists());
+        });
+    }
+
+    #[test]
     fn a_cancelled_export_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         state::with(|s| {
             s.replace_document(crate::demo::build().unwrap());
             let mut r = request(Range::Song);
             r.tail_seconds = 30.0;
-            s.start_export(dir.path().join("demo.flac"), &r).unwrap();
+            s.start_export(dir.path().join("demo.wav"), &r).unwrap();
             s.cancel_export();
             let f = finish(s).fields();
             assert_eq!(f.reason, Reason::ExportCancelled);

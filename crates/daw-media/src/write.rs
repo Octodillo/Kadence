@@ -286,8 +286,133 @@ enum Sink {
         /// Bytes of audio written so far, against the 4 GiB RIFF limit.
         bytes: u64,
     },
-    /// FLAC is encoded in one go at the end; this is the interleaved audio so far.
-    Flac { samples: Vec<i32>, bits: u32 },
+    Flac(Box<FlacSink>),
+}
+
+/// A FLAC stream encoded a frame at a time, so a long export never sits in memory.
+/// The STREAMINFO header goes out first as a placeholder and is rewritten with the
+/// totals and MD5 at the end; it has a fixed size, so nothing moves.
+struct FlacSink {
+    out: BufWriter<File>,
+    config: flacenc::error::Verified<flacenc::config::Encoder>,
+    info: flacenc::component::StreamInfo,
+    framebuf: flacenc::source::FrameBuf,
+    context: flacenc::source::Context,
+    /// Interleaved samples of the frame being filled.
+    pending: Vec<i32>,
+    block: usize,
+    channels: usize,
+    bits: u32,
+    sink: flacenc::bitsink::ByteSink,
+}
+
+impl FlacSink {
+    fn new(out: File, channels: usize, bits: u32, rate: u32) -> Result<Self> {
+        let encode = |e: &dyn std::fmt::Debug| MediaError::Encode(format!("{e:?}"));
+        let config = flacenc::config::Encoder::default()
+            .into_verified()
+            .map_err(|(_, e)| encode(&e))?;
+        let block = config.block_size;
+        let info = flacenc::component::StreamInfo::new(rate as usize, channels, bits as usize)
+            .map_err(|e| encode(&e))?;
+        let framebuf =
+            flacenc::source::FrameBuf::with_size(channels, block).map_err(|e| encode(&e))?;
+        let mut this = Self {
+            out: BufWriter::new(out),
+            config,
+            info,
+            framebuf,
+            context: flacenc::source::Context::new(bits as usize, channels),
+            pending: Vec::with_capacity(block * channels),
+            block,
+            channels,
+            bits,
+            sink: flacenc::bitsink::ByteSink::new(),
+        };
+        this.write_header()?;
+        Ok(this)
+    }
+
+    fn io(e: std::io::Error) -> MediaError {
+        MediaError::Encode(format!("writing FLAC: {e}"))
+    }
+
+    /// "fLaC" and STREAMINFO as they stand, at the current position.
+    fn write_header(&mut self) -> Result<()> {
+        let header = flacenc::component::Stream::with_stream_info(self.info.clone());
+        self.sink.clear();
+        header
+            .write(&mut self.sink)
+            .map_err(|e| MediaError::Encode(format!("{e:?}")))?;
+        self.out.write_all(self.sink.as_slice()).map_err(Self::io)
+    }
+
+    fn push(&mut self, sample: i32) -> Result<()> {
+        self.pending.push(sample);
+        if self.pending.len() == self.block * self.channels {
+            self.encode_pending()?;
+        }
+        Ok(())
+    }
+
+    fn encode_pending(&mut self) -> Result<()> {
+        use flacenc::source::Fill;
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let encode = |e: &dyn std::fmt::Debug| MediaError::Encode(format!("{e:?}"));
+        self.framebuf
+            .fill_interleaved(&self.pending)
+            .map_err(|e| encode(&e))?;
+        self.context
+            .fill_interleaved(&self.pending)
+            .map_err(|e| encode(&e))?;
+        let number = self.context.current_frame_number().unwrap_or(0);
+        let frame =
+            flacenc::encode_fixed_size_frame(&self.config, &self.framebuf, number, &self.info)
+                .map_err(|e| encode(&e))?;
+        self.info.update_frame_info(&frame);
+        self.sink.clear();
+        frame.write(&mut self.sink).map_err(|e| encode(&e))?;
+        self.out.write_all(self.sink.as_slice()).map_err(Self::io)?;
+        self.pending.clear();
+        Ok(())
+    }
+
+    /// Encodes the short last frame and rewrites the header with the totals.
+    fn finish(mut self) -> Result<()> {
+        self.encode_pending()?;
+        let encode = |e: &dyn std::fmt::Debug| MediaError::Encode(format!("{e:?}"));
+        // The minimum excludes the last block, and Symphonia refuses streams whose
+        // minimum is the short last block, so say min == max as libFLAC does for a
+        // fixed-size stream.
+        self.info
+            .set_block_sizes(self.block, self.block)
+            .map_err(|e| encode(&e))?;
+        self.info.set_md5_digest(&self.context.md5_digest());
+        if self.info.total_samples() == 0 {
+            // No frames: the frame sizes were never set.
+            self.info = {
+                let mut empty = flacenc::component::StreamInfo::new(
+                    self.info.sample_rate(),
+                    self.channels,
+                    self.bits as usize,
+                )
+                .map_err(|e| encode(&e))?;
+                empty
+                    .set_block_sizes(self.block, self.block)
+                    .map_err(|e| encode(&e))?;
+                empty.set_md5_digest(&self.context.md5_digest());
+                empty
+            };
+        }
+        use std::io::Seek;
+        self.out
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(Self::io)?;
+        self.write_header()?;
+        self.out.flush().map_err(Self::io)
+    }
 }
 
 /// Writes an audio file a block at a time, for exports too long to hold as
@@ -300,7 +425,6 @@ pub struct AudioWriter {
     file: File,
     sink: Sink,
     channels: usize,
-    sample_rate: u32,
     dither: Option<Dither>,
     frames: u64,
 }
@@ -337,13 +461,16 @@ impl AudioWriter {
                     bytes: 0,
                 }
             }
-            FileFormat::Flac(bits) => Sink::Flac {
-                samples: Vec::new(),
-                bits: match bits {
+            FileFormat::Flac(bits) => {
+                let clone = file
+                    .try_clone()
+                    .map_err(|e| MediaError::io(&replacement.tmp, e))?;
+                let bits = match bits {
                     FlacBits::B16 => 16,
                     FlacBits::B24 => 24,
-                },
-            },
+                };
+                Sink::Flac(Box::new(FlacSink::new(clone, channels, bits, sample_rate)?))
+            }
         };
         let dither =
             (dither && format.int_bits().is_some()).then_some(Dither(0x9e37_79b9_7f4a_7c15));
@@ -352,7 +479,6 @@ impl AudioWriter {
             file,
             sink,
             channels,
-            sample_rate,
             dither,
             frames: 0,
         })
@@ -412,12 +538,11 @@ impl AudioWriter {
                     }
                 }
             }
-            Sink::Flac { samples, bits } => {
-                samples.reserve(n * self.channels);
+            Sink::Flac(flac) => {
                 for i in 0..n {
                     for plane in planes {
                         let noise = self.dither.as_mut().map_or(0.0, Dither::next);
-                        samples.push(to_int_dithered(plane[i], *bits, noise));
+                        flac.push(to_int_dithered(plane[i], flac.bits, noise))?;
                     }
                 }
             }
@@ -432,22 +557,13 @@ impl AudioWriter {
             replacement,
             file,
             sink,
-            channels,
-            sample_rate,
             ..
         } = self;
         match sink {
             Sink::Wav { writer, .. } => writer
                 .finalize()
                 .map_err(|e| wav_error(&replacement.tmp, e))?,
-            Sink::Flac { samples, bits } => {
-                let bytes = encode_flac(&samples, channels, bits as usize, sample_rate)?;
-                drop(samples);
-                let mut w = BufWriter::new(&file);
-                w.write_all(&bytes)
-                    .and_then(|()| w.flush())
-                    .map_err(|e| MediaError::io(&replacement.tmp, e))?;
-            }
+            Sink::Flac(flac) => flac.finish()?,
         }
         replacement.commit(file)
     }

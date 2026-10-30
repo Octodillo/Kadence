@@ -15,13 +15,13 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::SampleTime;
-use daw_media::{AudioData, ClipReader, DiskStreamer, MediaError};
+use daw_media::{AudioData, ClipReader, DiskStreamer, MediaError, ReadStatus};
 use daw_model::ClipId;
 
 /// Output channels of every player (tracks are stereo).
@@ -165,11 +165,23 @@ impl ClipSet {
     }
 }
 
+/// A render to a file that players take part in: see [`player`].
+#[derive(Debug, Default)]
+pub struct Offline {
+    /// Set to stop waiting for the disk (the render was cancelled).
+    pub stop: AtomicBool,
+    /// Reads that gave up waiting and played silence.
+    pub dropouts: AtomicU64,
+}
+
 /// Creates a player node and the handle that feeds it. An `offline` player waits
 /// for the disk instead of playing silence when a streamed clip's audio isn't
 /// buffered yet, so a render gets every sample; it must not run on a real-time
 /// thread.
-pub fn player(loop_points: Arc<LoopPoints>, offline: bool) -> (AudioClipPlayer, PlayerHandle) {
+pub fn player(
+    loop_points: Arc<LoopPoints>,
+    offline: Option<Arc<Offline>>,
+) -> (AudioClipPlayer, PlayerHandle) {
     let (tx, rx) = spsc(8);
     let (retirer, garbage) = deferred_drop(8);
     let node = AudioClipPlayer {
@@ -266,7 +278,7 @@ pub struct AudioClipPlayer {
     /// Position streams were cued for while stopped.
     parked_at: i64,
     /// See [`player`].
-    offline: bool,
+    offline: Option<Arc<Offline>>,
 }
 
 impl AudioClipPlayer {
@@ -439,9 +451,16 @@ impl Node for AudioClipPlayer {
                 ClipSource::Stream(Some(s)) => {
                     let file = c.file_start + (from - c.start);
                     let mut bufs = [&mut sl[..len], &mut sr[..len]];
-                    if self.offline {
-                        s.main
-                            .read_blocking(SampleTime(file), &mut bufs, OFFLINE_WAIT);
+                    if let Some(offline) = &self.offline {
+                        let status = s.main.read_blocking(
+                            SampleTime(file),
+                            &mut bufs,
+                            OFFLINE_WAIT,
+                            &offline.stop,
+                        );
+                        if status != ReadStatus::Ok {
+                            offline.dropouts.fetch_add(1, Ordering::Relaxed);
+                        }
                     } else {
                         s.main.read(SampleTime(file), &mut bufs);
                     }

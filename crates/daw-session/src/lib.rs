@@ -131,7 +131,7 @@ pub struct Session {
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
     /// Rendering to a file rather than playing: players wait for the disk.
-    pub(crate) offline: bool,
+    pub(crate) offline: Option<Arc<player::Offline>>,
 }
 
 impl Session {
@@ -154,7 +154,7 @@ impl Session {
             master: None,
             suspended: HashSet::new(),
             live: HashMap::new(),
-            offline: false,
+            offline: None,
         };
         (session, processor)
     }

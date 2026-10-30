@@ -21,6 +21,7 @@ use daw_engine::EngineConfig;
 use daw_media::{AudioWriter, FileFormat, MediaError};
 use daw_model::{Project, ProjectSnapshot};
 
+use crate::player::Offline;
 use crate::{Session, SessionConfig, SessionError, Warning};
 
 /// Frames the render processes at a time.
@@ -28,6 +29,9 @@ const BLOCK: u32 = 512;
 
 /// Every export is stereo, like the master.
 pub const CHANNELS: usize = 2;
+
+/// The longest tail an export may have, in seconds.
+pub const MAX_TAIL_SECONDS: f64 = 3600.0;
 
 /// Lowest and highest sample rate an export may use, in Hz.
 pub const MIN_SAMPLE_RATE: u32 = 8_000;
@@ -69,6 +73,10 @@ pub enum ExportError {
     Write(#[from] MediaError),
     #[error("the export was cancelled")]
     Cancelled,
+    /// Audio files could not be read fast enough: this many reads gave up
+    /// waiting, so the render would have gaps. Nothing is written.
+    #[error("the disk was too slow: {0} reads timed out")]
+    DiskTooSlow(u64),
 }
 
 /// What a finished export did.
@@ -90,6 +98,9 @@ pub struct Progress {
     done: AtomicU64,
     total: AtomicU64,
     cancelled: AtomicBool,
+    /// Shared with the render's clip players, so a cancel also stops them
+    /// waiting for the disk.
+    offline: Arc<Offline>,
 }
 
 impl Progress {
@@ -105,6 +116,7 @@ impl Progress {
     /// Asks the render to stop at the end of its current block.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
+        self.offline.stop.store(true, Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -137,7 +149,7 @@ pub fn render(
     if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&settings.sample_rate) {
         return Err(ExportError::SampleRate(settings.sample_rate));
     }
-    if !(settings.tail_seconds.is_finite() && settings.tail_seconds >= 0.0) {
+    if !(0.0..=MAX_TAIL_SECONDS).contains(&settings.tail_seconds) {
         return Err(ExportError::Tail(settings.tail_seconds));
     }
     if settings.end <= settings.start {
@@ -153,9 +165,13 @@ pub fn render(
         inputs: 0,
         outputs: CHANNELS as u16,
     });
-    session.offline = true;
+    session.offline = Some(progress.offline.clone());
     session.set_root(root);
+    // Loads every clip short enough to play from memory, which takes a while.
     session.sync(snapshot)?;
+    if progress.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
     let warnings = session.warnings().to_vec();
     let start = session.ticks_to_samples(settings.start).0;
     let end = session.ticks_to_samples(settings.end).0;
@@ -208,7 +224,13 @@ pub fn render(
     // The processor frees the graph; drop it before the session, as the
     // audio host does.
     drop(processor);
-    Ok(warnings)
+    if progress.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
+    match progress.offline.dropouts.load(Ordering::Relaxed) {
+        0 => Ok(warnings),
+        n => Err(ExportError::DiskTooSlow(n)),
+    }
 }
 
 /// Renders `snapshot` into an audio file at `path`. The file appears only
@@ -232,6 +254,9 @@ pub fn export(
         Ok(writer.write(planes)?)
     })?;
     let frames = writer.frames();
+    if progress.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
     writer.finish()?;
     Ok(ExportReport {
         frames,
