@@ -318,12 +318,13 @@ impl qobject::DevicePanel {
     }
 
     fn update_plugin_status(mut self: Pin<&mut Self>) {
-        let (status, error) = match self.panel.plugin_status() {
+        let plugin = self.panel.plugin_status();
+        let (status, error) = match &plugin {
             None => ("", ""),
             Some(PluginStatus::Running) => ("running", ""),
             Some(PluginStatus::Crashed) => ("crashed", ""),
             Some(PluginStatus::Missing) => ("missing", ""),
-            Some(PluginStatus::Failed(ref e)) => ("failed", e.as_str()),
+            Some(PluginStatus::Failed(e)) => ("failed", e.as_str()),
             Some(PluginStatus::NoLoader) => ("unavailable", ""),
         };
         let (status, error) = (QString::from(status), QString::from(error));
