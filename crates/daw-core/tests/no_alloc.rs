@@ -53,6 +53,21 @@ fn rt_operations_do_not_allocate() {
         "EventList"
     );
 
+    // A clone must keep the full capacity, not just its length.
+    let mut source = EventList::with_capacity(8);
+    source.push(ev(1)).unwrap();
+    let mut cloned = source.clone();
+    assert_eq!(
+        allocations_in(|| {
+            for f in 2..9 {
+                cloned.push(ev(f)).unwrap();
+            }
+            assert!(cloned.push(ev(9)).is_err());
+        }),
+        0,
+        "EventList::clone"
+    );
+
     let (mut tx, mut rx) = spsc::<[f32; 8]>(16);
     assert_eq!(
         allocations_in(|| {

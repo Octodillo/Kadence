@@ -387,3 +387,58 @@ fn zone_state_has_a_newer_version() {
     let json: serde_json::Value = serde_json::from_slice(&other).unwrap();
     assert_eq!(json["version"], 1);
 }
+
+/// Issue #27: Gain at its -inf minimum added to a positive zone gain in dB,
+/// so the sampler wasn't silent.
+#[test]
+fn minimum_gain_is_silent_whatever_the_zone_gain() {
+    let s = Setup::default();
+    let mut sampler = Sampler::new();
+    let mut zone = Zone::full(Arc::new(SampleBuffer::mono(vec![0.5; 4800], 48_000.0)));
+    zone.gain_db = 12.0;
+    sampler.set_zones(vec![zone]);
+    sampler.set_param(GAIN, -70.0);
+    let r = render(&mut sampler, 2000, &[], &[(0, note_on(60, 1.0))], s);
+    assert!(r.channels[0].iter().all(|&x| x == 0.0));
+}
+
+/// Issue #27: a zone with sample rate 0 or NaN left voices stuck forever.
+#[test]
+fn invalid_sample_rate_plays_nothing() {
+    let s = Setup::default();
+    for rate in [0.0, f64::NAN, -48_000.0, f64::INFINITY] {
+        let mut sampler = sampler_with(vec![0.5; 4800], rate);
+        let r = render(&mut sampler, 2000, &[], &[(0, note_on(60, 1.0))], s);
+        assert_eq!(sampler.active_voices(), 0, "{rate}");
+        assert!(r.channels[0].iter().all(|&x| x == 0.0), "{rate}");
+    }
+}
+
+/// Issue #27: All Sound Off (CC 120) only released voices, so a long release
+/// kept sounding. It now fades them out within a few milliseconds.
+#[test]
+fn all_sound_off_silences_quickly() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 480_000], s.sample_rate);
+    sampler.set_param(RELEASE, 10_000.0);
+    let events = [
+        (0, note_on(60, 1.0)),
+        (0, note_on(64, 1.0)),
+        (1000, EventKind::Midi([0xB0, 120, 0])),
+    ];
+    let r = render(&mut sampler, 2000, &[], &events, s);
+    assert_eq!(sampler.active_voices(), 0);
+    assert!(r.channels[0][1000 + 200..].iter().all(|&x| x == 0.0));
+    // A fade, not a cut: the first sample after the message is still loud.
+    assert!(r.channels[0][1001] > 0.5);
+
+    // All Notes Off (CC 123) still uses the release.
+    let mut sampler = sampler_with(vec![0.5; 480_000], s.sample_rate);
+    sampler.set_param(RELEASE, 10_000.0);
+    let events = [
+        (0, note_on(60, 1.0)),
+        (1000, EventKind::Midi([0xB0, 123, 0])),
+    ];
+    let r = render(&mut sampler, 2000, &[], &events, s);
+    assert!(r.channels[0][1999] > 0.4);
+}

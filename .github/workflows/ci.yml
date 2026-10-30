@@ -34,6 +34,11 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --exclude daw-app --all-targets -- -D warnings
+      - name: clippy (release)
+        # cfg(debug_assertions) code can leave items unused in release builds,
+        # which the CMake install checks (Arch and neon jobs) build with
+        # RUSTFLAGS=-D warnings; this catches it in the fast job.
+        run: cargo clippy --release --workspace --exclude daw-app -- -D warnings
       - name: tests
         # -noreset: otherwise Xvfb resets when one test process disconnects
         # and drops the connection of a test opening a plugin UI in parallel.
@@ -90,13 +95,14 @@ jobs:
         run: cargo nextest run --workspace --no-tests=warn
       - name: CMake install layout
         run: ci/check-install.sh
+      # Built in its own step: building daw-app alone unifies features
+      # differently from the workspace test build, so it recompiles most of
+      # the tree, which can take longer than the screenshot timeout allows.
+      - name: Build kadence (debug)
+        run: cargo build -p daw-app
       - name: Screenshots (Breeze light and dark, 100% and 200%)
-        # Building one package resolves features differently from the
-        # workspace test build, so this rebuilds the app and much of its
-        # dependency tree (about 5 minutes on a runner).
-        timeout-minutes: 20
+        timeout-minutes: 10
         run: |
-          cargo build -p daw-app
           for scheme in BreezeLight BreezeDark; do
             for scale in 1 2; do
               XDG_CONFIG_HOME=$(mktemp -d) QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=$scale \

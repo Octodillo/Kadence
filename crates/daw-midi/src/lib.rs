@@ -29,3 +29,4 @@ pub mod view;
 
 pub use grid::{Bar, BarBeat, Division, Feel, Grid, GridLine, LineKind, Meter, MeterPoint};
 pub use note::{EditNote, NoteData};
+pub mod model;

@@ -15,7 +15,11 @@ pub(crate) enum Note {
         key: u8,
         id: NoteId,
     },
+    /// All Notes Off (CC 123): release every voice normally.
     AllOff,
+    /// All Sound Off (CC 120): silence every voice within a few milliseconds,
+    /// ignoring release times, and reset pitch bend.
+    SoundOff,
     /// Pitch bend in `-1..=1`.
     Bend(f32),
 }
@@ -51,7 +55,8 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
                 key: d1 & 0x7F,
                 id: -1,
             }),
-            0xB0 if d1 == 120 || d1 == 123 => Some(Note::AllOff),
+            0xB0 if d1 == 120 => Some(Note::SoundOff),
+            0xB0 if d1 == 123 => Some(Note::AllOff),
             0xE0 => {
                 let v = (((d2 as i32 & 0x7F) << 7) | (d1 as i32 & 0x7F)) - 8192;
                 Some(Note::Bend(v as f32 / 8192.0))
@@ -155,6 +160,7 @@ mod tests {
             Some(Note::Off { key: 61, id: -1 })
         );
         assert_eq!(note(&EventKind::Midi([0xB0, 123, 0])), Some(Note::AllOff));
+        assert_eq!(note(&EventKind::Midi([0xB0, 120, 0])), Some(Note::SoundOff));
         assert_eq!(
             note(&EventKind::Midi([0xE0, 0, 0x40])),
             Some(Note::Bend(0.0))

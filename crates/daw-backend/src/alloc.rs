@@ -68,12 +68,16 @@ unsafe impl GlobalAlloc for RtAllocCounter {
 }
 
 /// Allocator calls caught on this thread so far.
+// Only the debug-build guard in `rt_guard` calls this.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(crate) fn violations() -> u64 {
     VIOLATIONS.with(Cell::get)
 }
 
 /// Runs `f` with allocations counted as violations on this thread. The
 /// depth is restored even if `f` unwinds.
+// Only the debug-build guard in `rt_guard` calls this.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(crate) fn forbid<R>(f: impl FnOnce() -> R) -> R {
     struct Depth;
     impl Drop for Depth {

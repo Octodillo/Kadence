@@ -1,6 +1,7 @@
 mod common;
 
 use common::*;
+use daw_core::node::Node;
 use daw_devices::devices::delay::*;
 use daw_devices::{Delay, Device};
 
@@ -47,10 +48,28 @@ fn follows_tempo() {
     d.set_param(MIX, 1.0);
     d.set_param(FEEDBACK, 0.0);
     let r = render(&mut d, 40000, &[impulse(40000)], &[], s);
-    // Starts from the 120 BPM time and glides; the echo lands within a few
-    // samples of 32000 because the smoother settles long before then.
     let at = r.channels[0].iter().position(|x| x.abs() > 0.1).unwrap();
     assert!(at.abs_diff(32000) <= 2, "{at}");
+}
+
+/// Issue #27: after a reset the delay time started at the 120 BPM value and
+/// glided, so a short synced delay at another tempo echoed early.
+#[test]
+fn starts_at_the_transport_tempo_after_reset() {
+    let s = Setup {
+        bpm: 60.0,
+        ..Setup::default()
+    };
+    let mut d = Delay::new();
+    d.set_param(DIVISION, 4.0); // 1/16 at 60 BPM: 12000 frames
+    d.set_param(MIX, 1.0);
+    d.set_param(FEEDBACK, 0.0);
+    let echo = |r: &Rendered| r.channels[0].iter().position(|x| x.abs() > 0.1).unwrap();
+    let r = render(&mut d, 20000, &[impulse(20000)], &[], s);
+    assert_eq!(echo(&r), 12000);
+    Node::reset(&mut d);
+    let r = render_prepared(&mut d, 20000, &[impulse(20000)], &[], s, |_| 60.0);
+    assert_eq!(echo(&r), 12000);
 }
 
 #[test]
