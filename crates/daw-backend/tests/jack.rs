@@ -16,7 +16,7 @@ use daw_backend::{
 use daw_core::event::{Event, EventKind};
 
 #[global_allocator]
-static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+static ALLOC: daw_backend::RtAllocCounter = daw_backend::RtAllocCounter;
 
 // JACK clients in one process share the server connection; keep tests apart.
 static SERIAL: Mutex<()> = Mutex::new(());

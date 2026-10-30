@@ -28,8 +28,9 @@ pub struct BackendStats {
     /// [`start`](crate::AudioBackend::start). (JACK only; the dummy backend's
     /// `stop` returns an error instead.)
     pub callback_panicked: bool,
-    /// Allocations caught inside cycles (debug builds with
-    /// `assert_no_alloc::AllocDisabler` installed; always 0 otherwise).
+    /// Allocator calls caught inside cycles (debug builds with
+    /// [`RtAllocCounter`](crate::RtAllocCounter) installed; always 0
+    /// otherwise).
     pub rt_alloc_violations: u64,
 }
 
