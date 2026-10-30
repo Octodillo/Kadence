@@ -15,7 +15,8 @@ Kirigami.ApplicationWindow {
     required property bool smokeTest
     required property string screenshotDir
 
-    // A project that was never named or saved has an empty name.
+    // A project that was never named or saved has an empty name. This is %1
+    // in the window titles below.
     readonly property string projectName: Project.name || i18nc("@title:window name of a new, unsaved project", "Untitled")
 
     title: Project.modified ? i18nc("@title:window %1 is the project name", "%1 [modified] — Kadence", projectName)
