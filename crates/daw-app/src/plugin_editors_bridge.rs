@@ -123,7 +123,7 @@ impl qobject::PluginEditors {
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
-        let open = state::with(open_editors);
+        let open = state::with(|s| open_editors(s));
         if open != self.open {
             self.as_mut().rust_mut().open = open;
             let revision = self.revision().wrapping_add(1);
