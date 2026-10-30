@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DeviceInfo, ParamSpec};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// Version written when there is no extra data, so state from devices that
+/// don't use it still loads in builds from before it existed.
+const VERSION_PARAMS_ONLY: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -49,7 +52,11 @@ pub(crate) fn save_with(
 ) -> Vec<u8> {
     let saved = Saved {
         device: info.id.to_owned(),
-        version: VERSION,
+        version: if extra.is_some() {
+            VERSION
+        } else {
+            VERSION_PARAMS_ONLY
+        },
         params: specs
             .iter()
             .map(|s| (s.key.to_owned(), value(s.id)))

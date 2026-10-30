@@ -402,7 +402,10 @@ impl Sampler {
     /// Restore state saved by [`Device::save_state`](crate::Device::save_state),
     /// getting each zone's sample from `resolve`. It is called once per distinct
     /// source path, so callers can resolve paths relative to a project and
-    /// share buffers. A sample it returns `None` for becomes
+    /// share buffers. The returned buffer's `source` is set to the path as
+    /// saved, so a load and save round-trip keeps relative paths relative; set
+    /// `source` the same way (with [`SampleBuffer::with_source`]) for samples
+    /// added to a project. A sample it returns `None` for becomes
     /// [`SampleBuffer::missing`]: the zone keeps its mapping but stays silent.
     ///
     /// State without a zone map (from before zones were saved) keeps the
@@ -422,10 +425,18 @@ impl Sampler {
                 .map(|z| {
                     let sample = match z.sample {
                         Some(path) => cache
-                            .entry(path)
-                            .or_insert_with_key(|path| {
-                                resolve(path)
-                                    .unwrap_or_else(|| Arc::new(SampleBuffer::missing(path)))
+                            .entry(PathBuf::from(path))
+                            .or_insert_with_key(|path| match resolve(path) {
+                                // Keep the reference exactly as saved (for example
+                                // relative to a project), not wherever the resolver
+                                // found the file, so saving again writes it back.
+                                Some(mut sample) => {
+                                    if sample.source.as_deref() != Some(path.as_path()) {
+                                        Arc::make_mut(&mut sample).source = Some(path.clone());
+                                    }
+                                    sample
+                                }
+                                None => Arc::new(SampleBuffer::missing(path)),
                             })
                             .clone(),
                         None => Arc::new(SampleBuffer::default()),
@@ -456,7 +467,13 @@ impl Sampler {
             .zones
             .iter()
             .map(|z| SavedZone {
-                sample: z.sample.source.clone(),
+                // JSON strings must be UTF-8; a path that isn't is saved lossily
+                // and will show up as a missing sample rather than failing the save.
+                sample: z
+                    .sample
+                    .source
+                    .as_deref()
+                    .map(|p| p.to_string_lossy().into_owned()),
                 root_key: z.root_key,
                 key_lo: z.key_lo,
                 key_hi: z.key_hi,
@@ -479,7 +496,7 @@ struct SavedZones {
 struct SavedZone {
     /// Absent for a zone whose buffer had no source file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    sample: Option<PathBuf>,
+    sample: Option<String>,
     root_key: u8,
     key_lo: u8,
     key_hi: u8,

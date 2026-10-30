@@ -324,3 +324,59 @@ fn invalid_zone_state_changes_nothing() {
     assert_eq!(mapping(&b), before);
     assert_eq!(b.param_value(GAIN), -20.0);
 }
+
+/// Paths resolved against a project root are saved back as they were stored,
+/// even when the resolver's buffer has no source or an absolute one.
+#[test]
+fn resolved_paths_are_saved_as_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    write_hit(dir.path(), "kick.wav", 0.5);
+    let mut a = Sampler::new();
+    let kick = SampleBuffer::mono(vec![0.5; 10], 48_000.0).with_source("kick.wav");
+    a.set_zones(vec![Zone::full(Arc::new(kick))]);
+    let blob = a.save_state();
+
+    let mut b = Sampler::new();
+    b.load_state_with(&blob, |p| {
+        SampleBuffer::load(dir.path().join(p)).ok().map(Arc::new)
+    })
+    .unwrap();
+    assert_eq!(b.zones()[0].sample.len(), 4800);
+    let mut c = Sampler::new();
+    c.load_state_with(&b.save_state(), |_| {
+        Some(Arc::new(SampleBuffer::mono(vec![0.1; 10], 48_000.0)))
+    })
+    .unwrap();
+    for s in [&b, &c] {
+        assert_eq!(
+            s.zones()[0].sample.source.as_deref(),
+            Some(std::path::Path::new("kick.wav"))
+        );
+    }
+    assert_eq!(mapping(&c), mapping(&a));
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_sample_path_does_not_break_saving() {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/tmp/k\xffick.wav"));
+    let mut a = Sampler::new();
+    let kick = SampleBuffer::mono(vec![0.5; 10], 48_000.0).with_source(path);
+    a.set_zones(vec![Zone::full(Arc::new(kick))]);
+    let mut b = Sampler::new();
+    b.load_state(&a.save_state()).unwrap();
+    assert_eq!(b.zones().len(), 1);
+}
+
+/// Builds from before the zone map refuse state that has one, rather than
+/// loading it and dropping the zones on the next save.
+#[test]
+fn zone_state_has_a_newer_version() {
+    let blob = sampler_with(vec![0.5; 10], 48_000.0).save_state();
+    let json: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+    assert_eq!(json["version"], 2);
+    let other = daw_devices::create("daw.eq").unwrap().save_state();
+    let json: serde_json::Value = serde_json::from_slice(&other).unwrap();
+    assert_eq!(json["version"], 1);
+}
