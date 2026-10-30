@@ -57,9 +57,11 @@ impl PluginFormat for ClapFormat {
     }
 
     /// Lists the plugins in one `.clap` file. Each plugin is instantiated briefly to read its
-    /// audio ports, so call this in a scanner process that may crash.
-    fn scan(&self, path: &Path) -> Vec<PluginDescriptor> {
-        scan_file(path).unwrap_or_default()
+    /// audio ports, so call this in a scanner process that may crash. Plugins that cannot be
+    /// instantiated are left out; when none of the file's plugins can be, the scan fails with the
+    /// first one's error.
+    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+        scan_file(path)
     }
 
     fn instantiate(
@@ -95,10 +97,13 @@ pub(crate) fn host_info() -> HostInfo {
     .expect("host info has no NUL bytes")
 }
 
-fn scan_file(path: &Path) -> Option<Vec<PluginDescriptor>> {
-    let entry = load_entry(path).ok()?;
-    let factory = entry.get_plugin_factory()?;
+fn scan_file(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+    let entry = load_entry(path)?;
+    let factory = entry
+        .get_plugin_factory()
+        .ok_or_else(|| PluginError::Load(format!("{}: no plugin factory", path.display())))?;
     let mut found = Vec::new();
+    let mut first_error = None;
     for desc in factory.plugin_descriptors() {
         let Some(id) = desc.id().and_then(|id| id.to_str().ok()) else {
             continue;
@@ -115,10 +120,21 @@ fn scan_file(path: &Path) -> Option<Vec<PluginDescriptor>> {
             is_instrument,
             ports: (0, 0),
         };
-        d.ports = main_ports(&entry, id, is_instrument).unwrap_or((0, 0));
-        found.push(d);
+        match main_ports(&entry, id, is_instrument) {
+            Ok(ports) => {
+                d.ports = ports;
+                found.push(d);
+            }
+            Err(e) => {
+                eprintln!("clap scan: {id}: {e}");
+                first_error.get_or_insert(e);
+            }
+        }
     }
-    Some(found)
+    match first_error {
+        Some(e) if found.is_empty() => Err(e),
+        _ => Ok(found),
+    }
 }
 
 /// Which port the graph connects to: the one flagged main, else the first. Many effects leave
@@ -140,10 +156,20 @@ fn lossy(s: Option<&std::ffi::CStr>) -> Option<String> {
 }
 
 /// Channel counts of the main input and output ports, read from a short-lived instance.
-fn main_ports(entry: &PluginEntry, id: &str, is_instrument: bool) -> Option<(u16, u16)> {
-    let id = CString::new(id).ok()?;
-    let mut instance = host::new_instance(entry, &id).ok()?;
-    let ports: PluginAudioPorts = instance.plugin_shared_handle().get_extension()?;
+/// The main audio port channel counts of plugin `id`, which is instantiated to ask. A plugin
+/// without the audio ports extension has none.
+fn main_ports(
+    entry: &PluginEntry,
+    id: &str,
+    is_instrument: bool,
+) -> Result<(u16, u16), PluginError> {
+    let c_id = CString::new(id).map_err(|_| PluginError::Load(format!("{id:?} has a NUL byte")))?;
+    let mut instance = host::new_instance(entry, &c_id)
+        .map_err(|e| PluginError::Load(format!("{id} could not be instantiated: {e}")))?;
+    let Some(ports): Option<PluginAudioPorts> = instance.plugin_shared_handle().get_extension()
+    else {
+        return Ok((0, 0));
+    };
     let handle = instance.plugin_handle();
     let main = |is_input| {
         let mut buf = AudioPortInfoBuffer::new();
@@ -157,7 +183,7 @@ fn main_ports(entry: &PluginEntry, id: &str, is_instrument: bool) -> Option<(u16
         main_port(&infos, is_input, is_instrument)
             .map_or(0, |i| u16::try_from(infos[i].1).unwrap_or(u16::MAX))
     };
-    Some((main(true), main(false)))
+    Ok((main(true), main(false)))
 }
 
 #[cfg(test)]

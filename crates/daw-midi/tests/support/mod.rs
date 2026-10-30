@@ -105,7 +105,7 @@ pub fn simple(events: &[(i64, EventKind)]) -> Vec<(i64, u8, bool)> {
         .iter()
         .filter_map(|(t, k)| match *k {
             EventKind::NoteOn { key, .. } => Some((*t, key, true)),
-            EventKind::NoteOff { key, .. } => Some((*t, key, false)),
+            EventKind::NoteOff { key: Some(key), .. } => Some((*t, key, false)),
             _ => None,
         })
         .collect()

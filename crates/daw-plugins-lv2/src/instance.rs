@@ -181,6 +181,9 @@ impl Lv2Instance {
         let params = plugin
             .ports_with_type(PortType::ControlInput)
             .filter_map(|p| {
+                // lv2:sampleRate ports declare fractions of the rate; livi's
+                // own bounds for the port are scaled the same way.
+                let p = p.scaled(sample_rate);
                 let lp = raw.port_by_index(p.index.0)?;
                 if lp.has_property(&reports_latency)
                     || lp.get(&designation).is_some_and(|d| d == free_wheeling)
@@ -191,9 +194,17 @@ impl Lv2Instance {
                     id: p.index.0 as ParamId,
                     name: p.name.clone(),
                     // Unbounded ports get a range that at least holds the
-                    // default.
-                    min: f64::from(p.min_value.unwrap_or(p.default_value.min(0.0))),
-                    max: f64::from(p.max_value.unwrap_or(p.default_value.max(1.0))),
+                    // default (scaling can also overflow a huge bound).
+                    min: f64::from(
+                        p.min_value
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(p.default_value.min(0.0)),
+                    ),
+                    max: f64::from(
+                        p.max_value
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(p.default_value.max(1.0)),
+                    ),
                     default: f64::from(p.default_value),
                     automatable: !lp.has_property(&not_automatic),
                 })
@@ -864,6 +875,7 @@ mod tests {
         let id = "http://drobilla.net/plugins/mda/Delay";
         let d = format
             .scan(&dir.join("mda.lv2"))
+            .ok()?
             .into_iter()
             .find(|d| d.id == id)?;
         Some(format.instantiate_lv2(&d, 48_000.0).unwrap())

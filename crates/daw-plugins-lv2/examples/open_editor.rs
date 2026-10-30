@@ -16,7 +16,7 @@ fn main() {
     let d = format
         .default_search_paths()
         .iter()
-        .flat_map(|dir| format.scan(dir))
+        .flat_map(|dir| format.scan(dir).unwrap_or_default())
         .find(|d| d.id == uri)
         .expect("plugin not found");
     let mut p = format.instantiate(&d, 48_000.0, 512).expect("instantiate");

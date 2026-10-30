@@ -8,7 +8,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use daw_core::event::{Event as DawEvent, EventKind, ParamId};
+use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
@@ -378,25 +378,35 @@ fn channel_total(channels: &[i32]) -> u16 {
         .min(u16::MAX as u32) as u16
 }
 
-/// Lists the processor classes of one module as descriptors.
-pub fn scan_module(path: &Path) -> Vec<PluginDescriptor> {
-    let module = match Module::load(path) {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("vst3 scan: {e}");
-            return Vec::new();
-        }
-    };
+/// Lists the processor classes of one module as descriptors. Classes whose component cannot be
+/// created are left out; when that is every class, the scan fails, naming the first.
+pub fn scan_module(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+    let module = Module::load(path).map_err(PluginError::Load)?;
     let factory_vendor = module.factory_vendor();
-    module
+    let mut found = Vec::new();
+    let mut first_error = None;
+    for class in module
         .classes()
         .into_iter()
         .filter(|c| c.category == AUDIO_EFFECT_CLASS)
-        .map(|class| {
-            let ports = probe_ports(&module, &class).unwrap_or((0, 0));
-            descriptor_for(path, &class, &factory_vendor, ports)
-        })
-        .collect()
+    {
+        match probe_ports(&module, &class) {
+            Some(ports) => found.push(descriptor_for(path, &class, &factory_vendor, ports)),
+            None => {
+                let e = format!(
+                    "{}: {} could not be created and initialized",
+                    path.display(),
+                    class.name
+                );
+                log::warn!("vst3 scan: {e}");
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match first_error {
+        Some(e) if found.is_empty() => Err(PluginError::Load(e)),
+        _ => Ok(found),
+    }
 }
 
 fn descriptor_for(
@@ -944,7 +954,15 @@ impl Node for Vst3Instance {
 
         for ev in ctx.events_in.iter() {
             let frame = ev.frame.min(frames.saturating_sub(1) as u32);
-            match ev.kind {
+            let kind = match ev.kind {
+                // VST3 has no wildcard note off; send all notes off, which reaches plugins that
+                // map CC 123.
+                EventKind::NoteOff {
+                    channel, key: None, ..
+                } => EventKind::Midi(all_notes_off(channel)),
+                kind => kind,
+            };
+            match kind {
                 EventKind::NoteOn {
                     channel,
                     key,
@@ -968,7 +986,7 @@ impl Node for Vst3Instance {
                 }
                 EventKind::NoteOff {
                     channel,
-                    key,
+                    key: Some(key),
                     velocity,
                     note_id,
                 } => {
@@ -1015,6 +1033,8 @@ impl Node for Vst3Instance {
                             .send(self.param_index.get(&id).copied(), Edit { id, normalized });
                     }
                 }
+                // Turned into all notes off above.
+                EventKind::NoteOff { key: None, .. } => {}
                 EventKind::ParamValue { param, value } => {
                     let index = self.param_index.get(&param).copied();
                     let normalized = index.map_or(value.clamp(0.0, 1.0), |i| {
@@ -1104,7 +1124,8 @@ impl Node for Vst3Instance {
                         let n = e.__field0.noteOff;
                         EventKind::NoteOff {
                             channel: n.channel as u8,
-                            key: n.pitch as u8,
+                            // A negative pitch names no key; read it as every key, as CLAP does.
+                            key: (n.pitch >= 0).then_some(n.pitch as u8),
                             velocity: n.velocity,
                             note_id: n.noteId,
                         }
@@ -1459,7 +1480,7 @@ mod tests {
             std::fs::copy(&so, bin.join("TestGain.so")).unwrap();
             root.join("TestGain.vst3")
         });
-        scan_module(bundle).pop().unwrap()
+        scan_module(bundle).unwrap().pop().unwrap()
     }
 
     fn instance() -> Vst3Instance {

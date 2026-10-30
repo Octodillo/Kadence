@@ -69,6 +69,7 @@ proptest! {
                         "two voices on one key");
                 }
                 EventKind::NoteOff { channel, key, note_id, .. } => {
+                    let key = key.expect("the player names the key it releases");
                     prop_assert_eq!(sounding.remove(&(channel, key)), Some(note_id));
                 }
                 _ => {}

@@ -148,12 +148,19 @@ impl Plugin {
                 .instantiate(sample_rate, iter_features)
                 .ok_or(InstantiateError::UnknownError)?;
 
-            let mut control_inputs = Controls::new(self.ports_with_type(PortType::ControlInput));
+            // Bounds and defaults of lv2:sampleRate ports scale with the rate.
+            let mut control_inputs = Controls::new(
+                self.ports_with_type(PortType::ControlInput)
+                    .map(|p| p.scaled(sample_rate)),
+            );
             let control_input_symbols: HashMap<String, PortIndex> = self
                 .ports_with_type(PortType::ControlInput)
                 .map(|p| (p.symbol, p.index))
                 .collect();
-            let control_outputs = Controls::new(self.ports_with_type(PortType::ControlOutput));
+            let control_outputs = Controls::new(
+                self.ports_with_type(PortType::ControlOutput)
+                    .map(|p| p.scaled(sample_rate)),
+            );
             let mut audio_inputs = Vec::new();
             let mut audio_outputs = Vec::new();
             let mut atom_sequence_inputs = Vec::new();
@@ -776,6 +783,7 @@ fn iter_ports_impl<'a>(
             min_value: range.minimum.map(|n| node_to_value(&Some(n))),
             max_value: range.maximum.map(|n| node_to_value(&Some(n))),
             index: PortIndex(p.index()),
+            sample_rate: p.has_property(&common_uris.sample_rate_property_uri),
         }
     })
 }
@@ -838,6 +846,47 @@ mod tests {
         }
         // Only the two valid runs may invoke plugin code.
         assert_eq!(instance.control_output(PortIndex(2)), Some(2.0));
+    }
+
+    #[test]
+    fn sample_rate_ports_scale_with_the_rate() {
+        let fixture = crate::test_support::Fixture::new(
+            r#"
+            lv2:port
+                [ a lv2:InputPort, lv2:ControlPort; lv2:index 0; lv2:symbol "cutoff";
+                    lv2:name "Cutoff"; lv2:portProperty lv2:sampleRate;
+                    lv2:default 0.1; lv2:minimum 0.0001; lv2:maximum 0.45 ],
+                [ a lv2:InputPort, lv2:ControlPort; lv2:index 1; lv2:symbol "gain";
+                    lv2:name "Gain"; lv2:default 0.5; lv2:minimum 0.0; lv2:maximum 1.0 ],
+                [ a lv2:OutputPort, lv2:ControlPort; lv2:index 2; lv2:symbol "runs"; lv2:name "Runs" ]
+        "#,
+        );
+        let world = crate::World::with_load_bundle(&fixture.bundle_uri);
+        let plugin = world.plugin_by_uri("urn:livi:test").unwrap();
+        let ports: Vec<Port> = plugin.ports_with_type(PortType::ControlInput).collect();
+        // The metadata keeps the declared fractions.
+        assert!(ports[0].sample_rate);
+        assert!(!ports[1].sample_rate);
+        assert_eq!(ports[0].max_value, Some(0.45));
+        let cutoff = ports[0].clone().scaled(48000.0);
+        assert_eq!(cutoff.default_value, 4800.0);
+        assert!((cutoff.min_value.unwrap() - 4.8).abs() < 1e-4);
+        assert_eq!(cutoff.max_value, Some(21600.0));
+        assert_eq!(ports[1].clone().scaled(48000.0), ports[1]);
+
+        let features = world
+            .try_build_features(crate::FeaturesBuilder::default())
+            .expect("invalid feature block bounds");
+        let mut instance = unsafe { plugin.instantiate(features, 48000.0).unwrap() };
+        assert_eq!(instance.control_input(PortIndex(0)), Some(4800.0));
+        assert_eq!(
+            instance.set_control_input(PortIndex(0), 1000.0),
+            Some(1000.0)
+        );
+        assert_eq!(instance.set_control_input(PortIndex(0), 1e6), Some(21600.0));
+        let min = instance.set_control_input(PortIndex(0), 0.0).unwrap();
+        assert!((min - 4.8).abs() < 1e-4, "{min}");
+        assert_eq!(instance.set_control_input(PortIndex(1), 2.0), Some(1.0));
     }
 
     #[test]
@@ -918,7 +967,8 @@ mod tests {
                     default_value: 0.5,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(0)
+                    index: PortIndex(0),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -927,7 +977,8 @@ mod tests {
                     default_value: 0.5,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(1)
+                    index: PortIndex(1),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -936,7 +987,8 @@ mod tests {
                     default_value: 0.5,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(2)
+                    index: PortIndex(2),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -945,7 +997,8 @@ mod tests {
                     default_value: 0.5,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(3)
+                    index: PortIndex(3),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -954,7 +1007,8 @@ mod tests {
                     default_value: 0.5,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(4)
+                    index: PortIndex(4),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -963,7 +1017,8 @@ mod tests {
                     default_value: 0.65,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(5)
+                    index: PortIndex(5),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -972,7 +1027,8 @@ mod tests {
                     default_value: 0.25,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(6)
+                    index: PortIndex(6),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -981,7 +1037,8 @@ mod tests {
                     default_value: 0.5,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(7)
+                    index: PortIndex(7),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -990,7 +1047,8 @@ mod tests {
                     default_value: 1.0,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(8)
+                    index: PortIndex(8),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -999,7 +1057,8 @@ mod tests {
                     default_value: 0.5,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(9)
+                    index: PortIndex(9),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -1008,7 +1067,8 @@ mod tests {
                     default_value: 0.146,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(10)
+                    index: PortIndex(10),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::ControlInput,
@@ -1017,7 +1077,8 @@ mod tests {
                     default_value: 0.0,
                     min_value: Some(0.0),
                     max_value: Some(1.0),
-                    index: PortIndex(11)
+                    index: PortIndex(11),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::AudioOutput,
@@ -1026,7 +1087,8 @@ mod tests {
                     default_value: 0.0,
                     min_value: None,
                     max_value: None,
-                    index: PortIndex(12)
+                    index: PortIndex(12),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::AudioOutput,
@@ -1035,7 +1097,8 @@ mod tests {
                     default_value: 0.0,
                     min_value: None,
                     max_value: None,
-                    index: PortIndex(13)
+                    index: PortIndex(13),
+                    sample_rate: false
                 },
                 Port {
                     port_type: PortType::AtomSequenceInput,
@@ -1044,7 +1107,8 @@ mod tests {
                     default_value: 0.0,
                     min_value: None,
                     max_value: None,
-                    index: PortIndex(14)
+                    index: PortIndex(14),
+                    sample_rate: false
                 },
             ]
         );

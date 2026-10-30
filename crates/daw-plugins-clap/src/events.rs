@@ -8,7 +8,7 @@ use clack_host::events::spaces::CoreEventSpace;
 use clack_host::events::{EventFlags, EventHeader, Match, Pckn, UnknownEvent};
 use clack_host::prelude::*;
 use clack_host::utils::{BeatTime, SecondsTime};
-use daw_core::event::{Event, EventKind, EventList, NoteId};
+use daw_core::event::{Event, EventKind, EventList, NoteId, all_notes_off};
 use daw_core::node::TransportState;
 
 /// Pushes the CLAP form of `e`, at `frame`, into `out`. Notes become MIDI when the plugin's note
@@ -47,11 +47,11 @@ pub(crate) fn push_clap(out: &mut EventBuffer, e: &Event, frame: u32, notes_as_m
             note_id,
         } => {
             if notes_as_midi {
-                out.push(&MidiEvent::new(
-                    frame,
-                    0,
-                    [0x80 | (channel & 0x0f), key & 0x7f, midi_velocity(velocity)],
-                ));
+                let data = match key {
+                    Some(key) => [0x80 | (channel & 0x0f), key & 0x7f, midi_velocity(velocity)],
+                    None => all_notes_off(channel),
+                };
+                out.push(&MidiEvent::new(frame, 0, data));
             } else {
                 out.push(&NoteOffEvent::new(
                     frame,
@@ -124,9 +124,9 @@ pub(crate) fn push_daw(out: &mut EventList, e: &UnknownEvent, frame_offset: u32)
     }
 }
 
-/// A note off, where -1 for the channel or key means every channel or key. `daw_core` notes have
-/// no wildcard, so "any channel" becomes one event per channel and "any key" becomes MIDI all
-/// notes off (CC 123).
+/// A note off, where -1 for the channel or key means every channel or key. "Any key" maps to
+/// `key: None`; `daw_core` note offs always name a channel, so "any channel" becomes one event per
+/// channel.
 fn note_off(
     channel: i16,
     key: i16,
@@ -139,15 +139,12 @@ fn note_off(
         Err(_) => 0..16,
     };
     for channel in channels {
-        push(match u8::try_from(key) {
-            Ok(key) => EventKind::NoteOff {
-                channel,
-                key,
-                #[allow(clippy::cast_possible_truncation)]
-                velocity: velocity as f32,
-                note_id,
-            },
-            Err(_) => EventKind::Midi([0xb0 | (channel & 0x0f), 123, 0]),
+        push(EventKind::NoteOff {
+            channel,
+            key: u8::try_from(key).ok(),
+            #[allow(clippy::cast_possible_truncation)]
+            velocity: velocity as f32,
+            note_id,
         })?;
     }
     Ok(())
@@ -204,13 +201,18 @@ pub(crate) fn transport(t: &TransportState, offset: u32) -> TransportEvent {
     }
 }
 
-fn pckn(channel: u8, key: u8, note_id: NoteId) -> Pckn {
+/// A CLAP note address. `key: None` and a negative `note_id` match every key or note.
+fn pckn(channel: u8, key: impl Into<Option<u8>>, note_id: NoteId) -> Pckn {
     let id = if note_id < 0 {
         Match::All
     } else {
         Match::Specific(note_id.unsigned_abs())
     };
-    Pckn::new(0u16, u16::from(channel), u16::from(key), id)
+    let key = match key.into() {
+        Some(key) => Match::Specific(u16::from(key)),
+        None => Match::All,
+    };
+    Pckn::new(0u16, u16::from(channel), key, id)
 }
 
 fn midi_velocity(v: f32) -> u8 {
@@ -312,12 +314,17 @@ mod tests {
 
     #[test]
     fn wildcard_note_offs_release_every_matching_note() {
-        // Any key on one channel: all notes off on that channel.
+        // Any key on one channel: a wildcard note off on that channel.
         let mut buf = EventBuffer::with_capacity(4);
         buf.push(&NoteOffEvent::new(0, Pckn::from_raw(0, 3, -1, -1), 0.0));
         assert_eq!(
             converted(buf.get(0).unwrap()),
-            [EventKind::Midi([0xb3, 123, 0])]
+            [EventKind::NoteOff {
+                channel: 3,
+                key: None,
+                velocity: 0.0,
+                note_id: -1
+            }]
         );
 
         // One key on any channel: a note off on every channel.
@@ -327,19 +334,66 @@ mod tests {
         assert_eq!(kinds.len(), 16);
         for (ch, kind) in (0u8..).zip(&kinds) {
             assert!(
-                matches!(kind, EventKind::NoteOff { channel, key: 60, note_id: 7, .. } if *channel == ch),
+                matches!(kind, EventKind::NoteOff { channel, key: Some(60), note_id: 7, .. } if *channel == ch),
                 "{kind:?}"
             );
         }
 
-        // Everything: all notes off on every channel.
+        // Everything: a wildcard note off on every channel.
         buf.clear();
         buf.push(&NoteChokeEvent::new(0, Pckn::match_all()));
         let kinds = converted(buf.get(0).unwrap());
         assert_eq!(kinds.len(), 16);
         for (ch, kind) in (0u8..).zip(&kinds) {
-            assert_eq!(*kind, EventKind::Midi([0xb0 | ch, 123, 0]));
+            assert_eq!(
+                *kind,
+                EventKind::NoteOff {
+                    channel: ch,
+                    key: None,
+                    velocity: 0.0,
+                    note_id: -1
+                }
+            );
         }
+    }
+
+    /// Sends `kind` to a plugin and returns the CLAP event it gets.
+    fn sent(kind: EventKind, notes_as_midi: bool) -> EventBuffer {
+        let mut buf = EventBuffer::with_capacity(1);
+        push_clap(&mut buf, &Event { frame: 0, kind }, 0, notes_as_midi);
+        buf
+    }
+
+    #[test]
+    fn wildcard_note_offs_reach_clap_plugins_as_wildcards() {
+        // "Release note 7, whatever its key", from one plugin's output to the next plugin.
+        let mut out = EventBuffer::with_capacity(1);
+        out.push(&NoteOffEvent::new(0, Pckn::from_raw(0, 2, -1, 7), 0.25));
+        let kinds = converted(out.get(0).unwrap());
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+
+        let buf = sent(kinds[0], false);
+        let Some(CoreEventSpace::NoteOff(n)) = buf.get(0).and_then(|e| e.as_core_event()) else {
+            panic!("expected a CLAP note off");
+        };
+        let raw = n.as_raw();
+        assert_eq!((raw.channel, raw.key, raw.note_id), (2, -1, 7));
+        assert_eq!(raw.velocity, 0.25);
+    }
+
+    #[test]
+    fn wildcard_note_offs_become_all_notes_off_for_midi_ports() {
+        let off = EventKind::NoteOff {
+            channel: 5,
+            key: None,
+            velocity: 1.0,
+            note_id: 7,
+        };
+        let buf = sent(off, true);
+        let Some(CoreEventSpace::Midi(m)) = buf.get(0).and_then(|e| e.as_core_event()) else {
+            panic!("expected a MIDI event");
+        };
+        assert_eq!(m.data(), [0xb5, 123, 0]);
     }
 
     #[test]
@@ -348,7 +402,7 @@ mod tests {
             note_off(2, 64, 9),
             EventKind::NoteOff {
                 channel: 2,
-                key: 64,
+                key: Some(64),
                 note_id: 9,
                 ..
             }
@@ -361,7 +415,7 @@ mod tests {
                 kinds[..],
                 [EventKind::NoteOff {
                     channel: 1,
-                    key: 50,
+                    key: Some(50),
                     note_id: -1,
                     ..
                 }]
