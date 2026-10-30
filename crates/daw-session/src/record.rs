@@ -88,7 +88,10 @@ struct Take {
 /// Takes in progress. See the module docs.
 pub struct AudioTakes {
     takes: Vec<Take>,
-    latency: i64,
+    /// The backend's round trip, as last reported.
+    io_latency: i64,
+    /// The graph's latency when recording started.
+    graph_latency: i64,
 }
 
 /// What [`AudioTakes::finish`] produced.
@@ -121,7 +124,8 @@ impl AudioTakes {
         dir: &Path,
         io_latency: u32,
     ) -> (Self, Vec<TakeProblem>) {
-        let latency = i64::from(io_latency) + i64::from(session.controller().latency());
+        let io_latency = i64::from(io_latency);
+        let graph_latency = i64::from(session.controller().latency());
         let mut takes = Vec::new();
         let mut problems = Vec::new();
         let rate = session.sample_rate().round() as u32;
@@ -131,7 +135,14 @@ impl AudioTakes {
                 path: dir.to_owned(),
                 detail: e.to_string(),
             });
-            return (Self { takes, latency }, problems);
+            return (
+                Self {
+                    takes,
+                    io_latency,
+                    graph_latency,
+                },
+                problems,
+            );
         }
         for id in armed_audio_tracks(project).collect::<Vec<_>>() {
             let track = project.track(id).expect("listed above");
@@ -185,7 +196,14 @@ impl AudioTakes {
             });
         }
         session.update_monitors();
-        (Self { takes, latency }, problems)
+        (
+            Self {
+                takes,
+                io_latency,
+                graph_latency,
+            },
+            problems,
+        )
     }
 
     /// Whether no track is recording.
@@ -200,7 +218,15 @@ impl AudioTakes {
 
     /// The round trip latency the takes are compensated by, in samples.
     pub fn latency(&self) -> i64 {
-        self.latency
+        self.io_latency + self.graph_latency
+    }
+
+    /// Updates the backend's round trip before [`finish`](Self::finish).
+    /// JACK (PipeWire) recomputes port latencies a while after the server
+    /// starts or connections change, and can report 0 meanwhile, so the
+    /// value read when recording stopped is the better one.
+    pub fn set_io_latency(&mut self, io_latency: u32) {
+        self.io_latency = i64::from(io_latency);
     }
 
     /// Problems that turned up since the last call, each reported once.
@@ -233,6 +259,7 @@ impl AudioTakes {
     pub fn finish(self, session: &mut Session, project: &Project, root: Option<&Path>) -> Finished {
         let mut problems = Vec::new();
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
+        let latency = self.latency();
         for t in self.takes {
             if let Some(tap) = session.tap_mut(t.track) {
                 // A full queue only happens if stop is called in a burst; a
@@ -281,7 +308,7 @@ impl AudioTakes {
                     track: t.name.clone(),
                 });
             }
-            let mut at = started.map(|s| s - self.latency);
+            let mut at = started.map(|s| s - latency);
             for file in &stats.files {
                 let placed = at.and_then(|t0| place(session, t0, file.frames));
                 match placed {
@@ -299,11 +326,7 @@ impl AudioTakes {
                             name,
                             start,
                             length,
-                            ClipContent::Audio(AudioClip {
-                                source,
-                                offset,
-                                gain_db: 0.0,
-                            }),
+                            ClipContent::Audio(AudioClip::new(source, offset)),
                         );
                         commands.push(Box::new(AddClip::new(t.track, clip)));
                     }

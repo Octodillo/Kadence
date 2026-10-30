@@ -270,8 +270,11 @@ impl AppState {
             commands.push(cmd);
         }
         self.engine.stop();
-        if let Some(rec) = self.audio_recording.take() {
+        if let Some(mut rec) = self.audio_recording.take() {
             let root = self.root();
+            // Port latencies settle a while after connections change; the
+            // value now is more trustworthy than the one at the start.
+            rec.takes.set_io_latency(self.engine.round_trip_latency());
             if let Some(session) = self.engine.session_mut() {
                 let done = rec
                     .takes

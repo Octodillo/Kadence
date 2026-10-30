@@ -8,10 +8,11 @@ import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
 
-// One row of the track list beside the timeline: colour, name, record arm,
-// audio input, mute, solo.
-// Everything is read from Project by index; `revision` re-reads it after
-// any change.
+// One row of the track list beside the timeline: colour, drag handle,
+// name, record arm, audio input, mute, solo. Everything is read from
+// Project by index; `revision` re-reads it after any change. Dragging the
+// handle reorders tracks; the list view shows where the track will land
+// (`dragFrom`, `dragTo`).
 QQC2.ItemDelegate {
     id: header
 
@@ -23,11 +24,11 @@ QQC2.ItemDelegate {
     readonly property bool muted: { revision; return Project.trackMuted(index); }
     readonly property bool soloed: { revision; return Project.trackSoloed(index); }
     readonly property color trackColor: { revision; return Project.trackColor(index); }
-    readonly property bool armed: { revision; return Project.trackArmed(index); }
-    readonly property int input: { revision; return Project.trackInput(index); }
-    readonly property bool inputStereo: { revision; return Project.trackInputStereo(index); }
-    readonly property bool monitorAuto: { revision; return Project.trackMonitorAuto(index); }
-    readonly property int inputCount: { revision; return Project.inputCount(); }
+    readonly property bool armed: revision >= 0 ? Project.trackArmed(index) : false
+    readonly property int input: revision >= 0 ? Project.trackInput(index) : 0
+    readonly property bool inputStereo: revision >= 0 ? Project.trackInputStereo(index) : false
+    readonly property bool monitorAuto: revision >= 0 ? Project.trackMonitorAuto(index) : false
+    readonly property int inputCount: revision >= 0 ? Project.inputCount() : 0
     // Audio (0) and instrument (1) tracks record.
     readonly property bool canRecord: kind === 0 || kind === 1
     // Inputs are counted from 1 for people.
@@ -36,6 +37,7 @@ QQC2.ItemDelegate {
         : i18nc("@item one audio input, %1 is its number", "Input %1", input + 1)
 
     highlighted: Project.selectedTrack === index
+    opacity: ListView.view && ListView.view.dragFrom === index ? 0.5 : 1
     padding: 0
     leftPadding: 0
     onClicked: Project.selectTrack(index)
@@ -50,6 +52,52 @@ QQC2.ItemDelegate {
             Layout.fillHeight: true
             Layout.preferredWidth: Kirigami.Units.smallSpacing
             color: header.trackColor
+        }
+
+        // Drag to reorder.
+        Kirigami.Icon {
+            id: handle
+            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            Layout.alignment: Qt.AlignVCenter
+            source: "handle-sort"
+            isMask: true
+            color: Kirigami.Theme.textColor
+            opacity: handleHover.hovered || drag.active ? 1 : 0.5
+            Accessible.name: i18nc("@info:accessible", "Drag to move the track")
+
+            HoverHandler {
+                id: handleHover
+                cursorShape: drag.active ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+            }
+
+            DragHandler {
+                id: drag
+                target: null
+                xAxis.enabled: false
+                // The row the dragged track's middle is over.
+                readonly property int to: {
+                    const mid = header.y + header.height / 2 + activeTranslation.y;
+                    return Math.max(0, Math.min(Project.trackCount - 1, Math.floor(mid / header.height)));
+                }
+                onActiveChanged: {
+                    const list = header.ListView.view;
+                    if (active) {
+                        Project.selectTrack(header.index);
+                        list.dragFrom = header.index;
+                        list.dragTo = header.index;
+                    } else {
+                        const from = list.dragFrom;
+                        const to = list.dragTo;
+                        list.dragFrom = -1;
+                        list.dragTo = -1;
+                        if (from >= 0 && to >= 0 && from !== to) {
+                            Project.moveTrack(from, to);
+                        }
+                    }
+                }
+                onToChanged: if (active) header.ListView.view.dragTo = to
+            }
         }
 
         Kirigami.Icon {
@@ -213,6 +261,19 @@ QQC2.ItemDelegate {
                 nameField.selectAll();
             }
         }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Move Up")
+            icon.name: "go-up"
+            enabled: header.index > 0
+            onTriggered: Project.moveTrack(header.index, header.index - 1)
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Move Down")
+            icon.name: "go-down"
+            enabled: header.index < Project.trackCount - 1
+            onTriggered: Project.moveTrack(header.index, header.index + 1)
+        }
+        QQC2.MenuSeparator {}
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Delete Track")
             icon.name: "edit-delete"

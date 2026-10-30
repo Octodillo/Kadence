@@ -51,11 +51,7 @@ fn rig(latency: Latency) -> Rig {
         "source",
         TickTime(PPQ),
         TickTime(4 * PPQ),
-        ClipContent::Audio(AudioClip {
-            source: "source.wav".into(),
-            offset: SampleTime(0),
-            gain_db: 0.0,
-        }),
+        ClipContent::Audio(AudioClip::new("source.wav", SampleTime(0))),
     );
     doc.execute(AddClip::new(player_id, clip)).unwrap();
     let mic = Track::new(TrackKind::Audio, "Mic");
