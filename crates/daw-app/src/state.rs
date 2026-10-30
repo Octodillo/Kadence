@@ -24,6 +24,8 @@ pub struct AppState {
     pub arrange: Arrange,
     /// The piano roll on the Edit page.
     pub piano: PianoRoll,
+    /// The instruments the instrument menus offer.
+    pub instruments: crate::instrument::InstrumentChoices,
     /// The MIDI take in progress.
     pub recording: Option<crate::recording::Recording>,
     /// The audio takes in progress.
@@ -68,6 +70,7 @@ impl AppState {
             engine: default_engine(),
             arrange: Arrange::new(),
             piano: PianoRoll::new(),
+            instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
             audio_recording: None,
             synced: None,

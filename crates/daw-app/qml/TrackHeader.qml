@@ -9,9 +9,10 @@ import org.kde.kirigami as Kirigami
 import io.github.octodillo.daw
 
 // One row of the track list beside the timeline: colour, drag handle,
-// name, record arm, audio input, mute, solo. Everything is read from
-// Project by index; `revision` re-reads it after any change. Dragging the
-// handle reorders tracks; the list view shows where the track will land
+// name, instrument (on instrument tracks), record arm, audio input, mute,
+// solo. Everything is read from Project by index; `revision` re-reads it
+// after any change. Dragging the handle reorders tracks; the list view
+// shows where the track will land
 // (`dragFrom`, `dragTo`).
 QQC2.ItemDelegate {
     id: header
@@ -24,6 +25,7 @@ QQC2.ItemDelegate {
     readonly property bool muted: { revision; return Project.trackMuted(index); }
     readonly property bool soloed: { revision; return Project.trackSoloed(index); }
     readonly property color trackColor: { revision; return Project.trackColor(index); }
+    readonly property string instrument: { revision; return kind === 1 ? Project.trackInstrument(index) : ""; }
     readonly property bool armed: revision >= 0 ? Project.trackArmed(index) : false
     readonly property int input: revision >= 0 ? Project.trackInput(index) : 0
     readonly property bool inputStereo: revision >= 0 ? Project.trackInputStereo(index) : false
@@ -138,6 +140,15 @@ QQC2.ItemDelegate {
             }
             onActiveFocusChanged: if (!activeFocus) visible = false
             Keys.onEscapePressed: visible = false
+        }
+
+        InstrumentButton {
+            Layout.alignment: Qt.AlignVCenter
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 6
+            visible: header.kind === 1
+            instrument: header.instrument
+            currentChoice: { header.revision; return Project.trackInstrumentChoice(header.index); }
+            onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
         }
 
         QQC2.ToolButton {
