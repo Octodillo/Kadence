@@ -58,6 +58,9 @@ Item {
         },
         () => {
             check(TestHelper.loadDemoProject(), "load demo project");
+            // Building the demo can outlast the 33 ms tick, and then this
+            // timer may fire before it: refresh Project's properties now.
+            Project.tick();
         },
         () => {
             check(Project.trackCount === 3, "demo has three tracks");
