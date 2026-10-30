@@ -11,9 +11,9 @@ use std::sync::{Mutex, OnceLock};
 use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{
     Event, IAttributeList, IAttributeListTrait, IComponentHandler, IComponentHandlerTrait,
-    IEventList, IEventListTrait, IHostApplication, IHostApplicationTrait, IMessage, IMessageTrait,
-    IParamValueQueue, IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, ParamID,
-    ParamValue, String128, TChar,
+    IConnectionPoint, IConnectionPointTrait, IEventList, IEventListTrait, IHostApplication,
+    IHostApplicationTrait, IMessage, IMessageTrait, IParamValueQueue, IParamValueQueueTrait,
+    IParameterChanges, IParameterChangesTrait, ParamID, ParamValue, String128, TChar,
 };
 use vst3::Steinberg::{
     FIDString, FUnknown, IBStream, IBStream_::IStreamSeekMode_, IBStreamTrait, TUID, int32, int64,
@@ -425,6 +425,61 @@ impl IBStreamTrait for MemoryStream {
         }
         unsafe { *pos = self.inner.lock().unwrap().pos as int64 };
         kResultOk
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The processor's connection to its controller.
+
+thread_local! {
+    /// True while this thread is inside a call that runs on the audio thread (`process`, or
+    /// `setProcessing` from `reset`).
+    static IN_PROCESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f`, a call into the processor on the audio thread, with messages the processor
+/// sends from it refused.
+pub fn in_process<R>(f: impl FnOnce() -> R) -> R {
+    IN_PROCESS.with(|p| p.set(true));
+    let r = f();
+    IN_PROCESS.with(|p| p.set(false));
+    r
+}
+
+/// The processor's view of its controller. Messages are for the UI thread; one sent from
+/// `process` (a meter, say) would run controller code, with its UI locks, on the audio
+/// thread. Like the SDK's reference host (`PlugProvider`'s connection proxy), the proxy
+/// refuses those with `kResultFalse`. Queuing them instead is not safe: plugins that send
+/// from `process` without allocating reuse one message and rewrite it while the main thread
+/// would still be reading it. Messages sent from any other call go straight through.
+pub struct ControllerProxy {
+    controller: vst3::ComPtr<IConnectionPoint>,
+}
+
+impl Class for ControllerProxy {
+    type Interfaces = (IConnectionPoint,);
+}
+
+impl ControllerProxy {
+    pub fn new(controller: vst3::ComPtr<IConnectionPoint>) -> Self {
+        ControllerProxy { controller }
+    }
+}
+
+impl IConnectionPointTrait for ControllerProxy {
+    unsafe fn connect(&self, _other: *mut IConnectionPoint) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn disconnect(&self, _other: *mut IConnectionPoint) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn notify(&self, message: *mut IMessage) -> tresult {
+        if IN_PROCESS.with(|p| p.get()) {
+            return kResultFalse;
+        }
+        unsafe { self.controller.notify(message) }
     }
 }
 
