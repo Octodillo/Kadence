@@ -110,3 +110,32 @@ fn denormals() {
     ];
     check_denormals(&mut Synth::new(), &[], &events, 2.0);
 }
+
+/// Issue #27: All Sound Off (CC 120) only released voices and left pitch bend
+/// where it was.
+#[test]
+fn all_sound_off_silences_and_resets_bend() {
+    let s = Setup::default();
+    let mut synth = Synth::new();
+    synth.set_param(AMP_RELEASE, synth.param_specs()[AMP_RELEASE as usize].max);
+    let events = [
+        (0, EventKind::Midi([0xE0, 0x7F, 0x7F])),
+        (0, note_on(60, 1.0)),
+        (2000, EventKind::Midi([0xB0, 120, 0])),
+    ];
+    let r = render(&mut synth, 4000, &[], &events, s);
+    assert_eq!(synth.active_voices(), 0);
+    assert!(r.channels[0][2200..].iter().all(|&x| x == 0.0));
+
+    // The next note plays unbent: it matches a synth that never saw the bend.
+    let mut fresh = Synth::new();
+    let a = render(&mut fresh, 4000, &[], &[(0, note_on(60, 1.0))], s);
+    let mut bent = Synth::new();
+    let events = [
+        (0, EventKind::Midi([0xE0, 0x7F, 0x7F])),
+        (0, EventKind::Midi([0xB0, 120, 0])),
+        (0, note_on(60, 1.0)),
+    ];
+    let b = render(&mut bent, 4000, &[], &events, s);
+    assert_eq!(a.channels[0], b.channels[0]);
+}
