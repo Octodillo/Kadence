@@ -19,9 +19,10 @@ fn sample_project() -> Project {
             TickTime(960),
             TickTime(3840),
             ClipContent::Audio(AudioClip {
-                source: "audio/take1.wav".into(),
-                offset: SampleTime(4410),
                 gain_db: -1.5,
+                fade_in: Fade::new(TickTime(240), FadeShape::EqualPower),
+                fade_out: Fade::new(TickTime(480), FadeShape::SCurve),
+                ..AudioClip::new("audio/take1.wav", SampleTime(4410))
             }),
         )
         .into(),
@@ -331,11 +332,7 @@ fn thousand_track_project_loads_fast() {
         for c in 0..4 {
             let start = TickTime(c * 3840);
             let content = if t.kind == TrackKind::Audio {
-                ClipContent::Audio(AudioClip {
-                    source: format!("audio/{i}-{c}.wav").into(),
-                    offset: SampleTime(0),
-                    gain_db: 0.0,
-                })
+                ClipContent::Audio(AudioClip::new(format!("audio/{i}-{c}.wav"), SampleTime(0)))
             } else {
                 let mut m = MidiClip::default();
                 for n in 0..32 {
