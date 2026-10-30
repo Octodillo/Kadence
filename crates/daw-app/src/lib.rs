@@ -8,6 +8,8 @@
 pub mod bridge;
 pub mod engine;
 mod ffi;
+pub mod mixer;
+pub mod mixer_bridge;
 pub mod settings;
 mod test_helper;
 
