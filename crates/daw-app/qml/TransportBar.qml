@@ -125,7 +125,7 @@ QQC2.ToolBar {
                     onTranslationChanged: {
                         if (active) {
                             const steps = Math.round(-translation.y / (Kirigami.Units.gridUnit / 3));
-                            Project.setTempo(Math.max(20, Math.min(999, Math.round(startValue) + steps)));
+                            Project.setTempo(Math.max(20, Math.min(999, startValue + steps)));
                         }
                     }
                 }
@@ -209,6 +209,9 @@ QQC2.ToolBar {
                     x: clickMenuButton.width - width
                     y: clickMenuButton.height
                     margins: Kirigami.Units.smallSpacing
+                    // A press on the button closes it through the button,
+                    // rather than closing it and opening it again.
+                    closePolicy: QQC2.Popup.CloseOnEscape | QQC2.Popup.CloseOnPressOutsideParent
                     padding: Kirigami.Units.largeSpacing
 
                     contentItem: Kirigami.FormLayout {
@@ -219,7 +222,9 @@ QQC2.ToolBar {
                             to: 6
                             value: Project.metronomeVolume
                             implicitWidth: Kirigami.Units.gridUnit * 10
-                            onMoved: Project.setMetronomeLevel(Math.round(value * 2) / 2)
+                            // Saved once the handle is let go, not on every move.
+                            onMoved: Project.setMetronomeLevel(Math.round(value * 2) / 2, !pressed)
+                            onPressedChanged: if (!pressed) Project.setMetronomeLevel(Math.round(value * 2) / 2, true)
                             Accessible.name: i18nc("@info:accessible", "Metronome level")
 
                             QQC2.ToolTip.text: i18nc("@info:tooltip %1 is a level in decibels", "%1 dB", Number(value).toLocaleString(Qt.locale(), "f", 1))

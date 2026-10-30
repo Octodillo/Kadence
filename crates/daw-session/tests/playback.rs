@@ -774,3 +774,48 @@ fn a_stopped_playhead_keeps_its_beat_through_a_tempo_change() {
     let music = rig.session.music();
     assert_eq!((music.bar, music.beats), (1, 4.0));
 }
+
+/// The project's tempo set to `bpm`, synced, with no audio run after.
+fn set_bpm(rig: &mut Rig, bpm: f64) {
+    let mut tempo = rig.doc.project().tempo.clone();
+    tempo.tempos[0].bpm = bpm;
+    rig.doc.execute(SetTempo { tempo }).unwrap();
+    rig.sync();
+}
+
+#[test]
+fn tempo_edits_before_the_audio_thread_catches_up_keep_the_beat() {
+    let mut rig = Rig::new(f64::INFINITY);
+    rig.session.locate(TickTime(16 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    // A locate the audio thread hasn't applied, then a tempo change: the
+    // playhead goes where it was sent, not back to where it was.
+    rig.session.locate(TickTime(0)).unwrap();
+    set_bpm(&mut rig, 60.0);
+    rig.run(BLOCK);
+    assert_eq!(rig.session.position(), TickTime(0));
+    // Several changes between two audio blocks (a fast drag).
+    rig.session.locate(TickTime(16 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    for bpm in [70.0, 80.0, 90.0] {
+        set_bpm(&mut rig, bpm);
+    }
+    rig.run(BLOCK);
+    assert_eq!(rig.session.position(), TickTime(16 * PPQ));
+}
+
+#[test]
+fn a_faster_tempo_while_looping_keeps_the_playhead_in_the_loop() {
+    let mut rig = Rig::new(f64::INFINITY);
+    // Bars 1 and 2, playing from beat 6.
+    rig.session
+        .set_loop(Some((TickTime(0), TickTime(8 * PPQ))))
+        .unwrap();
+    rig.session.locate(TickTime(6 * PPQ)).unwrap();
+    rig.session.play().unwrap();
+    rig.run(BLOCK);
+    set_bpm(&mut rig, 240.0);
+    rig.run(2 * BEAT as usize);
+    let at = rig.session.position();
+    assert!(at < TickTime(8 * PPQ), "{at:?} left the loop");
+}

@@ -150,7 +150,7 @@ impl Segmented for Metronome {
             if let Some(c) = &t.count_in {
                 let at = c.elapsed + i as i64;
                 if let Some(beat) = count_in_beat(c, at) {
-                    self.trigger(accent && beat % c.beats_per_bar.max(1) == 0);
+                    self.trigger(accent && c.is_downbeat(beat));
                 }
                 // Playback starts on a fresh beat: a click there if it is
                 // on one.
@@ -201,8 +201,9 @@ fn count_in_beat(c: &CountIn, at: i64) -> Option<u32> {
     #[allow(clippy::cast_precision_loss)]
     let index = |s: i64| (s as f64 / c.beat_len).floor();
     let k = index(at);
+    let starts = at == 0 || k > index(at - 1);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    (at == 0 || k > index(at - 1)).then_some(k as u32)
+    (starts && k < f64::from(c.beats)).then_some(k as u32)
 }
 
 /// The beat that `beats` (quarter notes) falls in, as (bar, beat in bar), with

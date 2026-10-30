@@ -86,7 +86,11 @@ impl Transport {
                 self.playing = false;
                 self.count_in = None;
             }
-            TransportCommand::Locate(t) => self.position = t.0,
+            TransportCommand::Locate(t) => {
+                // A count-in counts towards where playback was to start.
+                self.position = t.0;
+                self.count_in = None;
+            }
             TransportCommand::SetLoop(r) => self.loop_range = r.filter(|r| r.end > r.start),
         }
     }
@@ -214,7 +218,7 @@ mod tests {
         // One bar of 3/4 at 120 bpm: three beats of 24 000 samples.
         let tl = Arc::new(Timeline::constant(120.0, 3, 4));
         let mut t = Transport::with_timeline(48_000.0, tl);
-        t.apply(TransportCommand::Locate(SampleTime(1_000)));
+        t.apply(TransportCommand::Locate(SampleTime(72_000)));
         t.apply(TransportCommand::PlayWithCountIn(1));
         assert!(t.is_playing() && t.is_counting_in());
         let s = t.state();
@@ -227,12 +231,31 @@ mod tests {
             let len = t.block_len(4096);
             counted += len;
             t.advance(len);
-            assert_eq!(t.position(), SampleTime(1_000));
+            assert_eq!(t.position(), SampleTime(72_000));
         }
         assert_eq!(counted, 72_000);
         assert!(t.state().playing && t.state().count_in.is_none());
         t.advance(64);
-        assert_eq!(t.position(), SampleTime(1_064));
+        assert_eq!(t.position(), SampleTime(72_064));
+    }
+
+    #[test]
+    fn a_count_in_between_beats_clicks_on_the_song_beats() {
+        // Half a beat into bar 1 of 4/4 at 120 bpm (beats are 24 000).
+        let mut t = Transport::new(48_000.0);
+        t.apply(TransportCommand::Locate(SampleTime(12_000)));
+        t.apply(TransportCommand::PlayWithCountIn(1));
+        let c = t.state().count_in.unwrap();
+        // Clicks on the four beat lines before: the last is beat 1 of the
+        // song, half a beat before playback starts.
+        assert_eq!(c.len(), 3 * 24_000 + 12_000);
+        assert_eq!(
+            (0..4).map(|k| c.is_downbeat(k)).collect::<Vec<_>>(),
+            [false, false, false, true]
+        );
+        // A locate drops the count-in.
+        t.apply(TransportCommand::Locate(SampleTime(0)));
+        assert!(!t.is_counting_in() && t.state().playing);
     }
 
     #[test]

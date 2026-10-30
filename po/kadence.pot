@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-30 17:19+0000\n"
+"POT-Creation-Date: 2026-10-30 17:42+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1303,33 +1303,33 @@ msgctxt "@action:button"
 msgid "Metronome Settings"
 msgstr ""
 
-#: crates/daw-app/qml/TransportBar.qml:217
+#: crates/daw-app/qml/TransportBar.qml:220
 msgctxt "@label:slider"
 msgid "Level:"
 msgstr ""
 
-#: crates/daw-app/qml/TransportBar.qml:223
+#: crates/daw-app/qml/TransportBar.qml:228
 msgctxt "@info:accessible"
 msgid "Metronome level"
 msgstr ""
 
-#: crates/daw-app/qml/TransportBar.qml:225
+#: crates/daw-app/qml/TransportBar.qml:230
 msgctxt "@info:tooltip %1 is a level in decibels"
 msgid "%1 dB"
 msgstr ""
 
-#: crates/daw-app/qml/TransportBar.qml:230
+#: crates/daw-app/qml/TransportBar.qml:235
 msgctxt "@label:listbox"
 msgid "Count-in before recording:"
 msgstr ""
 
-#: crates/daw-app/qml/TransportBar.qml:232
+#: crates/daw-app/qml/TransportBar.qml:237
 msgctxt "@item:inlistbox no count-in"
 msgid "None"
 msgstr ""
 
-#: crates/daw-app/qml/TransportBar.qml:233
-#: crates/daw-app/qml/TransportBar.qml:234
+#: crates/daw-app/qml/TransportBar.qml:238
+#: crates/daw-app/qml/TransportBar.qml:239
 msgctxt "@item:inlistbox count-in length"
 msgid "%1 bar"
 msgid_plural "%1 bars"

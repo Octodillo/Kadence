@@ -248,6 +248,9 @@ mod tests {
         s.poll_recording();
         assert!(s.is_recording(), "still recording during the count-in");
         s.stop_recording();
-        assert!(!s.is_counting_in() || !s.engine.is_playing());
+        assert!(
+            !s.engine.is_playing(),
+            "stopping the take stops the count-in"
+        );
     }
 }

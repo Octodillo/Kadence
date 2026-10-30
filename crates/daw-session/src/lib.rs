@@ -149,6 +149,9 @@ pub struct Session {
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
     metronome: MetronomeSettings,
+    /// The tick the playhead was last sent to. Until playback moves it,
+    /// this is where it is, even before the audio thread says so.
+    parked: Option<TickTime>,
 }
 
 impl Session {
@@ -172,6 +175,7 @@ impl Session {
             suspended: HashSet::new(),
             live: HashMap::new(),
             metronome: MetronomeSettings::default(),
+            parked: None,
         };
         (session, processor)
     }
@@ -236,9 +240,11 @@ impl Session {
         self.master = Some(snapshot.master.id);
         let tempo_changed = self.tempo_data.as_ref() != Some(&snapshot.tempo);
         if tempo_changed {
-            // A stopped playhead stays on its bar and beat. A playing one
-            // stays on its sample, so playback doesn't jump.
-            let keep = (self.tempo_data.is_some() && !self.playing).then(|| self.position());
+            let keep = self
+                .tempo_data
+                .is_some()
+                .then(|| self.kept_tick())
+                .flatten();
             // Tempo and time signatures, so the metronome and plugins see
             // the project's bars and beats.
             let timeline = daw_midi::model::timeline(&snapshot.tempo);
@@ -326,17 +332,19 @@ impl Session {
 
     /// Sets the click. Takes effect at once, without a graph rebuild: the
     /// metronome is always in the graph and only its parameters change.
+    /// When a parameter can't be sent (a full queue), the error says so and
+    /// [`metronome`](Self::metronome) keeps the old settings, so calling
+    /// again retries.
     pub fn set_metronome(&mut self, settings: MetronomeSettings) -> Result<(), SessionError> {
-        self.metronome = settings;
-        let Some(built) = self.built.as_mut() else {
-            return Ok(());
-        };
-        for ((key, param), value) in build::metronome_params(&settings) {
-            if built.params.get(&(key, param)) != Some(&value) {
-                self.controller.set_param_by_key(key, param, value)?;
-                built.params.insert((key, param), value);
+        if let Some(built) = self.built.as_mut() {
+            for ((key, param), value) in build::metronome_params(&settings) {
+                if built.params.get(&(key, param)) != Some(&value) {
+                    self.controller.set_param_by_key(key, param, value)?;
+                    built.params.insert((key, param), value);
+                }
             }
         }
+        self.metronome = settings;
         Ok(())
     }
 
@@ -420,6 +428,21 @@ impl Session {
         }
     }
 
+    /// Where the playhead should stay, in ticks, when the tempo changes. A
+    /// stopped (or counting-in) playhead stays on its bar and beat. A
+    /// playing one stays on its sample, so playback doesn't jump, unless it
+    /// is inside the loop: the loop moves with the tempo and the playhead
+    /// must stay inside it.
+    fn kept_tick(&self) -> Option<TickTime> {
+        if !self.playing || self.controller.is_counting_in() {
+            // The audio thread may not have applied the last locate yet.
+            return Some(self.parked.unwrap_or_else(|| self.position()));
+        }
+        let at = self.position();
+        let (start, end) = self.loop_ticks?;
+        (start <= at && at < end).then_some(at)
+    }
+
     pub fn play(&mut self) -> Result<(), SessionError> {
         self.controller.play()?;
         self.playing = true;
@@ -444,6 +467,8 @@ impl Session {
     pub fn stop(&mut self) -> Result<(), SessionError> {
         self.controller.stop()?;
         self.playing = false;
+        // Wherever playback got to; the audio thread reports it.
+        self.parked = None;
         Ok(())
     }
 
@@ -454,7 +479,9 @@ impl Session {
 
     pub fn locate(&mut self, t: TickTime) -> Result<(), SessionError> {
         let s = self.ticks_to_samples(t);
-        Ok(self.controller.locate(s)?)
+        self.controller.locate(s)?;
+        self.parked = Some(t);
+        Ok(())
     }
 
     /// The play position the audio thread last reported.

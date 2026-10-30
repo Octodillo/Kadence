@@ -186,8 +186,10 @@ pub mod qobject {
         fn set_time_signature(self: Pin<&mut Project>, numerator: i32, denominator: i32);
         #[qinvokable]
         fn set_metronome_enabled(self: Pin<&mut Project>, enabled: bool);
+        /// Saves the setting only when `save`, so a slider can save once it
+        /// is let go.
         #[qinvokable]
-        fn set_metronome_level(self: Pin<&mut Project>, volume_db: f64);
+        fn set_metronome_level(self: Pin<&mut Project>, volume_db: f64, save: bool);
         #[qinvokable]
         fn set_count_in(self: Pin<&mut Project>, bars: i32);
         /// Turns looping on (over the selection, or the four bars from the
@@ -767,26 +769,31 @@ impl qobject::Project {
         });
     }
 
-    /// Changes the click settings with `f`, applies and saves them.
-    fn change_click(self: Pin<&mut Self>, f: impl FnOnce(&mut ClickSettings)) {
+    /// Changes the click settings with `f` and applies them, saving them
+    /// when `save`.
+    fn change_click(self: Pin<&mut Self>, save: bool, f: impl FnOnce(&mut ClickSettings)) {
         self.edit(|s| {
             let mut click = s.click();
             f(&mut click);
             s.set_click(click);
-            settings::save_click_settings(&mut KConfigStore, &s.click());
+            if save {
+                settings::save_click_settings(&mut KConfigStore, &s.click());
+            }
         });
     }
 
     fn set_metronome_enabled(self: Pin<&mut Self>, enabled: bool) {
-        self.change_click(|c| c.metronome.enabled = enabled);
+        self.change_click(true, |c| c.metronome.enabled = enabled);
     }
 
-    fn set_metronome_level(self: Pin<&mut Self>, volume_db: f64) {
-        self.change_click(|c| c.metronome.volume_db = volume_db);
+    fn set_metronome_level(self: Pin<&mut Self>, volume_db: f64, save: bool) {
+        self.change_click(save, |c| c.metronome.volume_db = volume_db);
     }
 
     fn set_count_in(self: Pin<&mut Self>, bars: i32) {
-        self.change_click(|c| c.count_in_bars = u32::try_from(bars).unwrap_or(0));
+        self.change_click(true, |c| {
+            c.count_in_bars = u32::try_from(bars).unwrap_or(0);
+        });
     }
 
     fn toggle_loop(self: Pin<&mut Self>) {
