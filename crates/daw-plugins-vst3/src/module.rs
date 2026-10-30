@@ -23,15 +23,38 @@ pub const AUDIO_EFFECT_CLASS: &str = "Audio Module Class";
 
 /// A loaded VST3 module, shared by every instance created from it.
 ///
-/// A module stays loaded until the process exits, as in most hosts. Unloading it would race
-/// a concurrent load of the same module (the SDK's ModuleEntry and ModuleExit keep a
-/// non-atomic counter and a global factory), and plugins leave handlers in the process-wide
-/// run loop that would then point into unmapped code. Plugin scans, which load many modules,
-/// run in a child process.
+/// A module's code stays mapped until the process exits, as in most hosts. Unloading it
+/// would race a concurrent load of the same module (the SDK's ModuleEntry and ModuleExit keep
+/// a non-atomic counter and a global factory), and plugins leave handlers in the
+/// process-wide run loop that would then point into unmapped code. Plugin scans, which load
+/// many modules, run in a child process. [`shutdown`] runs ModuleExit before the process
+/// exits.
 pub struct Module {
-    factory: ComPtr<IPluginFactory>,
-    // Never unloaded; see above.
-    _library: Library,
+    // Released before ModuleExit runs in `Drop`.
+    factory: Option<ComPtr<IPluginFactory>>,
+    /// Set when ModuleEntry ran, so ModuleExit pairs with it.
+    exit: Option<ModuleExitFn>,
+}
+
+/// Loaded modules by canonical path. Held while a module is entered or exited, so ModuleEntry
+/// and ModuleExit never run concurrently.
+static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Module>>>> = OnceLock::new();
+
+fn cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Arc<Module>>> {
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Runs ModuleExit for every module no instance uses any more and forgets it, so a later
+/// load enters it again. The code stays mapped. Call it once all instances are dropped,
+/// before the process exits: plugins (JUCE ones, for example) stop their own threads there.
+pub fn shutdown() {
+    // Only the cache and instances hold a module, and the cache hands out new references
+    // only under this lock, so a count of one cannot grow while it is held. Dropping the
+    // module here runs ModuleExit under the lock.
+    cache().retain(|_, m| Arc::strong_count(m) > 1);
 }
 
 /// One class exported by a factory.
@@ -46,15 +69,10 @@ pub struct ClassInfo {
 
 impl Module {
     /// Loads (or reuses) the module at `path`, which may be a `.vst3` bundle directory or a
-    /// shared object. The cache lock is held while a module loads, so ModuleEntry never runs
-    /// twice at once.
+    /// shared object.
     pub fn load(path: &Path) -> Result<Arc<Module>, String> {
-        static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Module>>>> = OnceLock::new();
         let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let mut cache = CACHE
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = cache();
         if let Some(module) = cache.get(&key) {
             return Ok(module.clone());
         }
@@ -77,18 +95,27 @@ impl Module {
                 .map(|f| *f)
                 .map_err(|e| fail(&e))?;
             let entry = library.get::<ModuleEntryFn>(b"ModuleEntry\0").map(|f| *f);
-            let library = if let Ok(entry) = entry {
-                let handle = library.into_raw();
-                if !entry(handle) {
-                    drop(Library::from_raw(handle));
-                    return Err(fail(&"ModuleEntry failed"));
-                }
-                Library::from_raw(handle)
-            } else {
-                library
+            let exit = match entry {
+                Ok(_) => library
+                    .get::<ModuleExitFn>(b"ModuleExit\0")
+                    .ok()
+                    .map(|f| *f),
+                Err(_) => None,
             };
+            // Never unloaded (see `Module`), so the symbols above stay valid.
+            let handle = library.into_raw();
+            if let Ok(entry) = entry
+                && !entry(handle)
+            {
+                drop(Library::from_raw(handle));
+                return Err(fail(&"ModuleEntry failed"));
+            }
             let Some(factory) = ComPtr::from_raw(get_factory()) else {
-                exit(library);
+                // Nothing from the module is in use, so it can go entirely.
+                if let Some(exit) = exit {
+                    exit();
+                }
+                drop(Library::from_raw(handle));
                 return Err(fail(&"GetPluginFactory returned null"));
             };
             // Plugins built with SDK 3.7+ pick up the host's run loop (among other things)
@@ -97,14 +124,16 @@ impl Module {
                 f3.setHostContext(crate::host::host_context());
             }
             Ok(Module {
-                factory,
-                _library: library,
+                factory: Some(factory),
+                exit,
             })
         }
     }
 
     pub fn factory(&self) -> &ComPtr<IPluginFactory> {
-        &self.factory
+        self.factory
+            .as_ref()
+            .expect("factory is set until the module is dropped")
     }
 
     pub fn classes(&self) -> Vec<ClassInfo> {
@@ -154,17 +183,14 @@ impl Module {
     }
 }
 
-/// Undoes a successful ModuleEntry and unloads a module that never handed out a factory.
-///
-/// # Safety
-/// Nothing from `library` may be in use.
-unsafe fn exit(library: Library) {
-    unsafe {
-        if let Ok(exit) = library.get::<ModuleExitFn>(b"ModuleExit\0") {
-            exit();
+impl Drop for Module {
+    /// Only [`shutdown`] drops a module, with the cache locked. The library is not closed.
+    fn drop(&mut self) {
+        self.factory = None;
+        if let Some(exit) = self.exit {
+            unsafe { exit() };
         }
     }
-    drop(library);
 }
 
 /// Where the shared object for a VST3 module lives.

@@ -19,14 +19,19 @@ fn bundle(name: &str, bundle: &str) -> (PathBuf, PathBuf) {
         .unwrap()
         .to_path_buf();
     let so = profile_dir.join(format!("examples/lib{name}.so"));
-    if !so.exists() {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let status = Command::new(cargo)
-            .args(["build", "-p", "daw-plugins-vst3", "--example", name])
-            .status()
-            .expect("run cargo to build the test plugin");
-        assert!(status.success(), "building the {name} example failed");
-    }
+    // `cargo test --test module` does not rebuild examples, so build it here, always (an old
+    // copy may lack the counters), and in this test binary's profile.
+    let profile = match profile_dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") | None => "dev",
+        Some(name) => name,
+    };
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = Command::new(cargo)
+        .args(["build", "-p", "daw-plugins-vst3", "--example", name])
+        .args(["--profile", profile])
+        .status()
+        .expect("run cargo to build the test plugin");
+    assert!(status.success(), "building the {name} example failed");
     let root = std::env::temp_dir().join(format!("daw-vst3-module-{}", std::process::id()));
     let bin = root
         .join(format!("{bundle}.vst3/Contents"))
@@ -77,6 +82,19 @@ fn a_module_is_entered_once_however_many_threads_load_it() {
     // Loaded once and kept: plugins leave run loop handlers behind, so their code must stay
     // mapped.
     assert_eq!((entries, exits), (1, 0));
+
+    // Shutdown exits only modules no instance uses, and a later load enters them again.
+    let d = Vst3Format.scan(&bundle).pop().unwrap();
+    let p = Vst3Format.instantiate(&d, 48_000.0, 64).unwrap();
+    daw_plugins_vst3::shutdown();
+    assert_eq!(counts(), [1, 0, 0], "exited a module in use");
+    drop(p);
+    daw_plugins_vst3::shutdown();
+    assert_eq!(counts(), [1, 1, 0]);
+    let p = Vst3Format.instantiate(&d, 48_000.0, 64).unwrap();
+    drop(p);
+    daw_plugins_vst3::shutdown();
+    assert_eq!(counts(), [2, 2, 0]);
 }
 
 #[test]

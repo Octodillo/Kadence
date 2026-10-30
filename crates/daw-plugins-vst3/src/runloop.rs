@@ -117,7 +117,9 @@ impl RunLoop {
     /// Runs ready fd handlers and due timers. Handlers may (un)register during the call, so the
     /// lists are copied first and no lock is held while plugin code runs. A handler
     /// unregistered by an earlier one in the same pump (an editor closed from a timer, say)
-    /// is skipped: its object may be torn down and its fd closed or reused.
+    /// is skipped: its object may be torn down and its fd closed or reused. That covers
+    /// unregistering on the pumping (main) thread, which is where plugins do it; one
+    /// unregistered from another thread mid-pump may still get this pump's call.
     pub fn pump(&self) {
         let fds: Vec<_> = self
             .fds
