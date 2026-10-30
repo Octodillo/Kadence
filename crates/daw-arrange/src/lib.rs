@@ -27,8 +27,8 @@ use daw_core::time::{PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::grid::Meter;
 use daw_model::commands::{AddClip, AddTrack, ClipField, RemoveClip, SetClip};
 use daw_model::{
-    AudioClip, Clip, ClipContent, ClipId, Command, Document, MidiClip, ModelError, Project, Track,
-    TrackId, TrackKind,
+    AudioClip, Clip, ClipContent, ClipId, Command, Document, Fade, FadeShape, MidiClip, ModelError,
+    Project, Track, TrackId, TrackKind,
 };
 
 use commands::{Group, PlaceClip, TrimClip};
@@ -47,6 +47,13 @@ const DRAG_THRESHOLD: f64 = 3.0;
 
 /// The shortest clip a trim leaves, in ticks (a 64th note).
 const MIN_CLIP_TICKS: i64 = PPQ / 16;
+
+/// Clip gain a gain drag can set, in dB.
+pub const MIN_CLIP_GAIN_DB: f64 = -60.0;
+pub const MAX_CLIP_GAIN_DB: f64 = 24.0;
+/// dB per pixel of a gain drag, and with Shift held for fine control.
+const GAIN_DB_PER_PX: f64 = 0.25;
+const FINE_GAIN_DB_PER_PX: f64 = 0.025;
 
 /// Everything about the project the view needs besides the document.
 pub struct Env<'a> {
@@ -93,6 +100,24 @@ pub enum Zone {
     Start,
     /// The right edge: dragging it trims the end.
     End,
+    /// An audio clip's fade-in handle (top left).
+    FadeIn,
+    /// An audio clip's fade-out handle (top right).
+    FadeOut,
+    /// An audio clip's gain handle (top centre): drag up or down.
+    Gain,
+}
+
+/// Where an audio clip's handles are, in view pixels. See [`Arrange::handles`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Handles {
+    pub fade_in: Rect,
+    pub fade_out: Rect,
+    pub gain: Rect,
+    /// The x where the fade-in ends and the fade-out starts (shortened
+    /// together to fit the clip, as playback does).
+    pub fade_in_x: f64,
+    pub fade_out_x: f64,
 }
 
 /// What is under a point.
@@ -122,6 +147,8 @@ pub enum Cursor {
     Move,
     /// Over a clip edge: it can be resized horizontally.
     ResizeHorizontal,
+    /// Over a clip's gain handle: drag up or down.
+    ResizeVertical,
     /// Over the ruler: click to move the playhead.
     Pointing,
 }
@@ -242,6 +269,21 @@ enum Drag {
         offset: Option<SampleTime>,
         edited: bool,
     },
+    Fade {
+        clip: ClipId,
+        out: bool,
+        /// Ticks from the press to the fade's edge, so grabbing the handle
+        /// anywhere doesn't make the fade jump.
+        grab: i64,
+        edited: bool,
+    },
+    Gain {
+        clip: ClipId,
+        /// Pointer y and clip gain at the press.
+        y: f64,
+        db: f64,
+        edited: bool,
+    },
     Rubber {
         x0: f64,
         y0: f64,
@@ -288,6 +330,8 @@ pub struct Arrange {
     pub scroll_y: f64,
     /// How close to a clip edge counts as grabbing the edge.
     pub edge_px: f64,
+    /// Size of the fade and gain handles on audio clips.
+    pub handle_px: f64,
     pub snap: Snap,
     pub palette: Palette,
     pub selection: BTreeSet<ClipId>,
@@ -315,6 +359,7 @@ impl Arrange {
             ruler_height: 24.0,
             scroll_y: 0.0,
             edge_px: 6.0,
+            handle_px: 8.0,
             snap: Snap::default(),
             palette: Palette::default(),
             selection: BTreeSet::new(),
@@ -390,7 +435,19 @@ impl Arrange {
                 continue;
             }
             let edge = self.edge_px.min(r.w / 4.0);
-            let zone = if x < r.x + edge {
+            let handle = self.handles(row, clip).and_then(|h| {
+                [
+                    (h.fade_in, Zone::FadeIn),
+                    (h.fade_out, Zone::FadeOut),
+                    (h.gain, Zone::Gain),
+                ]
+                .into_iter()
+                .find(|(r, _)| r.contains(x, y))
+                .map(|(_, z)| z)
+            });
+            let zone = if let Some(z) = handle {
+                z
+            } else if x < r.x + edge {
                 Zone::Start
             } else if x >= r.right() - edge {
                 Zone::End
@@ -414,7 +471,8 @@ impl Arrange {
     pub fn cursor(&self, project: &Project, x: f64, y: f64) -> Cursor {
         match &self.drag {
             Some(Drag::Move { .. }) => return Cursor::Move,
-            Some(Drag::Trim { .. }) => return Cursor::ResizeHorizontal,
+            Some(Drag::Trim { .. } | Drag::Fade { .. }) => return Cursor::ResizeHorizontal,
+            Some(Drag::Gain { .. }) => return Cursor::ResizeVertical,
             _ => {}
         }
         match self.hit(project, x, y) {
@@ -422,6 +480,9 @@ impl Arrange {
             Hit::Clip {
                 zone: Zone::Body, ..
             } => Cursor::Move,
+            Hit::Clip {
+                zone: Zone::Gain, ..
+            } => Cursor::ResizeVertical,
             Hit::Clip { .. } => Cursor::ResizeHorizontal,
             _ => Cursor::Arrow,
         }
@@ -430,6 +491,45 @@ impl Arrange {
     /// Whether a drag is in progress (the front end should grab the pointer).
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// The fade and gain handles of an audio clip on track row `row`, or
+    /// `None` for a MIDI clip or one too small to show them.
+    pub fn handles(&self, row: usize, clip: &Clip) -> Option<Handles> {
+        let ClipContent::Audio(a) = &clip.content else {
+            return None;
+        };
+        let r = self.clip_rect(row, clip);
+        let h = self.handle_px;
+        if r.w < 4.0 * h || r.h < 2.0 * h {
+            return None;
+        }
+        let ppt = self.view.px_per_tick();
+        let (fi, fo) = daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, clip.length.0);
+        let fade_in_x = r.x + fi as f64 * ppt;
+        let fade_out_x = r.right() - fo as f64 * ppt;
+        // Keep the handles inside the clip and apart from each other.
+        let in_x = fade_in_x.clamp(r.x, r.right() - 2.0 * h);
+        let out_x = fade_out_x.clamp(in_x + 2.0 * h, r.right());
+        Some(Handles {
+            fade_in: Rect::new(in_x, r.y, h, h),
+            fade_out: Rect::new(out_x - h, r.y, h, h),
+            gain: Rect::new(r.x + (r.w - h) / 2.0, r.y, h, h),
+            fade_in_x,
+            fade_out_x,
+        })
+    }
+
+    /// The gain of the clip being gain-dragged, so the front end can show
+    /// the value by the pointer.
+    pub fn dragged_gain(&self, project: &Project) -> Option<f64> {
+        let Some(Drag::Gain { clip, .. }) = &self.drag else {
+            return None;
+        };
+        match &project.clip(*clip)?.content {
+            ClipContent::Audio(a) => Some(a.gain_db),
+            ClipContent::Midi(_) => None,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -614,6 +714,29 @@ impl Arrange {
                 self.mark_edited(&o);
                 o
             }
+            Drag::Fade {
+                clip, out, grab, ..
+            } => {
+                let o = self.drag_fade(doc, p, clip, out, grab);
+                self.mark_edited(&o);
+                o
+            }
+            Drag::Gain { clip, y, db, .. } => {
+                let per_px = if p.shift {
+                    FINE_GAIN_DB_PER_PX
+                } else {
+                    GAIN_DB_PER_PX
+                };
+                let to = (db + (y - p.y) * per_px).clamp(MIN_CLIP_GAIN_DB, MAX_CLIP_GAIN_DB);
+                // Whole hundredths, so the shown value is the stored one.
+                let to = (to * 100.0).round() / 100.0;
+                let r = doc
+                    .execute(SetClip::new(clip, ClipField::AudioGainDb(to)))
+                    .map(|_| ());
+                let o = Outcome::from_result(r);
+                self.mark_edited(&o);
+                o
+            }
             Drag::Rubber { x0, y0, base, .. } => {
                 let r = Rect::spanning(x0, y0, p.x, p.y);
                 let mut sel = base.clone();
@@ -668,7 +791,7 @@ impl Arrange {
                 }
                 _ => Outcome::view(),
             },
-            Some(Drag::Move { .. } | Drag::Trim { .. }) => {
+            Some(Drag::Move { .. } | Drag::Trim { .. } | Drag::Fade { .. } | Drag::Gain { .. }) => {
                 // The drag merged into one undo step; end it so the next edit
                 // doesn't merge in too.
                 doc.seal();
@@ -687,7 +810,12 @@ impl Arrange {
     /// Drops the drag in progress (Escape, or the pointer was taken away).
     pub fn cancel(&mut self, doc: &mut Document) -> Outcome {
         match self.drag.take() {
-            Some(Drag::Move { edited: true, .. } | Drag::Trim { edited: true, .. }) => {
+            Some(
+                Drag::Move { edited: true, .. }
+                | Drag::Trim { edited: true, .. }
+                | Drag::Fade { edited: true, .. }
+                | Drag::Gain { edited: true, .. },
+            ) => {
                 // The drag is one merged undo step: undo it.
                 doc.seal();
                 let _ = doc.undo();
@@ -702,14 +830,21 @@ impl Arrange {
     /// other edit (a shortcut, undo) while a button may still be held, so the
     /// drag neither merges with that edit nor works on clips it removed.
     pub fn end_drag(&mut self, doc: &mut Document) {
-        if let Some(Drag::Move { .. } | Drag::Trim { .. }) = self.drag.take() {
+        if let Some(Drag::Move { .. } | Drag::Trim { .. } | Drag::Fade { .. } | Drag::Gain { .. }) =
+            self.drag.take()
+        {
             doc.seal();
         }
     }
 
     fn mark_edited(&mut self, o: &Outcome) {
         if o.document
-            && let Some(Drag::Move { edited, .. } | Drag::Trim { edited, .. }) = &mut self.drag
+            && let Some(
+                Drag::Move { edited, .. }
+                | Drag::Trim { edited, .. }
+                | Drag::Fade { edited, .. }
+                | Drag::Gain { edited, .. },
+            ) = &mut self.drag
         {
             *edited = true;
         }
@@ -718,6 +853,21 @@ impl Arrange {
     pub fn double_click(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
         self.end_drag(doc);
         match self.hit(doc.project(), p.x, p.y) {
+            // Double-clicking a handle resets what it sets.
+            Hit::Clip {
+                clip,
+                zone: zone @ (Zone::FadeIn | Zone::FadeOut | Zone::Gain),
+                ..
+            } => {
+                let field = match zone {
+                    Zone::FadeIn => ClipField::FadeIn(Fade::default()),
+                    Zone::FadeOut => ClipField::FadeOut(Fade::default()),
+                    _ => ClipField::AudioGainDb(0.0),
+                };
+                let r = doc.execute(SetClip::new(clip, field)).map(|_| ());
+                doc.seal();
+                Outcome::from_result(r)
+            }
             Hit::Clip { clip, .. } => Outcome {
                 open_clip: Some(clip),
                 ..Outcome::view()
@@ -772,6 +922,44 @@ impl Arrange {
                     lead: clip,
                     clips,
                     edited: false,
+                })
+            }
+            Hit::Clip {
+                clip,
+                zone: zone @ (Zone::FadeIn | Zone::FadeOut | Zone::Gain),
+                ..
+            } => {
+                let Some(c) = project.clip(clip) else {
+                    self.drag = None;
+                    return;
+                };
+                let ClipContent::Audio(a) = &c.content else {
+                    self.drag = None;
+                    return;
+                };
+                let db = a.gain_db;
+                let (fi, fo) =
+                    daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, c.length.0);
+                let edge = if zone == Zone::FadeOut {
+                    c.start.0 + c.length.0 - fo
+                } else {
+                    c.start.0 + fi
+                };
+                self.selection = BTreeSet::from([clip]);
+                doc.seal();
+                Some(match zone {
+                    Zone::Gain => Drag::Gain {
+                        clip,
+                        y: start.y,
+                        db,
+                        edited: false,
+                    },
+                    _ => Drag::Fade {
+                        clip,
+                        out: zone == Zone::FadeOut,
+                        grab: edge - tick.0,
+                        edited: false,
+                    },
                 })
             }
             Hit::Clip { clip, zone, .. } => {
@@ -892,6 +1080,41 @@ impl Arrange {
         Outcome::from_result(r)
     }
 
+    /// Sets a fade's length to reach the pointer, leaving the other fade
+    /// room. Not snapped: fades are usually set by ear.
+    fn drag_fade(
+        &mut self,
+        doc: &mut Document,
+        p: Pointer,
+        id: ClipId,
+        out: bool,
+        grab: i64,
+    ) -> Outcome {
+        let Some(clip) = doc.project().clip(id) else {
+            self.drag = None;
+            return Outcome::default();
+        };
+        let ClipContent::Audio(a) = &clip.content else {
+            return Outcome::default();
+        };
+        let at = self.view.x_to_tick(p.x).0 + grab;
+        let end = clip.start.0 + clip.length.0;
+        let (fade, other) = if out {
+            (end - at, a.fade_in.length.0)
+        } else {
+            (at - clip.start.0, a.fade_out.length.0)
+        };
+        let room = (clip.length.0 - other.min(clip.length.0)).max(0);
+        let length = TickTime(fade.clamp(0, room));
+        let field = if out {
+            ClipField::FadeOut(Fade::new(length, a.fade_out.shape))
+        } else {
+            ClipField::FadeIn(Fade::new(length, a.fade_in.shape))
+        };
+        let r = doc.execute(SetClip::new(id, field)).map(|_| ());
+        Outcome::from_result(r)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn drag_trim(
         &mut self,
@@ -935,7 +1158,7 @@ impl Arrange {
                 }
                 TrimClip::new(id, start, TickTime(new_end - start.0), offset)
             }
-            Zone::Start | Zone::Body => {
+            Zone::Start | Zone::Body | Zone::FadeIn | Zone::FadeOut | Zone::Gain => {
                 let mut new_start = snap(TickTime(start.0 + moved.0))
                     .0
                     .min(end - MIN_CLIP_TICKS);
@@ -1134,6 +1357,13 @@ impl Arrange {
                     let shift = env.ticks_to_samples(at).0 - env.ticks_to_samples(c.start).0;
                     let rate = self.file_rate(env, &a.source);
                     a.offset = SampleTime(a.offset.0 + env.engine_to_file(shift, rate));
+                    // The fade-in stays with the left half and the fade-out
+                    // goes with the right one, cut short if the split is
+                    // inside it (the cut-off part is lost, as in most DAWs).
+                    let (_, fo) =
+                        daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, c.length.0);
+                    a.fade_in = Fade::default();
+                    a.fade_out.length = TickTime(fo.min(right.length.0));
                 }
                 ClipContent::Midi(m) => {
                     // Notes starting in the right half move to the new clip.
@@ -1155,6 +1385,22 @@ impl Arrange {
                     items.push(Box::new(daw_model::commands::RemoveNotes::new(c.id, moved)));
                 }
             }
+            if let ClipContent::Audio(a) = &c.content {
+                let (fi, _) =
+                    daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, c.length.0);
+                if fi.min(left_len) != a.fade_in.length.0 {
+                    items.push(Box::new(SetClip::new(
+                        c.id,
+                        ClipField::FadeIn(Fade::new(TickTime(fi.min(left_len)), a.fade_in.shape)),
+                    )));
+                }
+                if !a.fade_out.is_none() {
+                    items.push(Box::new(SetClip::new(
+                        c.id,
+                        ClipField::FadeOut(Fade::default()),
+                    )));
+                }
+            }
             items.push(Box::new(SetClip::new(
                 c.id,
                 ClipField::Length(TickTime(left_len)),
@@ -1169,6 +1415,67 @@ impl Arrange {
             self.selection.extend(right_ids);
         }
         Outcome::from_result(r)
+    }
+
+    /// Sets the shape of both fades on every selected audio clip.
+    pub fn set_fade_shape(&mut self, doc: &mut Document, shape: FadeShape) -> Outcome {
+        self.edit_selected_audio(doc, "Change Fade Shape", |a| {
+            vec![
+                ClipField::FadeIn(Fade::new(a.fade_in.length, shape)),
+                ClipField::FadeOut(Fade::new(a.fade_out.length, shape)),
+            ]
+        })
+    }
+
+    /// Sets every selected audio clip back to 0 dB.
+    pub fn reset_clip_gain(&mut self, doc: &mut Document) -> Outcome {
+        self.edit_selected_audio(doc, "Reset Clip Gain", |_| {
+            vec![ClipField::AudioGainDb(0.0)]
+        })
+    }
+
+    /// Removes both fades from every selected audio clip.
+    pub fn remove_fades(&mut self, doc: &mut Document) -> Outcome {
+        self.edit_selected_audio(doc, "Remove Fades", |_| {
+            vec![
+                ClipField::FadeIn(Fade::default()),
+                ClipField::FadeOut(Fade::default()),
+            ]
+        })
+    }
+
+    /// One undo step setting `fields(clip)` on each selected audio clip.
+    fn edit_selected_audio(
+        &mut self,
+        doc: &mut Document,
+        label: &str,
+        fields: impl Fn(&AudioClip) -> Vec<ClipField>,
+    ) -> Outcome {
+        self.end_drag(doc);
+        let mut ids = Vec::new();
+        let mut items: Vec<Box<dyn Command>> = Vec::new();
+        for (_, c) in self.selected_clips(doc.project()) {
+            if let ClipContent::Audio(a) = &c.content {
+                ids.push(c.id);
+                for f in fields(a) {
+                    items.push(Box::new(SetClip::new(c.id, f)));
+                }
+            }
+        }
+        if items.is_empty() {
+            return Outcome::default();
+        }
+        let r = doc.execute(Group::new(label, ids, items)).map(|_| ());
+        doc.seal();
+        Outcome::from_result(r)
+    }
+
+    /// Whether the selection holds an audio clip (for enabling clip gain and
+    /// fade actions).
+    pub fn audio_selected(&self, project: &Project) -> bool {
+        self.selected_clips(project)
+            .iter()
+            .any(|(_, c)| matches!(c.content, ClipContent::Audio(_)))
     }
 
     /// Moves the selection one grid step left (`-1`) or right (`1`).
@@ -1249,11 +1556,7 @@ impl Arrange {
             name,
             at,
             length,
-            ClipContent::Audio(AudioClip {
-                source,
-                offset: SampleTime(0),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new(source, SampleTime(0))),
         );
         let id = clip.id;
         items.push(Box::new(AddClip::new(target, clip)));

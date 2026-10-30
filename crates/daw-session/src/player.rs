@@ -22,7 +22,7 @@ use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::SampleTime;
 use daw_media::{AudioData, ClipReader, DiskStreamer, MediaError};
-use daw_model::ClipId;
+use daw_model::{ClipId, FadeShape};
 
 /// Output channels of every player (tracks are stereo).
 pub const PLAYER_CHANNELS: u16 = 2;
@@ -108,10 +108,14 @@ pub struct PlayClip {
     pub file_start: i64,
     /// Linear gain.
     pub gain: f32,
-    /// Whether to fade at each edge. Off where the clip runs straight on
+    /// Whether to declick each edge. Off where the clip runs straight on
     /// into the next one, as after a split.
     pub fade_in: bool,
     pub fade_out: bool,
+    /// The user's fades: length in samples and shape. Lengths are already
+    /// shortened to fit the clip together.
+    pub user_fade_in: (i64, FadeShape),
+    pub user_fade_out: (i64, FadeShape),
     pub source: ClipSource,
 }
 
@@ -119,26 +123,62 @@ impl PlayClip {
     fn file_pos(&self, timeline: i64) -> i64 {
         self.file_start + (timeline - self.start)
     }
+
+    fn envelope(&self) -> Envelope {
+        Envelope {
+            start: self.start,
+            end: self.end,
+            gain: self.gain,
+            declick_in: self.fade_in,
+            declick_out: self.fade_out,
+            fade_in: self.user_fade_in,
+            fade_out: self.user_fade_out,
+        }
+    }
 }
 
-/// The edges of a clip as the fade sees them: `(start, end, gain, fade_in,
-/// fade_out)`.
-type Edges = (i64, i64, f32, bool, bool);
+/// A clip's gain over time: its level, the user's fades and the short
+/// declick at each edge.
+#[derive(Copy, Clone)]
+struct Envelope {
+    start: i64,
+    end: i64,
+    gain: f32,
+    declick_in: bool,
+    declick_out: bool,
+    fade_in: (i64, FadeShape),
+    fade_out: (i64, FadeShape),
+}
 
-/// Clip gain at `timeline`, faded in and out over `EDGE_FADE` samples at the
-/// clip's edges where it has fades.
-fn edge_gain((start, end, gain, fade_in, fade_out): Edges, timeline: i64) -> f32 {
-    let from_start = if fade_in { timeline - start } else { i64::MAX };
-    let to_end = if fade_out {
-        end - 1 - timeline
-    } else {
-        i64::MAX
-    };
-    let d = from_start.min(to_end);
-    if d >= EDGE_FADE {
-        gain
-    } else {
-        gain * (d.max(0) as f32 + 0.5) / EDGE_FADE as f32
+impl Envelope {
+    /// Whether the whole span `[from, to)` plays at the plain clip gain.
+    fn flat(&self, from: i64, to: i64) -> bool {
+        let lead = if self.declick_in { EDGE_FADE } else { 0 }.max(self.fade_in.0);
+        let tail = if self.declick_out { EDGE_FADE } else { 0 }.max(self.fade_out.0);
+        from - self.start >= lead && self.end - to >= tail
+    }
+
+    /// Gain at `timeline`.
+    fn at(&self, timeline: i64) -> f32 {
+        let from_start = timeline - self.start;
+        let to_end = self.end - 1 - timeline;
+        let mut g = self.gain;
+        let declick = |d: i64| (d.max(0) as f32 + 0.5) / EDGE_FADE as f32;
+        if self.declick_in && from_start < EDGE_FADE {
+            g *= declick(from_start);
+        }
+        if self.declick_out && to_end < EDGE_FADE {
+            g *= declick(to_end);
+        }
+        let (len, shape) = self.fade_in;
+        if from_start < len {
+            g *= shape.gain((from_start.max(0) as f32 + 0.5) / len as f32);
+        }
+        let (len, shape) = self.fade_out;
+        if to_end < len {
+            g *= shape.gain((to_end.max(0) as f32 + 0.5) / len as f32);
+        }
+        g
     }
 }
 
@@ -403,7 +443,9 @@ impl Node for AudioClipPlayer {
                 continue;
             }
             let at = (from - pos) as usize;
-            let edges = (c.start, c.end, c.gain, c.fade_in, c.fade_out);
+            let env = c.envelope();
+            let flat = env.flat(from, to);
+            let gain_at = |t: i64| if flat { env.gain } else { env.at(t) };
             let len = (to - from) as usize;
             match &mut c.source {
                 ClipSource::Memory(data) => {
@@ -420,8 +462,7 @@ impl Node for AudioClipPlayer {
                             if f >= 0
                                 && let Some(x) = src.get(f as usize)
                             {
-                                let g = edge_gain(edges, from + i as i64);
-                                out[at + i] += x * g;
+                                out[at + i] += x * gain_at(from + i as i64);
                             }
                         }
                     }
@@ -433,8 +474,7 @@ impl Node for AudioClipPlayer {
                     s.main_next = to;
                     for (ch, out) in ctx.audio_out.iter_mut().enumerate().take(2) {
                         for i in 0..len {
-                            let g = edge_gain(edges, from + i as i64);
-                            out[at + i] += bufs[ch][i] * g;
+                            out[at + i] += bufs[ch][i] * gain_at(from + i as i64);
                         }
                     }
                 }
