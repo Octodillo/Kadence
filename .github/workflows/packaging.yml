@@ -111,7 +111,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl gnupg
-          curl -fsSL https://archive.neon.kde.org/public.key \
+          curl -fsSL --retry 5 --retry-delay 15 --retry-all-errors https://archive.neon.kde.org/public.key \
             | gpg --dearmor -o /usr/share/keyrings/neon.gpg
           echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
             > /etc/apt/sources.list.d/neon.list
