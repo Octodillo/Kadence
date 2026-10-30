@@ -324,11 +324,15 @@ fn connects_other_clients_ports_while_stopped() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut b = JackBackend::new();
     b.open(cfg("wu2-route")).unwrap();
+    // Other tests may link system ports at the same time (nextest runs each
+    // test in its own process, so SERIAL does not cover them): only look at
+    // this pair.
+    let linked = || connections_of("system:capture_1").contains(&"system:playback_1".to_string());
     b.connect("system:capture_1", "system:playback_1").unwrap();
-    assert_eq!(connections_of("system:capture_1"), ["system:playback_1"]);
+    assert!(linked());
     b.disconnect("system:capture_1", "system:playback_1")
         .unwrap();
-    assert!(connections_of("system:capture_1").is_empty());
+    assert!(!linked());
     b.close().unwrap();
 }
 
