@@ -1,12 +1,14 @@
 //! Test helpers for `--smoke-test` and `--screenshot-dir` (see SelfTest.qml).
 
-use cxx_qt_lib::QString;
+use cxx_qt_lib::{QString, QUrl};
 
 #[cxx_qt::bridge]
 pub mod self_test {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qurl.h");
+        type QUrl = cxx_qt_lib::QUrl;
     }
 
     #[auto_cxx_name]
@@ -45,14 +47,18 @@ pub mod self_test {
         #[qinvokable]
         fn make_files_test(self: &TestHelper) -> QString;
 
-        /// Whether a file exists at `path`.
-        #[qinvokable]
-        fn file_exists(self: &TestHelper, path: &QString) -> bool;
-
         /// Leave a never-saved project with one track behind in a scratch
         /// folder, as a crash would, and offer it for recovery.
         #[qinvokable]
         fn offer_test_recovery(self: &TestHelper) -> bool;
+        /// A file URL for `name` in a fresh directory of this process's
+        /// own under the temporary directory.
+        #[qinvokable]
+        fn temp_file_url(self: &TestHelper, name: &QString) -> QUrl;
+
+        /// Whether the local file at `url` exists.
+        #[qinvokable]
+        fn file_exists(self: &TestHelper, url: &QUrl) -> bool;
     }
 }
 
@@ -125,10 +131,6 @@ impl self_test::TestHelper {
         }
     }
 
-    fn file_exists(&self, path: &QString) -> bool {
-        std::path::Path::new(&path.to_string()).exists()
-    }
-
     fn offer_test_recovery(&self) -> bool {
         let base = test_dir("recovery");
         let result = (|| -> Result<(), String> {
@@ -149,6 +151,20 @@ impl self_test::TestHelper {
             s.touch();
             !s.recovery.is_empty()
         })
+    }
+
+    fn temp_file_url(&self, name: &QString) -> QUrl {
+        let dir = std::env::temp_dir().join(format!("kadence-test-{}", std::process::id()));
+        // A missing directory shows up as a failed export in the test.
+        let _ = std::fs::create_dir_all(&dir);
+        QUrl::from_local_file(&QString::from(
+            dir.join(name.to_string()).display().to_string().as_str(),
+        ))
+    }
+
+    fn file_exists(&self, url: &QUrl) -> bool {
+        url.to_local_file()
+            .is_some_and(|p| std::path::Path::new(&p.to_string()).exists())
     }
 }
 
