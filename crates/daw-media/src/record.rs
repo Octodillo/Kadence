@@ -80,22 +80,31 @@ impl RecordInput {
     }
 
     /// Queue one block: one slice per channel, equal lengths. If the ring is too full
-    /// the whole block is dropped and counted. Returns the frames queued, which is 0
-    /// once the writer has [`failed`](Self::failed).
+    /// the frames that don't fit are dropped and counted, as is a whole block with
+    /// missing channels. Returns the frames queued, which is 0 once the writer has
+    /// [`failed`](Self::failed).
     pub fn write(&mut self, inputs: &[&[f32]]) -> usize {
         let ch = self.channels;
         let frames = inputs.iter().map(|c| c.len()).min().unwrap_or(0);
-        if inputs.len() < ch || self.failed() {
+        if self.failed() {
             return 0;
         }
-        let Ok(chunk) = self.tx.write_chunk_uninit(frames * ch) else {
+        let fit = if inputs.len() < ch {
+            0
+        } else {
+            frames.min(self.tx.slots() / ch)
+        };
+        if fit < frames {
             self.shared
                 .dropped_frames
-                .fetch_add(frames as u64, Ordering::Relaxed);
+                .fetch_add((frames - fit) as u64, Ordering::Relaxed);
+        }
+        if fit == 0 {
             return 0;
-        };
-        chunk.fill_from_iter((0..frames).flat_map(|f| (0..ch).map(move |c| inputs[c][f])));
-        frames
+        }
+        let chunk = self.tx.write_chunk_uninit(fit * ch).expect("slots checked");
+        chunk.fill_from_iter((0..fit).flat_map(|f| (0..ch).map(move |c| inputs[c][f])));
+        fit
     }
 }
 
@@ -107,7 +116,8 @@ pub struct Recorder {
 
 impl Recorder {
     /// Create `path` and start the writer thread. The ring holds `buffer_seconds` of
-    /// audio, which is how long the disk may stall before frames are dropped.
+    /// audio, which is how long the disk may stall before frames are dropped. Fails if
+    /// `path` already exists: an earlier take there is never overwritten.
     pub fn start(
         path: impl AsRef<Path>,
         channels: usize,
@@ -115,8 +125,10 @@ impl Recorder {
         format: WavFormat,
         buffer_seconds: f32,
     ) -> Result<(Recorder, RecordInput)> {
+        let path = path.as_ref();
         Self::start_with_limit(
-            path.as_ref(),
+            path,
+            File::create_new(path),
             channels,
             sample_rate,
             format,
@@ -127,6 +139,7 @@ impl Recorder {
 
     fn start_with_limit(
         path: &Path,
+        file: std::io::Result<File>,
         channels: usize,
         sample_rate: u32,
         format: WavFormat,
@@ -139,7 +152,7 @@ impl Recorder {
         let spec = format.spec(channels, sample_rate);
         let frame_bytes = channels as u64 * spec.bits_per_sample as u64 / 8;
         let max_frames = (max_data_bytes / frame_bytes).max(1);
-        let first = Segment::create(path.to_owned(), File::create(path), spec, sample_rate)?;
+        let first = Segment::create(path.to_owned(), file, spec, sample_rate)?;
         let capacity = ((buffer_seconds * sample_rate as f32) as usize).max(4096) * channels;
         let (tx, rx) = RingBuffer::new(capacity);
         let shared = Arc::new(Shared {
@@ -419,6 +432,54 @@ mod tests {
     use super::*;
     use crate::decode_file;
 
+    /// Issue #22: a writer I/O error (disk full) used to make `finish` return only the
+    /// error, losing the stats, while the RT side kept "recording" into a dead ring.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writer_error_is_reported_at_once_and_keeps_the_stats() {
+        let full = Path::new("/dev/full");
+        let file = File::options().write(true).open(full);
+        let (rec, mut input) = Recorder::start_with_limit(
+            full,
+            file,
+            2,
+            48_000,
+            WavFormat::Float32,
+            1.0,
+            MAX_DATA_BYTES,
+        )
+        .unwrap();
+        let block = vec![0.1f32; 512];
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        // BufWriter holds 8 KiB, so the error shows up on a later write or header flush.
+        while !input.failed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer error never surfaced"
+            );
+            input.write(&[&block, &block]);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(rec.failed());
+        let dropped_before = rec.dropped_frames();
+        assert_eq!(
+            input.write(&[&block, &block]),
+            0,
+            "nothing is queued after a failure"
+        );
+        assert_eq!(rec.dropped_frames(), dropped_before);
+        drop(input);
+        let stats = rec
+            .finish()
+            .expect("a writer error still returns the stats");
+        let err = stats.error.expect("the error is reported");
+        assert!(err.to_string().contains("space"), "{err}");
+        assert_eq!(stats.files.len(), 1);
+        // No peak cache is written for a failed file (here it would be /dev/full.peaks).
+        assert!(stats.files[0].peaks_error.is_some());
+        assert!(!Path::new("/dev/full.peaks").exists());
+    }
+
     #[test]
     fn file_limit_leaves_room_for_the_header() {
         // hound's largest header (WAVE_FORMAT_EXTENSIBLE) is well under 1 KiB.
@@ -435,8 +496,16 @@ mod tests {
         let taken = dir.path().join("take-2.wav");
         std::fs::write(&taken, b"not ours").unwrap();
         // 1000 stereo Pcm16 frames (4000 bytes) per file.
-        let (rec, mut input) =
-            Recorder::start_with_limit(&path, 2, 48_000, WavFormat::Pcm16, 1.0, 4000).unwrap();
+        let (rec, mut input) = Recorder::start_with_limit(
+            &path,
+            File::create_new(&path),
+            2,
+            48_000,
+            WavFormat::Pcm16,
+            1.0,
+            4000,
+        )
+        .unwrap();
         let left: Vec<f32> = (0..2500).map(|i| (i as f32 / 2500.0) - 0.5).collect();
         let right: Vec<f32> = left.iter().map(|s| -s).collect();
         for (l, r) in left.chunks(300).zip(right.chunks(300)) {
