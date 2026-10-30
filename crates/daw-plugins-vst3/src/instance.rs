@@ -295,6 +295,9 @@ pub struct Vst3Instance {
     layout_changed: bool,
     /// The plugin's buses no longer match `rt`, so `process` outputs silence until `prepare`.
     io_stale: bool,
+    /// Whether the plugin had parameters at the last `prepare`, which makes its ports take
+    /// and send events. Fixed between prepares like the rest of the layout.
+    has_params: bool,
     /// The speaker arrangements `prepare` settled on, inputs then outputs.
     arrangements: (Vec<SpeakerArrangement>, Vec<SpeakerArrangement>),
 
@@ -518,6 +521,7 @@ impl Vst3Instance {
                 layout_changed: false,
                 io_stale: false,
                 arrangements: Default::default(),
+                has_params: false,
                 edits_rx,
                 to_controller: ToController::new(0),
                 connection,
@@ -530,6 +534,7 @@ impl Vst3Instance {
             };
             instance.sync_controller_to_component();
             instance.read_params();
+            instance.has_params = !instance.params.is_empty();
             instance.read_midi_map();
             instance.descriptor.ports = (
                 channel_total(&instance.buses.inputs),
@@ -751,6 +756,10 @@ impl Vst3Instance {
             != 0
         {
             self.read_params();
+            // Gaining the first parameter or losing the last changes the event ports.
+            if self.params.is_empty() == self.has_params {
+                self.layout_changed = true;
+            }
         }
         if flags & (RestartFlags_::kMidiCCAssignmentChanged as i32) != 0 {
             self.read_midi_map();
@@ -824,8 +833,10 @@ impl Node for Vst3Instance {
         PortLayout {
             audio_in: channel_total(&self.buses.inputs),
             audio_out: channel_total(&self.buses.outputs),
-            event_in: self.buses.event_in,
-            event_out: self.buses.event_out,
+            // Parameter changes travel as events too, so a plugin with parameters takes and
+            // sends events even without event buses (most effects); notes need a bus.
+            event_in: self.buses.event_in || self.has_params,
+            event_out: self.buses.event_out || self.has_params,
         }
     }
 
@@ -897,6 +908,7 @@ impl Node for Vst3Instance {
                 }
             }
         }
+        self.has_params = !self.params.is_empty();
         self.rt = Some(Rt::new(&self.buses, self.max_frames, sample_rate));
         self.activate();
     }
@@ -1018,6 +1030,11 @@ impl Node for Vst3Instance {
                     );
                 }
             }
+        }
+
+        if !self.buses.event_in {
+            // Notes have nowhere to go without an event bus.
+            rt.in_events.clear();
         }
 
         for (i, buf) in rt.in_audio.iter_mut().enumerate() {
@@ -1560,6 +1577,43 @@ mod tests {
             &[(c"channels", channels), (c"locked", locked as i64)],
         );
         unsafe { p.handler.restartComponent(RestartFlags_::kIoChanged as i32) };
+    }
+
+    #[test]
+    fn effects_without_an_event_bus_still_take_parameter_events() {
+        let mut p = instance();
+        // Most effects have no event bus; testgain has one, so take it away.
+        p.buses.event_in = false;
+        p.buses.event_out = false;
+        assert!(p.ports().event_in, "the engine would refuse automation");
+        assert!(p.ports().event_out, "editor edits could not be recorded");
+        let heard = gain_heard_with(
+            &mut p,
+            &[
+                EventKind::ParamValue {
+                    param: GAIN,
+                    value: 0.5,
+                },
+                EventKind::NoteOn {
+                    channel: 0,
+                    key: 60,
+                    velocity: 1.0,
+                    note_id: -1,
+                },
+            ],
+        );
+        assert_eq!(heard, 0.5);
+        assert!(p.rt.as_ref().unwrap().in_events.iter().next().is_none());
+
+        // A plugin that gains its first parameter (or loses its last) changes its event
+        // ports, which the host must hear about.
+        p.has_params = false;
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kParamTitlesChanged as i32)
+        };
+        main_thread(&mut p);
+        assert!(p.take_layout_changed());
     }
 
     #[test]

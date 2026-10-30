@@ -105,14 +105,25 @@ pub struct WireParam {
     pub automatable: bool,
 }
 
+/// `value` made finite, since JSON has no NaN or infinity: infinities are clamped and NaN
+/// becomes `nan`.
+fn finite(value: f64, nan: f64) -> f64 {
+    if value.is_nan() {
+        nan
+    } else {
+        value.clamp(f64::MIN, f64::MAX)
+    }
+}
+
 impl From<&ParamInfo> for WireParam {
     fn from(p: &ParamInfo) -> Self {
+        let default = finite(p.default, 0.0);
         Self {
             id: p.id,
             name: p.name.clone(),
-            min: p.min,
-            max: p.max,
-            default: p.default,
+            min: finite(p.min, default),
+            max: finite(p.max, default),
+            default,
             automatable: p.automatable,
         }
     }
@@ -183,6 +194,7 @@ pub fn write_frame(mut w: impl Write, msg: &impl Serialize, blob: &[u8]) -> io::
 }
 
 /// Reads one frame, blocking (or until the stream's read timeout).
+#[cfg(test)]
 pub fn read_frame<T: for<'de> Deserialize<'de>>(mut r: impl Read) -> io::Result<(T, Vec<u8>)> {
     let mut lens = [0u8; 8];
     r.read_exact(&mut lens)?;
@@ -307,5 +319,26 @@ mod tests {
     fn a_closed_stream_is_an_error() {
         let mut reader = FrameReader::default();
         assert!(reader.poll::<Request>(&[][..]).is_err());
+    }
+
+    #[test]
+    fn non_finite_param_info_crosses_the_wire() {
+        let info = ParamInfo {
+            id: 3,
+            name: "odd".into(),
+            min: f64::NEG_INFINITY,
+            max: f64::INFINITY,
+            default: f64::NAN,
+            automatable: true,
+        };
+        let mut wire = Vec::new();
+        let reply = Reply::Params(vec![WireParam::from(&info)]);
+        write_frame(&mut wire, &reply, b"").unwrap();
+        let (reply, _): (Reply, _) = read_frame(&wire[..]).unwrap();
+        let Reply::Params(params) = reply else {
+            panic!("{reply:?}");
+        };
+        let p = &params[0];
+        assert_eq!((p.min, p.max, p.default), (f64::MIN, f64::MAX, 0.0));
     }
 }

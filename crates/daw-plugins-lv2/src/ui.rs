@@ -697,7 +697,13 @@ impl Editor {
     }
 
     fn destroy(&mut self) {
-        if let Some(w) = self.external.take() {
+        // An external UI that called `ui_closed` is defunct: it only gets
+        // `cleanup`, never `hide`.
+        // SAFETY: the controller is ours; the UI is not running right now.
+        let closed = unsafe { (*self.controller).closed };
+        if let Some(w) = self.external.take()
+            && !closed
+        {
             // SAFETY: a live external widget.
             if let Some(hide) = unsafe { (*w).hide } {
                 unsafe { hide(w) };

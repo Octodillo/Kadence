@@ -470,3 +470,69 @@ fn many_changes_in_one_segment_keep_their_order() {
         p.param_value(fb)
     );
 }
+
+/// A copy of mda Delay's metadata whose Feedback port has its bounds the wrong
+/// way round, using the installed binary.
+fn inverted_range_bundle(dir: &Path) -> tempfile::TempDir {
+    let bundle = tempfile::tempdir().unwrap();
+    let binary = dir.join("mda.lv2/Delay.so");
+    let ttl = format!(
+        r#"@prefix doap: <http://usefulinc.com/ns/doap#> .
+@prefix lv2: <http://lv2plug.in/ns/lv2core#> .
+<{MDA}Delay>
+	a lv2:Plugin ;
+	doap:name "MDA Delay" ;
+	lv2:binary <file://{binary}> ;
+	lv2:port [
+		a lv2:InputPort , lv2:ControlPort ;
+		lv2:index 0 ; lv2:symbol "l_delay" ; lv2:name "L Delay" ;
+		lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+	] , [
+		a lv2:InputPort , lv2:ControlPort ;
+		lv2:index 1 ; lv2:symbol "r_delay" ; lv2:name "R Delay" ;
+		lv2:default 0.27 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+	] , [
+		a lv2:InputPort , lv2:ControlPort ;
+		lv2:index 2 ; lv2:symbol "feedback" ; lv2:name "Feedback" ;
+		lv2:default 0.7 ; lv2:minimum 1.0 ; lv2:maximum 0.0
+	] , [
+		a lv2:InputPort , lv2:ControlPort ;
+		lv2:index 3 ; lv2:symbol "fb_tone" ; lv2:name "Fb Tone" ;
+		lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+	] , [
+		a lv2:InputPort , lv2:ControlPort ;
+		lv2:index 4 ; lv2:symbol "fx_mix" ; lv2:name "FX Mix" ;
+		lv2:default 0.33 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+	] , [
+		a lv2:InputPort , lv2:ControlPort ;
+		lv2:index 5 ; lv2:symbol "output" ; lv2:name "Output" ;
+		lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+	] , [
+		a lv2:InputPort , lv2:AudioPort ; lv2:index 6 ; lv2:symbol "left_in" ; lv2:name "Left In"
+	] , [
+		a lv2:InputPort , lv2:AudioPort ; lv2:index 7 ; lv2:symbol "right_in" ; lv2:name "Right In"
+	] , [
+		a lv2:OutputPort , lv2:AudioPort ; lv2:index 8 ; lv2:symbol "left_out" ; lv2:name "Left Out"
+	] , [
+		a lv2:OutputPort , lv2:AudioPort ; lv2:index 9 ; lv2:symbol "right_out" ; lv2:name "Right Out"
+	] .
+"#,
+        binary = binary.display()
+    );
+    std::fs::write(bundle.path().join("manifest.ttl"), ttl).unwrap();
+    bundle
+}
+
+/// livi clamps every control write to the port's bounds, which panics when
+/// they are inverted, so such a plugin is refused up front.
+#[test]
+fn a_port_with_an_inverted_range_is_refused() {
+    let dir = need_plugins!();
+    let bundle = inverted_range_bundle(&dir);
+    let format = daw_plugins_lv2::format();
+    let d = find(&*format, bundle.path(), ".", &format!("{MDA}Delay"));
+    let Err(e) = format.instantiate(&d, SR, BLOCK) else {
+        panic!("instantiated a plugin whose control writes would panic");
+    };
+    assert!(e.to_string().contains("Feedback"), "{e}");
+}

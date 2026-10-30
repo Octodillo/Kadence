@@ -9,6 +9,7 @@ use daw_core::node::TransportState;
 pub(crate) struct Urids {
     pub midi_event: u32,
     pub atom_object: u32,
+    pub atom_sequence: u32,
     pub atom_long: u32,
     pub atom_int: u32,
     pub atom_float: u32,
@@ -29,6 +30,7 @@ impl Urids {
         Self {
             midi_event: f.midi_urid(),
             atom_object: m(c"http://lv2plug.in/ns/ext/atom#Object"),
+            atom_sequence: m(c"http://lv2plug.in/ns/ext/atom#Sequence"),
             atom_long: m(c"http://lv2plug.in/ns/ext/atom#Long"),
             atom_int: m(c"http://lv2plug.in/ns/ext/atom#Int"),
             atom_float: m(c"http://lv2plug.in/ns/ext/atom#Float"),
@@ -81,6 +83,61 @@ pub(crate) fn push_event(
         size.write_unaligned(size.read_unaligned() + padded as u32);
     }
     true
+}
+
+/// One event of an atom sequence.
+pub(crate) struct SeqEvent<'a> {
+    pub time: i64,
+    pub ty: u32,
+    pub data: &'a [u8],
+}
+
+/// The events of the `atom:Sequence` in `buf` (header included), which a
+/// plugin wrote. Unlike livi's iterator this trusts no size the plugin wrote:
+/// it stops at the first event that would run past the buffer. Nothing is
+/// yielded unless the atom's type is `sequence_urid`.
+pub(crate) fn sequence_events(
+    buf: &[u8],
+    sequence_urid: u32,
+) -> impl Iterator<Item = SeqEvent<'_>> {
+    let u32_at = |at: usize| u32::from_ne_bytes(buf[at..at + 4].try_into().unwrap());
+    // The atom header (size, type) and the sequence body header (unit, pad).
+    let start = 16;
+    let end = if buf.len() >= start && u32_at(4) == sequence_urid {
+        (8 + u32_at(0) as usize).min(buf.len())
+    } else {
+        0
+    };
+    let mut at = start;
+    std::iter::from_fn(move || {
+        if at + EVENT_HEADER > end {
+            return None;
+        }
+        let size = u32_at(at + 8) as usize;
+        let data = buf.get(at + EVENT_HEADER..at + EVENT_HEADER + size)?;
+        if at + EVENT_HEADER + size > end {
+            return None;
+        }
+        let ev = SeqEvent {
+            time: i64::from_ne_bytes(buf[at..at + 8].try_into().unwrap()),
+            ty: u32_at(at + 12),
+            data,
+        };
+        at += event_size(size);
+        Some(ev)
+    })
+}
+
+/// [`sequence_events`] for one of the host's sequence buffers.
+pub(crate) fn output_events(
+    seq: &livi::event::LV2AtomSequence,
+    sequence_urid: u32,
+) -> impl Iterator<Item = SeqEvent<'_>> {
+    let len = seq.capacity() + std::mem::size_of::<lv2_raw::LV2AtomSequence>();
+    // SAFETY: livi's buffer is exactly `capacity()` bytes past the sequence
+    // header, and it is borrowed for as long as the slice.
+    let buf = unsafe { std::slice::from_raw_parts(seq.as_ptr().cast::<u8>(), len) };
+    sequence_events(buf, sequence_urid)
 }
 
 /// Writes the body of an `atom:Object` into a fixed buffer, one property at a
@@ -194,11 +251,70 @@ mod tests {
         assert_eq!(i64::from_ne_bytes(buf[48..56].try_into().unwrap()), -9);
     }
 
+    /// A sequence buffer: header (size, type, unit, pad), then `events`.
+    fn sequence(size: u32, ty: u32, events: &[u8], len: usize) -> Vec<u8> {
+        let mut b = vec![0u8; len];
+        b[..4].copy_from_slice(&size.to_ne_bytes());
+        b[4..8].copy_from_slice(&ty.to_ne_bytes());
+        b[16..16 + events.len()].copy_from_slice(events);
+        b
+    }
+
+    fn event(time: i64, ty: u32, body: &[u8]) -> Vec<u8> {
+        let mut e = Vec::new();
+        e.extend_from_slice(&time.to_ne_bytes());
+        e.extend_from_slice(&(body.len() as u32).to_ne_bytes());
+        e.extend_from_slice(&ty.to_ne_bytes());
+        e.extend_from_slice(body);
+        e.resize(event_size(body.len()), 0);
+        e
+    }
+
+    fn collect(buf: &[u8], seq: u32) -> Vec<(i64, u32, Vec<u8>)> {
+        sequence_events(buf, seq)
+            .map(|e| (e.time, e.ty, e.data.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn well_formed_sequences_are_read() {
+        let mut events = event(3, 9, &[1, 2, 3]);
+        events.extend(event(7, 10, &[4; 9]));
+        let buf = sequence(8 + events.len() as u32, 5, &events, 128);
+        assert_eq!(
+            collect(&buf, 5),
+            [(3, 9, vec![1, 2, 3]), (7, 10, vec![4; 9])]
+        );
+        // Not a sequence (a chunk the plugin left alone): nothing.
+        assert!(collect(&buf, 6).is_empty());
+    }
+
+    /// Sizes a plugin wrote are never trusted past the buffer.
+    #[test]
+    fn malformed_sequences_stay_in_bounds() {
+        let good = event(1, 9, &[1, 2]);
+        let mut events = good.clone();
+        // An event claiming a 60000-byte body.
+        let mut huge = event(2, 9, &[0; 8]);
+        huge[8..12].copy_from_slice(&60_000u32.to_ne_bytes());
+        events.extend(&huge);
+        let len = 16 + events.len();
+        let buf = sequence(8 + events.len() as u32, 5, &events, len);
+        assert_eq!(collect(&buf, 5), [(1, 9, vec![1, 2])]);
+        // A sequence size far past the buffer: events that fit are read, and
+        // reading stops at the buffer's end.
+        let buf = sequence(u32::MAX, 5, &good, 16 + good.len() + 8);
+        assert_eq!(collect(&buf, 5), [(1, 9, vec![1, 2])]);
+        // A buffer too short for even a header.
+        assert!(collect(&[0; 6], 5).is_empty());
+    }
+
     #[test]
     fn a_full_position_fits_its_buffer() {
         let u = Urids {
             midi_event: 1,
             atom_object: 2,
+            atom_sequence: 3,
             atom_long: 4,
             atom_int: 5,
             atom_float: 6,
@@ -246,6 +362,7 @@ mod tests {
         let u = Urids {
             midi_event: 1,
             atom_object: 2,
+            atom_sequence: 3,
             atom_long: 4,
             atom_int: 5,
             atom_float: 6,
