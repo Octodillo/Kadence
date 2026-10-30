@@ -50,6 +50,9 @@ const STATE_VERSION: u32 = 1;
 /// between them to follow log and skewed curves to well under a percent.
 const CURVE_POINTS: usize = 129;
 
+/// Most zero-sample `process` calls one state save makes to hand editor edits over.
+const FLUSH_ROUNDS: usize = 64;
+
 #[derive(Clone, Debug)]
 struct Param {
     info: ParamInfo,
@@ -596,7 +599,10 @@ impl Vst3Instance {
         let Some(rt) = self.rt.as_deref_mut() else {
             return;
         };
-        loop {
+        // Bounded, so a plugin that calls `performEdit` from its own `process` cannot keep
+        // the loop going forever. Each round empties the ring and refills it from overflow,
+        // which holds at most one edit per parameter.
+        for _ in 0..FLUSH_ROUNDS {
             self.handler.retry_overflow();
             if self.edits_rx.is_empty() {
                 return;
@@ -1221,14 +1227,20 @@ mod tests {
                 .unwrap()
                 .to_path_buf();
             let so = profile_dir.join("examples/libtestgain.so");
-            if !so.exists() {
-                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-                let status = std::process::Command::new(cargo)
-                    .args(["build", "-p", "daw-plugins-vst3", "--example", "testgain"])
-                    .status()
-                    .expect("run cargo to build the test plugin");
-                assert!(status.success(), "building the testgain example failed");
-            }
+            // `cargo test --lib` does not build examples, so build it here, always (a stale
+            // copy would test an old plugin), and in this test binary's profile, or the
+            // library lands in another profile's directory.
+            let profile = match profile_dir.file_name().and_then(|n| n.to_str()) {
+                Some("debug") | None => "dev",
+                Some(name) => name,
+            };
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "-p", "daw-plugins-vst3", "--example", "testgain"])
+                .args(["--profile", profile])
+                .status()
+                .expect("run cargo to build the test plugin");
+            assert!(status.success(), "building the testgain example failed");
             let root = std::env::temp_dir().join(format!("daw-vst3-unit-{}", std::process::id()));
             let bin = root
                 .join("TestGain.vst3/Contents")
