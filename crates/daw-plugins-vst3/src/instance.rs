@@ -616,14 +616,23 @@ unsafe impl Send for Audio {}
 /// The audio-thread half of a [`Vst3Instance`], from [`PluginInstance::split`].
 ///
 /// A block that comes while the main thread is in one of the few calls that must not
-/// overlap `process` is silent, and a `reset` then is skipped.
+/// overlap `process` waits a few microseconds for it, then is silent and loses its events;
+/// a `reset` then is skipped. Join it before dropping the instance, or the plugin's last
+/// reference goes wherever this is dropped.
 pub struct Vst3Processor(Arc<Exclusive<Audio>>);
+
+/// How many times a [`Vst3Processor`] block retries the audio state the main thread holds.
+const AUDIO_RETRIES: u32 = 100;
 
 impl PluginProcessor for Vst3Processor {
     fn process(&mut self, ctx: &mut ProcessContext) {
-        if self.0.try_audio(|a| a.process(ctx)).is_none() {
-            silence(ctx);
+        for _ in 0..AUDIO_RETRIES {
+            if self.0.try_audio(|a| a.process(ctx)).is_some() {
+                return;
+            }
+            std::hint::spin_loop();
         }
+        silence(ctx);
     }
 
     fn reset(&mut self) {
@@ -1361,6 +1370,11 @@ impl PluginInstance for Vst3Instance {
                 }
                 Ok(())
             };
+        // Editor edits made before the load are stale and must not reach `process` on top of
+        // the restored state; with the half out the audio thread could apply them before the
+        // clear below, so drop them first.
+        self.handler.discard_overflow();
+        self.with_audio(|_, a| while a.edits_rx.pop().is_ok() {});
         write(component.clone(), &|s| unsafe {
             self.component.setState(s)
         })?;
@@ -1382,8 +1396,7 @@ impl PluginInstance for Vst3Instance {
                 log::warn!("vst3 {}: controller setState: {e}", self.descriptor.name);
             }
         }
-        // Values pushed before the load are stale now, in both directions: editor edits still
-        // queued for the processor would otherwise overwrite the restored state.
+        // Values pushed before the load are stale now, in both directions.
         self.handler.discard_overflow();
         self.with_audio(|p, a| {
             while a.edits_rx.pop().is_ok() {}
@@ -1432,7 +1445,8 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
-        if self.lent {
+        // Before the first `prepare` there is nothing to process.
+        if self.lent || self.sample_rate == 0.0 {
             return None;
         }
         self.lent = true;
@@ -1440,10 +1454,12 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn join(&mut self, processor: Box<dyn PluginProcessor>) {
-        if let Ok(half) = processor.into_any().downcast::<Vst3Processor>()
-            && Arc::ptr_eq(&half.0, &self.audio)
-        {
-            self.lent = false;
+        match processor.into_any().downcast::<Vst3Processor>() {
+            Ok(half) if Arc::ptr_eq(&half.0, &self.audio) => self.lent = false,
+            _ => log::warn!(
+                "vst3 {}: asked to join a processor that is not its own",
+                self.descriptor.name
+            ),
         }
     }
 }
@@ -1999,6 +2015,33 @@ mod tests {
         assert_eq!(heard_through(&mut |ctx| half.process(ctx), &[param]), 0.5);
         main_thread(&mut p);
         assert_eq!(p.param_value(GAIN), 0.5);
+        p.join(half);
+    }
+
+    #[test]
+    fn load_state_discards_editor_edits_before_a_split_half_hears_them() {
+        let mut p = instance();
+        let state = p.save_state().unwrap();
+        let mut half = p.split().unwrap();
+        for _ in 0..2 * EDIT_QUEUE {
+            editor_edit(&p, GAIN, 0.3);
+        }
+        p.load_state(&state).unwrap();
+        main_thread(&mut p);
+        assert_eq!(
+            heard_through(&mut |ctx| half.process(ctx), &[]),
+            1.0,
+            "the stale edit overrode the loaded state"
+        );
+        p.join(half);
+    }
+
+    #[test]
+    fn nothing_splits_before_the_first_prepare() {
+        let mut p = Vst3Instance::new(&testgain()).unwrap();
+        assert!(p.split().is_none());
+        p.prepare(48_000.0, FRAMES);
+        let half = p.split().unwrap();
         p.join(half);
     }
 

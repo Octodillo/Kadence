@@ -529,7 +529,9 @@ impl ComponentHandler {
     }
 
     /// Whether edits wait for `process`, in the ring or for room in it. Can turn false at
-    /// once if the audio thread is reading.
+    /// once if the audio thread is reading. Like `retry_overflow` it can run while the
+    /// plugin processes; only a plugin that calls `performEdit` from `process`, against the
+    /// spec, then waits on the lock.
     pub fn has_edits(&self) -> bool {
         let q = self.edits.lock().unwrap();
         !q.overflow.is_empty() || q.ring.slots() < q.ring.buffer().capacity()
