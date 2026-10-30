@@ -542,11 +542,18 @@ fn the_catalog_scans_added_folders_in_the_background() {
     };
     assert_eq!(catalog.filtered(&instruments).count(), 0);
 
+    // The same plugins again: the list counts as unchanged.
+    let list = catalog.list_revision();
+    catalog.scan(false);
+    finish_scan(&mut catalog);
+    assert_eq!(catalog.list_revision(), list);
+
     // Without the folder the plugin is gone, even though the cache still has it.
     catalog.set_extra_folders(vec![]);
     catalog.scan(true);
     finish_scan(&mut catalog);
     assert!(catalog.plugins().is_empty());
+    assert_ne!(catalog.list_revision(), list);
 }
 
 #[test]

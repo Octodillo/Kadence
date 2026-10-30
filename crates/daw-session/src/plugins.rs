@@ -104,6 +104,11 @@ impl SandboxLoader {
     /// Scans every format's folders again, loading only bundles that changed.
     pub fn rescan(&mut self) -> daw_plugins::ScanReport {
         self.scanned = true;
+        // Another scan (the app's) may have written the file since it was read; start from
+        // that, so saving doesn't drop its entries.
+        if let Some(path) = &self.cache_file {
+            self.cache = ScanCache::load(path);
+        }
         let report = self.registry.scan(&self.scanner, &mut self.cache);
         if let Some(path) = &self.cache_file {
             // The cache only saves time; failing to write it is no reason to stop.

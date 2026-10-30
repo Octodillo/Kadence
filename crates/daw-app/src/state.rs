@@ -49,6 +49,8 @@ pub struct AppState {
     /// The installed plugins, for the plugin browser. Scanned in the
     /// background once the browser's model starts it.
     pub plugins: PluginCatalog,
+    /// The catalog list revision last handed to the session.
+    known_plugins: Option<u64>,
 }
 
 /// The app's plugin catalog: scanned by this executable (which answers
@@ -94,6 +96,7 @@ impl AppState {
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
             plugins: plugin_catalog(),
+            known_plugins: None,
         };
         s.sync();
         s
@@ -174,9 +177,21 @@ impl AppState {
         if !self.plugins.poll() {
             return false;
         }
-        // A finished scan: the list is new.
+        let list = self.plugins.list_revision();
+        if self.known_plugins == Some(list) || !self.plugins.has_scanned() {
+            return true;
+        }
+        self.known_plugins = Some(list);
         if let Some(session) = self.engine.session_mut() {
             session.set_known_plugins(self.plugins.plugins());
+            // Missing plugins are tried again; those still missing say so again.
+            if self
+                .status
+                .as_ref()
+                .is_some_and(|f| f.reason == crate::message::Reason::PluginMissing)
+            {
+                self.status = None;
+            }
             self.resync();
         }
         true

@@ -156,9 +156,14 @@ Item {
                         QQC2.MenuItem {
                             icon.name: "preferences-plugin"
                             text: i18nc("@action:inmenu", "Browse Plugins…")
-                            onTriggered: applicationWindow().browsePlugins(2, (format, pluginId, name) => {
-                                Mixer.addPluginInsert(strip.index, format, pluginId, name);
-                            })
+                            onTriggered: {
+                                // The row now: the delegate may be gone by the time a
+                                // plugin is chosen.
+                                const row = strip.index;
+                                applicationWindow().browsePlugins(2, (format, pluginId, name) => {
+                                    Mixer.addPluginInsert(row, format, pluginId, name);
+                                });
+                            }
                         }
                     }
                 }

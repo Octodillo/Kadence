@@ -87,6 +87,10 @@ pub mod qobject {
 
         #[qinvokable]
         fn remove_folder(self: Pin<&mut Plugins>, index: i32);
+
+        /// Row `row` as [formatId, pluginId, name], or empty.
+        #[qinvokable]
+        fn plugin_at(self: &Plugins, row: i32) -> QStringList;
     }
 
     unsafe extern "RustQt" {
@@ -313,6 +317,17 @@ impl qobject::Plugins {
         };
         folders.remove(i);
         self.set_folders(folders);
+    }
+
+    fn plugin_at(&self, row: i32) -> QStringList {
+        let Some(p) = usize::try_from(row).ok().and_then(|r| self.rows.get(r)) else {
+            return QStringList::default();
+        };
+        string_list([
+            daw_plugins::kind_name(&p.format).to_owned(),
+            p.id.clone(),
+            p.name.clone(),
+        ])
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {

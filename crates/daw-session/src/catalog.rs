@@ -113,6 +113,7 @@ pub struct PluginCatalog {
     /// A scan asked for while one ran, and whether it retries failures.
     queued: Option<bool>,
     revision: u64,
+    list_revision: u64,
 }
 
 impl PluginCatalog {
@@ -130,6 +131,7 @@ impl PluginCatalog {
             running: None,
             queued: None,
             revision: 0,
+            list_revision: 0,
         }
     }
 
@@ -200,18 +202,20 @@ impl PluginCatalog {
             return false;
         };
         let outcome = match running.result.try_recv() {
-            Ok(outcome) => outcome,
+            Ok(outcome) => Some(outcome),
             Err(mpsc::TryRecvError::Empty) => return false,
-            // The scan thread panicked: keep what was there.
-            Err(mpsc::TryRecvError::Disconnected) => Outcome {
-                plugins: self.plugins.clone(),
-                failed: self.failed.clone(),
-            },
+            // The scan thread panicked: keep what was there, and don't count it as a scan.
+            Err(mpsc::TryRecvError::Disconnected) => None,
         };
         self.running = None;
-        self.plugins = outcome.plugins;
-        self.failed = outcome.failed;
-        self.scanned = true;
+        if let Some(outcome) = outcome {
+            if !same_plugins(&self.plugins, &outcome.plugins) {
+                self.list_revision += 1;
+            }
+            self.plugins = outcome.plugins;
+            self.failed = outcome.failed;
+            self.scanned = true;
+        }
         self.revision += 1;
         if let Some(retry) = self.queued.take() {
             self.scan(retry);
@@ -266,6 +270,27 @@ impl PluginCatalog {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+
+    /// Changes only when a scan found a different plugin list.
+    pub fn list_revision(&self) -> u64 {
+        self.list_revision
+    }
+}
+
+/// Whether two lists name the same plugins, described the same way.
+fn same_plugins(a: &[PluginDescriptor], b: &[PluginDescriptor]) -> bool {
+    let key = |d: &PluginDescriptor| {
+        (
+            d.format.clone(),
+            d.id.clone(),
+            d.name.clone(),
+            d.vendor.clone(),
+            d.path.clone(),
+            d.is_instrument,
+            d.ports,
+        )
+    };
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| key(x) == key(y))
 }
 
 /// One scan, as the background thread runs it.

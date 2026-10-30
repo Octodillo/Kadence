@@ -43,10 +43,9 @@ Kirigami.Dialog {
     onOpened: search.forceActiveFocus()
 
     function pick(row: int): void {
-        list.currentIndex = row;
-        const item = list.itemAtIndex(row);
-        if (item) {
-            browser.chosen(item.formatId, item.pluginId, item.name);
+        const p = Plugins.pluginAt(row);
+        if (p.length === 3) {
+            browser.chosen(p[0], p[1], p[2]);
             browser.close();
         }
     }
@@ -69,6 +68,9 @@ Kirigami.Dialog {
             }
             QQC2.ComboBox {
                 id: typeBox
+                // Effects go into insert chains and instruments into the
+                // instrument slot, so the opener's choice holds there.
+                visible: browser.kind === 0
                 Accessible.name: i18nc("@label:listbox", "Plugin type")
                 model: [
                     i18nc("@item:inlistbox plugin type filter", "All Types"),
@@ -93,7 +95,11 @@ Kirigami.Dialog {
         QQC2.ScrollView {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.minimumHeight: Kirigami.Units.gridUnit * 10
+            // A set height, so the list scrolls inside rather than the
+            // dialog scrolling the whole column with the search field.
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 20
+            Layout.minimumHeight: Kirigami.Units.gridUnit * 6
+            implicitHeight: 0
 
             ListView {
                 id: list
