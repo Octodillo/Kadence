@@ -128,4 +128,7 @@ fn writer_error_is_reported_at_once_and_keeps_the_stats() {
     let err = stats.error.expect("the error is reported");
     assert!(err.to_string().contains("space"), "{err}");
     assert_eq!(stats.files.len(), 1);
+    // No peak cache is written for a failed file (here it would be /dev/full.peaks).
+    assert!(stats.files[0].peaks_error.is_some());
+    assert!(!std::path::Path::new("/dev/full.peaks").exists());
 }

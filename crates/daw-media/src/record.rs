@@ -56,6 +56,8 @@ pub struct RecordingStats {
     pub dropped_frames: u64,
     /// The error that stopped the writer early (disk full, drive removed). The files
     /// hold the audio written before it; check this before treating the take as whole.
+    /// The last file's `frames` then counts what was handed to the OS, which can be a
+    /// few KiB more than reached the disk.
     pub error: Option<Arc<MediaError>>,
 }
 
@@ -216,6 +218,9 @@ struct Segment {
     writer: hound::WavWriter<BufWriter<File>>,
     peaks: PeakBuilder,
     frames: u64,
+    /// A write to this file failed, so its contents past the last header update are
+    /// unknown.
+    failed: bool,
 }
 
 impl Segment {
@@ -230,6 +235,7 @@ impl Segment {
             writer: hound::WavWriter::new(BufWriter::new(file), spec)?,
             peaks: PeakBuilder::new(spec.channels as usize, sample_rate),
             frames: 0,
+            failed: false,
             path,
         })
     }
@@ -240,7 +246,15 @@ impl Segment {
     fn close(self) -> (RecordedFile, Result<()>) {
         let finalized = self.writer.finalize().map_err(MediaError::from);
         let peaks = self.peaks.finish();
-        let peaks_error = peaks.save_for(&self.path).err().map(Arc::new);
+        // After a write error the cache may not match the file (and the disk is likely
+        // full), so leave it to be rebuilt from the file on the next load.
+        let peaks_error = if self.failed {
+            Some(Arc::new(MediaError::Peaks(
+                "not saved because the recording failed".into(),
+            )))
+        } else {
+            peaks.save_for(&self.path).err().map(Arc::new)
+        };
         let file = RecordedFile {
             path: self.path,
             frames: self.frames,
@@ -277,14 +291,25 @@ impl Writer {
             let seg = self.current.as_mut().expect("open segment");
             let room = ((self.max_frames - seg.frames) as usize).saturating_mul(self.channels);
             let (now, rest) = samples.split_at(samples.len().min(room));
-            for frame in now.chunks_exact(self.channels) {
+            let mut written = 0;
+            let mut result = Ok(());
+            'frames: for frame in now.chunks_exact(self.channels) {
                 for &s in frame {
-                    self.format.write_sample(&mut seg.writer, s)?;
+                    if let Err(e) = self.format.write_sample(&mut seg.writer, s) {
+                        result = Err(e);
+                        break 'frames;
+                    }
                 }
-                seg.frames += 1;
-                self.frames += 1;
+                written += frame.len();
             }
-            seg.peaks.push_interleaved(now);
+            let frames = (written / self.channels) as u64;
+            seg.frames += frames;
+            self.frames += frames;
+            seg.peaks.push_interleaved(&now[..written]);
+            if let Err(e) = result {
+                seg.failed = true;
+                return Err(e.into());
+            }
             samples = rest;
         }
         Ok(())
@@ -295,14 +320,16 @@ impl Writer {
         self.done.push(file);
         finalized?;
         let n = self.done.len() + 1;
-        let stem = self.base.file_stem().unwrap_or_default().to_string_lossy();
-        let ext = self.base.extension().map(|e| e.to_string_lossy());
+        let stem = self.base.file_stem().unwrap_or_default();
+        let ext = self.base.extension();
         // Never overwrite an existing file; skip to the next free name.
         for i in n.. {
-            let name = match &ext {
-                Some(ext) => format!("{stem}-{i}.{ext}"),
-                None => format!("{stem}-{i}"),
-            };
+            let mut name = stem.to_owned();
+            name.push(format!("-{i}"));
+            if let Some(ext) = ext {
+                name.push(".");
+                name.push(ext);
+            }
             let path = self.base.with_file_name(name);
             match File::create_new(&path) {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -316,8 +343,11 @@ impl Writer {
     }
 
     fn flush(&mut self) -> Result<()> {
-        if let Some(seg) = &mut self.current {
-            seg.writer.flush()?;
+        if let Some(seg) = &mut self.current
+            && let Err(e) = seg.writer.flush()
+        {
+            seg.failed = true;
+            return Err(e.into());
         }
         Ok(())
     }
