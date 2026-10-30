@@ -59,7 +59,11 @@ jobs:
           sudo -u builder env KADENCE_SOURCE="git+file://$GITHUB_WORKSPACE#commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" \
             makepkg --syncdeps --noconfirm
       - name: namcap
-        run: namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-git-*.pkg.tar.zst
+        # namcap exits 0 whatever it finds, so fail on its error lines.
+        run: |
+          set -o pipefail
+          namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-git-*.pkg.tar.zst | tee namcap.log
+          ! grep -q ' E: ' namcap.log
       - name: Install
         run: pacman -U --noconfirm /home/builder/pkg/kadence-git-*.pkg.tar.zst
       - name: Smoke test (installed)
@@ -210,6 +214,8 @@ jobs:
           flatpak run --command=sh io.github.octodillo.daw -c 'ldconfig -p | grep -F libjack.so.0'
           # Flatpak keeps the app's config in ~/.var/app; start from a clean one.
           rm -rf ~/.var/app/io.github.octodillo.daw
+          # The step needs kadence's exit status, not tee's.
+          set -o pipefail
           flatpak run \
             --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software \
             --env=QT_FORCE_STDERR_LOGGING=1 \
