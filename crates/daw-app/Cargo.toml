@@ -29,6 +29,10 @@ cxx-qt-lib = { version = "0.10", features = ["qt_gui", "qt_qml"] }
 daw-devices = { path = "../daw-devices" }
 daw-engine = { path = "../daw-engine" }
 
+[dev-dependencies]
+assert_no_alloc.workspace = true
+tempfile = "3"
+
 [build-dependencies]
 cxx-qt-build = "0.10"
 

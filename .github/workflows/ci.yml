@@ -107,7 +107,21 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
-        run: cargo nextest run --workspace --no-tests=warn
+        run: >-
+          cargo nextest run --workspace --no-tests=warn
+          -E 'not (package(daw-app) and binary(song))'
+      # In its own step, so a broken song workflow shows as its own red
+      # step, and the render is kept for listening.
+      - name: Song smoke test (make a song, save, reload, render)
+        run: cargo nextest run -p daw-app --test song --no-capture
+        env:
+          KADENCE_SMOKE_OUT: smoke-song
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: smoke-song
+          path: smoke-song/
+          if-no-files-found: ignore
       - name: CMake install layout
         run: ci/check-install.sh
       # Built in its own step: building daw-app alone unifies features
