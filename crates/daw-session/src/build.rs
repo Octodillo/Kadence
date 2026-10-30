@@ -25,6 +25,7 @@ use daw_midi::model::compile_track;
 use daw_midi::player::midi_player;
 
 use crate::Warning;
+use crate::capture::input_tap;
 use crate::media::Loaded;
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
 use crate::{Built, Session, db_to_gain};
@@ -53,10 +54,15 @@ fn midi_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 2)
 }
 
+/// The key of an audio track's input tap.
+fn tap_key(track: TrackId) -> NodeKey {
+    NodeKey(track.0.as_u128() ^ 3)
+}
+
 /// The key of a bus's input: a unity gain stage in front of the strip, for
 /// pre-fader sends from a bus with no devices to tap.
 fn input_key(track: TrackId) -> NodeKey {
-    NodeKey(track.0.as_u128() ^ 3)
+    NodeKey(track.0.as_u128() ^ 4)
 }
 
 /// How many captured input events can wait for the recorder.
@@ -215,6 +221,29 @@ pub(crate) fn graph(
                 }
             }
         }
+        // The input tap joins the chain after the player, so monitored input
+        // goes through the track's devices like its clips do.
+        let mut tap = None;
+        if track.kind == TrackKind::Audio && inputs > 0 {
+            let tkey = tap_key(track.id);
+            let id = match old.taps.remove(&track.id) {
+                Some(handle) if g.can_reuse(tkey) => {
+                    built.taps.insert(track.id, handle);
+                    g.reuse(tkey).expect("checked")
+                }
+                _ => {
+                    let (node, handle) = input_tap(inputs);
+                    built.taps.insert(track.id, handle);
+                    let id = g.add_device(format!("{} input", track.name), Box::new(node));
+                    g.set_key(id, tkey);
+                    id
+                }
+            };
+            for ch in 0..inputs {
+                g.connect_audio(g.input(), ch, id, ch);
+            }
+            tap = Some(id);
+        }
         // An instrument track's MIDI player feeds its first device events,
         // not audio, so it stays out of the audio chain.
         let mut midi = None;
@@ -244,7 +273,11 @@ pub(crate) fn graph(
         for d in &track.devices {
             let key = device_key(d.id);
             let same_source = old.structure.device_source(d.id) == Some(&d.source);
+            let plugin = matches!(d.source, DeviceSource::Plugin { .. });
             let id = match (same_source, g.can_reuse(key)) {
+                // A plugin keeps its state in its handle; every graph gets a fresh node of
+                // it, with its current ports and latency.
+                _ if plugin => plugin_node(session, &mut g, &mut built, &old, d),
                 (true, true) => {
                     let id = g.reuse(key).expect("checked");
                     g.rename(id, &d.name);
@@ -299,6 +332,11 @@ pub(crate) fn graph(
         }
         for pair in chain.windows(2) {
             g.connect(pair[0], pair[1]);
+        }
+        if let Some(tap) = tap {
+            // The player is first in an audio track's chain.
+            let after_player = chain.get(1).copied().unwrap_or(strip);
+            g.connect(tap, after_player);
         }
         if let Some(&last) = chain.last() {
             g.connect(last, strip);
@@ -643,6 +681,37 @@ fn join_contiguous(set: &mut ClipSet) {
     }
 }
 
+/// The node of a plugin device: a fresh node of its loaded plugin, or a
+/// bypass when it can't play.
+fn plugin_node(
+    session: &mut Session,
+    g: &mut GraphDesc,
+    built: &mut Built,
+    old: &Built,
+    d: &Device,
+) -> NodeId {
+    let key = device_key(d.id);
+    let (sample_rate, max_frames) = (session.sample_rate(), session.config.engine.max_frames);
+    let node: Box<dyn Node> =
+        match session
+            .plugins
+            .ensure(d, sample_rate, max_frames, &mut session.warnings)
+        {
+            Some(live) => {
+                if !std::mem::take(&mut live.fresh) {
+                    carry_params(built, old, key);
+                }
+                // A fresh plugin has had none of the document's values: the session sends
+                // them all once the graph is in.
+                Box::new(live.handle.node(sample_rate, max_frames))
+            }
+            None => Box::new(Bypass),
+        };
+    let id = g.add_device(&d.name, node);
+    g.set_key(id, key);
+    id
+}
+
 /// The engine node for a model device, its gain reduction meter if it has
 /// one, and a warning if it can't be made.
 fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
@@ -670,14 +739,7 @@ fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<War
                 Some(Warning::UnknownDevice { kind: kind.clone() }),
             ),
         },
-        DeviceSource::Plugin { id, .. } => (
-            Box::new(Bypass),
-            None,
-            Some(Warning::PluginNotLoaded {
-                device: d.name.clone(),
-                plugin: id.to_string(),
-            }),
-        ),
+        DeviceSource::Plugin { .. } => unreachable!("plugins are made by plugin_node"),
     }
 }
 

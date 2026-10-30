@@ -12,6 +12,7 @@ use daw_arrange::Refusal;
 use daw_media::MediaError;
 use daw_model::{FormatError, ModelError};
 use daw_session::Warning;
+use daw_session::record::TakeProblem;
 
 /// What the user was doing when it went wrong, which picks the headline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,7 +24,7 @@ pub enum Context {
     Import,
     Edit,
     Playback,
-    /// Recording MIDI.
+    /// Recording MIDI or audio.
     Record,
 }
 
@@ -64,6 +65,15 @@ pub enum Reason {
     UnknownDevice,
     /// Plugin `detail` of device `name` is bypassed until it is loaded.
     PluginNotLoaded,
+    /// Plugin `detail` of device `name` is not installed; it is bypassed.
+    PluginMissing,
+    /// The plugin of device `name` would not load; `detail` is its id and
+    /// the plugin's message. It is bypassed.
+    PluginLoadFailed,
+    /// Plugin `detail` of device `name` crashed; it is bypassed.
+    PluginCrashed,
+    /// Device `name` did not save its plugin state; `detail`.
+    PluginStateNotSaved,
     /// Audio file `path` cannot be streamed; `detail`.
     CannotStream,
     /// Audio file `path` cannot be read.
@@ -74,7 +84,7 @@ pub enum Reason {
     ClipsDropped,
     /// An output or send of track `name` would loop, so it is left out.
     RoutingLoop,
-    /// Recording needs an instrument track.
+    /// Recording needs an armed track or an instrument track.
     NoInstrumentTrack,
     /// Recording needs the audio engine running.
     EngineNotRunning,
@@ -84,6 +94,22 @@ pub enum Reason {
     MidiInputDropped,
     /// The take has no notes inside the song.
     NothingRecorded,
+    /// An audio take could not be written to `path`; `detail`.
+    CannotRecordTo,
+    /// Track `name` records inputs the audio system doesn't have.
+    NoSuchInput,
+    /// Track `name` can't record audio yet.
+    TrackNotReady,
+    /// Writing the take of track `name` stopped early; `detail`.
+    RecordingStopped,
+    /// `number` frames of track `name`'s take were lost: the disk was slow.
+    AudioDropped,
+    /// The play position jumped while recording track `name`.
+    PositionJumped,
+    /// Track `name` was deleted while recording.
+    TrackGoneWhileRecording,
+    /// The audio system missed `number` cycles while recording.
+    RecordXruns,
 }
 
 /// A message, flattened for a front end.
@@ -148,6 +174,10 @@ pub enum RecordProblem {
     NothingRecorded,
     /// The model refused the take.
     Refused(ModelError),
+    /// Something went wrong with an audio take.
+    Take(TakeProblem),
+    /// The audio system missed this many cycles while recording.
+    Xruns(u64),
 }
 
 /// Something to tell the user about the project.
@@ -204,6 +234,27 @@ fn file_fields(context: Context, e: &FormatError) -> Fields {
     }
 }
 
+fn take_fields(t: &TakeProblem) -> Fields {
+    use Reason as R;
+    let new = |r| Fields::new(Context::Record, r);
+    match t {
+        TakeProblem::CannotCreate { path, detail } => {
+            new(R::CannotRecordTo).path(path).detail(detail)
+        }
+        TakeProblem::NotReady { track } => new(R::TrackNotReady).name(track),
+        TakeProblem::NoSuchInput { track } => new(R::NoSuchInput).name(track),
+        TakeProblem::WriteFailed { track, error } => {
+            new(R::RecordingStopped).name(track).detail(error)
+        }
+        TakeProblem::Dropped { track, frames } => Fields {
+            number: *frames,
+            ..new(R::AudioDropped).name(track)
+        },
+        TakeProblem::Jumped { track } => new(R::PositionJumped).name(track),
+        TakeProblem::TrackGone { track } => new(R::TrackGoneWhileRecording).name(track),
+    }
+}
+
 impl Message {
     pub fn fields(&self) -> Fields {
         use Context as C;
@@ -241,6 +292,11 @@ impl Message {
                 RecordProblem::InputDropped => Fields::new(C::Record, R::MidiInputDropped),
                 RecordProblem::NothingRecorded => Fields::new(C::Record, R::NothingRecorded),
                 RecordProblem::Refused(e) => Fields::new(C::Record, R::EditRefused).detail(e),
+                RecordProblem::Take(t) => take_fields(t),
+                RecordProblem::Xruns(n) => Fields {
+                    number: *n,
+                    ..Fields::new(C::Record, R::RecordXruns)
+                },
             },
             Self::Warning(w) => match w {
                 Warning::DeviceStateRejected { device, detail } => {
@@ -255,6 +311,28 @@ impl Message {
                     Fields::new(C::Playback, R::PluginNotLoaded)
                         .name(device)
                         .detail(plugin)
+                }
+                Warning::PluginMissing { device, plugin } => {
+                    Fields::new(C::Playback, R::PluginMissing)
+                        .name(device)
+                        .detail(plugin)
+                }
+                Warning::PluginLoadFailed {
+                    device,
+                    plugin,
+                    detail,
+                } => Fields::new(C::Playback, R::PluginLoadFailed)
+                    .name(device)
+                    .detail(format!("{plugin}: {detail}")),
+                Warning::PluginCrashed { device, plugin } => {
+                    Fields::new(C::Playback, R::PluginCrashed)
+                        .name(device)
+                        .detail(plugin)
+                }
+                Warning::PluginStateNotSaved { device, detail } => {
+                    Fields::new(C::Save, R::PluginStateNotSaved)
+                        .name(device)
+                        .detail(detail)
                 }
                 Warning::CannotStream { path, detail } => Fields::new(C::Playback, R::CannotStream)
                     .path(path)
@@ -390,6 +468,24 @@ mod tests {
             (f.reason, f.detail.is_empty()),
             (Reason::EditRefused, false)
         );
+        let f = Message::Record(RecordProblem::Take(TakeProblem::Dropped {
+            track: "Vox".into(),
+            frames: 480,
+        }))
+        .fields();
+        assert_eq!(
+            (f.context, f.reason, f.name.as_str(), f.number),
+            (Context::Record, Reason::AudioDropped, "Vox", 480)
+        );
+        let f = Message::Record(RecordProblem::Take(TakeProblem::CannotCreate {
+            path: "/full/take.wav".into(),
+            detail: "No space left".into(),
+        }))
+        .fields();
+        assert_eq!(f.reason, Reason::CannotRecordTo);
+        assert_eq!(f.path.as_deref(), Some(Path::new("/full/take.wav")));
+        let f = Message::Record(RecordProblem::Xruns(3)).fields();
+        assert_eq!((f.reason, f.number), (Reason::RecordXruns, 3));
     }
 
     #[test]

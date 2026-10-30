@@ -6,7 +6,9 @@
 //! pacing itself in real time, so the app still runs (silently) and the
 //! playhead still moves.
 
-use daw_backend::{AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Pacing};
+use daw_backend::{
+    AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Latency, Pacing,
+};
 use daw_core::time::TickTime;
 use daw_engine::EngineConfig;
 
@@ -124,8 +126,11 @@ impl AudioHost {
         let looped = self.session.loop_range();
         let playing = self.session.is_playing();
         let tempo = self.session.tempo().clone();
+        // Saved while the old engine still plays them; restored at the new rate.
+        let plugins = self.session.take_plugins();
         let _ = self.backend.close();
         *self = Self::start(config);
+        self.session.set_plugins(plugins);
         // Positions are in ticks: map them with the project's tempo, not the
         // fresh session's default, so the playhead stays on the same bar.
         // The next sync applies the tempo to the engine.
@@ -164,6 +169,16 @@ impl AudioHost {
 
     pub fn buffer_size(&self) -> u32 {
         self.backend.buffer_size()
+    }
+
+    /// The backend's input and output latency as it reports it now.
+    pub fn latency(&self) -> Latency {
+        self.backend.latency()
+    }
+
+    /// Cycles the backend missed (xruns) since it started.
+    pub fn xruns(&self) -> u64 {
+        self.backend.stats().xruns
     }
 
     pub fn backend(&self) -> &dyn AudioBackend {

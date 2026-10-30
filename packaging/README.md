@@ -4,6 +4,10 @@ Kadence installs the same way everywhere: Cargo builds the `kadence` binary
 and CMake installs it with the desktop file, AppStream metadata, MIME type
 and icon. App ID `io.github.octodillo.daw`, binary `kadence`.
 
+There is no separate plugin host to install: each plugin runs in its own
+`kadence --plugin-host <socket>` process, and plugin scans run as
+`kadence --scan <format> <bundle>`. The binary answers both before Qt starts.
+
 | Where | Recipe | Tested in CI (`.github/workflows/packaging.yml`) |
 |---|---|---|
 | Arch Linux, SteamOS (distrobox), Manjaro | `arch/PKGBUILD` (`kadence-git`) | makepkg, namcap, install, smoke test |
@@ -28,6 +32,7 @@ inside the sandbox and checks that libjack is visible there.
   recommended outside Plasma.
 - libjack (`libjack.so.0`), loaded at run time. On Plasma this is normally
   PipeWire's (`pipewire-jack`); JACK2's works too.
+- lilv 0.24.2 or newer, for LV2 plugins.
 
 Kirigami and qqc2-desktop-style are QML modules and libjack is loaded with
 `dlopen`, so automatic shared-library dependency scanners miss them. Each
@@ -37,7 +42,7 @@ recipe lists them by hand.
 
 Rust 1.88 or newer, a C++ compiler, clang (bindgen), `lld` (CXX-Qt picks
 it over the deprecated gold linker), CMake, Ninja, extra-cmake-modules,
-the `-dev` packages of everything above, and `jack.pc` (from
+the `-dev` packages of everything above (`lilv-0.pc` for lilv), and `jack.pc` (from
 `pipewire-jack` or JACK2's development package).
 
 ## Arch Linux

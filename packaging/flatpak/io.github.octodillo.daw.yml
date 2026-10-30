@@ -56,6 +56,51 @@ cleanup:
   - /lib/pkgconfig
 
 modules:
+  # lilv and what it needs, for LV2 plugin hosting; the KDE runtime has none
+  # of them.
+  - name: lv2
+    buildsystem: meson
+    config-opts: [-Ddocs=disabled, -Dplugins=disabled, -Dtests=disabled]
+    sources:
+      - type: archive
+        url: https://lv2plug.in/spec/lv2-1.18.10.tar.xz
+        sha256: 78c51bcf21b54e58bb6329accbb4dae03b2ed79b520f9a01e734bd9de530953f
+  - name: zix
+    buildsystem: meson
+    config-opts: [-Ddocs=disabled, -Dtests=disabled, -Dbenchmarks=disabled]
+    sources:
+      - type: archive
+        url: https://download.drobilla.net/zix-0.6.2.tar.xz
+        sha256: 4bc771abf4fcf399ea969a1da6b375f0117784f8fd0e2db356a859f635f616a7
+  - name: serd
+    buildsystem: meson
+    config-opts: [-Ddocs=disabled, -Dtests=disabled, -Dtools=disabled, -Dman=disabled]
+    sources:
+      - type: archive
+        url: https://download.drobilla.net/serd-0.32.4.tar.xz
+        sha256: cbefb569e8db686be8c69cb3866a9538c7cb055e8f24217dd6a4471effa7d349
+  - name: sord
+    buildsystem: meson
+    config-opts: [-Ddocs=disabled, -Dtests=disabled, -Dtools=disabled, -Dman=disabled]
+    sources:
+      - type: archive
+        url: https://download.drobilla.net/sord-0.16.18.tar.xz
+        sha256: 4f398b635894491a4774b1498959805a08e11734c324f13d572dea695b13d3b3
+  - name: sratom
+    buildsystem: meson
+    config-opts: [-Ddocs=disabled, -Dtests=disabled]
+    sources:
+      - type: archive
+        url: https://download.drobilla.net/sratom-0.6.18.tar.xz
+        sha256: 4c6a6d9e0b4d6c01cc06a8849910feceb92e666cb38779c614dd2404a9931e92
+  - name: lilv
+    buildsystem: meson
+    config-opts: [-Ddocs=disabled, -Dtests=disabled, -Dtools=disabled, -Dbindings_py=disabled]
+    sources:
+      - type: archive
+        url: https://download.drobilla.net/lilv-0.24.26.tar.xz
+        sha256: 22feed30bc0f952384a25c2f6f4b04e6d43836408798ed65a8a934c055d5d8ac
+
   - name: kadence
     buildsystem: cmake-ninja
     builddir: true

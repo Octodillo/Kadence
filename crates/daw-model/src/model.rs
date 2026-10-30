@@ -420,6 +420,59 @@ pub enum TrackOutput {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Color(pub u8, pub u8, pub u8);
 
+/// Which hardware inputs an audio track records, counted from 0.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputChannels {
+    /// One input, recorded as a mono file.
+    Mono(u16),
+    /// Two neighbouring inputs from this one on, recorded as a stereo file.
+    Stereo(u16),
+}
+
+impl InputChannels {
+    /// The first input used.
+    pub fn first(self) -> u16 {
+        match self {
+            Self::Mono(c) | Self::Stereo(c) => c,
+        }
+    }
+
+    /// How many inputs are used, which is the channel count of a take.
+    pub fn count(self) -> u16 {
+        match self {
+            Self::Mono(_) => 1,
+            Self::Stereo(_) => 2,
+        }
+    }
+}
+
+impl Default for InputChannels {
+    fn default() -> Self {
+        Self::Mono(0)
+    }
+}
+
+/// When an audio track plays its input through.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Monitoring {
+    /// Never. The default, so arming a track with a built-in microphone
+    /// next to the speakers doesn't howl.
+    #[default]
+    Off,
+    /// While the track is armed, except during playback that isn't
+    /// recording, so takes can be played back.
+    Auto,
+}
+
+/// What an audio track records from and how it monitors it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AudioInput {
+    pub channels: InputChannels,
+    pub monitor: Monitoring,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: TrackId,
@@ -433,6 +486,12 @@ pub struct Track {
     pub pan: f64,
     pub mute: bool,
     pub solo: bool,
+    /// Armed for recording: the Record action records onto it.
+    #[serde(default)]
+    pub armed: bool,
+    /// What an audio track records. Other kinds ignore it.
+    #[serde(default)]
+    pub audio_input: AudioInput,
     pub output: TrackOutput,
     /// Sorted by start tick.
     #[serde(default)]
@@ -457,6 +516,8 @@ impl Track {
             pan: 0.0,
             mute: false,
             solo: false,
+            armed: false,
+            audio_input: AudioInput::default(),
             output: TrackOutput::Master,
             clips: Vec::new(),
             devices: Vec::new(),
