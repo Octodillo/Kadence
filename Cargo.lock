@@ -629,6 +629,7 @@ dependencies = [
  "daw-core",
  "daw-plugins",
  "libc",
+ "log",
  "memmap2",
  "serde",
  "serde_json",

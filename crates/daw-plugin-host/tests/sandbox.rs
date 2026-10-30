@@ -625,6 +625,66 @@ fn latency_state(magic: &[u8; 4], latency: u32) -> Vec<u8> {
     state
 }
 
+/// While the application's main thread waits on a slow call in the host, a split instance's
+/// audio half keeps playing every block, there and in the host.
+#[test]
+fn a_split_sandbox_plays_through_a_slow_main_thread_call() {
+    let mut plugin = instance();
+    run(&mut plugin, 16, 0.0, &[param(GAIN, 0.25, 0)]);
+    let mut half = plugin.split().expect("sandboxes split");
+    assert!(plugin.split().is_none(), "split twice");
+
+    let loading = std::sync::atomic::AtomicBool::new(true);
+    let blocks = std::thread::scope(|s| {
+        let audio = s.spawn(|| {
+            let mut blocks = Vec::new();
+            while loading.load(Ordering::Acquire) {
+                let input = [1.0f32; 64];
+                let (mut left, mut right) = ([f32::NAN; 64], [f32::NAN; 64]);
+                let events_in = EventList::with_capacity(4);
+                let mut events_out = EventList::with_capacity(64);
+                let transport = TransportState::default();
+                let audio_in = [&input[..], &input[..]];
+                let mut audio_out = [&mut left[..], &mut right[..]];
+                half.process(&mut ProcessContext {
+                    frames: 64,
+                    transport: &transport,
+                    audio_in: &audio_in,
+                    audio_out: &mut audio_out,
+                    events_in: &events_in,
+                    events_out: &mut events_out,
+                });
+                blocks.push(left[0]);
+                // Roughly real time, so the host's own cycles are not all that runs.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            blocks
+        });
+        plugin
+            .load_state(&latency_state(b"DAWS", 300))
+            .expect("the slow load");
+        loading.store(false, Ordering::Release);
+        audio.join().unwrap()
+    });
+    assert!(blocks.len() > 20, "only {} blocks ran", blocks.len());
+    assert!(
+        blocks.iter().all(|&s| s == 0.25),
+        "a block went silent during the load: {blocks:?}"
+    );
+    assert_eq!(plugin.monitor().late_cycles(), 0);
+
+    plugin.join(half);
+    let ([l, _], _) = run(&mut plugin, 16, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 0.25), "{:?}", &l[..4]);
+    plugin.prepare(SR, MAX * 2);
+    let ([l, _], _) = run(&mut plugin, 16, 1.0, &[]);
+    assert!(
+        l.iter().all(|&s| s == 0.25),
+        "after a prepare: {:?}",
+        &l[..4]
+    );
+}
+
 /// Pumps the main thread until the instance reports a layout change, or `timeout` passes.
 fn layout_changed_within(plugin: &mut SandboxedInstance, timeout: Duration) -> bool {
     let start = Instant::now();

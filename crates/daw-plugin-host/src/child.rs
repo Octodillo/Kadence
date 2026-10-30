@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use daw_core::event::{Event, EventList, ParamId};
 use daw_core::node::ProcessContext;
-use daw_core::plugin::{PluginError, PluginInstance};
+use daw_core::plugin::{PluginError, PluginInstance, PluginProcessor};
 use daw_plugins::PluginRegistry;
 
 use crate::protocol::{
@@ -389,29 +389,48 @@ fn value_reply(id: ParamId, value: f64) -> Result<Reply, PluginError> {
     Ok(Reply::Value(value.clamp(f64::MIN, f64::MAX)))
 }
 
+/// The thread that runs the plugin's audio cycles. A plugin that can
+/// [`split`](PluginInstance::split) hands it its audio half for as long as it runs, so the
+/// main thread's calls never hold a cycle up; any other plugin is locked for each cycle.
 struct AudioThread {
     quit: Arc<AtomicBool>,
     shm: Arc<Shm>,
-    handle: JoinHandle<()>,
+    plugin: SharedPlugin,
+    handle: JoinHandle<Option<Box<dyn PluginProcessor>>>,
 }
 
 impl AudioThread {
     fn start(shm: Arc<Shm>, plugin: SharedPlugin, rt_priority: Option<i32>) -> Self {
         let quit = Arc::new(AtomicBool::new(false));
+        let mut half = lock(&plugin).as_mut().and_then(|p| p.split());
         let handle = {
-            let (shm, quit) = (shm.clone(), quit.clone());
+            let (shm, quit, plugin) = (shm.clone(), quit.clone(), plugin.clone());
             std::thread::Builder::new()
                 .name("plugin-audio".into())
-                .spawn(move || audio_loop(&shm, &plugin, &quit, rt_priority))
+                .spawn(move || {
+                    audio_loop(&shm, &plugin, &mut half, &quit, rt_priority);
+                    half
+                })
                 .expect("spawn the audio thread")
         };
-        Self { quit, shm, handle }
+        Self {
+            quit,
+            shm,
+            plugin,
+            handle,
+        }
     }
 
+    /// Stops the thread and gives the plugin its audio half back.
     fn stop(self) -> Arc<Shm> {
         self.quit.store(true, Ordering::Release);
         futex_wake(&self.shm.header().state);
-        let _ = self.handle.join();
+        // The thread aborts the process if it panics, so it always hands the half back.
+        if let Ok(Some(half)) = self.handle.join()
+            && let Some(p) = lock(&self.plugin).as_mut()
+        {
+            p.join(half);
+        }
         self.shm
     }
 }
@@ -431,7 +450,13 @@ fn set_realtime(priority: i32) {
     }
 }
 
-fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: Option<i32>) {
+fn audio_loop(
+    shm: &Shm,
+    plugin: &SharedPlugin,
+    half: &mut Option<Box<dyn PluginProcessor>>,
+    quit: &AtomicBool,
+    rt_priority: Option<i32>,
+) {
     if let Some(p) = rt_priority {
         set_realtime(p);
     }
@@ -486,41 +511,60 @@ fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: 
                 // SAFETY: as above.
                 *slot = unsafe { shm.audio_out(ch, frames) };
             }
-            // While the main thread is in a slow call, skip the cycle instead of waiting on it.
-            let mut guard = if h.main_busy.load(Ordering::SeqCst) != 0 {
-                match plugin.try_lock() {
-                    Ok(guard) => Some(guard),
-                    Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-                    Err(std::sync::TryLockError::WouldBlock) => None,
+            let ran = {
+                let mut ctx = ProcessContext {
+                    frames: frames as u32,
+                    transport: &transport,
+                    audio_in: &ins[..n_in],
+                    audio_out: &mut outs[..n_out],
+                    events_in: &events_in,
+                    events_out: &mut events_out,
+                };
+                let ran = match half.as_deref_mut() {
+                    Some(half) => {
+                        if flags & FLAG_RESET != 0 {
+                            half.reset();
+                        }
+                        half.process(&mut ctx);
+                        true
+                    }
+                    None => {
+                        // While the main thread is in a slow call, skip the cycle instead of
+                        // waiting on it.
+                        let mut guard = if h.main_busy.load(Ordering::SeqCst) != 0 {
+                            match plugin.try_lock() {
+                                Ok(guard) => Some(guard),
+                                Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+                                Err(std::sync::TryLockError::WouldBlock) => None,
+                            }
+                        } else {
+                            Some(lock(plugin))
+                        };
+                        match guard.as_mut().and_then(|g| g.as_mut()) {
+                            Some(p) => {
+                                if flags & FLAG_RESET != 0 {
+                                    p.reset();
+                                }
+                                p.process(&mut ctx);
+                                true
+                            }
+                            None => false,
+                        }
+                    }
+                };
+                if !ran {
+                    ctx.audio_out.iter_mut().for_each(|o| o.fill(0.0));
                 }
-            } else {
-                Some(lock(plugin))
+                ran
             };
-            match guard.as_mut().and_then(|g| g.as_mut()) {
-                Some(p) => {
-                    if flags & FLAG_RESET != 0 {
-                        p.reset();
-                    }
-                    let mut ctx = ProcessContext {
-                        frames: frames as u32,
-                        transport: &transport,
-                        audio_in: &ins[..n_in],
-                        audio_out: &mut outs[..n_out],
-                        events_in: &events_in,
-                        events_out: &mut events_out,
-                    };
-                    p.process(&mut ctx);
+            if !ran {
+                // The application counts the cycle as done, so keep what it asked for: a
+                // note-off or a reset is late rather than lost.
+                for e in events_in.iter() {
+                    let _ = skipped.push(Event { frame: 0, ..*e });
                 }
-                None => {
-                    outs[..n_out].iter_mut().for_each(|o| o.fill(0.0));
-                    // The application counts the cycle as done, so keep what it asked for: a
-                    // note-off or a reset is late rather than lost.
-                    for e in events_in.iter() {
-                        let _ = skipped.push(Event { frame: 0, ..*e });
-                    }
-                    if flags & FLAG_RESET != 0 {
-                        h.flags.fetch_or(FLAG_RESET, Ordering::Relaxed);
-                    }
+                if flags & FLAG_RESET != 0 {
+                    h.flags.fetch_or(FLAG_RESET, Ordering::Relaxed);
                 }
             }
         }
@@ -559,6 +603,30 @@ mod tests {
         resets: Arc<AtomicU32>,
         events: Arc<Mutex<Vec<Event>>>,
         value: f64,
+        /// An audio half to hand out, and how often it came back.
+        half: Option<Box<dyn PluginProcessor>>,
+        joins: Arc<AtomicU32>,
+    }
+
+    /// A [`Probe`]'s audio half: records the same things.
+    struct HalfProbe {
+        resets: Arc<AtomicU32>,
+        events: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl PluginProcessor for HalfProbe {
+        fn process(&mut self, ctx: &mut ProcessContext) {
+            self.events
+                .lock()
+                .unwrap()
+                .extend(ctx.events_in.iter().copied());
+        }
+        fn reset(&mut self) {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
     }
 
     impl Node for Probe {
@@ -609,6 +677,13 @@ mod tests {
             Ok(())
         }
         fn close_editor(&mut self) {}
+        fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
+            self.half.take()
+        }
+        fn join(&mut self, half: Box<dyn PluginProcessor>) {
+            self.half = Some(half);
+            self.joins.fetch_add(1, Ordering::SeqCst);
+        }
         fn on_main_thread(&mut self) {
             if let Some(shm) = &self.shm {
                 let flag = shm.header().main_in_plugin.load(Ordering::SeqCst);
@@ -765,6 +840,48 @@ mod tests {
         audio.stop();
         assert_eq!(resets.load(Ordering::SeqCst), 1);
         assert_eq!(*events.lock().unwrap(), [Event { frame: 0, ..off }]);
+    }
+
+    #[test]
+    fn a_split_plugin_plays_while_the_main_thread_holds_it() {
+        let shm = block();
+        let (resets, events, joins) = (Arc::new(AtomicU32::new(0)), Arc::default(), Arc::default());
+        let half = HalfProbe {
+            resets: resets.clone(),
+            events: Arc::clone(&events),
+        };
+        let plugin = shared(Probe {
+            half: Some(Box::new(half)),
+            joins: Arc::clone(&joins),
+            ..Probe::default()
+        });
+        let audio = AudioThread::start(shm.clone(), plugin.clone(), None);
+        let on = Event {
+            frame: 3,
+            kind: EventKind::NoteOn {
+                channel: 0,
+                key: 60,
+                velocity: 1.0,
+                note_id: -1,
+            },
+        };
+
+        // A long main-thread call holds the instance; the audio half does not need it.
+        let guard = lock(&plugin);
+        shm.header().main_busy.store(1, Ordering::SeqCst);
+        cycle(&shm, &[on], FLAG_RESET);
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+        assert_eq!(*events.lock().unwrap(), [on]);
+        shm.header().main_busy.store(0, Ordering::SeqCst);
+        drop(guard);
+
+        // Stopping the audio thread gives the plugin its half back.
+        audio.stop();
+        assert_eq!(joins.load(Ordering::SeqCst), 1);
+        let audio = AudioThread::start(shm.clone(), plugin.clone(), None);
+        cycle(&shm, &[], 0);
+        audio.stop();
+        assert_eq!(joins.load(Ordering::SeqCst), 2);
     }
 
     #[test]
