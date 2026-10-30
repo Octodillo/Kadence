@@ -14,6 +14,8 @@ pub mod export;
 #[allow(clippy::too_many_arguments)]
 pub mod export_bridge;
 mod ffi;
+pub mod instrument;
+pub mod instruments_bridge;
 pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;
