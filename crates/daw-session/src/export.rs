@@ -24,6 +24,7 @@ use daw_core::time::TickTime;
 use daw_engine::EngineConfig;
 use daw_media::{AudioWriter, FileFormat, MediaError};
 use daw_model::{Project, ProjectSnapshot};
+use daw_plugin_host::SandboxConfig;
 
 use crate::player::Offline;
 use crate::plugins::PluginLoader;
@@ -82,6 +83,27 @@ pub enum ExportError {
     /// waiting, so the render would have gaps. Nothing is written.
     #[error("the disk was too slow: {0} reads timed out")]
     DiskTooSlow(u64),
+    /// Sandboxed plugins missed this many cycles, each a block of silence.
+    #[error("plugins did not answer in time {0} times")]
+    PluginTooSlow(u64),
+    /// Device `0`'s plugin crashed during the render, so it was bypassed
+    /// from there on.
+    #[error("the plugin of {0} crashed")]
+    PluginCrashed(String),
+    /// A plugin changed its latency during the render, which would shift
+    /// the audio after that point.
+    #[error("a plugin changed its latency during the export")]
+    LatencyChanged,
+}
+
+/// `config` adjusted for rendering offline: the render waits for a plugin
+/// as long as it takes short of a hang (it runs faster than real time, so
+/// the real-time deadline would play silence), and the host gets no
+/// real-time priority, which belongs to playback.
+pub fn offline_sandbox(mut config: SandboxConfig) -> SandboxConfig {
+    config.process_timeout = Some(config.hang_timeout);
+    config.rt_priority = None;
+    config
 }
 
 /// Makes the plugin loader for an export, on the thread that renders: plugin
@@ -182,7 +204,11 @@ pub fn render(
     if loader.is_some() {
         session.set_plugin_loader(loader);
     }
-    // Loads every clip short enough to play from memory, which takes a while.
+    if progress.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
+    // Loads every clip short enough to play from memory, and every plugin,
+    // which takes a while.
     session.sync(snapshot)?;
     if progress.is_cancelled() {
         return Err(ExportError::Cancelled);
@@ -234,26 +260,36 @@ pub fn render(
             written += (n - skip) as u64;
             progress.done.store(written, Ordering::Relaxed);
         }
-        // Plugins' main-thread work, and the bypass for one that crashed.
+        // Plugins' main-thread work. A crashed plugin would be bypassed from
+        // here on, leaving the file without it.
         let report = session.tick();
         if let Some(e) = report.error {
             return Err(e.into());
         }
         for w in report.warnings {
+            if let Warning::PluginCrashed { device, .. } = w {
+                return Err(ExportError::PluginCrashed(device));
+            }
             if !warnings.contains(&w) {
                 warnings.push(w);
             }
         }
+        if u64::from(session.controller().latency()) != latency {
+            return Err(ExportError::LatencyChanged);
+        }
     }
+    let late = session.plugin_late_cycles();
     // The processor frees the graph; drop it before the session, as the
     // audio host does.
     drop(processor);
+    drop(session);
     if progress.is_cancelled() {
         return Err(ExportError::Cancelled);
     }
-    match progress.offline.dropouts.load(Ordering::Relaxed) {
-        0 => Ok(warnings),
-        n => Err(ExportError::DiskTooSlow(n)),
+    match (progress.offline.dropouts.load(Ordering::Relaxed), late) {
+        (0, 0) => Ok(warnings),
+        (0, n) => Err(ExportError::PluginTooSlow(n)),
+        (n, _) => Err(ExportError::DiskTooSlow(n)),
     }
 }
 
