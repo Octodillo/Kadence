@@ -6,9 +6,10 @@ use std::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QMap, QMapPair_QString_QVariant, QString, QUrl, QVariant};
 use daw_core::time::{PPQ, TickTime};
-use daw_model::commands::{AddTrack, MoveTrack, RemoveTrack, SetTrack, TrackField};
-use daw_model::{FadeShape, Track, TrackKind};
+use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
+use daw_model::{FadeShape, InputChannels, Monitoring, Track, TrackKind};
 
+use crate::instrument;
 use crate::message::{Context, Fields, Message, Reason};
 use crate::state::{self, AppState};
 
@@ -68,6 +69,14 @@ pub mod qobject {
         NoMidiPlayer,
         MidiInputDropped,
         NothingRecorded,
+        CannotRecordTo,
+        NoSuchInput,
+        TrackNotReady,
+        RecordingStopped,
+        AudioDropped,
+        PositionJumped,
+        TrackGoneWhileRecording,
+        RecordXruns,
     }
 
     #[auto_cxx_name]
@@ -87,7 +96,7 @@ pub mod qobject {
         #[qproperty(QString, undo_text)]
         #[qproperty(QString, redo_text)]
         #[qproperty(bool, playing)]
-        /// A MIDI take is being recorded.
+        /// Takes are being recorded.
         #[qproperty(bool, recording)]
         #[qproperty(bool, looping)]
         /// Bar.beat of the playhead, like "12.3".
@@ -146,12 +155,43 @@ pub mod qobject {
         fn track_muted(self: &Project, index: i32) -> bool;
         #[qinvokable]
         fn track_soloed(self: &Project, index: i32) -> bool;
+        /// Armed for recording.
+        #[qinvokable]
+        fn track_armed(self: &Project, index: i32) -> bool;
+        #[qinvokable]
+        fn set_track_armed(self: Pin<&mut Project>, index: i32, armed: bool);
+        /// The first hardware input an audio track records, from 0.
+        #[qinvokable]
+        fn track_input(self: &Project, index: i32) -> i32;
+        /// Whether an audio track records a stereo pair from its input on.
+        #[qinvokable]
+        fn track_input_stereo(self: &Project, index: i32) -> bool;
+        #[qinvokable]
+        fn set_track_input(self: Pin<&mut Project>, index: i32, first: i32, stereo: bool);
+        /// Whether an audio track monitors its input while armed.
+        #[qinvokable]
+        fn track_monitor_auto(self: &Project, index: i32) -> bool;
+        #[qinvokable]
+        fn set_track_monitor_auto(self: Pin<&mut Project>, index: i32, on: bool);
+        /// Hardware inputs the running audio engine has.
+        #[qinvokable]
+        fn input_count(self: &Project) -> i32;
         #[qinvokable]
         fn set_track_muted(self: Pin<&mut Project>, index: i32, muted: bool);
         #[qinvokable]
         fn set_track_soloed(self: Pin<&mut Project>, index: i32, soloed: bool);
         #[qinvokable]
         fn rename_track(self: Pin<&mut Project>, index: i32, name: &QString);
+        /// The name of the track's instrument; empty when it has none.
+        #[qinvokable]
+        fn track_instrument(self: &Project, index: i32) -> QString;
+        /// The row in `Instruments` of the track's instrument, or -1.
+        #[qinvokable]
+        fn track_instrument_choice(self: &Project, index: i32) -> i32;
+        /// Swaps the track's instrument for row `choice` of `Instruments`
+        /// at its `revision`.
+        #[qinvokable]
+        fn set_track_instrument(self: Pin<&mut Project>, index: i32, choice: i32, revision: i32);
         #[qinvokable]
         fn select_track(self: Pin<&mut Project>, index: i32);
         /// Moves the track at `from` to index `to`, as one undo step.
@@ -167,8 +207,9 @@ pub mod qobject {
         fn toggle_play(self: Pin<&mut Project>);
         #[qinvokable]
         fn stop(self: Pin<&mut Project>);
-        /// Starts recording MIDI on the open clip's track (or the selected
-        /// or first instrument track), or stops and keeps the take.
+        /// Starts recording every armed track (with none armed, MIDI on the
+        /// open clip's track, or the selected or first instrument track),
+        /// or stops and keeps the takes.
         #[qinvokable]
         fn toggle_record(self: Pin<&mut Project>);
         #[qinvokable]
@@ -306,6 +347,14 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::NoMidiPlayer => QR::NoMidiPlayer,
         Reason::MidiInputDropped => QR::MidiInputDropped,
         Reason::NothingRecorded => QR::NothingRecorded,
+        Reason::CannotRecordTo => QR::CannotRecordTo,
+        Reason::NoSuchInput => QR::NoSuchInput,
+        Reason::TrackNotReady => QR::TrackNotReady,
+        Reason::RecordingStopped => QR::RecordingStopped,
+        Reason::AudioDropped => QR::AudioDropped,
+        Reason::PositionJumped => QR::PositionJumped,
+        Reason::TrackGoneWhileRecording => QR::TrackGoneWhileRecording,
+        Reason::RecordXruns => QR::RecordXruns,
     };
     let text = |s: &str| QVariant::from(&QString::from(s));
     // Numbers are schema versions; they fit an i32.
@@ -578,7 +627,8 @@ impl qobject::Project {
                 .map_or(p.tracks.len(), |i| i + 1);
             let track = Track::new(kind, name);
             let id = track.id;
-            match s.doc.execute(AddTrack::new(at, track)) {
+            let command = instrument::add_track(at, track, s.instruments.default_choice());
+            match s.doc.execute_boxed(command) {
                 Ok(_) => s.arrange.selected_track = Some(id),
                 Err(e) => s.report(e.into()),
             }
@@ -640,12 +690,116 @@ impl qobject::Project {
         });
     }
 
+    fn track_armed(&self, index: i32) -> bool {
+        state::with(|s| track_at(s, index).is_some_and(|t| t.armed))
+    }
+
+    fn set_track_armed(self: Pin<&mut Self>, index: i32, armed: bool) {
+        self.set_track_field(index, TrackField::Armed(armed));
+    }
+
+    fn track_input(&self, index: i32) -> i32 {
+        state::with(|s| track_at(s, index).map_or(0, |t| i32::from(t.audio_input.channels.first())))
+    }
+
+    fn track_input_stereo(&self, index: i32) -> bool {
+        state::with(|s| {
+            track_at(s, index)
+                .is_some_and(|t| matches!(t.audio_input.channels, InputChannels::Stereo(_)))
+        })
+    }
+
+    fn set_track_input(self: Pin<&mut Self>, index: i32, first: i32, stereo: bool) {
+        let Ok(first) = u16::try_from(first) else {
+            return;
+        };
+        let Some(mut input) = state::with(|s| track_at(s, index).map(|t| t.audio_input)) else {
+            return;
+        };
+        let channels = if stereo {
+            InputChannels::Stereo(first)
+        } else {
+            InputChannels::Mono(first)
+        };
+        if input.channels == channels {
+            return;
+        }
+        input.channels = channels;
+        self.set_track_field(index, TrackField::AudioInput(input));
+    }
+
+    fn track_monitor_auto(&self, index: i32) -> bool {
+        state::with(|s| {
+            track_at(s, index).is_some_and(|t| t.audio_input.monitor == Monitoring::Auto)
+        })
+    }
+
+    fn set_track_monitor_auto(self: Pin<&mut Self>, index: i32, on: bool) {
+        let Some(mut input) = state::with(|s| track_at(s, index).map(|t| t.audio_input)) else {
+            return;
+        };
+        input.monitor = if on {
+            Monitoring::Auto
+        } else {
+            Monitoring::Off
+        };
+        self.set_track_field(index, TrackField::AudioInput(input));
+    }
+
+    fn input_count(&self) -> i32 {
+        state::with(|s| {
+            s.engine
+                .session()
+                .map_or(0, |x| i32::from(x.config().inputs))
+        })
+    }
+
     fn set_track_muted(self: Pin<&mut Self>, index: i32, muted: bool) {
         self.set_track_field(index, TrackField::Mute(muted));
     }
 
     fn set_track_soloed(self: Pin<&mut Self>, index: i32, soloed: bool) {
         self.set_track_field(index, TrackField::Solo(soloed));
+    }
+
+    fn track_instrument(&self, index: i32) -> QString {
+        state::with(|s| {
+            track_at(s, index)
+                .and_then(|t| instrument::instrument_of(t))
+                .map(|d| QString::from(d.name.as_str()))
+        })
+        .unwrap_or_default()
+    }
+
+    fn track_instrument_choice(&self, index: i32) -> i32 {
+        state::with(|s| {
+            track_at(s, index)
+                .and_then(|t| instrument::instrument_of(t))
+                .and_then(|d| s.instruments.position(&d.source))
+                .and_then(|i| i32::try_from(i).ok())
+                .unwrap_or(-1)
+        })
+    }
+
+    fn set_track_instrument(self: Pin<&mut Self>, index: i32, choice: i32, revision: i32) {
+        // Read before `edit`, which holds the state.
+        let Some(choice) = crate::instruments_bridge::choice_at(choice, revision) else {
+            return;
+        };
+        self.edit(|s| {
+            let choice = &choice;
+            let Some(track) = track_at(s, index) else {
+                return;
+            };
+            let Some(command) = instrument::set_instrument(s.doc.project(), track.id, choice)
+            else {
+                return;
+            };
+            if let Err(e) = s.doc.execute_boxed(command) {
+                s.report(e.into());
+            }
+            s.doc.seal();
+        });
     }
 
     fn rename_track(self: Pin<&mut Self>, index: i32, name: &QString) {
