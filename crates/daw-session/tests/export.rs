@@ -54,6 +54,8 @@ fn song(dir: &Path) -> Document {
                 source: file.into(),
                 offset: SampleTime(offset),
                 gain_db: -3.0,
+                fade_in: Default::default(),
+                fade_out: Default::default(),
             }),
         )
     };

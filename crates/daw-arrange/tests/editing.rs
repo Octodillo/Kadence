@@ -50,11 +50,7 @@ impl Rig {
             "audio",
             TickTime(start),
             TickTime(len),
-            ClipContent::Audio(AudioClip {
-                source: "missing.wav".into(),
-                offset: SampleTime(offset),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new("missing.wav", SampleTime(offset))),
         );
         let id = c.id;
         self.doc.execute(AddClip::new(self.tracks[row], c)).unwrap();
@@ -465,11 +461,7 @@ fn waveforms_draw_for_clips_anywhere() {
             "tone",
             TickTime(start),
             TickTime(BAR),
-            ClipContent::Audio(AudioClip {
-                source: file.clone(),
-                offset: SampleTime(0),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new(file.clone(), SampleTime(0))),
         );
         r.doc.execute(AddClip::new(r.tracks[0], c)).unwrap();
     }

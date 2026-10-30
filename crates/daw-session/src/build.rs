@@ -520,14 +520,33 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
                 ClipSource::Missing
             }
         };
+        let start = session.ticks_to_samples(c.start).0;
+        let end_tick = c.start.0 + c.length.0;
+        let end = session.ticks_to_samples(TickTime(end_tick)).0;
+        // Fades are in ticks, so they follow tempo changes like the clip.
+        let fade_in = session
+            .ticks_to_samples(TickTime(
+                c.start.0.saturating_add(a.fade_in.length.0).min(end_tick),
+            ))
+            .0
+            - start;
+        let fade_out = end
+            - session
+                .ticks_to_samples(TickTime(
+                    end_tick.saturating_sub(a.fade_out.length.0).max(c.start.0),
+                ))
+                .0;
+        let (fade_in, fade_out) = daw_model::fit_fades(fade_in, fade_out, end - start);
         set.clips.push(PlayClip {
             id: c.id,
-            start: session.ticks_to_samples(c.start).0,
-            end: session.ticks_to_samples(TickTime(c.start.0 + c.length.0)).0,
+            start,
+            end,
             // The model keeps the offset in the file's own frames.
             file_start: (a.offset.0 as f64 * engine_rate / file_rate.max(1.0)).round() as i64,
             fade_in: true,
             fade_out: true,
+            user_fade_in: (fade_in, a.fade_in.shape),
+            user_fade_out: (fade_out, a.fade_out.shape),
             gain: 10f64.powf(a.gain_db / 20.0) as f32,
             path,
             source,
