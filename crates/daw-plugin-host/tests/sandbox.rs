@@ -687,6 +687,7 @@ fn a_new_rate_refreshes_parameter_ranges() {
     let format = SandboxFormat::new(PluginFormatKind::Lv2, vec![], config());
     let d = format
         .scan(bundle.path())
+        .expect("scan")
         .into_iter()
         .find(|d| d.id == "http://drobilla.net/plugins/mda/Delay")
         .expect("scanned");

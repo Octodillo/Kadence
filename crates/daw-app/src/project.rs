@@ -288,6 +288,13 @@ impl qobject::Project {
             if let Some(session) = s.engine.session_mut() {
                 session.collect_garbage();
             }
+            // An update a full player queue refused; the queue has drained.
+            if s.engine
+                .session()
+                .is_some_and(|session| session.wants_sync())
+            {
+                s.resync();
+            }
             if s.arrange.peaks.poll() {
                 s.touch();
             }

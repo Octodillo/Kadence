@@ -6,7 +6,8 @@ use std::sync::Arc;
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_media::{AudioData, WavFormat, write_wav};
 use daw_model::{
-    AudioClip, Clip, ClipContent, Color, Document, MidiClip, Note, Project, Track, TrackKind,
+    AudioClip, Clip, ClipContent, Color, Device, DeviceSource, Document, MidiClip, Note, Project,
+    Track, TrackKind,
 };
 
 const RATE: u32 = 48_000;
@@ -70,6 +71,12 @@ pub fn build() -> Result<Document, String> {
     ];
     let mut keys = Track::new(TrackKind::Instrument, "Keys");
     keys.color = Some(Color(0x9b, 0x59, 0xb6));
+    keys.devices.push(Device::new(
+        "Synth",
+        DeviceSource::Builtin {
+            kind: "daw.synth".into(),
+        },
+    ));
     let mut m = MidiClip::default();
     for (i, key) in [60u8, 64, 67, 72, 67, 64, 62, 65, 69, 74, 69, 65]
         .into_iter()
