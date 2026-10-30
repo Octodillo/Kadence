@@ -127,6 +127,12 @@ pub trait EngineHandle {
         0
     }
 
+    /// How an export loads plugins, as the session does: `None` when the
+    /// session has no plugin loader either (the stub engine).
+    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
+        None
+    }
+
     /// The session playing the project. After
     /// [`apply_audio_config`](Self::apply_audio_config) it may be a new one
     /// that has to be synced with the document again.
@@ -212,6 +218,10 @@ impl Default for SessionEngine {
 }
 
 impl EngineHandle for SessionEngine {
+    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
+        Some(Box::new(plugin_loader))
+    }
+
     fn backend_kind(&self) -> BackendKind {
         match self.host.kind() {
             HostKind::Jack => BackendKind::Jack,

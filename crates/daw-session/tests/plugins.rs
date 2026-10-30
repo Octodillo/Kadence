@@ -526,3 +526,65 @@ fn undoing_a_device_removal_brings_its_plugin_back_as_it_was() {
     rig.sync();
     rig.settles_at(LEVEL * 0.75);
 }
+
+/// Renders bar 1 of `rig`'s project offline, loading plugins with `loader`.
+fn export_bar(
+    rig: &mut Rig,
+    loader: Option<Box<dyn daw_session::PluginLoader>>,
+) -> (Vec<f32>, Vec<Warning>) {
+    use daw_session::export::{Progress, RenderSettings, render};
+    let mut out = Vec::new();
+    let warnings = render(
+        &rig.doc.snapshot(),
+        Some(rig.dir.path().to_path_buf()),
+        loader,
+        &RenderSettings {
+            start: TickTime(0),
+            end: TickTime(4 * PPQ),
+            tail_seconds: 0.0,
+            sample_rate: RATE as u32,
+        },
+        &Progress::default(),
+        |planes| {
+            out.extend_from_slice(planes[0]);
+            Ok(())
+        },
+    )
+    .unwrap();
+    (out, warnings)
+}
+
+#[test]
+fn exports_play_plugins_with_their_stored_state() {
+    let mut rig = Rig::new();
+    rig.doc
+        .store_plugin_state(rig.device, Some(gain_state(0.5).into()))
+        .unwrap();
+
+    let (out, warnings) = export_bar(&mut rig, Some(Box::new(loader())));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    // Two seconds at 120 bpm through the plugin at its stored gain. The plugin
+    // reports 32 samples of latency but doesn't delay, so the export, which
+    // compensates for it, starts 32 samples into the clip's 64-sample fade-in
+    // and ends with 32 samples of silence.
+    let latency = 32; // daw_clap_test_plugin::LATENCY
+    assert_eq!(out.len(), 2 * RATE as usize);
+    let body = &out[latency..out.len() - latency];
+    let worst = body
+        .iter()
+        .fold(0.0f32, |m, s| m.max((s - LEVEL * 0.5).abs()));
+    assert!(
+        worst < 1e-5,
+        "export strays {worst} from the plugin's output"
+    );
+    assert!(out[out.len() - latency..].iter().all(|&s| s == 0.0));
+
+    // Without a loader the device is bypassed, and the export says so.
+    let (out, warnings) = export_bar(&mut rig, None);
+    assert!(
+        matches!(warnings.as_slice(), [Warning::PluginNotLoaded { .. }]),
+        "{warnings:?}"
+    );
+    // Past the clip's fade-in, the clip as it is.
+    assert!(out[64..].iter().all(|s| (s - LEVEL).abs() < 1e-5));
+}

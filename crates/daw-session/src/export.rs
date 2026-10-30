@@ -9,6 +9,10 @@
 //!
 //! [`ExportJob`] runs [`export`] on a worker thread with progress and cancel;
 //! [`render`] is the loop underneath, handing each block to a closure.
+//!
+//! Plugin devices play when the render is given a [`PluginLoader`]: the
+//! export loads its own instances (in their own sandbox hosts), set to the
+//! states stored in the snapshot.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +26,7 @@ use daw_media::{AudioWriter, FileFormat, MediaError};
 use daw_model::{Project, ProjectSnapshot};
 
 use crate::player::Offline;
+use crate::plugins::PluginLoader;
 use crate::{Session, SessionConfig, SessionError, Warning};
 
 /// Frames the render processes at a time.
@@ -79,6 +84,10 @@ pub enum ExportError {
     DiskTooSlow(u64),
 }
 
+/// Makes the plugin loader for an export, on the thread that renders: plugin
+/// instances stay on the thread that loaded them.
+pub type LoaderFactory = Box<dyn FnOnce() -> Option<Box<dyn PluginLoader>> + Send>;
+
 /// What a finished export did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExportReport {
@@ -87,7 +96,8 @@ pub struct ExportReport {
     /// The file's sample rate.
     pub sample_rate: u32,
     /// Problems building the project, such as audio files that could not be
-    /// read: the file was written without them.
+    /// read or plugins that would not load or crashed: the file was written
+    /// without them.
     pub warnings: Vec<Warning>,
 }
 
@@ -138,10 +148,12 @@ pub fn song_end(project: &Project) -> TickTime {
 /// Plays `snapshot` from `settings.start` to `settings.end` plus the tail
 /// and gives each block of the master output to `sink`, one slice per
 /// channel. Relative clip paths resolve against `root` (the project bundle).
-/// Returns the warnings from building the project.
+/// Plugin devices load through `loader`; without one they are bypassed.
+/// Returns the warnings from building and playing the project.
 pub fn render(
     snapshot: &ProjectSnapshot,
     root: Option<PathBuf>,
+    loader: Option<Box<dyn PluginLoader>>,
     settings: &RenderSettings,
     progress: &Progress,
     mut sink: impl FnMut(&[&[f32]]) -> Result<(), ExportError>,
@@ -167,12 +179,15 @@ pub fn render(
     });
     session.offline = Some(progress.offline.clone());
     session.set_root(root);
+    if loader.is_some() {
+        session.set_plugin_loader(loader);
+    }
     // Loads every clip short enough to play from memory, which takes a while.
     session.sync(snapshot)?;
     if progress.is_cancelled() {
         return Err(ExportError::Cancelled);
     }
-    let warnings = session.warnings().to_vec();
+    let mut warnings = session.warnings().to_vec();
     let start = session.ticks_to_samples(settings.start).0;
     let end = session.ticks_to_samples(settings.end).0;
     let body = u64::try_from(end - start).unwrap_or(0);
@@ -219,7 +234,16 @@ pub fn render(
             written += (n - skip) as u64;
             progress.done.store(written, Ordering::Relaxed);
         }
-        session.collect_garbage();
+        // Plugins' main-thread work, and the bypass for one that crashed.
+        let report = session.tick();
+        if let Some(e) = report.error {
+            return Err(e.into());
+        }
+        for w in report.warnings {
+            if !warnings.contains(&w) {
+                warnings.push(w);
+            }
+        }
     }
     // The processor frees the graph; drop it before the session, as the
     // audio host does.
@@ -239,6 +263,7 @@ pub fn render(
 pub fn export(
     snapshot: &ProjectSnapshot,
     root: Option<PathBuf>,
+    loader: Option<Box<dyn PluginLoader>>,
     path: &Path,
     settings: &ExportSettings,
     progress: &Progress,
@@ -250,9 +275,14 @@ pub fn export(
         settings.render.sample_rate,
         settings.dither,
     )?;
-    let warnings = render(snapshot, root, &settings.render, progress, |planes| {
-        Ok(writer.write(planes)?)
-    })?;
+    let warnings = render(
+        snapshot,
+        root,
+        loader,
+        &settings.render,
+        progress,
+        |planes| Ok(writer.write(planes)?),
+    )?;
     let frames = writer.frames();
     if progress.is_cancelled() {
         return Err(ExportError::Cancelled);
@@ -273,10 +303,12 @@ pub struct ExportJob {
 }
 
 impl ExportJob {
-    /// Starts exporting `snapshot` to `path`.
+    /// Starts exporting `snapshot` to `path`, loading plugins through the
+    /// loader `loader` makes.
     pub fn start(
         snapshot: ProjectSnapshot,
         root: Option<PathBuf>,
+        loader: Option<LoaderFactory>,
         path: PathBuf,
         settings: ExportSettings,
     ) -> std::io::Result<Self> {
@@ -286,7 +318,10 @@ impl ExportJob {
             let path = path.clone();
             std::thread::Builder::new()
                 .name("daw-export".into())
-                .spawn(move || export(&snapshot, root, &path, &settings, &progress))?
+                .spawn(move || {
+                    let loader = loader.and_then(|make| make());
+                    export(&snapshot, root, loader, &path, &settings, &progress)
+                })?
         };
         Ok(Self {
             progress,
