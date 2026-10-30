@@ -36,6 +36,9 @@ pub struct JackBackend {
     /// Auto-connect has run since `open`. Later starts restore `links`
     /// instead, so ports the user unplugged stay unplugged.
     auto_connected: bool,
+    /// Make the next `start` fail the way `jack_activate` failing does.
+    #[cfg(test)]
+    fail_next_activation: bool,
 }
 
 #[derive(Default)]
@@ -279,9 +282,40 @@ impl AudioBackend for JackBackend {
         let notifications = Notifications {
             shared: self.shared.clone(),
         };
-        let active = client
-            .activate_async(notifications, processor)
-            .map_err(|e| BackendError::Other(format!("could not activate the JACK client: {e}")))?;
+        let raw = client.raw();
+        #[cfg(test)]
+        let result = if std::mem::take(&mut self.fail_next_activation) {
+            // What the jack crate does when jack_activate fails.
+            std::mem::forget((client, notifications, processor));
+            Err(jack::Error::ClientActivationError)
+        } else {
+            client.activate_async(notifications, processor)
+        };
+        #[cfg(not(test))]
+        let result = client.activate_async(notifications, processor);
+        let active = match result {
+            Ok(active) => active,
+            Err(e) => {
+                if matches!(e, jack::Error::ClientActivationError) {
+                    // When jack_activate fails, the jack crate leaks the
+                    // client rather than close it (its callbacks may already
+                    // point at the context). Left open, it stays on the
+                    // server under our name, and the next open is renamed
+                    // ("daw-01"), so saved "daw:*" links no longer match.
+                    // SAFETY: the crate forgot its `Client`, so nothing else
+                    // uses or closes `raw`. Closing it ends all callbacks
+                    // into the leaked context, which is never freed.
+                    drop(unsafe { Client::from_raw(raw) });
+                }
+                // On any other error the crate dropped, and so closed, the
+                // client. Either way the ports are gone.
+                self.cfg = None;
+                self.links.clear();
+                return Err(BackendError::Other(format!(
+                    "could not activate the JACK client ({e}); the backend is closed and must be opened again"
+                )));
+            }
+        };
         if cfg.auto_connect && !self.auto_connected {
             self.auto_connect(active.as_client(), &cfg);
             self.auto_connected = true;
@@ -602,5 +636,47 @@ impl Processor {
         if dropped > 0 {
             self.shared.midi_dropped.fetch_add(dropped, Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a running JACK server"]
+    fn failed_activation_closes_the_client_and_frees_its_name() {
+        let cfg = BackendConfig {
+            client_name: "wu2-actfail".into(),
+            auto_connect: false,
+            ..BackendConfig::default()
+        };
+        let mut b = JackBackend::new();
+        b.open(cfg.clone()).unwrap();
+        b.fail_next_activation = true;
+        let err = b.start(Box::new(|_| {})).unwrap_err();
+        assert!(matches!(err, BackendError::Other(_)), "{err}");
+        assert!(!b.is_running());
+        assert!(matches!(
+            b.start(Box::new(|_| {})),
+            Err(BackendError::NotOpen)
+        ));
+
+        // The leaked client is gone, so reopening gets the same name back.
+        b.open(cfg).unwrap();
+        let ours: Vec<_> = b
+            .list_ports(&PortFilter::default())
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.is_ours)
+            .map(|p| p.name)
+            .collect();
+        assert!(!ours.is_empty());
+        assert!(
+            ours.iter().all(|n| n.starts_with("wu2-actfail:")),
+            "renamed: {ours:?}"
+        );
+        b.start(Box::new(|_| {})).unwrap();
+        b.close().unwrap();
     }
 }
