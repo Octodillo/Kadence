@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-30 17:43+0000\n"
+"POT-Creation-Date: 2026-10-30 18:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -305,140 +305,145 @@ msgctxt "@info milliseconds"
 msgid "%1 ms"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:34
+#: crates/daw-app/qml/ChannelStrip.qml:37
 msgctxt "@title name of the master bus"
 msgid "Master"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:41
+#: crates/daw-app/qml/ChannelStrip.qml:44
 msgctxt "@label fader at silence"
 msgid "−∞"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:44
+#: crates/daw-app/qml/ChannelStrip.qml:47
 msgctxt "@label decibels"
 msgid "%1 dB"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:50
+#: crates/daw-app/qml/ChannelStrip.qml:53
 msgctxt "@label pan centre"
 msgid "C"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:52
+#: crates/daw-app/qml/ChannelStrip.qml:55
 msgctxt "@label pan left, percent"
 msgid "L%1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:52
+#: crates/daw-app/qml/ChannelStrip.qml:55
 msgctxt "@label pan right, percent"
 msgid "R%1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:90
+#: crates/daw-app/qml/ChannelStrip.qml:93
 msgctxt "@label strip type"
 msgid "Bus"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:91
+#: crates/daw-app/qml/ChannelStrip.qml:94
 msgctxt "@label strip type"
 msgid "Main output"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:92
+#: crates/daw-app/qml/ChannelStrip.qml:95
 msgctxt "@label strip type"
 msgid "Track"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:112
+#: crates/daw-app/qml/ChannelStrip.qml:115
+msgctxt "@title:group"
+msgid "Instrument"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:129
 msgctxt "@title:group effect slots"
 msgid "Effects"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:131
+#: crates/daw-app/qml/ChannelStrip.qml:148
 msgctxt "@action:button"
 msgid "Remove %1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:142
+#: crates/daw-app/qml/ChannelStrip.qml:159
 msgctxt "@action:button"
 msgid "Add Effect"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:162
+#: crates/daw-app/qml/ChannelStrip.qml:179
 msgctxt "@label gain reduction, short"
 msgid "GR"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:164
+#: crates/daw-app/qml/ChannelStrip.qml:181
 msgctxt "@info:tooltip"
 msgid "Gain reduction"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:177
+#: crates/daw-app/qml/ChannelStrip.qml:194
 msgctxt "@title:group"
 msgid "Sends"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:204
+#: crates/daw-app/qml/ChannelStrip.qml:221
 msgctxt "@info:tooltip send level to bus"
 msgid "Send to %1: %2"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:206
+#: crates/daw-app/qml/ChannelStrip.qml:223
 msgctxt "@label:slider"
 msgid "Send to %1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:226
-#: crates/daw-app/qml/ChannelStrip.qml:245
+#: crates/daw-app/qml/ChannelStrip.qml:243
+#: crates/daw-app/qml/ChannelStrip.qml:262
 msgctxt "@label:slider"
 msgid "Pan"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:246
+#: crates/daw-app/qml/ChannelStrip.qml:263
 msgctxt "@info:tooltip"
 msgid "Pan: %1 (double-click to centre)"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:271
+#: crates/daw-app/qml/ChannelStrip.qml:288
 msgctxt "@label:slider"
 msgid "Volume"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:272
+#: crates/daw-app/qml/ChannelStrip.qml:289
 msgctxt "@info:tooltip"
 msgid "Volume (double-click for 0 dB)"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:302
+#: crates/daw-app/qml/ChannelStrip.qml:319
 msgctxt "@action:button short for Mute"
 msgid "M"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:303
-#: crates/daw-app/qml/TrackHeader.qml:136
+#: crates/daw-app/qml/ChannelStrip.qml:320
+#: crates/daw-app/qml/TrackHeader.qml:147
 msgctxt "@action:button"
 msgid "Mute"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:304
+#: crates/daw-app/qml/ChannelStrip.qml:321
 msgctxt "@info:tooltip"
 msgid "Mute"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:313
+#: crates/daw-app/qml/ChannelStrip.qml:330
 msgctxt "@action:button short for Solo"
 msgid "S"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:314
-#: crates/daw-app/qml/TrackHeader.qml:150
+#: crates/daw-app/qml/ChannelStrip.qml:331
+#: crates/daw-app/qml/TrackHeader.qml:161
 msgctxt "@action:button"
 msgid "Solo"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:315
+#: crates/daw-app/qml/ChannelStrip.qml:332
 msgctxt "@info:tooltip"
 msgid "Solo"
 msgstr ""
@@ -505,280 +510,285 @@ msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:23
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Pan"
+msgid "Change Instrument"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:24
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Parameter"
+msgid "Change Pan"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:25
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Plugin State"
+msgid "Change Parameter"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:26
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Send Level"
+msgid "Change Plugin State"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:27
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Send Tap"
+msgid "Change Send Level"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:28
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Send Target"
+msgid "Change Send Tap"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:29
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Tempo"
+msgid "Change Send Target"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:30
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Time Signature"
+msgid "Change Tempo"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:31
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Track Color"
+msgid "Change Time Signature"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:32
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Track Output"
+msgid "Change Track Color"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:33
 msgctxt "@item:inmenu name of an edit"
-msgid "Change Volume"
+msgid "Change Track Output"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:34
 msgctxt "@item:inmenu name of an edit"
-msgid "Delete Clip"
+msgid "Change Volume"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:35
 msgctxt "@item:inmenu name of an edit"
-msgid "Delete Clips"
+msgid "Delete Clip"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:36
 msgctxt "@item:inmenu name of an edit"
-msgid "Delete Note"
+msgid "Delete Clips"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:37
 msgctxt "@item:inmenu name of an edit"
-msgid "Delete Notes"
+msgid "Delete Note"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:38
 msgctxt "@item:inmenu name of an edit"
-msgid "Duplicate"
+msgid "Delete Notes"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:39
 msgctxt "@item:inmenu name of an edit"
-msgid "Duplicate Notes"
+msgid "Duplicate"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:40
 msgctxt "@item:inmenu name of an edit"
-msgid "Edit Automation"
+msgid "Duplicate Notes"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:41
 msgctxt "@item:inmenu name of an edit"
-msgid "Edit Note"
+msgid "Edit Automation"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:42
 msgctxt "@item:inmenu name of an edit"
-msgid "Edit Notes"
+msgid "Edit Note"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:43
 msgctxt "@item:inmenu name of an edit"
-msgid "Fix Overlaps"
+msgid "Edit Notes"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:44
 msgctxt "@item:inmenu name of an edit"
-msgid "Glue Notes"
+msgid "Fix Overlaps"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:45
 msgctxt "@item:inmenu name of an edit"
-msgid "Humanize"
+msgid "Glue Notes"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:46
 msgctxt "@item:inmenu name of an edit"
-msgid "Import Audio"
+msgid "Humanize"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:47
 msgctxt "@item:inmenu name of an edit"
-msgid "Legato"
+msgid "Import Audio"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:48
 msgctxt "@item:inmenu name of an edit"
-msgid "Move Clip"
+msgid "Legato"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:49
 msgctxt "@item:inmenu name of an edit"
-msgid "Move Clips"
+msgid "Move Clip"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:50
 msgctxt "@item:inmenu name of an edit"
-msgid "Move Device"
+msgid "Move Clips"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:51
 msgctxt "@item:inmenu name of an edit"
-msgid "Move Track"
+msgid "Move Device"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:52
 msgctxt "@item:inmenu name of an edit"
-msgid "Mute Clip"
+msgid "Move Track"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:53
 msgctxt "@item:inmenu name of an edit"
-msgid "Mute Track"
+msgid "Mute Clip"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:54
 msgctxt "@item:inmenu name of an edit"
-msgid "Nudge"
+msgid "Mute Track"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:55
 msgctxt "@item:inmenu name of an edit"
-msgid "Quantize"
+msgid "Nudge"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:56
 msgctxt "@item:inmenu name of an edit"
-msgid "Record Notes"
+msgid "Quantize"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:57
 msgctxt "@item:inmenu name of an edit"
-msgid "Remove Automation Lane"
+msgid "Record Notes"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:58
 msgctxt "@item:inmenu name of an edit"
-msgid "Remove Clip"
+msgid "Remove Automation Lane"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:59
 msgctxt "@item:inmenu name of an edit"
-msgid "Remove Device"
+msgid "Remove Clip"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:60
 msgctxt "@item:inmenu name of an edit"
-msgid "Remove Fades"
+msgid "Remove Device"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:61
 msgctxt "@item:inmenu name of an edit"
-msgid "Remove Send"
+msgid "Remove Fades"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:62
 msgctxt "@item:inmenu name of an edit"
-msgid "Remove Track"
+msgid "Remove Send"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:63
 msgctxt "@item:inmenu name of an edit"
-msgid "Rename Clip"
+msgid "Remove Track"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:64
 msgctxt "@item:inmenu name of an edit"
-msgid "Rename Device"
+msgid "Rename Clip"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:65
 msgctxt "@item:inmenu name of an edit"
-msgid "Rename Project"
+msgid "Rename Device"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:66
 msgctxt "@item:inmenu name of an edit"
-msgid "Rename Track"
+msgid "Rename Project"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:67
 msgctxt "@item:inmenu name of an edit"
-msgid "Reset Clip Gain"
+msgid "Rename Track"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:68
 msgctxt "@item:inmenu name of an edit"
-msgid "Resize Clip"
+msgid "Reset Clip Gain"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:69
 msgctxt "@item:inmenu name of an edit"
-msgid "Reverse"
+msgid "Resize Clip"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:70
 msgctxt "@item:inmenu name of an edit"
-msgid "Scale Velocity"
+msgid "Reverse"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:71
 msgctxt "@item:inmenu name of an edit"
-msgid "Set Velocity"
+msgid "Scale Velocity"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:72
 msgctxt "@item:inmenu name of an edit"
-msgid "Slip Clip"
+msgid "Set Velocity"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:73
 msgctxt "@item:inmenu name of an edit"
-msgid "Solo Track"
+msgid "Slip Clip"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:74
 msgctxt "@item:inmenu name of an edit"
-msgid "Split"
+msgid "Solo Track"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:75
 msgctxt "@item:inmenu name of an edit"
-msgid "Split Notes"
+msgid "Split"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:76
 msgctxt "@item:inmenu name of an edit"
-msgid "Toggle Automation"
+msgid "Split Notes"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:77
 msgctxt "@item:inmenu name of an edit"
-msgid "Transpose"
+msgid "Toggle Automation"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml:78
+msgctxt "@item:inmenu name of an edit"
+msgid "Transpose"
+msgstr ""
+
+#: crates/daw-app/qml/EditNames.qml:79
 msgctxt "@item:inmenu name of an edit"
 msgid "Write Automation"
 msgstr ""
@@ -938,6 +948,16 @@ msgstr ""
 #: crates/daw-app/qml/GainReductionMeter.qml:21
 msgctxt "@label"
 msgid "Gain reduction meter"
+msgstr ""
+
+#: crates/daw-app/qml/InstrumentButton.qml:23
+msgctxt "@action:button the track has no instrument"
+msgid "Choose Instrument"
+msgstr ""
+
+#: crates/daw-app/qml/InstrumentButton.qml:27
+msgctxt "@action:button %1 is an instrument name"
+msgid "Instrument: %1"
 msgstr ""
 
 #: crates/daw-app/qml/LevelMeter.qml:22
@@ -1303,27 +1323,27 @@ msgctxt "@title"
 msgid "Audio"
 msgstr ""
 
-#: crates/daw-app/qml/TrackHeader.qml:54
+#: crates/daw-app/qml/TrackHeader.qml:56
 msgctxt "@info:accessible"
 msgid "Drag to move the track"
 msgstr ""
 
-#: crates/daw-app/qml/TrackHeader.qml:168
+#: crates/daw-app/qml/TrackHeader.qml:179
 msgctxt "@action:inmenu"
 msgid "Rename…"
 msgstr ""
 
-#: crates/daw-app/qml/TrackHeader.qml:178
+#: crates/daw-app/qml/TrackHeader.qml:189
 msgctxt "@action:inmenu"
 msgid "Move Up"
 msgstr ""
 
-#: crates/daw-app/qml/TrackHeader.qml:184
+#: crates/daw-app/qml/TrackHeader.qml:195
 msgctxt "@action:inmenu"
 msgid "Move Down"
 msgstr ""
 
-#: crates/daw-app/qml/TrackHeader.qml:191
+#: crates/daw-app/qml/TrackHeader.qml:202
 msgctxt "@action:inmenu"
 msgid "Delete Track"
 msgstr ""
