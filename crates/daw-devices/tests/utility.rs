@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use daw_core::node::Node;
+use daw_core::time::Timeline;
 use daw_devices::devices::utility::*;
 use daw_devices::{Device, Utility};
 
@@ -56,6 +57,13 @@ fn load_state_after_prepare_does_not_glide() {
     u.prepare(s.sample_rate, s.block as u32);
     u.load_state(&blob).unwrap();
     let input = [vec![1.0; 256]];
-    let r = render_prepared(&mut u, 256, &input, &[], s, |_| s.bpm);
+    let r = render_prepared(
+        &mut u,
+        256,
+        &input,
+        &[],
+        s,
+        &Timeline::constant(s.bpm, 4, 4),
+    );
     assert!(peak(&r.channels[0]) < 1e-3, "{}", peak(&r.channels[0]));
 }
