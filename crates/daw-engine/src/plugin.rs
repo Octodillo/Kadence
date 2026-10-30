@@ -8,8 +8,10 @@
 //! [`GraphDesc::reuse`](crate::GraphDesc::reuse), and the plugin keeps its state, while each
 //! compile picks up its current ports and latency.
 //!
-//! On the main thread, call [`PluginHandle::pump`] about 60 times a second. When it returns
-//! true, build and send the graph again; [`PluginHandle::node`] then prepares the plugin, and
+//! On the main thread, call [`PluginHandle::pump`] about 60 times a second, along with
+//! [`EngineController::collect_garbage`](crate::EngineController::collect_garbage), which
+//! frees retired graphs and with them the nodes that would otherwise keep an older node of
+//! the plugin quiet. When `pump` returns true, build and send the graph again; [`PluginHandle::node`] then prepares the plugin, and
 //! the rest of the graph plays on while that one plugin restarts. A plain rebuild with no
 //! change does not prepare it again, so it plays on without a gap.
 //!
