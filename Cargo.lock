@@ -518,7 +518,6 @@ dependencies = [
 name = "daw-backend"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "ctrlc",
  "daw-core",
  "jack",

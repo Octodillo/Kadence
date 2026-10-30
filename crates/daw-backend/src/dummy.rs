@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::thread::JoinHandle;
@@ -94,7 +95,8 @@ pub struct DummyBackend {
 
 struct Running {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<Worker>,
+    /// The worker, and whether the callback panicked.
+    thread: JoinHandle<(Worker, bool)>,
 }
 
 impl DummyBackend {
@@ -118,15 +120,17 @@ impl DummyBackend {
         self
     }
 
-    /// Creates the MIDI input queue. Call before `start`; a later call
-    /// replaces the previous injector.
+    /// Creates the MIDI input queue, replacing any previous injector. Made
+    /// while running, it delivers from the next `start` on; the running
+    /// cycle keeps reading the previous one until `stop`.
     pub fn midi_injector(&mut self) -> MidiInjector {
         let (tx, rx) = spsc(RING_CAPACITY);
         self.midi_in_rx = Some(rx);
         MidiInjector(tx)
     }
 
-    /// Creates the MIDI output tap. Call before `start`.
+    /// Creates the MIDI output tap, replacing any previous tap. Made while
+    /// running, it receives from the next `start` on.
     pub fn midi_tap(&mut self) -> MidiTap {
         let (tx, rx) = spsc(RING_CAPACITY);
         self.midi_out_tx = Some(tx);
@@ -261,8 +265,17 @@ impl AudioBackend for DummyBackend {
             bufs: PortBuffers::new(cfg.audio_inputs.into(), cfg.audio_outputs.into()),
             midi_in: EventList::with_capacity(cfg.midi_capacity),
             midi_out: EventList::with_capacity(cfg.midi_capacity),
-            midi_in_rx: self.midi_in_rx.take().filter(|_| cfg.midi_input),
-            midi_out_tx: self.midi_out_tx.take().filter(|_| cfg.midi_output),
+            // Without the port, the queue stays here for a later `open`.
+            midi_in_rx: if cfg.midi_input {
+                self.midi_in_rx.take()
+            } else {
+                None
+            },
+            midi_out_tx: if cfg.midi_output {
+                self.midi_out_tx.take()
+            } else {
+                None
+            },
             frame_time: 0,
         };
         let stop = Arc::new(AtomicBool::new(false));
@@ -270,8 +283,9 @@ impl AudioBackend for DummyBackend {
         let thread = std::thread::Builder::new()
             .name(format!("{}-dummy-audio", cfg.client_name))
             .spawn(move || {
-                worker.run(&stop2);
-                worker
+                // Catch a panic so `stop` gets the worker, and its queues, back.
+                let panicked = catch_unwind(AssertUnwindSafe(|| worker.run(&stop2))).is_err();
+                (worker, panicked)
             })
             .map_err(|e| BackendError::Other(e.to_string()))?;
         self.running = Some(Running { stop, thread });
@@ -286,19 +300,25 @@ impl AudioBackend for DummyBackend {
             return Ok(());
         };
         running.stop.store(true, Relaxed);
-        let worker = running
+        // Wake the worker from its wait for the next period.
+        running.thread.thread().unpark();
+        let (worker, panicked) = running
             .thread
             .join()
-            .map_err(|_| BackendError::Other("the process callback panicked".into()))?;
-        // Keep the queues so the injector and tap survive a restart; the
-        // callback drops here, on the caller's thread.
+            .map_err(|_| BackendError::Other("the dummy audio thread panicked".into()))?;
+        // Keep the queues so the injector and tap survive a restart. One made
+        // while running is newer than the worker's and wins. The callback
+        // drops here, on the caller's thread.
         let Worker {
             midi_in_rx,
             midi_out_tx,
             ..
         } = worker;
-        self.midi_in_rx = midi_in_rx.or(self.midi_in_rx.take());
-        self.midi_out_tx = midi_out_tx.or(self.midi_out_tx.take());
+        self.midi_in_rx = self.midi_in_rx.take().or(midi_in_rx);
+        self.midi_out_tx = self.midi_out_tx.take().or(midi_out_tx);
+        if panicked {
+            return Err(BackendError::Other("the process callback panicked".into()));
+        }
         Ok(())
     }
 
@@ -424,7 +444,7 @@ impl Worker {
                 } else if now > deadline {
                     deadline = now;
                 } else {
-                    std::thread::sleep(deadline - now);
+                    wait_until(deadline, stop);
                 }
                 deadline += period;
             }
@@ -465,15 +485,17 @@ impl Worker {
         if let Some(tx) = &mut self.midi_out_tx {
             for e in self.midi_out.iter() {
                 let mut bytes = [0; 3];
-                if let Some(len) = midi::encode(&e.kind, &mut bytes) {
-                    let msg = RawMessage {
-                        frame: frame_time + u64::from(e.frame),
-                        bytes,
-                        len: len as u8,
-                    };
-                    if tx.push(msg).is_err() {
-                        dropped += 1;
-                    }
+                let Some(len) = midi::encode(&e.kind, &mut bytes) else {
+                    dropped += u64::from(midi::is_malformed(&e.kind));
+                    continue;
+                };
+                let msg = RawMessage {
+                    frame: frame_time + u64::from(e.frame),
+                    bytes,
+                    len: len as u8,
+                };
+                if tx.push(msg).is_err() {
+                    dropped += 1;
                 }
             }
         }
@@ -481,5 +503,17 @@ impl Worker {
         self.shared.frames.fetch_add(u64::from(frames), Relaxed);
         self.shared.midi_dropped.fetch_add(dropped, Relaxed);
         self.shared.cycles.fetch_add(1, Relaxed);
+    }
+}
+
+/// Parks until `deadline`, or until `stop` is set and the thread unparked, so
+/// `stop()` never waits out a long period.
+fn wait_until(deadline: Instant, stop: &AtomicBool) {
+    loop {
+        let now = Instant::now();
+        if now >= deadline || stop.load(Relaxed) {
+            return;
+        }
+        std::thread::park_timeout(deadline - now);
     }
 }

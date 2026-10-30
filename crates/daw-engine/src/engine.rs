@@ -277,8 +277,8 @@ impl EngineController {
         self.shared.swaps.load(Ordering::Relaxed)
     }
 
-    /// Parameter changes dropped because a node's queue was full or the node
-    /// was not in the running graph.
+    /// Parameter changes dropped because a node's queue was full, the node
+    /// was not in the running graph, or it has no event input.
     pub fn dropped_params(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
     }
@@ -422,5 +422,88 @@ impl EngineProcessor {
         {
             self.retired = Some(g);
         }
+    }
+}
+
+// Lives here rather than in tests/no_alloc.rs because it pushes graphs onto
+// the command queue directly: send_graph collects garbage first, so from the
+// public API the garbage queue only fills when the two threads race.
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
+
+    use super::*;
+    use crate::nodes::Strip;
+
+    #[global_allocator]
+    static ALLOC: AllocDisabler = AllocDisabler;
+
+    /// Queues a graph without collecting garbage first, as a controller
+    /// whose sends race the audio thread's retirements would.
+    fn push_graph(ctl: &mut EngineController, desc: GraphDesc) {
+        let g = Box::new(ctl.compile(desc).unwrap());
+        assert!(ctl.commands.push(Command::Graph(g)).is_ok());
+    }
+
+    fn process(proc: &mut EngineProcessor, out: &mut [f32]) -> u32 {
+        let input = [1.0f32; 32];
+        let events = EventList::with_capacity(0);
+        reset_violation_count();
+        assert_no_alloc(|| proc.process(32, &[&input], &mut [out], &events));
+        violation_count()
+    }
+
+    #[test]
+    fn swaps_with_a_full_garbage_queue_neither_free_nor_reorder() {
+        const CAPACITY: usize = 4;
+        let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+            max_frames: 32,
+            command_capacity: CAPACITY,
+            ..Default::default()
+        });
+        let mut out = [0.0f32; 32];
+        let plain = || {
+            let mut g = GraphDesc::new(1, 1);
+            g.connect(g.input(), g.master());
+            g
+        };
+
+        push_graph(&mut ctl, plain());
+        assert_eq!(process(&mut proc, &mut out), 0);
+        // Each swap retires the graph before it; these fill the garbage queue.
+        for _ in 0..CAPACITY {
+            push_graph(&mut ctl, plain());
+        }
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(ctl.graphs_swapped(), 1 + CAPACITY as u64);
+
+        // The first swap below cannot retire its old graph, so the processor
+        // holds it and `last` has to wait. The change for `track`, which
+        // only exists in `last`, and the graph after it must wait behind
+        // `last`: run early, the change would be dropped and the second
+        // pending graph would free `last` on this thread.
+        push_graph(&mut ctl, plain());
+        let mut last = GraphDesc::new(1, 1);
+        let track = last.add_track("track", 1);
+        last.connect(last.input(), track);
+        last.connect(track, last.master());
+        push_graph(&mut ctl, last);
+        ctl.set_param(track, Strip::MUTE, 1.0).unwrap();
+        push_graph(&mut ctl, plain());
+        for _ in 0..2 {
+            assert_eq!(process(&mut proc, &mut out), 0);
+            assert_eq!(ctl.graphs_swapped(), 2 + CAPACITY as u64);
+            assert!(proc.retired.is_some() && proc.pending.is_some());
+        }
+
+        assert_eq!(ctl.collect_garbage(), CAPACITY);
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(ctl.graphs_swapped(), 4 + CAPACITY as u64);
+        assert_eq!(ctl.dropped_params(), 0, "the change reached `last`");
+        assert!(proc.retired.is_none() && proc.pending.is_none());
+
+        // Every replaced graph comes back to be freed here.
+        assert_eq!(ctl.collect_garbage(), 3);
+        drop(proc);
     }
 }
