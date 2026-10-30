@@ -91,7 +91,10 @@ jobs:
       - name: CMake install layout
         run: ci/check-install.sh
       - name: Screenshots (Breeze light and dark, 100% and 200%)
-        timeout-minutes: 10
+        # Building one package resolves features differently from the
+        # workspace test build, so this rebuilds the app and much of its
+        # dependency tree (about 5 minutes on a runner).
+        timeout-minutes: 20
         run: |
           cargo build -p daw-app
           for scheme in BreezeLight BreezeDark; do
