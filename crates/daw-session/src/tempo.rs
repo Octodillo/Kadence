@@ -1,22 +1,13 @@
 //! The model's tempo data as a `daw_core` tempo map.
 
-use daw_core::time::SegmentTempoMap;
-use daw_model::TempoData;
-
-/// Builds the engine's tempo map from the model's tempo points.
-pub fn tempo_map(data: &TempoData) -> SegmentTempoMap {
-    let first = data.tempos.first().map_or(120.0, |p| p.bpm);
-    let mut map = SegmentTempoMap::new(first);
-    for p in &data.tempos {
-        map.set_tempo(p.tick, p.bpm, p.ramp);
-    }
-    map
-}
+/// Builds the engine's tempo map from the model's tempo points. The same
+/// map daw-midi uses, so MIDI and audio agree on where a beat falls.
+pub use daw_midi::model::tempo_map;
 
 #[cfg(test)]
 mod tests {
     use daw_core::time::{PPQ, SampleTime, TempoMap, TickTime};
-    use daw_model::TempoPoint;
+    use daw_model::{TempoData, TempoPoint};
 
     use super::*;
 

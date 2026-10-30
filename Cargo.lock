@@ -690,6 +690,7 @@ dependencies = [
  "daw-devices",
  "daw-engine",
  "daw-media",
+ "daw-midi",
  "daw-model",
  "tempfile",
  "thiserror 2.0.21",

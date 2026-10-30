@@ -12,6 +12,7 @@ publish.workspace = true
 daw-core.workspace = true
 daw-engine = { path = "../daw-engine" }
 daw-model = { path = "../daw-model" }
+daw-midi = { path = "../daw-midi" }
 daw-media = { path = "../daw-media" }
 daw-devices = { path = "../daw-devices" }
 daw-backend = { path = "../daw-backend" }

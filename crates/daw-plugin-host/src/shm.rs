@@ -15,12 +15,14 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use daw_core::event::{Event, EventKind};
+use daw_core::node::TransportState;
+use daw_core::time::{MusicalPosition, SampleTime};
 use memmap2::MmapMut;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"KDSB");
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// Bytes reserved for [`Header`] at the start of the block.
-const HEADER_BYTES: usize = 128;
+const HEADER_BYTES: usize = 192;
 /// `u64` words per event record.
 const EVENT_WORDS: usize = 4;
 
@@ -63,16 +65,66 @@ pub struct Header {
     /// usual, but the watchdog gives a stalled cycle the call timeout rather than the hang
     /// timeout, so slow main-thread work in a healthy plugin is not mistaken for a hang.
     pub main_in_plugin: AtomicU32,
-    pub position: AtomicU64,
+    /// Time-signature numerator in the low byte, denominator in the next.
+    time_sig: AtomicU32,
+    position: AtomicU64,
     /// `f64` bits.
-    pub bpm: AtomicU64,
+    bpm: AtomicU64,
     /// `f64` bits.
-    pub sample_rate: AtomicU64,
+    sample_rate: AtomicU64,
+    /// `f64` bits.
+    beats: AtomicU64,
+    bar: AtomicU64,
+    /// `f64` bits.
+    bar_start: AtomicU64,
+    /// `f64` bits.
+    bar_len: AtomicU64,
     /// Cycles the host has finished, for the hang watchdog.
     pub completed: AtomicU64,
 }
 
 const _: () = assert!(size_of::<Header>() <= HEADER_BYTES);
+
+impl Header {
+    /// Stores the transport for the next cycle. Ordered by `state`.
+    pub fn write_transport(&self, t: &TransportState) {
+        let m = &t.music;
+        self.playing.store(u32::from(t.playing), Ordering::Relaxed);
+        self.position.store(t.position.0 as u64, Ordering::Relaxed);
+        self.bpm.store(t.bpm.to_bits(), Ordering::Relaxed);
+        self.sample_rate
+            .store(t.sample_rate.to_bits(), Ordering::Relaxed);
+        self.beats.store(m.beats.to_bits(), Ordering::Relaxed);
+        self.bar.store(m.bar as u64, Ordering::Relaxed);
+        self.bar_start
+            .store(m.bar_start.to_bits(), Ordering::Relaxed);
+        self.bar_len.store(m.bar_len.to_bits(), Ordering::Relaxed);
+        self.time_sig.store(
+            u32::from(m.numerator) | u32::from(m.denominator) << 8,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// The transport [`write_transport`](Self::write_transport) stored.
+    pub fn read_transport(&self) -> TransportState {
+        let f = |w: &AtomicU64| f64::from_bits(w.load(Ordering::Relaxed));
+        let sig = self.time_sig.load(Ordering::Relaxed);
+        TransportState {
+            playing: self.playing.load(Ordering::Relaxed) != 0,
+            position: SampleTime(self.position.load(Ordering::Relaxed) as i64),
+            bpm: f(&self.bpm),
+            sample_rate: f(&self.sample_rate),
+            music: MusicalPosition {
+                beats: f(&self.beats),
+                bar: self.bar.load(Ordering::Relaxed) as i64,
+                bar_start: f(&self.bar_start),
+                bar_len: f(&self.bar_len),
+                numerator: sig as u8,
+                denominator: (sig >> 8) as u8,
+            },
+        }
+    }
+}
 
 /// The sizes a block is made for.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -427,6 +479,26 @@ pub fn record(words: &mut [u64], i: usize) -> &mut [u64] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_round_trips() {
+        // Zeroed memory is what a fresh mapping holds.
+        // SAFETY: every field is an atomic integer, for which zero is valid.
+        let h: Header = unsafe { std::mem::zeroed() };
+        let mut tempo = daw_core::time::SegmentTempoMap::new(97.5);
+        tempo.set_tempo(daw_core::time::TickTime(960), 133.0, true);
+        let timeline = daw_core::time::Timeline::new(tempo, daw_core::time::Meter::constant(7, 16));
+        for pos in [-100_000, 0, 123_457, 9_000_000] {
+            let t = TransportState::at(&timeline, true, SampleTime(pos), 44_100.0);
+            h.write_transport(&t);
+            let back = h.read_transport();
+            assert_eq!(back.playing, t.playing);
+            assert_eq!(back.position, t.position);
+            assert_eq!(back.bpm.to_bits(), t.bpm.to_bits());
+            assert_eq!(back.sample_rate.to_bits(), t.sample_rate.to_bits());
+            assert_eq!(back.music, t.music);
+        }
+    }
 
     #[test]
     fn events_round_trip() {

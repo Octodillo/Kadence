@@ -65,8 +65,8 @@ pub struct Lv2Instance {
     /// Parameter changes waiting for their segment boundary; preallocated.
     pending: Vec<(ParamId, f64)>,
     latency_port: Option<usize>,
-    /// (playing, bpm, position expected at the next block) last sent.
-    last_transport: Option<(bool, f64, i64)>,
+    /// What the plugin expects at the next block from the last position sent.
+    last_transport: Option<Expected>,
     pending_reset: bool,
 }
 
@@ -332,25 +332,17 @@ impl Lv2Instance {
 
     fn send_transport(&mut self, t: &TransportState, frames: usize) {
         let Some(i) = self.time_in else { return };
-        let pos = t.position.0;
+        let t = t.or_default_tempo(self.sample_rate);
         let changed = match self.last_transport {
             None => true,
-            Some((playing, bpm, expected)) => {
-                playing != t.playing || bpm != t.bpm || expected != pos
-            }
+            Some(expected) => !expected.matches(&t),
         };
-        let next = if t.playing { pos + frames as i64 } else { pos };
-        self.last_transport = Some((t.playing, t.bpm, next));
+        self.last_transport = Some(Expected::after(&t, frames));
         if !changed {
             return;
         }
-        let rate = if t.sample_rate > 0.0 {
-            t.sample_rate
-        } else {
-            self.sample_rate
-        };
         let mut buf = [0u8; 192];
-        let len = atom::time_position(&self.urids, &mut buf, pos, t.playing, t.bpm, rate);
+        let len = atom::time_position(&self.urids, &mut buf, &t);
         if let Ok(ev) = LV2AtomEventBuilder::<192>::new(0, self.urids.atom_object, &buf[..len]) {
             let _ = self.atom_in[i].push_event(&ev);
         }
@@ -811,6 +803,44 @@ impl<I: Iterator> Iterator for Exact<I> {
 }
 
 impl<I: Iterator> ExactSizeIterator for Exact<I> {}
+/// The transport a plugin extrapolates from the last `time:Position` it got.
+/// A new position is sent only when the real one differs.
+#[derive(Copy, Clone, Debug)]
+struct Expected {
+    playing: bool,
+    bpm: f64,
+    position: i64,
+    beats: f64,
+    numerator: u8,
+    denominator: u8,
+}
+
+impl Expected {
+    /// Where `t` will be `frames` samples on, at its tempo.
+    fn after(t: &TransportState, frames: usize) -> Self {
+        let next = t.advanced(frames as u32);
+        Self {
+            playing: t.playing,
+            bpm: t.bpm,
+            position: next.position.0,
+            beats: next.music.beats,
+            numerator: t.music.numerator,
+            denominator: t.music.denominator,
+        }
+    }
+
+    fn matches(&self, t: &TransportState) -> bool {
+        // A plugin rounds beats from float anyway; this only catches jumps
+        // (a locate, a loop, an edited tempo map).
+        const BEATS: f64 = 1e-6;
+        self.playing == t.playing
+            && self.bpm == t.bpm
+            && self.position == t.position.0
+            && (self.beats - t.music.beats).abs() < BEATS
+            && self.numerator == t.music.numerator
+            && self.denominator == t.music.denominator
+    }
+}
 
 #[cfg(test)]
 mod tests {
