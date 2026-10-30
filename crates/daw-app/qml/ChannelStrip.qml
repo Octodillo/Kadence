@@ -7,7 +7,7 @@ import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
 
-// One mixer channel: inserts, sends, pan, fader with meter, mute and solo.
+// One mixer channel: instrument, inserts, sends, pan, fader with meter, mute and solo.
 Item {
     id: strip
 
@@ -19,6 +19,9 @@ Item {
     required property bool muted
     required property bool soloed
     required property bool silenced
+    required property bool hasInstrument
+    required property string instrument
+    required property int instrumentChoice
     required property list<string> inserts
     required property bool insertMeters
     required property list<string> sends
@@ -105,6 +108,20 @@ Item {
             ColumnLayout {
                 width: slots.availableWidth
                 spacing: Kirigami.Units.smallSpacing
+
+                // Instrument, on instrument tracks
+                Kirigami.ListSectionHeader {
+                    Layout.fillWidth: true
+                    text: i18nc("@title:group", "Instrument")
+                    visible: strip.hasInstrument
+                }
+                InstrumentButton {
+                    Layout.fillWidth: true
+                    visible: strip.hasInstrument
+                    instrument: strip.instrument
+                    currentChoice: strip.instrumentChoice
+                    onChosen: (choice, revision) => Mixer.setInstrument(strip.index, choice, revision)
+                }
 
                 // Inserts
                 Kirigami.ListSectionHeader {

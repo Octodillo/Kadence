@@ -26,6 +26,8 @@ pub struct AppState {
     pub arrange: Arrange,
     /// The piano roll on the Edit page.
     pub piano: PianoRoll,
+    /// The instruments the instrument menus offer.
+    pub instruments: crate::instrument::InstrumentChoices,
     /// The MIDI take in progress.
     pub recording: Option<crate::recording::Recording>,
     /// The document revision the engine last played.
@@ -86,6 +88,7 @@ impl AppState {
             engine: default_engine(),
             arrange: Arrange::new(),
             piano: PianoRoll::new(),
+            instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
             synced: None,
             view_revision: 0,
@@ -178,6 +181,11 @@ impl AppState {
             return true;
         }
         self.known_plugins = Some(list);
+        crate::instrument::set_plugin_effects(self.plugins.plugins());
+        self.instruments.clear_plugins();
+        for choice in crate::instrument::plugin_choices(self.plugins.plugins()) {
+            self.instruments.push(choice);
+        }
         if let Some(session) = self.engine.session_mut() {
             session.set_known_plugins(self.plugins.plugins());
             // Missing plugins are tried again; those still missing say so again.
