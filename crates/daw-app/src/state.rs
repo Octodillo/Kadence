@@ -30,6 +30,8 @@ pub struct AppState {
     pub recording: Option<crate::recording::Recording>,
     /// The export to a file in progress (see `crate::export`).
     pub export: Option<daw_session::export::ExportJob>,
+    /// The audio takes in progress.
+    pub audio_recording: Option<crate::recording::AudioRecording>,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -73,6 +75,7 @@ impl AppState {
             instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
             export: None,
+            audio_recording: None,
             synced: None,
             view_revision: 0,
             status: None,

@@ -25,6 +25,7 @@ use daw_midi::model::compile_track;
 use daw_midi::player::midi_player;
 
 use crate::Warning;
+use crate::capture::input_tap;
 use crate::media::Loaded;
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
 use crate::{Built, Session, db_to_gain};
@@ -51,6 +52,11 @@ fn player_key(track: TrackId) -> NodeKey {
 /// The key of an instrument track's MIDI player.
 fn midi_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 2)
+}
+
+/// The key of an audio track's input tap.
+fn tap_key(track: TrackId) -> NodeKey {
+    NodeKey(track.0.as_u128() ^ 3)
 }
 
 /// How many captured input events can wait for the recorder.
@@ -210,6 +216,29 @@ pub(crate) fn graph(
                 }
             }
         }
+        // The input tap joins the chain after the player, so monitored input
+        // goes through the track's devices like its clips do.
+        let mut tap = None;
+        if track.kind == TrackKind::Audio && inputs > 0 {
+            let tkey = tap_key(track.id);
+            let id = match old.taps.remove(&track.id) {
+                Some(handle) if g.can_reuse(tkey) => {
+                    built.taps.insert(track.id, handle);
+                    g.reuse(tkey).expect("checked")
+                }
+                _ => {
+                    let (node, handle) = input_tap(inputs);
+                    built.taps.insert(track.id, handle);
+                    let id = g.add_device(format!("{} input", track.name), Box::new(node));
+                    g.set_key(id, tkey);
+                    id
+                }
+            };
+            for ch in 0..inputs {
+                g.connect_audio(g.input(), ch, id, ch);
+            }
+            tap = Some(id);
+        }
         // An instrument track's MIDI player feeds its first device events,
         // not audio, so it stays out of the audio chain.
         let mut midi = None;
@@ -273,6 +302,11 @@ pub(crate) fn graph(
         }
         for pair in chain.windows(2) {
             g.connect(pair[0], pair[1]);
+        }
+        if let Some(tap) = tap {
+            // The player is first in an audio track's chain.
+            let after_player = chain.get(1).copied().unwrap_or(strip);
+            g.connect(tap, after_player);
         }
         if let Some(&last) = chain.last() {
             g.connect(last, strip);

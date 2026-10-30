@@ -16,10 +16,12 @@
 //! undo, redo and loading a file all take the same path.
 
 mod build;
+pub mod capture;
 pub mod export;
 pub mod host;
 mod media;
 pub mod player;
+pub mod record;
 mod tempo;
 
 use std::collections::{HashMap, HashSet};
@@ -107,6 +109,8 @@ pub(crate) struct Built {
     pub midi: HashMap<TrackId, daw_midi::player::PlayerHandle>,
     /// The clips each MIDI player's sequence was last compiled from.
     pub midi_clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
+    /// Input taps of audio tracks.
+    pub taps: HashMap<TrackId, capture::TapHandle>,
 }
 
 /// The engine as the model sees it. See the crate docs.
@@ -132,6 +136,9 @@ pub struct Session {
     live: HashMap<(NodeKey, u32), f64>,
     /// Rendering to a file rather than playing: players wait for the disk.
     pub(crate) offline: Option<Arc<player::Offline>>,
+    /// Audio tracks that monitor automatically (armed, monitoring on
+    /// auto), as of the last sync.
+    auto_monitor: HashSet<TrackId>,
 }
 
 impl Session {
@@ -155,6 +162,7 @@ impl Session {
             suspended: HashSet::new(),
             live: HashMap::new(),
             offline: None,
+            auto_monitor: HashSet::new(),
         };
         (session, processor)
     }
@@ -197,8 +205,14 @@ impl Session {
             return;
         }
         self.media.set_root(root);
-        // Paths may resolve differently now; rebuild everything.
-        self.built = None;
+        // Paths may resolve differently now; rebuild everything but the
+        // input taps, whose nodes hold takes being recorded (saving a new
+        // project while recording moves its root).
+        let taps = self.built.take().map(|b| b.taps).unwrap_or_default();
+        self.built = Some(Built {
+            taps,
+            ..Default::default()
+        });
     }
 
     /// Problems found by the last sync, such as audio files that could not
@@ -241,7 +255,53 @@ impl Session {
         }
         self.send_params(snapshot)?;
         self.send_clips(snapshot, tempo_changed);
+        self.apply_inputs(snapshot);
         Ok(())
+    }
+
+    /// Gives every input tap its track's channels and works out which
+    /// tracks monitor.
+    fn apply_inputs(&mut self, snapshot: &ProjectSnapshot) {
+        self.auto_monitor.clear();
+        let Some(built) = &self.built else { return };
+        for track in snapshot.tracks.iter() {
+            let Some(tap) = built.taps.get(&track.id) else {
+                continue;
+            };
+            tap.set_channels(track.audio_input.channels);
+            if track.armed && track.audio_input.monitor == daw_model::Monitoring::Auto {
+                self.auto_monitor.insert(track.id);
+            }
+        }
+        self.update_monitors();
+    }
+
+    /// Turns input monitoring on or off on each audio track: on while the
+    /// track is armed with monitoring on auto, unless the transport plays
+    /// without recording that track, so its takes can be heard back.
+    /// [`sync`](Self::sync), [`play`](Self::play), [`stop`](Self::stop) and
+    /// [`record::AudioTakes`] call it; call it after starting or stopping a
+    /// recording by hand through [`tap_mut`](Self::tap_mut).
+    pub fn update_monitors(&mut self) {
+        let playing = self.playing;
+        let Some(built) = &self.built else { return };
+        for (id, tap) in &built.taps {
+            let on = self.auto_monitor.contains(id) && (!playing || tap.is_recording());
+            tap.set_monitor(on);
+        }
+    }
+
+    /// The input tap of an audio track, for recording.
+    pub fn tap_mut(&mut self, track: TrackId) -> Option<&mut capture::TapHandle> {
+        self.built.as_mut()?.taps.get_mut(&track)
+    }
+
+    /// Whether an audio track is playing its input through right now.
+    pub fn is_monitoring(&self, track: TrackId) -> bool {
+        self.built
+            .as_ref()
+            .and_then(|b| b.taps.get(&track))
+            .is_some_and(|t| t.monitoring())
     }
 
     /// Leaves the automation lanes in `lanes` out of playback, so a control
@@ -373,18 +433,23 @@ impl Session {
             for p in b.midi.values_mut() {
                 p.collect_garbage();
             }
+            for t in b.taps.values_mut() {
+                t.collect_garbage();
+            }
         }
     }
 
     pub fn play(&mut self) -> Result<(), SessionError> {
         self.controller.play()?;
         self.playing = true;
+        self.update_monitors();
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), SessionError> {
         self.controller.stop()?;
         self.playing = false;
+        self.update_monitors();
         Ok(())
     }
 
