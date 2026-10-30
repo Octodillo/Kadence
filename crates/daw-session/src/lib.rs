@@ -21,6 +21,7 @@
 
 mod build;
 pub mod capture;
+pub mod export;
 pub mod host;
 mod media;
 pub mod player;
@@ -164,6 +165,8 @@ pub struct Session {
     suspended: HashSet<LaneId>,
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
+    /// Rendering to a file rather than playing: players wait for the disk.
+    pub(crate) offline: Option<Arc<player::Offline>>,
     plugins: Plugins,
     /// The snapshot last synced, for rebuilds the plugins ask for.
     last: Option<ProjectSnapshot>,
@@ -217,6 +220,7 @@ impl Session {
             master: None,
             suspended: HashSet::new(),
             live: HashMap::new(),
+            offline: None,
             plugins: Plugins::default(),
             last: None,
             force_rebuild: false,
