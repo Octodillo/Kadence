@@ -306,6 +306,16 @@ impl Session {
                 built.params.insert((key, param), value);
             }
         }
+        // Only parameters that were sent another value: one the document
+        // never set keeps what the device has, which may come from its
+        // saved state.
+        for ((key, param), value) in build::param_defaults(snapshot) {
+            let value = self.live.get(&(key, param)).copied().unwrap_or(value);
+            if built.params.get(&(key, param)).is_some_and(|&v| v != value) {
+                self.controller.set_param_by_key(key, param, value)?;
+                built.params.insert((key, param), value);
+            }
+        }
         Ok(())
     }
 

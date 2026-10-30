@@ -19,6 +19,7 @@ const QML_FILES: &[&str] = &[
     "qml/ArrangePage.qml",
     "qml/MixPage.qml",
     "qml/ChannelStrip.qml",
+    "qml/DevicePanelDrawer.qml",
     "qml/LevelMeter.qml",
     "qml/GainReductionMeter.qml",
     "qml/EditPage.qml",
@@ -75,6 +76,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/mixer_bridge.rs",
+        "src/device_panel_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",

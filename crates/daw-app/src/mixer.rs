@@ -21,8 +21,12 @@ pub enum StripKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InsertInfo {
+    /// The model device's id, for the device panel.
+    pub uid: String,
     /// Built-in device id, such as `daw.compressor`.
     pub device_id: String,
+    /// Switched on; off is bypassed.
+    pub enabled: bool,
     pub name: String,
     pub has_gain_reduction: bool,
 }

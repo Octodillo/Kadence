@@ -37,6 +37,7 @@ pub mod qobject {
         type QVector_i32 = cxx_qt_lib::QVector<i32>;
         include!("cxx-qt-lib/qlist.h");
         type QList_f64 = cxx_qt_lib::QList<f64>;
+        type QList_bool = cxx_qt_lib::QList<bool>;
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qstringlist.h");
@@ -77,6 +78,10 @@ pub mod qobject {
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
         #[qinvokable]
         fn remove_insert(self: Pin<&mut Mixer>, row: i32, insert: i32);
+        /// The id of an insert's device, for `DevicePanel.open`; empty if
+        /// there is none.
+        #[qinvokable]
+        fn insert_device(self: &Mixer, row: i32, insert: i32) -> QString;
         /// Turns touch writing on or off.
         #[qinvokable]
         fn set_writing(self: Pin<&mut Mixer>, on: bool);
@@ -141,6 +146,7 @@ const ROLES: &[&str] = &[
     "soloed",
     "silenced",
     "inserts",
+    "insertsEnabled",
     "insertMeters",
     "sends",
     "sendLevels",
@@ -331,6 +337,15 @@ impl qobject::Mixer {
         }
     }
 
+    fn insert_device(&self, row: i32, insert: i32) -> QString {
+        let uid = usize::try_from(row)
+            .ok()
+            .zip(usize::try_from(insert).ok())
+            .and_then(|(r, i)| self.strips.get(r)?.inserts.get(i))
+            .map_or("", |i| i.uid.as_str());
+        QString::from(uid)
+    }
+
     fn set_writing(mut self: Pin<&mut Self>, on: bool) {
         self.as_mut().rust_mut().mixer.set_write_automation(on);
         let on = self.mixer.write_automation();
@@ -446,6 +461,13 @@ impl qobject::Mixer {
             Some("silenced") => QVariant::from(&s.silenced),
             Some("inserts") => {
                 QVariant::from(&string_list(s.inserts.iter().map(|i| i.name.as_str())))
+            }
+            Some("insertsEnabled") => {
+                let mut on = QList::<bool>::default();
+                for i in &s.inserts {
+                    on.append(i.enabled);
+                }
+                QVariant::from(&on)
             }
             Some("insertMeters") => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
             Some("sends") => {

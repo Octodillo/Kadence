@@ -21,7 +21,7 @@ pub const BEATS_PER_BAR: ParamId = 1;
 pub const ACCENT: ParamId = 2;
 pub const PITCH: ParamId = 3;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::new(
         VOLUME,
         "volume",

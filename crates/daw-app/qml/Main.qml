@@ -276,6 +276,11 @@ Kirigami.ApplicationWindow {
         id: editNames
     }
 
+    // Opened by DevicePanel.open() from any page.
+    DevicePanelDrawer {
+        id: devicePanel
+    }
+
     // Shows a message map from Project, if it holds one.
     function notify(message: var): void {
         const text = projectMessage.text(message);

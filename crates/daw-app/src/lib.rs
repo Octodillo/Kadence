@@ -8,6 +8,8 @@
 pub mod arrange_view;
 pub mod bridge;
 mod demo;
+pub mod device_panel;
+pub mod device_panel_bridge;
 pub mod engine;
 mod ffi;
 pub mod message;

@@ -153,6 +153,35 @@ Item {
             check(!Mixer.writeAutomation, "writing off");
         },
         () => {
+            // Click the compressor added above: its panel opens.
+            const id = Mixer.insertDevice(0, 0);
+            check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
+            check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
+            check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            // Drag the threshold: one undo step.
+            DevicePanel.setValue(0, -30, true);
+            DevicePanel.setValue(0, -24, true);
+            DevicePanel.endGesture();
+            // Project's properties follow the document on its tick.
+            Project.tick();
+            check(Project.undoText === "Change Parameter", "parameter edit undoes");
+            Project.undo();
+            check(Project.undoText === "Add Automation Lane", "a drag is one undo step");
+            Project.redo();
+            DevicePanel.setDeviceEnabled(false);
+            Project.tick();
+            check(!DevicePanel.switchedOn && Project.undoText === "Bypass Device", "bypass");
+            DevicePanel.setDeviceEnabled(true);
+            check(DevicePanel.switchedOn, "switch back on");
+        },
+        () => {
+            shoot(window.title, "mix-device");
+        },
+        () => {
+            DevicePanel.close();
+            check(!DevicePanel.active, "panel closed");
+        },
+        () => {
             window.pageActions[2].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Edit"), "switch to Edit");
             check(TestHelper.openFirstMidiClip(), "open the demo's MIDI clip");

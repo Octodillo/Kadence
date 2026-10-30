@@ -441,6 +441,25 @@ pub(crate) fn params(project: &Project) -> Vec<((NodeKey, u32), f64)> {
     out
 }
 
+/// The default of every built-in device parameter the project leaves at
+/// its default. A parameter returned to its default (`SetParam` with
+/// `None`) is no longer in [`params`], so the session sends it this.
+pub(crate) fn param_defaults(project: &Project) -> Vec<((NodeKey, u32), f64)> {
+    let mut out = Vec::new();
+    for d in project.all_tracks().flat_map(|t| t.devices.iter()) {
+        let DeviceSource::Builtin { kind } = &d.source else {
+            continue;
+        };
+        let Some(specs) = daw_devices::param_specs(kind) else {
+            continue;
+        };
+        for s in specs.iter().filter(|s| !d.params.contains_key(&s.id)) {
+            out.push(((device_key(d.id), s.id), s.default));
+        }
+    }
+    out
+}
+
 /// Tracks that are silent: muted ones, and while anything is soloed, every
 /// track that neither is soloed nor carries a soloed track's signal. Uses
 /// the mixer's rule (`daw_engine::mixer::effective_mutes`).
