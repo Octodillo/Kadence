@@ -26,6 +26,17 @@ pub mod settings;
 pub mod state;
 mod test_helper;
 
+/// Runs a plugin sandbox host or scanner if the arguments ask for one
+/// (`--plugin-host <socket>` or `--scan <format> <bundle>`), which the
+/// session's plugin loader starts this executable with. Call it first thing,
+/// before Qt sees the arguments. `None` means start the application.
+pub fn run_plugin_child() -> Option<std::process::ExitCode> {
+    let registry = daw_plugins::default_registry();
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    daw_plugin_host::run_host_child(&registry, args.iter().cloned())
+        .or_else(|| daw_plugins::run_scan_child(&registry, args))
+}
+
 /// Run the application with the process arguments. Returns the exit code.
 pub fn run() -> i32 {
     // Make sure the linker keeps the QML module and its Rust types.
