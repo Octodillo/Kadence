@@ -17,6 +17,7 @@ mod paint;
 pub mod piano_roll;
 pub mod project;
 mod recording;
+pub mod recovery;
 pub mod session_mixer;
 pub mod settings;
 pub mod state;

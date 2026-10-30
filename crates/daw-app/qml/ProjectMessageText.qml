@@ -79,6 +79,8 @@ QtObject {
             return i18nc("@info", "Some MIDI input arrived too fast to be recorded, so the take may be missing notes.");
         case Project.NothingRecorded:
             return i18nc("@info", "The take was outside the song, so nothing was added.");
+        case Project.AlreadyOpen:
+            return i18nc("@info", "It is open in another Kadence window.");
         }
         return "";
     }
@@ -107,6 +109,11 @@ QtObject {
             return i18nc("@info %1 is the reason, a full sentence", "That edit could not be made. %1", why);
         case Project.PlaybackContext:
             return i18nc("@info %1 is the reason, a full sentence", "Playback may be incomplete. %1", why);
+        case Project.CollectContext:
+            return i18nc("@info %1 is the reason, a full sentence",
+                         "Could not copy the audio files into the project. %1", why);
+        case Project.RecoverContext:
+            return i18nc("@info %1 is the reason, a full sentence", "Could not recover the unsaved changes. %1", why);
         case Project.RecordContext:
             switch (m.reason) {
             case Project.NoInstrumentTrack:

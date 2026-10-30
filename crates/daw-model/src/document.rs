@@ -94,6 +94,16 @@ impl Document {
         })
     }
 
+    /// A document for a project that was never saved, recovered from an
+    /// autosave kept outside any bundle. It starts out modified, since the
+    /// recovered state isn't saved.
+    pub fn recovered(project: Project) -> Self {
+        Self {
+            saved_at: None,
+            ..Self::new(project)
+        }
+    }
+
     pub fn project(&self) -> &Project {
         &self.project
     }

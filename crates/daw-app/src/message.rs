@@ -25,6 +25,10 @@ pub enum Context {
     Playback,
     /// Recording MIDI.
     Record,
+    /// Copying audio from outside the bundle into it.
+    Collect,
+    /// Getting unsaved work back from an autosave.
+    Recover,
 }
 
 /// Why, which picks the second sentence.
@@ -82,6 +86,8 @@ pub enum Reason {
     MidiInputDropped,
     /// The take has no notes inside the song.
     NothingRecorded,
+    /// The bundle at `path` is open in another Kadence.
+    AlreadyOpen,
 }
 
 /// A message, flattened for a front end.
@@ -165,6 +171,8 @@ pub enum Message {
     Playback(daw_session::SessionError),
     Warning(Warning),
     Record(RecordProblem),
+    /// Another Kadence has the bundle at this path open.
+    AlreadyOpen(PathBuf),
 }
 
 impl From<ModelError> for Message {
@@ -240,6 +248,7 @@ impl Message {
                 RecordProblem::NothingRecorded => Fields::new(C::Record, R::NothingRecorded),
                 RecordProblem::Refused(e) => Fields::new(C::Record, R::EditRefused).detail(e),
             },
+            Self::AlreadyOpen(path) => Fields::new(C::Open, R::AlreadyOpen).path(path),
             Self::Warning(w) => match w {
                 Warning::DeviceStateRejected { device, detail } => {
                     Fields::new(C::Playback, R::DeviceStateRejected)

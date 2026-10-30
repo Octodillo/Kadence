@@ -28,6 +28,11 @@ cxx-qt = "0.10"
 cxx-qt-lib = { version = "0.10", features = ["qt_gui", "qt_qml"] }
 daw-devices = { path = "../daw-devices" }
 daw-engine = { path = "../daw-engine" }
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 cxx-qt-build = "0.10"

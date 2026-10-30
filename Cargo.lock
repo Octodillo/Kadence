@@ -502,6 +502,9 @@ dependencies = [
  "daw-model",
  "daw-pianoroll",
  "daw-session",
+ "libc",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

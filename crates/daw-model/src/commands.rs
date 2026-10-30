@@ -645,6 +645,8 @@ pub enum ClipField {
     AudioOffset(SampleTime),
     /// Audio clips only.
     AudioGainDb(f64),
+    /// Audio clips only: the file it plays, as in [`AudioClip::source`].
+    AudioSource(std::path::PathBuf),
 }
 
 /// Sets one property of a clip. Consecutive edits of the same property on the
@@ -668,6 +670,7 @@ impl SetClip {
             (ClipField::Muted(v), _) => mem::swap(&mut c.muted, v),
             (ClipField::AudioOffset(v), ClipContent::Audio(a)) => mem::swap(&mut a.offset, v),
             (ClipField::AudioGainDb(v), ClipContent::Audio(a)) => mem::swap(&mut a.gain_db, v),
+            (ClipField::AudioSource(v), ClipContent::Audio(a)) => mem::swap(&mut a.source, v),
             _ => return Err(invalid("that property only applies to audio clips")),
         }
         Ok(ChangeSet::one(Change::Clip(self.id)))
@@ -682,6 +685,7 @@ impl Command for SetClip {
             ClipField::Muted(_) => "Mute Clip",
             ClipField::AudioOffset(_) => "Slip Clip",
             ClipField::AudioGainDb(_) => "Change Clip Gain",
+            ClipField::AudioSource(_) => "Relink Audio",
         }
         .into()
     }
@@ -698,11 +702,14 @@ impl Command for SetClip {
                 return Err(invalid("audio offset must not be negative"));
             }
             ClipField::AudioGainDb(g) => check_finite(g, "clip gain")?,
+            ClipField::AudioSource(ref p) if p.as_os_str().is_empty() => {
+                return Err(invalid("audio clip needs a source file"));
+            }
             _ => {}
         }
         let audio_only = matches!(
             self.field,
-            ClipField::AudioOffset(_) | ClipField::AudioGainDb(_)
+            ClipField::AudioOffset(_) | ClipField::AudioGainDb(_) | ClipField::AudioSource(_)
         );
         if audio_only && !matches!(clip.content, ClipContent::Audio(_)) {
             return Err(invalid("that property only applies to audio clips"));

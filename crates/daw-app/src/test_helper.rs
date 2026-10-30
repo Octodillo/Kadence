@@ -38,6 +38,21 @@ pub mod self_test {
         /// The sum of the keys of the piano roll's notes.
         #[qinvokable]
         fn piano_key_sum(self: &TestHelper) -> i32;
+
+        /// Make a temporary folder holding a bundle `Files` whose clips play
+        /// `outside/kick.wav` (outside the bundle) and `moved/snare.wav`
+        /// (missing: the file is in `found/`). Returns the folder, or "".
+        #[qinvokable]
+        fn make_files_test(self: &TestHelper) -> QString;
+
+        /// Whether a file exists at `path`.
+        #[qinvokable]
+        fn file_exists(self: &TestHelper, path: &QString) -> bool;
+
+        /// Leave a never-saved project with one track behind in a scratch
+        /// folder, as a crash would, and offer it for recovery.
+        #[qinvokable]
+        fn offer_test_recovery(self: &TestHelper) -> bool;
     }
 }
 
@@ -99,4 +114,88 @@ impl self_test::TestHelper {
                 .sum()
         })
     }
+
+    fn make_files_test(&self) -> QString {
+        match files_test() {
+            Ok(dir) => QString::from(dir.display().to_string().as_str()),
+            Err(e) => {
+                eprintln!("files test: {e}");
+                QString::default()
+            }
+        }
+    }
+
+    fn file_exists(&self, path: &QString) -> bool {
+        std::path::Path::new(&path.to_string()).exists()
+    }
+
+    fn offer_test_recovery(&self) -> bool {
+        let base = test_dir("recovery");
+        let result = (|| -> Result<(), String> {
+            let scratch = crate::recovery::Scratch::create(&base).map_err(|e| e.to_string())?;
+            let mut p = daw_model::Project::default();
+            p.tracks
+                .push(daw_model::Track::new(daw_model::TrackKind::Instrument, "Recovered").into());
+            scratch.write(&p).map_err(|e| e.to_string())?;
+            // Dropped without removing the folder, as a crash would.
+            Ok(())
+        })();
+        if let Err(e) = result {
+            eprintln!("recovery test: {e}");
+            return false;
+        }
+        crate::state::with(|s| {
+            s.recovery = crate::recovery::find(Some(&base), &[]);
+            s.touch();
+            !s.recovery.is_empty()
+        })
+    }
+}
+
+/// A fresh folder for one part of the self test.
+fn test_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir()
+        .join(format!("kadence-selftest-{}", std::process::id()))
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn files_test() -> Result<std::path::PathBuf, String> {
+    use daw_core::time::{SampleTime, TickTime};
+    use daw_model::{AudioClip, Clip, ClipContent, Document, Project, Track, TrackKind};
+
+    let dir = test_dir("files");
+    let err = |e: &dyn std::fmt::Display| e.to_string();
+    let tone = daw_media::AudioData {
+        sample_rate: 48_000,
+        channels: vec![vec![0.25; 4_800]],
+    };
+    for f in ["outside/kick.wav", "found/snare.wav"] {
+        let path = dir.join(f);
+        std::fs::create_dir_all(path.parent().expect("has a folder")).map_err(|e| err(&e))?;
+        daw_media::write_wav(&path, &tone, daw_media::WavFormat::Float32).map_err(|e| err(&e))?;
+    }
+    let clip = |name: &str, source: std::path::PathBuf, start: i64| {
+        std::sync::Arc::new(Clip::new(
+            name,
+            TickTime(start),
+            TickTime(daw_core::time::PPQ),
+            ClipContent::Audio(AudioClip {
+                source,
+                offset: SampleTime(0),
+                gain_db: 0.0,
+            }),
+        ))
+    };
+    let mut t = Track::new(TrackKind::Audio, "Drums");
+    t.clips = vec![
+        clip("Kick", dir.join("outside/kick.wav"), 0),
+        clip("Snare", dir.join("moved/snare.wav"), daw_core::time::PPQ),
+    ];
+    let mut p = Project::new("Files");
+    p.tracks.push(t.into());
+    let mut doc = Document::new(p);
+    doc.save_as(dir.join("Files")).map_err(|e| err(&e))?;
+    Ok(dir)
 }
