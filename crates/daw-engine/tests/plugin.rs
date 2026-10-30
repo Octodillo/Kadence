@@ -456,3 +456,18 @@ fn a_split_plugin_retires_stale_nodes_like_a_whole_one() {
     send(&mut ctl, &plugin);
     assert_eq!(run(&mut proc, 1), [vec![3.0], vec![3.0]]);
 }
+
+#[test]
+fn a_plugin_that_splits_only_once_prepared_is_split_from_then_on() {
+    let (plugin, control) = plugin_with(FakePlugin::splitting_after_prepare(1));
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    run(&mut proc, 1);
+    let held = plugin.with(|_| run(&mut proc, 1));
+    assert_eq!(held[0], vec![0.0], "whole: the main thread holds it");
+    ask_for(&control, 1);
+    plugin.pump();
+    send(&mut ctl, &plugin);
+    let held = plugin.with(|_| run(&mut proc, 2));
+    assert_eq!(held[0], ramp(2, 4), "split now: plays during the call");
+}

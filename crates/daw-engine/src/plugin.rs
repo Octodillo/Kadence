@@ -84,12 +84,6 @@ struct Inner {
     /// The node that last played. A newer node takes over on its first block; older ones
     /// stay quiet.
     owner: u64,
-    /// The node asked to play last, if it was the owner or newer, could not: it was made
-    /// for an older layout.
-    stale: bool,
-    /// The node that last played caught up with ports other than the ones it was made, and
-    /// wired, with.
-    rewire: bool,
 }
 
 /// Main-thread state. Only the handle's thread locks it, so the audio thread never waits on
@@ -161,6 +155,13 @@ struct Shared {
     /// `Inner::owner` while that node lives, 0 once it is dropped: then an older node may
     /// take over.
     live_owner: AtomicU64,
+    /// The node asked to play last, if it was the owner or newer, could not: it was made
+    /// for an older layout. Written by the audio thread; atomic so `pump` reads it without
+    /// stopping the audio.
+    stale: AtomicBool,
+    /// The node that last played caught up with ports other than the ones it was made, and
+    /// wired, with.
+    rewire: AtomicBool,
     /// Blocks the audio thread output silence for because the main thread held the plugin.
     busy: AtomicU64,
 }
@@ -216,6 +217,20 @@ impl Shared {
                     state.prepare(p, sample_rate, max_frames);
                 }
             });
+            // A plugin that could not split before it was prepared may now.
+            let instance = self.inner.main(|i| {
+                let Audio::Whole(p) = &mut i.audio else {
+                    return None;
+                };
+                let half = p.split()?;
+                match std::mem::replace(&mut i.audio, Audio::Split(Some(half))) {
+                    Audio::Whole(p) => Some(p),
+                    _ => unreachable!("matched above"),
+                }
+            });
+            if instance.is_some() {
+                self.lock_main().instance = instance;
+            }
             return;
         }
         let half = self.inner.main(|i| {
@@ -261,18 +276,15 @@ impl PluginHandle {
         };
         Self {
             shared: Arc::new(Shared {
-                inner: Exclusive::new(Inner {
-                    audio,
-                    owner: 0,
-                    stale: false,
-                    rewire: false,
-                }),
+                inner: Exclusive::new(Inner { audio, owner: 0 }),
                 epoch: AtomicU64::new(0),
                 main: Mutex::new(Main { instance, state }),
                 thread: thread::current().id(),
                 main_inside: AtomicBool::new(false),
                 nodes: AtomicU64::new(0),
                 live_owner: AtomicU64::new(0),
+                stale: AtomicBool::new(false),
+                rewire: AtomicBool::new(false),
                 busy: AtomicU64::new(0),
             }),
             _not_send: PhantomData,
@@ -280,36 +292,37 @@ impl PluginHandle {
     }
 
     /// Runs `f` on the plugin, for state, parameters and editors. For a format that splits
-    /// its instances (CLAP, VST3, sandboxed plugins), the audio thread plays on meanwhile.
+    /// its instances (CLAP), the audio thread plays on meanwhile.
     /// For one that does not, it waits a few microseconds, then outputs silence for this
     /// plugin, so keep `f` short. Leave `prepare`, `process`, `split`, `join` and
     /// `take_layout_changed` to the handle.
     pub fn with<R>(&self, f: impl FnOnce(&mut dyn PluginInstance) -> R) -> R {
-        let (r, retire) = self.shared.main(|p, state| {
+        let shared = &*self.shared;
+        shared.main(|p, state| {
             let p = p.expect("the handle holds the plugin while it lives");
             let r = f(p);
-            // A state load can change the latency.
-            (r, state.note_layout_change(p))
-        });
-        if retire {
-            self.shared.retire_nodes();
-        }
-        r
+            // A state load can change the latency. A whole instance is still held here, so
+            // no node plays it with ports it was not compiled for.
+            if state.note_layout_change(p) {
+                shared.retire_nodes();
+            }
+            r
+        })
     }
 
     /// Runs the plugin's main-thread callbacks. Returns true while the graph should be built
     /// and sent again with a fresh [`node`](Self::node): the plugin wants another layout or
     /// latency, or the node asked to play is out of date.
     pub fn pump(&self) -> bool {
-        let retire = self.shared.main(|p, state| {
-            p.is_some_and(|p| {
+        let shared = &*self.shared;
+        shared.main(|p, state| {
+            if let Some(p) = p {
                 p.on_main_thread();
-                state.note_layout_change(p)
-            })
+                if state.note_layout_change(p) {
+                    shared.retire_nodes();
+                }
+            }
         });
-        if retire {
-            self.shared.retire_nodes();
-        }
         self.needs_rebuild()
     }
 
@@ -319,7 +332,8 @@ impl PluginHandle {
         let in_graph = Arc::strong_count(&self.shared) > 1;
         in_graph
             && (self.shared.main(|_, state| state.layout_changed)
-                || self.shared.inner.main(|i| i.stale || i.rewire))
+                || self.shared.stale.load(Ordering::Relaxed)
+                || self.shared.rewire.load(Ordering::Relaxed))
     }
 
     /// A node for the next graph, with the plugin's current ports and latency. Prepares the
@@ -419,8 +433,9 @@ impl PluginNode {
                 // A newer node plays; it, not this one, tells the host about its state.
                 return None;
             }
-            i.stale = shared.epoch.load(Ordering::Acquire) != epoch;
-            if i.stale {
+            let stale = shared.epoch.load(Ordering::Acquire) != epoch;
+            shared.stale.store(stale, Ordering::Relaxed);
+            if stale {
                 return None;
             }
             let target = match &mut i.audio {
@@ -432,7 +447,7 @@ impl PluginNode {
                 i.owner = id;
                 shared.live_owner.store(id, Ordering::Relaxed);
             }
-            i.rewire = rewired;
+            shared.rewire.store(rewired, Ordering::Relaxed);
             Some(f(target))
         };
         for _ in 0..AUDIO_RETRIES {

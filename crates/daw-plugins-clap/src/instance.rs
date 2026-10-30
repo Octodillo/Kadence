@@ -140,11 +140,6 @@ struct AudioHalf {
 /// while it processes, so the instance serves state, editors and callbacks meanwhile.
 pub struct ClapProcessor(AudioHalf);
 
-// SAFETY: only the audio-thread functions of the plugin (`process`, `reset`, and starting
-// processing) are reached through this half, as CLAP allows from the audio thread while the
-// main thread uses the instance.
-unsafe impl Send for ClapProcessor {}
-
 impl plugin::PluginProcessor for ClapProcessor {
     fn process(&mut self, ctx: &mut ProcessContext) {
         self.0.process(ctx);
@@ -334,6 +329,12 @@ impl ClapInstance {
     /// What [`Node::prepare`] does, but reporting activation failure instead of leaving the
     /// plugin silent.
     pub fn try_prepare(&mut self, sample_rate: f64, max_frames: u32) -> Result<(), PluginError> {
+        if self.active && self.audio.is_none() {
+            return Err(PluginError::Load(format!(
+                "{}: prepared while its audio half is out; join it first",
+                self.descriptor.id
+            )));
+        }
         self.layout_changed = false;
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);

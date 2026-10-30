@@ -248,6 +248,7 @@ pub struct FakePlugin {
     count: std::sync::Arc<std::sync::atomic::AtomicU32>,
     changed: bool,
     splits: bool,
+    split_after_prepare: bool,
     /// The audio half is out.
     out: bool,
 }
@@ -301,6 +302,7 @@ impl FakePlugin {
             count: Default::default(),
             changed: false,
             splits: false,
+            split_after_prepare: false,
             out: false,
         }
     }
@@ -308,6 +310,13 @@ impl FakePlugin {
     pub fn splitting(outputs: u16) -> Self {
         let mut p = Self::new(outputs);
         p.splits = true;
+        p
+    }
+
+    /// Splits from its first prepare on, like a format that instantiates inactive.
+    pub fn splitting_after_prepare(outputs: u16) -> Self {
+        let mut p = Self::new(outputs);
+        p.split_after_prepare = true;
         p
     }
 
@@ -330,6 +339,7 @@ impl Node for FakePlugin {
         assert!(!self.out, "prepared while the audio half is out");
         let c = &self.control;
         c.prepares.fetch_add(1, Relaxed);
+        self.splits |= self.split_after_prepare;
         self.outputs = c.next_outputs.load(Relaxed) as u16;
         self.latency = c.next_latency.load(Relaxed);
     }

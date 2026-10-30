@@ -454,3 +454,16 @@ fn a_split_instance_processes_while_the_main_thread_works() {
         true
     }));
 }
+
+#[test]
+fn preparing_with_the_half_out_is_refused_and_changes_nothing() {
+    let mut plugin = instance();
+    let half = plugin.split().expect("splits");
+    plugin.prepare(SR, MAX);
+    // Still active with its half out: it can be joined and keeps working.
+    plugin.join(half);
+    let ([l, _], _) = run(plugin.as_mut(), 8, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 1.0));
+    plugin.prepare(SR, MAX);
+    assert!(plugin.split().is_some());
+}
