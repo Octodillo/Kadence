@@ -700,9 +700,8 @@ fn a_split_sandbox_reloads_without_playing_its_defaults() {
             // A few blocks that start after the reload is done.
             let mut after = 0;
             while after < 5 {
-                if !reloading.load(Ordering::Acquire) {
-                    after += 1;
-                }
+                let done = !reloading.load(Ordering::Acquire);
+                after += usize::from(done);
                 let input = [1.0f32; 64];
                 let (mut left, mut right) = ([f32::NAN; 64], [f32::NAN; 64]);
                 let events_in = EventList::with_capacity(4);
@@ -718,7 +717,7 @@ fn a_split_sandbox_reloads_without_playing_its_defaults() {
                     events_in: &events_in,
                     events_out: &mut events_out,
                 });
-                blocks.push(left[0]);
+                blocks.push((done, left[0]));
                 std::thread::sleep(Duration::from_millis(1));
             }
             blocks
@@ -728,10 +727,13 @@ fn a_split_sandbox_reloads_without_playing_its_defaults() {
         audio.join().unwrap()
     });
     assert!(
-        blocks.iter().all(|&s| s == 0.0 || s == 0.25),
+        blocks.iter().all(|&(_, s)| s == 0.0 || s == 0.25),
         "a block played something else: {blocks:?}"
     );
-    assert_eq!(blocks.last(), Some(&0.25), "{blocks:?}");
+    assert!(
+        blocks.iter().filter(|b| b.0).all(|&(_, s)| s == 0.25),
+        "a block after the reload did not play the restored gain: {blocks:?}"
+    );
     plugin.join(half);
 }
 

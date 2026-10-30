@@ -58,12 +58,15 @@ pub struct Header {
     pub events_out: AtomicU32,
     /// Set by the host while its main thread is in a slow plugin call (state, editor). Audio
     /// cycles then output silence instead of waiting for it, and the watchdog does not count
-    /// them as a hang.
+    /// them as a hang. Not set while the audio thread runs the plugin's split half, which
+    /// never waits for the main thread.
     pub main_busy: AtomicU32,
     /// Set by the host while its main thread holds the plugin for any reason (a call or the
     /// main-thread pump), but not while it only waits for the lock. Audio cycles wait for it as
     /// usual, but the watchdog gives a stalled cycle the call timeout rather than the hang
-    /// timeout, so slow main-thread work in a healthy plugin is not mistaken for a hang.
+    /// timeout, so slow main-thread work in a healthy plugin is not mistaken for a hang. Not
+    /// set while the audio thread runs a split half, except during a prepare, when it is
+    /// stopped.
     pub main_in_plugin: AtomicU32,
     /// Set by the host when the plugin reported, through
     /// [`PluginInstance::take_layout_changed`], that it wants to be prepared again; taken by

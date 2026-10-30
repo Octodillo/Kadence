@@ -1315,6 +1315,13 @@ impl Audio {
             self.rt.reset_pending = true;
         }
         let Some(shm) = self.shm.as_ref() else {
+            // Between hosts, during a reload. Note-offs wait for the new host, which may get
+            // notes carried from the old one; parameter values are tracked above.
+            for e in ctx.events_in.iter() {
+                if matches!(e.kind, EventKind::NoteOff { .. }) {
+                    self.rt.carry(*e);
+                }
+            }
             SandboxedInstance::silence(ctx, 0);
             return;
         };
