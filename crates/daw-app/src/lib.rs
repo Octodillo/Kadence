@@ -41,5 +41,9 @@ pub fn run() -> i32 {
         args.extend_from_slice(arg.as_bytes());
         args.push(0);
     }
-    ffi::run_application(&args, env!("CARGO_PKG_VERSION"))
+    let code = ffi::run_application(&args, env!("CARGO_PKG_VERSION"));
+    // `main` exits without running thread-local destructors, so stop a
+    // running export here: dropping it removes its temporary file.
+    drop(state::with(|s| s.export.take()));
+    code
 }

@@ -15,6 +15,8 @@ Item {
     property int step: 0
     property Item settingsPage
     property int failures: 0
+    // Times steps have asked to be run again.
+    property int waits: 0
     // What the export dialog reported last, and where it exported to.
     property var exportMessage: ({})
     property url exportUrl
@@ -213,7 +215,11 @@ Item {
             check(!Project.playing, "stop");
         },
         () => {
-            // The export ran in the background meanwhile.
+            // The export ran in the background meanwhile; give a slow
+            // machine more time.
+            if (Exporter.running && test.waits < 75) {
+                return false;
+            }
             check(!Exporter.running, "export finished");
             check(exportMessage.context === Project.ExportContext && exportMessage.reason === Project.Exported,
                   "export reported done: " + projectMessage.text(exportMessage));
@@ -310,7 +316,11 @@ Item {
                 const current = test.step;
                 test.step += 1;
                 try {
-                    test.steps[current]();
+                    // A step returning false isn't ready: run it again.
+                    if (test.steps[current]() === false) {
+                        test.step = current;
+                        test.waits += 1;
+                    }
                 } catch (error) {
                     test.check(false, "step " + current + " threw: " + error);
                 }
