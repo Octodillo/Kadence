@@ -26,5 +26,10 @@ tempfile = "3"
 name = "testgain"
 crate-type = ["cdylib"]
 
+# A module without a factory, for the module lifecycle tests.
+[[example]]
+name = "nofactory"
+crate-type = ["cdylib"]
+
 [lints]
 workspace = true

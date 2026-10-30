@@ -242,7 +242,7 @@ pub struct Vst3Instance {
     split: bool,
     component: ComPtr<IComponent>,
     handler: ComWrapper<ComponentHandler>,
-    // Dropped last so the plugin's code stays mapped until every object above is released.
+    // Modules stay loaded for the life of the process; this only keeps the cache honest.
     _module: Arc<Module>,
 }
 

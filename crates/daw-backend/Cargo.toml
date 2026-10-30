@@ -11,7 +11,6 @@ publish.workspace = true
 [dependencies]
 daw-core.workspace = true
 thiserror.workspace = true
-assert_no_alloc.workspace = true
 # Loads libjack at run time, so the binary starts without JACK installed.
 # Building still needs jack.pc (libjack-jackd2-dev or pipewire-jack).
 jack = "0.13"

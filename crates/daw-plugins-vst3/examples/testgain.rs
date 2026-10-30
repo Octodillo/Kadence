@@ -9,13 +9,16 @@
 //! - Component state is the gain as a little-endian f64. The controller saves 8 bytes but
 //!   answers kNotImplemented when asked to load them.
 //! - MIDI CC 7 is mapped to the gain.
+//! - `testgain_module_counts` reports how often ModuleEntry and ModuleExit ran and whether
+//!   two of those calls ever overlapped.
 
 #![allow(non_snake_case, clippy::unnecessary_cast)]
 
 use std::ffi::{c_char, c_void};
 use std::slice;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::Duration;
 
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
@@ -536,14 +539,43 @@ impl IPluginFactory2Trait for Factory {
     }
 }
 
+static MODULE_ENTRIES: AtomicU32 = AtomicU32::new(0);
+static MODULE_EXITS: AtomicU32 = AtomicU32::new(0);
+static MODULE_OVERLAPS: AtomicU32 = AtomicU32::new(0);
+static IN_MODULE_CALL: AtomicBool = AtomicBool::new(false);
+
+/// Counts one ModuleEntry or ModuleExit. The SDK's versions update a plain counter and a
+/// global factory, so the host must never run two at once; take long enough to notice.
+fn module_call(counter: &AtomicU32) {
+    if IN_MODULE_CALL.swap(true, Ordering::AcqRel) {
+        MODULE_OVERLAPS.fetch_add(1, Ordering::Relaxed);
+    }
+    std::thread::sleep(Duration::from_millis(2));
+    counter.fetch_add(1, Ordering::Relaxed);
+    IN_MODULE_CALL.store(false, Ordering::Release);
+}
+
 #[unsafe(no_mangle)]
 extern "system" fn ModuleEntry(_handle: *mut c_void) -> bool {
+    module_call(&MODULE_ENTRIES);
     true
 }
 
 #[unsafe(no_mangle)]
 extern "system" fn ModuleExit() -> bool {
+    module_call(&MODULE_EXITS);
     true
+}
+
+/// Writes entries, exits and overlapping calls so far to `out[0..3]`.
+///
+/// # Safety
+/// `out` must point at three writable `u32`s.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn testgain_module_counts(out: *mut u32) {
+    let counts =
+        [&MODULE_ENTRIES, &MODULE_EXITS, &MODULE_OVERLAPS].map(|c| c.load(Ordering::Relaxed));
+    unsafe { std::ptr::copy_nonoverlapping(counts.as_ptr(), out, 3) };
 }
 
 #[unsafe(no_mangle)]

@@ -23,6 +23,7 @@ use daw_core::plugin::{
 };
 
 pub use instance::Vst3Instance;
+pub use module::shutdown;
 
 /// Entry point for the plugin registry.
 pub fn format() -> Box<dyn PluginFormat> {

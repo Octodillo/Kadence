@@ -69,8 +69,9 @@ pub trait Device: Node {
         self.param_specs().iter().map(ParamSpec::info).collect()
     }
 
-    /// Serialize all parameter values. Sample data is not included; the
-    /// project stores audio files separately.
+    /// Serialize all parameter values, plus any device-specific state such as
+    /// the sampler's zone map. Audio data itself is not included: the sampler
+    /// stores each sample's file path, and the project keeps the files.
     fn save_state(&self) -> Vec<u8> {
         state::save(self.info(), self.param_specs(), |id| self.param_value(id))
     }

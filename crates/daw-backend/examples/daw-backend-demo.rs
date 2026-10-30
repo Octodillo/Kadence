@@ -11,7 +11,7 @@ use daw_core::event::EventKind;
 
 #[cfg(debug_assertions)]
 #[global_allocator]
-static ALLOC: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+static ALLOC: daw_backend::RtAllocCounter = daw_backend::RtAllocCounter;
 
 const USAGE: &str = "\
 Usage: daw-backend-demo [options]

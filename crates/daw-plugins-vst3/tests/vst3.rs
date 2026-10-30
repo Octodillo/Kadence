@@ -268,7 +268,7 @@ fn many_instances_share_one_module() {
         .map(|_| Vst3Format.instantiate(&d, SAMPLE_RATE, FRAMES).unwrap())
         .collect();
     drop(plugins);
-    // And the module loads again after the last instance is gone.
+    // And instances still come from it after the last one is gone.
     Vst3Format.instantiate(&d, SAMPLE_RATE, FRAMES).unwrap();
 }
 
