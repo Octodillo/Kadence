@@ -8,7 +8,7 @@ use std::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList};
 
-use crate::engine::{AudioConfig, EngineError, EngineHandle, EngineStatus};
+use crate::engine::{AudioConfig, BackendKind, EngineError, EngineHandle, EngineStatus};
 use crate::settings::{self, KConfigStore};
 use crate::state;
 
@@ -60,12 +60,22 @@ pub mod qobject {
         InvalidBufferSize,
     }
 
+    /// The audio system in `backendKind`; QML names it.
+    #[qenum(Engine)]
+    enum Backend {
+        JackBackend,
+        SilentBackend,
+        /// The test engine.
+        StubBackend,
+    }
+
     #[auto_cxx_name]
     extern "RustQt" {
         #[qobject]
         #[qml_element]
         #[qml_singleton]
-        #[qproperty(QString, backend_name)]
+        /// A `Backend`.
+        #[qproperty(i32, backend_kind)]
         #[qproperty(bool, running)]
         /// An `ErrorContext`; `NoError` when there is nothing to show.
         #[qproperty(i32, error_context)]
@@ -106,7 +116,7 @@ pub mod qobject {
 
 #[derive(Default)]
 pub struct EngineRust {
-    backend_name: QString,
+    backend_kind: i32,
     running: bool,
     error_context: i32,
     error_kind: i32,
@@ -222,20 +232,25 @@ impl cxx_qt::Initialize for qobject::Engine {
             let e = &s.engine;
             (
                 e.audio_devices(),
-                e.backend_name(),
+                e.backend_kind(),
                 e.supported_sample_rates(),
                 e.supported_buffer_sizes(),
             )
         });
         let mut names = QStringList::default();
-        // QML replaces this entry with a translated label.
+        // QML replaces this entry, and empty device names, with translated
+        // labels.
         names.append(QString::from(""));
         for device in &devices {
             names.append(QString::from(device.name.as_str()));
         }
         self.as_mut().rust_mut().device_ids = devices.into_iter().map(|d| d.id).collect();
-        self.as_mut()
-            .set_backend_name(QString::from(backend.as_str()));
+        let backend = match backend {
+            BackendKind::Jack => qobject::Backend::JackBackend,
+            BackendKind::Silent => qobject::Backend::SilentBackend,
+            BackendKind::Stub => qobject::Backend::StubBackend,
+        };
+        self.as_mut().set_backend_kind(backend.repr);
         self.as_mut().set_device_names(names);
         self.as_mut().set_sample_rates(to_qlist(&rates));
         self.as_mut().set_buffer_sizes(to_qlist(&sizes));
@@ -558,8 +573,8 @@ mod tests {
     struct FixedRateEngine(StubEngine);
 
     impl EngineHandle for FixedRateEngine {
-        fn backend_name(&self) -> String {
-            self.0.backend_name()
+        fn backend_kind(&self) -> BackendKind {
+            self.0.backend_kind()
         }
         fn audio_devices(&self) -> Vec<crate::engine::AudioDevice> {
             Vec::new()
@@ -618,8 +633,8 @@ mod tests {
     struct BrokenEngine(StubEngine);
 
     impl EngineHandle for BrokenEngine {
-        fn backend_name(&self) -> String {
-            self.0.backend_name()
+        fn backend_kind(&self) -> BackendKind {
+            self.0.backend_kind()
         }
         fn audio_devices(&self) -> Vec<crate::engine::AudioDevice> {
             self.0.audio_devices()

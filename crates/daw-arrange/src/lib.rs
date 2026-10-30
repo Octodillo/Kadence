@@ -173,8 +173,17 @@ pub struct Outcome {
     pub open_clip: Option<ClipId>,
     /// The user asked for a context menu here.
     pub context_menu: Option<Hit>,
-    /// A command was refused; the message is for the status bar.
-    pub error: Option<String>,
+    /// A command was refused. The front end words it for the status bar.
+    pub error: Option<Refusal>,
+}
+
+/// Why a gesture or command did nothing, as data for the front end to word.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Refusal {
+    /// The model refused the edit (usually a bug; the detail is English).
+    Edit(ModelError),
+    /// A note was drawn past the end of its clip.
+    NoteOutsideClip,
 }
 
 impl Outcome {
@@ -198,7 +207,7 @@ impl Outcome {
             Ok(()) => Self::document(),
             Err(e) => Self {
                 view: true,
-                error: Some(e.to_string()),
+                error: Some(Refusal::Edit(e)),
                 ..Default::default()
             },
         }

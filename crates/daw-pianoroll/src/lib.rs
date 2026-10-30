@@ -25,7 +25,7 @@ mod draw;
 use std::collections::BTreeSet;
 
 use daw_arrange::{
-    Button, Cursor, Env, Outcome, Palette, Pointer, Rect, Scene, Snap, TimelineView,
+    Button, Cursor, Env, Outcome, Palette, Pointer, Rect, Refusal, Scene, Snap, TimelineView,
 };
 use daw_core::time::{PPQ, TickTime};
 use daw_midi::edit::{self, Quantize, Snap as ClipSnap};
@@ -127,10 +127,10 @@ fn outcome_document() -> Outcome {
     }
 }
 
-fn outcome_error(e: impl ToString) -> Outcome {
+fn outcome_error(e: Refusal) -> Outcome {
     Outcome {
         view: true,
-        error: Some(e.to_string()),
+        error: Some(e),
         ..Outcome::default()
     }
 }
@@ -595,7 +595,7 @@ impl PianoRoll {
             self.new_velocity,
         );
         if note.start >= c.length {
-            return outcome_error("Notes must start inside the clip");
+            return outcome_error(Refusal::NoteOutsideClip);
         }
         let e = NoteEdit::new(clip_id, "Add Note").add_notes([note]);
         let ids = e.added_ids();
@@ -645,7 +645,7 @@ impl PianoRoll {
             Some(c) => {
                 let out = match doc.execute_boxed(c) {
                     Ok(_) => outcome_document(),
-                    Err(e) => outcome_error(e),
+                    Err(e) => outcome_error(Refusal::Edit(e)),
                 };
                 self.sync(doc.project());
                 out

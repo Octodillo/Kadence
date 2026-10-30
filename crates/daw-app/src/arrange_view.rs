@@ -9,9 +9,10 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QString, QUrl};
+use cxx_qt_lib::{QColor, QUrl};
 use daw_arrange::{Button, Cursor, Hit, Pointer, Rgba, Scene};
 
+use crate::message::{Context, Message};
 use crate::paint::{self, PaintOp};
 use crate::state;
 
@@ -84,10 +85,10 @@ pub mod qobject {
         /// From the scroll bars.
         #[qinvokable]
         fn scroll_to(self: Pin<&mut ArrangeView>, x: f64, y: f64);
-        /// Adds a dropped audio file at view position (x, y). Returns "" or
-        /// an error message.
+        /// Adds a dropped audio file at view position (x, y). Returns false
+        /// if it could not; `Project.status` says why.
         #[qinvokable]
-        fn drop_file(self: Pin<&mut ArrangeView>, url: &QUrl, x: f64, y: f64) -> QString;
+        fn drop_file(self: Pin<&mut ArrangeView>, url: &QUrl, x: f64, y: f64) -> bool;
 
         /// A context menu was asked for; `on_clip` tells which one.
         #[qsignal]
@@ -367,26 +368,26 @@ impl qobject::ArrangeView {
         self.refresh();
     }
 
-    fn drop_file(mut self: Pin<&mut Self>, url: &QUrl, x: f64, y: f64) -> QString {
-        let Some(path) = url.to_local_file() else {
-            return QString::from("only local files can be added");
-        };
-        let path = std::path::PathBuf::from(path.to_string());
-        let result = state::with(|s| {
+    fn drop_file(mut self: Pin<&mut Self>, url: &QUrl, x: f64, y: f64) -> bool {
+        let ok = state::with(|s| {
+            let Some(path) = url.to_local_file() else {
+                s.report(Message::NotLocalFile(Context::Import));
+                return false;
+            };
+            let path = std::path::PathBuf::from(path.to_string());
             let project = s.doc.project();
             let track = s.arrange.drop_track(project, y);
             let at = s.arrange.drop_tick(project, x);
-            let r = s.import_audio(&path, track, at);
-            if let Err(e) = &r {
-                s.status = e.clone();
+            match s.import_audio(&path, track, at) {
+                Ok(()) => true,
+                Err(m) => {
+                    s.report(m);
+                    false
+                }
             }
-            r
         });
         self.as_mut().refresh();
         self.as_mut().edited();
-        match result {
-            Ok(()) => QString::default(),
-            Err(e) => QString::from(e.as_str()),
-        }
+        ok
     }
 }

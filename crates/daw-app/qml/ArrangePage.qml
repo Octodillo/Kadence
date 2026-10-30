@@ -32,6 +32,26 @@ Kirigami.Page {
         onTriggered: Project.toggleLoop()
     }
 
+    ProjectMessageText {
+        id: projectMessage
+    }
+
+    // Adds a track of `kind` (0 audio, 1 instrument, 2 bus) with a
+    // numbered default name in the user's language.
+    function addTrack(kind: int): void {
+        const n = Project.nextTrackNumber(kind);
+        switch (kind) {
+        case 1:
+            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Instrument %1", n));
+            break;
+        case 2:
+            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Bus %1", n));
+            break;
+        default:
+            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Audio %1", n));
+        }
+    }
+
     readonly property Kirigami.Action addTrackAction: Kirigami.Action {
         text: i18nc("@action:button", "Add Track")
         icon.name: "list-add"
@@ -40,18 +60,18 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Audio Track")
             icon.name: "audio-x-generic"
             shortcut: "Ctrl+T"
-            onTriggered: Project.addTrack(0)
+            onTriggered: page.addTrack(0)
         }
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Instrument Track")
             icon.name: "audio-midi"
             shortcut: "Ctrl+Shift+T"
-            onTriggered: Project.addTrack(1)
+            onTriggered: page.addTrack(1)
         }
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Bus")
             icon.name: "view-media-equalizer"
-            onTriggered: Project.addTrack(2)
+            onTriggered: page.addTrack(2)
         }
     }
 
@@ -156,8 +176,8 @@ Kirigami.Page {
             position: Kirigami.InlineMessage.Position.Header
             type: Kirigami.MessageType.Warning
             showCloseButton: true
-            visible: Project.statusText !== ""
-            text: Project.statusText
+            visible: text !== ""
+            text: projectMessage.text(Project.status)
             onVisibleChanged: if (!visible) Project.clearStatus()
         }
 
@@ -329,7 +349,7 @@ Kirigami.Page {
                     helpfulAction: Kirigami.Action {
                         text: i18nc("@action:button", "Add Audio Track")
                         icon.name: "list-add"
-                        onTriggered: Project.addTrack(0)
+                        onTriggered: page.addTrack(0)
                     }
                 }
 
@@ -387,12 +407,12 @@ Kirigami.Page {
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Add Audio Track")
             icon.name: "audio-x-generic"
-            onTriggered: Project.addTrack(0)
+            onTriggered: page.addTrack(0)
         }
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Add Instrument Track")
             icon.name: "audio-midi"
-            onTriggered: Project.addTrack(1)
+            onTriggered: page.addTrack(1)
         }
     }
 }

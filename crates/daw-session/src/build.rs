@@ -24,6 +24,7 @@ use daw_model::{
 use daw_midi::model::compile_track;
 use daw_midi::player::midi_player;
 
+use crate::Warning;
 use crate::media::Loaded;
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
 use crate::{Built, Session, db_to_gain};
@@ -497,16 +498,17 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
                     ClipSource::Stream(Some(Box::new(s)))
                 }
                 Err(e) => {
-                    session
-                        .warnings
-                        .push(format!("can't stream {}: {e}", path.display()));
+                    session.warnings.push(Warning::CannotStream {
+                        path: path.clone(),
+                        detail: e.to_string(),
+                    });
                     ClipSource::Missing
                 }
             },
             Loaded::Missing => {
                 session
                     .warnings
-                    .push(format!("can't read {}", path.display()));
+                    .push(Warning::CannotRead { path: path.clone() });
                 ClipSource::Missing
             }
         };
@@ -549,7 +551,7 @@ fn join_contiguous(set: &mut ClipSet) {
 
 /// The engine node for a model device, its gain reduction meter if it has
 /// one, and a warning if it can't be made.
-fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<String>) {
+fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
     match &d.source {
         DeviceSource::Builtin { kind } => match daw_devices::create(kind) {
             Some(mut dev) => {
@@ -557,7 +559,10 @@ fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Str
                 if let Some(state) = &d.state
                     && let Err(e) = dev.load_state(&state.0)
                 {
-                    warning = Some(format!("{}: {e}", d.name));
+                    warning = Some(Warning::DeviceStateRejected {
+                        device: d.name.clone(),
+                        detail: e.to_string(),
+                    });
                 }
                 for (&p, &v) in &d.params {
                     dev.set_param(p, v);
@@ -568,13 +573,16 @@ fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Str
             None => (
                 Box::new(Bypass),
                 None,
-                Some(format!("unknown built-in device {kind}")),
+                Some(Warning::UnknownDevice { kind: kind.clone() }),
             ),
         },
         DeviceSource::Plugin { id, .. } => (
             Box::new(Bypass),
             None,
-            Some(format!("plugin {id} is not loaded yet; it is bypassed")),
+            Some(Warning::PluginNotLoaded {
+                device: d.name.clone(),
+                plugin: id.to_string(),
+            }),
         ),
     }
 }

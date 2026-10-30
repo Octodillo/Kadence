@@ -15,6 +15,7 @@ use daw_model::{Document, FormatError, Project};
 use daw_pianoroll::PianoRoll;
 
 use crate::engine::{EngineHandle, default_engine};
+use crate::message::{Fields, Message};
 
 pub struct AppState {
     pub doc: Document,
@@ -27,8 +28,8 @@ pub struct AppState {
     /// Bumped whenever anything a view shows changed: the document, the
     /// selection, the zoom. QML watches it.
     pub view_revision: u64,
-    /// A message for the status line: the last error or warning.
-    pub status: String,
+    /// The last error or warning, for the status line.
+    pub status: Option<Fields>,
     /// Scroll to keep the playhead in view while playing.
     pub follow_playhead: bool,
     /// Tempo map for the view when no session runs.
@@ -58,7 +59,7 @@ impl AppState {
             piano: PianoRoll::new(),
             synced: None,
             view_revision: 0,
-            status: String::new(),
+            status: None,
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
         };
@@ -77,9 +78,9 @@ impl AppState {
         if let Some(session) = self.engine.session_mut() {
             session.set_root(root);
             if let Err(e) = session.sync(&snapshot) {
-                self.status = e.to_string();
+                self.status = Some(Message::Playback(e).fields());
             } else if let Some(w) = session.warnings().first() {
-                self.status = w.clone();
+                self.status = Some(Message::Warning(w.clone()).fields());
             }
         }
         self.synced = Some(revision);
@@ -90,6 +91,12 @@ impl AppState {
     pub fn resync(&mut self) {
         self.synced = None;
         self.sync();
+    }
+
+    /// Shows `message` in the status line.
+    pub fn report(&mut self, message: Message) {
+        self.status = Some(message.fields());
+        self.touch();
     }
 
     /// Something visible changed.
@@ -175,7 +182,7 @@ impl AppState {
             let _ = s.set_loop(range);
         }
         if let Some(e) = out.error {
-            self.status = e;
+            self.report(Message::Edit(e));
         }
         if out.document {
             self.sync();
@@ -219,17 +226,18 @@ impl AppState {
         file: &Path,
         track: Option<daw_model::TrackId>,
         at: TickTime,
-    ) -> Result<(), String> {
+    ) -> Result<(), Message> {
+        let owned = || file.to_path_buf();
         let info = Decoder::open(file)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| Message::ImportDecode(owned(), e))?
             .info()
             .clone();
-        let frames = info
-            .frames
-            .ok_or_else(|| format!("{} has no known length", file.display()))?;
+        let frames = info.frames.ok_or_else(|| Message::ImportLength(owned()))?;
         let stored = match self.doc.bundle() {
             Some(b) => {
-                let rel = b.import_audio(file).map_err(|e| e.to_string())?;
+                let rel = b
+                    .import_audio(file)
+                    .map_err(|e| Message::ImportCopy(owned(), e))?;
                 b.resolve(&rel)
             }
             None => file.to_path_buf(),
@@ -237,7 +245,7 @@ impl AppState {
         let r = self.with_arrange(|a, doc, env| {
             a.import_audio(doc, env, &stored, frames, info.sample_rate, track, at)
         });
-        r.map_err(|e| e.to_string())?;
+        r.map_err(|e| Message::ImportEdit(owned(), e))?;
         self.sync();
         Ok(())
     }

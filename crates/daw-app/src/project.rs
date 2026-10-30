@@ -4,11 +4,12 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QString, QUrl};
+use cxx_qt_lib::{QColor, QMap, QMapPair_QString_QVariant, QString, QUrl, QVariant};
 use daw_core::time::{PPQ, TickTime};
 use daw_model::commands::{AddTrack, RemoveTrack, SetTrack, TrackField};
 use daw_model::{Track, TrackKind};
 
+use crate::message::{Context, Fields, Message, Reason};
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]
@@ -20,6 +21,47 @@ pub mod qobject {
         type QColor = cxx_qt_lib::QColor;
         include!("cxx-qt-lib/qurl.h");
         type QUrl = cxx_qt_lib::QUrl;
+        include!("cxx-qt-lib/qmap.h");
+        type QMap_QString_QVariant = cxx_qt_lib::QMap<cxx_qt_lib::QMapPair_QString_QVariant>;
+    }
+
+    /// The `context` of a message map: what the user was doing. See
+    /// `crate::message::Context`.
+    #[qenum(Project)]
+    enum MessageContext {
+        OpenContext,
+        SaveContext,
+        AutosaveContext,
+        ImportContext,
+        EditContext,
+        PlaybackContext,
+    }
+
+    /// The `reason` of a message map. See `crate::message::Reason` for
+    /// which other keys each one fills.
+    #[qenum(Project)]
+    enum MessageReason {
+        NotLocalFile,
+        FileAccess,
+        Malformed,
+        NotAProject,
+        TooNew,
+        NoMigration,
+        Inconsistent,
+        NoLocation,
+        AutosavePending,
+        CannotDecode,
+        UnknownLength,
+        EditRefused,
+        NoteOutsideClip,
+        EngineRefused,
+        DeviceStateRejected,
+        UnknownDevice,
+        PluginNotLoaded,
+        CannotStream,
+        CannotRead,
+        NotesDropped,
+        ClipsDropped,
     }
 
     #[auto_cxx_name]
@@ -46,8 +88,9 @@ pub mod qobject {
         #[qproperty(QString, time_text)]
         #[qproperty(bool, has_selection)]
         #[qproperty(i32, selected_track)]
-        /// The last error or warning, for an inline message.
-        #[qproperty(QString, status_text)]
+        /// The last error or warning, as a message map (see
+        /// `message_map`); empty when there is none. QML words it.
+        #[qproperty(QMap_QString_QVariant, status)]
         type Project = super::ProjectRust;
 
         /// Called by a timer: picks up engine position and background work.
@@ -56,23 +99,30 @@ pub mod qobject {
 
         #[qinvokable]
         fn new_project(self: Pin<&mut Project>);
-        /// Returns "" or an error message.
+        /// Returns an empty map, or a message map saying why it failed.
         #[qinvokable]
-        fn open_project(self: Pin<&mut Project>, url: &QUrl) -> QString;
+        fn open_project(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
+        /// Returns an empty map, or a message map saying why it failed.
         #[qinvokable]
-        fn save(self: Pin<&mut Project>) -> QString;
-        /// Saves into a new bundle directory at `url`.
+        fn save(self: Pin<&mut Project>) -> QMap_QString_QVariant;
+        /// Saves into a new bundle directory at `url`. Returns an empty map,
+        /// or a message map saying why it failed.
         #[qinvokable]
-        fn save_as(self: Pin<&mut Project>, url: &QUrl) -> QString;
+        fn save_as(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
 
         #[qinvokable]
         fn undo(self: Pin<&mut Project>);
         #[qinvokable]
         fn redo(self: Pin<&mut Project>);
 
-        /// 0 audio, 1 instrument, 2 bus.
+        /// Adds a track of `kind` (0 audio, 1 instrument, 2 bus) called
+        /// `name`; QML words the default name with `next_track_number`.
         #[qinvokable]
-        fn add_track(self: Pin<&mut Project>, kind: i32);
+        fn add_track(self: Pin<&mut Project>, kind: i32, name: &QString);
+        /// The number for the next default track name of `kind`, as in
+        /// "Audio 3".
+        #[qinvokable]
+        fn next_track_number(self: &Project, kind: i32) -> i32;
         #[qinvokable]
         fn remove_track(self: Pin<&mut Project>, index: i32);
         #[qinvokable]
@@ -144,7 +194,7 @@ pub struct ProjectRust {
     time_text: QString,
     has_selection: bool,
     selected_track: i32,
-    status_text: QString,
+    status: QMap<QMapPair_QString_QVariant>,
     /// Last view revision copied into the properties.
     seen: u64,
     seen_position: i64,
@@ -159,14 +209,84 @@ fn kind_index(kind: TrackKind) -> i32 {
     }
 }
 
+/// The `kind` argument of `add_track`.
+fn track_kind(kind: i32) -> TrackKind {
+    match kind {
+        1 => TrackKind::Instrument,
+        2 => TrackKind::Bus,
+        _ => TrackKind::Audio,
+    }
+}
+
 fn track_at(s: &AppState, index: i32) -> Option<&std::sync::Arc<Track>> {
     usize::try_from(index)
         .ok()
         .and_then(|i| s.doc.project().tracks.get(i))
 }
 
-fn error_text(e: impl std::fmt::Display) -> QString {
-    QString::from(e.to_string().as_str())
+/// A message as QML sees it: `context` and `reason` (the qenums above),
+/// `fileName` (of `Fields::file`), `path`, `name`, `detail`, `number` and
+/// `number2`.
+pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
+    use qobject::{MessageContext as QC, MessageReason as QR};
+    let context = match f.context {
+        Context::Open => QC::OpenContext,
+        Context::Save => QC::SaveContext,
+        Context::Autosave => QC::AutosaveContext,
+        Context::Import => QC::ImportContext,
+        Context::Edit => QC::EditContext,
+        Context::Playback => QC::PlaybackContext,
+    };
+    let reason = match f.reason {
+        Reason::NotLocalFile => QR::NotLocalFile,
+        Reason::FileAccess => QR::FileAccess,
+        Reason::Malformed => QR::Malformed,
+        Reason::NotAProject => QR::NotAProject,
+        Reason::TooNew => QR::TooNew,
+        Reason::NoMigration => QR::NoMigration,
+        Reason::Inconsistent => QR::Inconsistent,
+        Reason::NoLocation => QR::NoLocation,
+        Reason::AutosavePending => QR::AutosavePending,
+        Reason::CannotDecode => QR::CannotDecode,
+        Reason::UnknownLength => QR::UnknownLength,
+        Reason::EditRefused => QR::EditRefused,
+        Reason::NoteOutsideClip => QR::NoteOutsideClip,
+        Reason::EngineRefused => QR::EngineRefused,
+        Reason::DeviceStateRejected => QR::DeviceStateRejected,
+        Reason::UnknownDevice => QR::UnknownDevice,
+        Reason::PluginNotLoaded => QR::PluginNotLoaded,
+        Reason::CannotStream => QR::CannotStream,
+        Reason::CannotRead => QR::CannotRead,
+        Reason::NotesDropped => QR::NotesDropped,
+        Reason::ClipsDropped => QR::ClipsDropped,
+    };
+    let text = |s: &str| QVariant::from(&QString::from(s));
+    // Numbers are schema versions; they fit an i32.
+    let number = |n: u64| QVariant::from(&i32::try_from(n).unwrap_or(i32::MAX));
+    let path = f
+        .path
+        .as_deref()
+        .map_or_else(String::new, |p| p.display().to_string());
+    let file_name = f.file.as_deref().map_or_else(String::new, |p| {
+        p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    });
+    let mut map = QMap::default();
+    map.insert(QString::from("context"), QVariant::from(&context.repr));
+    map.insert(QString::from("reason"), QVariant::from(&reason.repr));
+    map.insert(QString::from("path"), text(&path));
+    map.insert(QString::from("fileName"), text(&file_name));
+    map.insert(QString::from("name"), text(&f.name));
+    map.insert(QString::from("detail"), text(&f.detail));
+    map.insert(QString::from("number"), number(f.number));
+    map.insert(QString::from("number2"), number(f.number2));
+    map
+}
+
+fn message_or_empty(fields: Option<&Fields>) -> QMap<QMapPair_QString_QVariant> {
+    fields.map_or_else(QMap::default, message_map)
 }
 
 impl cxx_qt::Initialize for qobject::Project {
@@ -265,8 +385,7 @@ impl qobject::Project {
         this.as_mut().set_time_text(QString::from(time.as_str()));
         this.as_mut().set_has_selection(has_selection);
         this.as_mut().set_selected_track(selected);
-        this.as_mut()
-            .set_status_text(QString::from(status.as_str()));
+        this.as_mut().set_status(message_or_empty(status.as_ref()));
         // Last, so QML that reacts to it sees the other values already.
         this.set_revision((rev % i32::MAX as u64) as i32);
     }
@@ -305,7 +424,7 @@ impl qobject::Project {
                 }
             }
             if let Err(e) = s.doc.autosave() {
-                s.status = e.to_string();
+                s.report(Message::File(Context::Autosave, e));
             }
         });
         self.refresh(false);
@@ -315,33 +434,33 @@ impl qobject::Project {
         self.edit(AppState::new_document);
     }
 
-    fn open_project(self: Pin<&mut Self>, url: &QUrl) -> QString {
+    fn open_project(self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
         let Some(path) = url.to_local_file() else {
-            return QString::from("not a local file");
+            return message_map(&Message::NotLocalFile(Context::Open).fields());
         };
         let path = std::path::PathBuf::from(path.to_string());
-        let mut result = QString::default();
+        let mut result = None;
         self.edit(|s| {
             if let Err(e) = s.open(&path) {
-                result = error_text(e);
+                result = Some(Message::File(Context::Open, e).fields());
             }
         });
-        result
+        message_or_empty(result.as_ref())
     }
 
-    fn save(self: Pin<&mut Self>) -> QString {
-        let mut result = QString::default();
+    fn save(self: Pin<&mut Self>) -> QMap<QMapPair_QString_QVariant> {
+        let mut result = None;
         self.edit(|s| {
             if let Err(e) = s.doc.save() {
-                result = error_text(e);
+                result = Some(Message::File(Context::Save, e).fields());
             }
         });
-        result
+        message_or_empty(result.as_ref())
     }
 
-    fn save_as(self: Pin<&mut Self>, url: &QUrl) -> QString {
+    fn save_as(self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
         let Some(path) = url.to_local_file() else {
-            return QString::from("not a local file");
+            return message_map(&Message::NotLocalFile(Context::Save).fields());
         };
         let mut dir = std::path::PathBuf::from(path.to_string());
         // A file dialog may hand back "Name.kadence"; the bundle is the
@@ -349,20 +468,20 @@ impl qobject::Project {
         if dir.extension().is_some_and(|e| e == "kadence") {
             dir.set_extension("");
         }
-        let mut result = QString::default();
+        let mut result = None;
         self.edit(|s| {
             if let Err(e) = s.doc.save_as(&dir) {
-                result = error_text(e);
+                result = Some(Message::File(Context::Save, e).fields());
             }
             s.resync();
         });
-        result
+        message_or_empty(result.as_ref())
     }
 
     fn undo(self: Pin<&mut Self>) {
         self.edit(|s| {
             if let Err(e) = s.doc.undo() {
-                s.status = e.to_string();
+                s.report(e.into());
             }
         });
     }
@@ -370,31 +489,41 @@ impl qobject::Project {
     fn redo(self: Pin<&mut Self>) {
         self.edit(|s| {
             if let Err(e) = s.doc.redo() {
-                s.status = e.to_string();
+                s.report(e.into());
             }
         });
     }
 
-    fn add_track(self: Pin<&mut Self>, kind: i32) {
+    fn next_track_number(&self, kind: i32) -> i32 {
+        let kind = track_kind(kind);
+        state::with(|s| {
+            let n = s
+                .doc
+                .project()
+                .tracks
+                .iter()
+                .filter(|t| t.kind == kind)
+                .count();
+            i32::try_from(n + 1).unwrap_or(i32::MAX)
+        })
+    }
+
+    fn add_track(self: Pin<&mut Self>, kind: i32, name: &QString) {
+        let name = name.to_string();
         self.edit(|s| {
-            let (kind, base) = match kind {
-                1 => (TrackKind::Instrument, "Instrument"),
-                2 => (TrackKind::Bus, "Bus"),
-                _ => (TrackKind::Audio, "Audio"),
-            };
+            let kind = track_kind(kind);
             let p = s.doc.project();
-            let n = p.tracks.iter().filter(|t| t.kind == kind).count() + 1;
             // After the selected track, or at the end.
             let at = s
                 .arrange
                 .selected_track
                 .and_then(|id| p.track_index(id))
                 .map_or(p.tracks.len(), |i| i + 1);
-            let track = Track::new(kind, format!("{base} {n}"));
+            let track = Track::new(kind, name);
             let id = track.id;
             match s.doc.execute(AddTrack::new(at, track)) {
                 Ok(_) => s.arrange.selected_track = Some(id),
-                Err(e) => s.status = e.to_string(),
+                Err(e) => s.report(e.into()),
             }
             s.doc.seal();
         });
@@ -406,7 +535,7 @@ impl qobject::Project {
                 return;
             };
             if let Err(e) = s.doc.execute(RemoveTrack::new(id)) {
-                s.status = e.to_string();
+                s.report(e.into());
             }
             s.doc.seal();
             if s.arrange.selected_track == Some(id) {
@@ -448,7 +577,7 @@ impl qobject::Project {
                 return;
             };
             if let Err(e) = s.doc.execute(SetTrack::new(id, field)) {
-                s.status = e.to_string();
+                s.report(e.into());
             }
             s.doc.seal();
         });
@@ -578,6 +707,6 @@ impl qobject::Project {
     }
 
     fn clear_status(self: Pin<&mut Self>) {
-        self.edit(|s| s.status.clear());
+        self.edit(|s| s.status = None);
     }
 }
