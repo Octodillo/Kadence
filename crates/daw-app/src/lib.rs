@@ -12,6 +12,8 @@ pub mod device_panel;
 pub mod device_panel_bridge;
 pub mod engine;
 mod ffi;
+pub mod instrument;
+pub mod instruments_bridge;
 pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;

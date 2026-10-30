@@ -178,6 +178,10 @@ Item {
             shoot(window.title, "mix-device");
         },
         () => {
+            // The demo's Keys track plays the synth: its panel opens too.
+            const keys = 2;
+            check(DevicePanel.open(Mixer.instrumentDevice(keys)), "open the instrument's panel");
+            check(DevicePanel.deviceKind === "daw.synth" && DevicePanel.instrument, "panel shows the synth");
             DevicePanel.close();
             check(!DevicePanel.active, "panel closed");
         },
