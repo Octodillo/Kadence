@@ -272,6 +272,31 @@ impl ClipReader {
     /// at file frame `position` (engine rate). Positions before 0 or past the end are
     /// silent. A mono file is copied to every output; extra outputs are silent.
     pub fn read(&mut self, position: SampleTime, out: &mut [&mut [f32]]) -> ReadStatus {
+        self.read_inner(position, out, None)
+    }
+
+    /// Like [`read`](Self::read), but waits for the fill thread instead of playing
+    /// silence, for up to `timeout` in all or until `stop` is set. For offline
+    /// rendering, which must get every frame and can wait; it sleeps, so never call it
+    /// on a real-time thread. Gives [`ReadStatus::Underrun`] (with the missing frames
+    /// silent) if it stops waiting before the data came.
+    pub fn read_blocking(
+        &mut self,
+        position: SampleTime,
+        out: &mut [&mut [f32]],
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> ReadStatus {
+        let deadline = std::time::Instant::now() + timeout;
+        self.read_inner(position, out, Some((deadline, stop)))
+    }
+
+    fn read_inner(
+        &mut self,
+        position: SampleTime,
+        out: &mut [&mut [f32]],
+        wait: Option<(std::time::Instant, &AtomicBool)>,
+    ) -> ReadStatus {
         let n = out.iter().map(|c| c.len()).min().unwrap_or(0);
         if position.0 != self.expected {
             self.cue(position);
@@ -302,8 +327,16 @@ impl ClipReader {
                     }
                     continue;
                 }
+                if let Some((deadline, stop)) = wait
+                    && std::time::Instant::now() < deadline
+                    && !stop.load(Ordering::Relaxed)
+                    && !self.failed()
+                {
+                    std::thread::sleep(Duration::from_micros(200));
+                    continue;
+                }
                 silence(out, i, n - i);
-                if self.waiting {
+                if self.waiting && wait.is_none() {
                     status = ReadStatus::Pending;
                 } else {
                     status = ReadStatus::Underrun;
@@ -724,5 +757,64 @@ mod tests {
             ReadStatus::Ok
         );
         assert!(buf.iter().all(|&s| s == 0.0));
+    }
+
+    /// An offline render reads far faster than real time; a blocking read waits for
+    /// the fill thread instead of handing back silence, at every seek and all along.
+    #[test]
+    fn blocking_reads_get_every_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ramp.wav");
+        let frames = 48_000 * 3;
+        let data = AudioData {
+            sample_rate: 48_000,
+            channels: vec![(0..frames).map(|i| i as f32 / frames as f32).collect()],
+        };
+        write_wav(&path, &data, WavFormat::Float32).unwrap();
+        let streamer = DiskStreamer::new(StreamerConfig {
+            buffer_seconds: 0.1,
+            ..StreamerConfig::default()
+        });
+        let mut reader = streamer.open(&path).unwrap();
+        let mut buf = vec![0.0f32; 512];
+        // Straight after a seek, and then as fast as it goes past the small buffer.
+        let start = 48_000;
+        for k in 0..(frames - start) / 512 {
+            let at = start + k * 512;
+            let status = reader.read_blocking(
+                SampleTime(at as i64),
+                &mut [&mut buf[..]],
+                Duration::from_secs(10),
+                &AtomicBool::new(false),
+            );
+            assert_eq!(status, ReadStatus::Ok, "read at {at}");
+            for (i, &x) in buf.iter().enumerate() {
+                assert_eq!(x, data.channels[0][at + i], "frame {}", at + i);
+            }
+        }
+        assert_eq!(reader.underruns(), 0);
+        // Past the end it is silence, without waiting out the timeout.
+        let t = std::time::Instant::now();
+        let status = reader.read_blocking(
+            SampleTime(frames as i64),
+            &mut [&mut buf[..]],
+            Duration::from_secs(10),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(status, ReadStatus::Ok);
+        assert!(buf.iter().all(|&x| x == 0.0));
+        assert!(t.elapsed() < Duration::from_secs(5));
+
+        // A stop given up front: a seek can't be served, so the read gives up at once
+        // with silence instead of waiting.
+        let t = std::time::Instant::now();
+        let status = reader.read_blocking(
+            SampleTime(1000),
+            &mut [&mut buf[..]],
+            Duration::from_secs(10),
+            &AtomicBool::new(true),
+        );
+        assert_eq!(status, ReadStatus::Underrun);
+        assert!(t.elapsed() < Duration::from_secs(1));
     }
 }

@@ -32,6 +32,7 @@ const QML_FILES: &[&str] = &[
     "qml/TrackHeader.qml",
     "qml/PluginBrowser.qml",
     "qml/PluginSettings.qml",
+    "qml/ExportDialog.qml",
     "qml/InstrumentButton.qml",
 ];
 
@@ -83,6 +84,7 @@ fn main() {
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",
+        "src/export_bridge.rs",
         "src/arrange_view.rs",
         "src/piano_roll.rs",
         "src/paint.rs",
