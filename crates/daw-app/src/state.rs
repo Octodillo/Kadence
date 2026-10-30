@@ -62,7 +62,7 @@ pub fn with<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
 impl AppState {
     fn new() -> Self {
         let mut s = Self {
-            doc: Document::new(Project::new("Untitled")),
+            doc: Document::new(Project::default()),
             engine: default_engine(),
             arrange: Arrange::new(),
             piano: PianoRoll::new(),
@@ -232,7 +232,7 @@ impl AppState {
     // Files
 
     pub fn new_document(&mut self) {
-        self.replace_document(Document::new(Project::new("Untitled")));
+        self.replace_document(Document::new(Project::default()));
     }
 
     pub fn open(&mut self, path: &Path) -> Result<(), FormatError> {

@@ -844,7 +844,7 @@ mod tests {
                 ("Drums", StripKind::Track),
                 ("Keys", StripKind::Track),
                 ("Reverb", StripKind::Bus),
-                ("Master", StripKind::Master),
+                ("", StripKind::Master),
             ]
         );
         assert_eq!(strips[0].sends.len(), 1);
@@ -877,9 +877,9 @@ mod tests {
         let silenced: Vec<_> = strips.iter().map(|s| s.silenced).collect();
         // Keys is silenced; the bus Drums feeds and the master are not.
         assert_eq!(silenced, [false, true, false, false]);
-        let master = r.id("Master");
+        let master = r.id("");
         r.mixer.set_muted(&mut r.doc, master, true).unwrap();
-        assert!(!r.track("Master").mute, "the master can't be muted");
+        assert!(!r.track("").mute, "the master can't be muted");
     }
 
     #[test]
