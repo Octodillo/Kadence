@@ -376,6 +376,101 @@ fn editors_open_as_floating_windows() {
     drop(p);
 }
 
+/// x42 Balance with its UI marked ui:noUserResize, under its own name so its
+/// window can be told apart from other tests' windows.
+fn fixed_size_balance_bundle(dir: &Path) -> tempfile::TempDir {
+    let bundle = tempfile::tempdir().unwrap();
+    let src = dir.join("balance.lv2");
+    for f in ["manifest.ttl", "balance.so", "balanceUI.so"] {
+        std::os::unix::fs::symlink(src.join(f), bundle.path().join(f)).unwrap();
+    }
+    let ttl = std::fs::read_to_string(src.join("balance.ttl")).unwrap();
+    let ttl = ttl
+        .replace(
+            "doap:name \"Stereo Balance Control\"",
+            "doap:name \"Fixed-size UI test\"",
+        )
+        .replace(
+            "\ta ui:X11UI;\n",
+            "\ta ui:X11UI;\n\tlv2:optionalFeature ui:noUserResize ;\n",
+        );
+    assert!(ttl.contains("ui:noUserResize") && ttl.contains("Fixed-size UI test"));
+    std::fs::write(bundle.path().join("balance.ttl"), ttl).unwrap();
+    bundle
+}
+
+/// A UI that may not be resized gets a window whose size hints pin it to the
+/// UI's size, and its widget keeps that size even if the window changes.
+#[test]
+fn fixed_size_editors_have_fixed_windows() {
+    use x11rb::connection::Connection;
+    use x11rb::properties::WmSizeHints;
+    use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt as _};
+
+    let dir = need_plugins!();
+    if std::env::var_os("DISPLAY").is_none() {
+        eprintln!("skipped: no DISPLAY");
+        return;
+    }
+    let bundle = fixed_size_balance_bundle(&dir);
+    let format = daw_plugins_lv2::format();
+    let d = find(
+        &*format,
+        bundle.path(),
+        ".",
+        "http://gareus.org/oss/lv2/balance",
+    );
+    assert_eq!(d.name, "Fixed-size UI test");
+    let mut p = format.instantiate(&d, SR, BLOCK).unwrap();
+    p.prepare(SR, BLOCK);
+    let _turn = EDITORS.lock().unwrap_or_else(|e| e.into_inner());
+    p.open_editor().unwrap();
+    p.on_main_thread();
+
+    let (conn, screen) = x11rb::connect(None).unwrap();
+    let root = conn.setup().roots[screen].root;
+    let window = conn
+        .query_tree(root)
+        .unwrap()
+        .reply()
+        .unwrap()
+        .children
+        .into_iter()
+        .find(|&w| {
+            conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 64)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some_and(|r| r.value == b"Fixed-size UI test")
+        })
+        .expect("no plugin window");
+    let geometry = conn.get_geometry(window).unwrap().reply().unwrap();
+    let size = (i32::from(geometry.width), i32::from(geometry.height));
+    let hints = WmSizeHints::get_normal_hints(&conn, window)
+        .unwrap()
+        .reply()
+        .unwrap()
+        .expect("no WM_NORMAL_HINTS");
+    assert_eq!(hints.min_size, Some(size));
+    assert_eq!(hints.max_size, Some(size));
+
+    // Without a window manager to enforce the hints, the window can still be
+    // resized; the UI's widget must not follow.
+    let child = conn.query_tree(window).unwrap().reply().unwrap().children[0];
+    let before = conn.get_geometry(child).unwrap().reply().unwrap();
+    let aux = ConfigureWindowAux::new()
+        .width(geometry.width as u32 + 100)
+        .height(geometry.height as u32 + 100);
+    conn.configure_window(window, &aux).unwrap();
+    conn.flush().unwrap();
+    for _ in 0..20 {
+        p.on_main_thread();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let after = conn.get_geometry(child).unwrap().reply().unwrap();
+    assert_eq!((after.width, after.height), (before.width, before.height));
+    p.close_editor();
+}
+
 /// Bigger toolkit UIs, when installed and a display is available.
 #[test]
 fn other_editors_open_when_available() {
