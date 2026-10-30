@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import QtQml
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -8,9 +9,10 @@ import org.kde.kirigami as Kirigami
 import io.github.octodillo.daw
 
 // One row of the track list beside the timeline: colour, drag handle,
-// name, instrument (on instrument tracks), mute, solo, and the button that
-// shows the track's automation lanes, whose headers follow under it. Everything is read from Project
-// and Automation by index; `revision` re-reads it after any change.
+// name, instrument (on instrument tracks), record arm, audio input, mute,
+// solo, and the button that shows the track's automation lanes, whose
+// headers follow under it. Everything is read from Project and Automation
+// by index; `revision` re-reads it after any change.
 // Dragging the handle reorders tracks; the list view shows where the track
 // will land (`dragFrom`, `dragTo`).
 Column {
@@ -38,6 +40,17 @@ Column {
         readonly property bool soloed: { revision; return Project.trackSoloed(index); }
         readonly property color trackColor: { revision; return Project.trackColor(index); }
         readonly property string instrument: { revision; return kind === 1 ? Project.trackInstrument(index) : ""; }
+        readonly property bool armed: revision >= 0 ? Project.trackArmed(index) : false
+        readonly property int input: revision >= 0 ? Project.trackInput(index) : 0
+        readonly property bool inputStereo: revision >= 0 ? Project.trackInputStereo(index) : false
+        readonly property bool monitorAuto: revision >= 0 ? Project.trackMonitorAuto(index) : false
+        readonly property int inputCount: revision >= 0 ? Project.inputCount() : 0
+        // Audio (0) and instrument (1) tracks record.
+        readonly property bool canRecord: kind === 0 || kind === 1
+        // Inputs are counted from 1 for people.
+        readonly property string inputText: inputStereo
+            ? i18nc("@item a pair of audio inputs, %1 and %2 are input numbers", "Inputs %1–%2", input + 1, input + 2)
+            : i18nc("@item one audio input, %1 is its number", "Input %1", input + 1)
 
         highlighted: Project.selectedTrack === index
         opacity: row.ListView.view && row.ListView.view.dragFrom === index ? 0.5 : 1
@@ -161,6 +174,80 @@ Column {
                 instrument: header.instrument
                 currentChoice: { header.revision; return Project.trackInstrumentChoice(header.index); }
                 onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
+            }
+
+            QQC2.ToolButton {
+                Layout.alignment: Qt.AlignVCenter
+                visible: header.canRecord
+                icon.name: "media-record"
+                checkable: true
+                checked: header.armed
+                display: QQC2.AbstractButton.IconOnly
+                text: i18nc("@action:button arm track for recording", "Arm")
+                onToggled: Project.setTrackArmed(header.index, checked)
+                QQC2.ToolTip.text: i18nc("@info:tooltip", "Arm for recording")
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            }
+
+            // The audio input: which inputs to record and whether to monitor.
+            QQC2.ToolButton {
+                id: inputButton
+                Layout.alignment: Qt.AlignVCenter
+                visible: header.kind === 0
+                icon.name: "audio-input-microphone"
+                display: QQC2.AbstractButton.IconOnly
+                text: i18nc("@action:button %1 is the chosen input, like Input 1", "Audio input: %1", header.inputText)
+                down: inputMenu.visible
+                onClicked: inputMenu.popup(inputButton, 0, inputButton.height)
+                QQC2.ToolTip.text: text
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+
+                QQC2.Menu {
+                    id: inputMenu
+
+                    // Each input on its own, then the pairs 1–2, 3–4 and so on,
+                    // in one model so they stay in order above the separator.
+                    Instantiator {
+                        model: {
+                            const choices = [];
+                            for (let i = 0; i < header.inputCount; ++i) {
+                                choices.push({ first: i, stereo: false });
+                            }
+                            for (let i = 0; i + 1 < header.inputCount; i += 2) {
+                                choices.push({ first: i, stereo: true });
+                            }
+                            return choices;
+                        }
+                        delegate: QQC2.MenuItem {
+                            required property var modelData
+                            text: modelData.stereo
+                                ? i18nc("@item:inmenu a pair of audio inputs recorded as stereo, %1 and %2 are input numbers",
+                                        "Inputs %1–%2 (Stereo)", modelData.first + 1, modelData.first + 2)
+                                : i18nc("@item:inmenu one audio input, %1 is its number", "Input %1", modelData.first + 1)
+                            checkable: true
+                            checked: header.inputStereo === modelData.stereo && header.input === modelData.first
+                            // Re-picking the current choice keeps it checked.
+                            onTriggered: {
+                                Project.setTrackInput(header.index, modelData.first, modelData.stereo);
+                                checked = Qt.binding(() => header.inputStereo === modelData.stereo
+                                                           && header.input === modelData.first);
+                            }
+                        }
+                        onObjectAdded: (i, item) => inputMenu.insertItem(i, item)
+                        onObjectRemoved: (i, item) => inputMenu.removeItem(item)
+                    }
+
+                    QQC2.MenuSeparator {}
+
+                    QQC2.MenuItem {
+                        text: i18nc("@option:check", "Monitor Input While Armed")
+                        checkable: true
+                        checked: header.monitorAuto
+                        onTriggered: Project.setTrackMonitorAuto(header.index, checked)
+                    }
+                }
             }
 
             QQC2.ToolButton {

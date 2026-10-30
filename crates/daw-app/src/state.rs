@@ -28,6 +28,8 @@ pub struct AppState {
     pub instruments: crate::instrument::InstrumentChoices,
     /// The MIDI take in progress.
     pub recording: Option<crate::recording::Recording>,
+    /// The audio takes in progress.
+    pub audio_recording: Option<crate::recording::AudioRecording>,
     /// Automation lane modes and device parameter names.
     pub lanes: crate::lanes::Lanes,
     /// The document revision the engine last played.
@@ -75,6 +77,7 @@ impl AppState {
             piano: PianoRoll::new(),
             instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
+            audio_recording: None,
             lanes,
             synced: None,
             view_revision: 0,
