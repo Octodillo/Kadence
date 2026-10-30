@@ -156,19 +156,22 @@ impl Problem {
 }
 
 /// Startup: apply `saved`, else fall back to the saved rate and buffer on
-/// the default device, then to plain defaults. Returns what to tell the
+/// the default device, then to what the engine runs at already (a JACK
+/// server picks its own rate), then to plain defaults. Returns what to tell the
 /// user, if anything: the first refusal if a fallback worked (that is why
 /// the saved settings are not in use), else the last one.
 fn start_audio(
     engine: &mut dyn EngineHandle,
     saved: &AudioConfig,
 ) -> Option<(qobject::ErrorContext, EngineError)> {
+    let current = engine.audio_config();
     let first = engine.apply_audio_config(saved).err()?;
     let fallbacks = [
         AudioConfig {
             device: None,
             ..saved.clone()
         },
+        current,
         AudioConfig::default(),
     ];
     let mut last = first.clone();
@@ -190,16 +193,15 @@ enum StatusError {
     Show(EngineError),
 }
 
-/// `current` is the `ErrorContext` on show. A startup or settings error
-/// already showing wins over the status, since it says more about why
-/// audio is down (and `Failed` also covers "never started"); an
-/// `AudioFailed` goes away once audio runs again.
+/// `current` is the `ErrorContext` on show. A failed status wins over a
+/// startup message, since it is why there is no sound now (a saved "jack"
+/// device is also gone when the server is). It does not replace a
+/// settings refusal the user just caused; that one says what to fix.
+/// An `AudioFailed` goes away once audio runs again.
 fn status_error(current: i32, status: EngineStatus) -> StatusError {
     use qobject::ErrorContext as C;
     match status {
-        EngineStatus::Failed(e) if current == C::NoError.repr || current == C::AudioFailed.repr => {
-            StatusError::Show(e)
-        }
+        EngineStatus::Failed(e) if current != C::ApplyingSettings.repr => StatusError::Show(e),
         EngineStatus::Failed(_) => StatusError::Keep,
         _ if current == C::AudioFailed.repr => StatusError::Clear,
         _ => StatusError::Keep,
@@ -302,9 +304,17 @@ impl qobject::Engine {
         });
         let ok = result.is_ok();
         match result {
-            Ok(()) => self
-                .as_mut()
-                .set_error(qobject::ErrorContext::NoError, None),
+            // Go straight to what sync() would show, so QML sees one change
+            // (and Main.qml does not notify again) when audio stays failed.
+            Ok(()) => match state::with(|s| s.engine.status()) {
+                EngineStatus::Failed(e) => self.as_mut().set_error(
+                    qobject::ErrorContext::AudioFailed,
+                    Some(&Problem::Engine(e)),
+                ),
+                _ => self
+                    .as_mut()
+                    .set_error(qobject::ErrorContext::NoError, None),
+            },
             Err(problem) => self
                 .as_mut()
                 .set_error(qobject::ErrorContext::ApplyingSettings, Some(&problem)),
@@ -505,24 +515,30 @@ mod tests {
     }
 
     #[test]
-    fn status_failure_does_not_hide_a_more_specific_error() {
+    fn status_failure_wins_over_startup_but_not_settings_errors() {
         let failed = || EngineStatus::Failed(EngineError::Backend("gone".into()));
         let running = EngineStatus::Running {
             sample_rate: 48_000,
             buffer_size: 256,
         };
         let shown = StatusError::Show(EngineError::Backend("gone".into()));
-        assert_eq!(status_error(ErrorContext::NoError.repr, failed()), shown);
+        for context in [
+            ErrorContext::NoError,
+            ErrorContext::AudioFailed,
+            ErrorContext::StartupFallback,
+            ErrorContext::StartupFailed,
+        ] {
+            assert_eq!(status_error(context.repr, failed()), shown);
+        }
         assert_eq!(
-            status_error(ErrorContext::AudioFailed.repr, failed()),
-            shown
+            status_error(ErrorContext::ApplyingSettings.repr, failed()),
+            StatusError::Keep
         );
         for context in [
             ErrorContext::ApplyingSettings,
             ErrorContext::StartupFallback,
             ErrorContext::StartupFailed,
         ] {
-            assert_eq!(status_error(context.repr, failed()), StatusError::Keep);
             assert_eq!(
                 status_error(context.repr, running.clone()),
                 StatusError::Keep
@@ -536,6 +552,66 @@ mod tests {
             status_error(ErrorContext::NoError.repr, EngineStatus::Stopped),
             StatusError::Keep
         );
+    }
+
+    /// Runs only at 44.1 kHz, like a JACK server the app cannot change.
+    struct FixedRateEngine(StubEngine);
+
+    impl EngineHandle for FixedRateEngine {
+        fn backend_name(&self) -> String {
+            self.0.backend_name()
+        }
+        fn audio_devices(&self) -> Vec<crate::engine::AudioDevice> {
+            Vec::new()
+        }
+        fn supported_sample_rates(&self) -> Vec<u32> {
+            vec![44_100]
+        }
+        fn supported_buffer_sizes(&self) -> Vec<u32> {
+            self.0.supported_buffer_sizes()
+        }
+        fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
+            if config.sample_rate != 44_100 {
+                return Err(EngineError::UnsupportedSampleRate(config.sample_rate));
+            }
+            self.0.apply_audio_config(config)
+        }
+        fn audio_config(&self) -> AudioConfig {
+            let config = self.0.audio_config();
+            AudioConfig {
+                sample_rate: 44_100,
+                ..config
+            }
+        }
+        fn status(&self) -> EngineStatus {
+            self.0.status()
+        }
+        fn play(&mut self) {}
+        fn stop(&mut self) {}
+        fn is_playing(&self) -> bool {
+            false
+        }
+        fn session(&self) -> Option<&daw_session::Session> {
+            None
+        }
+        fn session_mut(&mut self) -> Option<&mut daw_session::Session> {
+            None
+        }
+    }
+
+    #[test]
+    fn startup_falls_back_to_the_rate_the_engine_runs_at() {
+        // Fresh config (48 kHz) against a 44.1 kHz server: a fallback, not
+        // "could not start".
+        let mut engine = FixedRateEngine(StubEngine::default());
+        assert_eq!(
+            start(&mut engine, &AudioConfig::default()),
+            Some((
+                ErrorContext::StartupFallback.repr,
+                EngineError::UnsupportedSampleRate(48_000)
+            ))
+        );
+        assert_eq!(engine.audio_config().sample_rate, 44_100);
     }
 
     /// Refuses everything, like a machine with no working audio.

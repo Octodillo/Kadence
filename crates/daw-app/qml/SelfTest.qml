@@ -133,7 +133,8 @@ Item {
                   "settings took effect");
             // Without an audio server the real engine reports AudioFailed;
             // only a settings error must be gone.
-            check(Engine.errorContext !== Engine.ApplyingSettings, "no settings error after good settings");
+            check(Engine.errorContext === (Engine.running ? Engine.NoError : Engine.AudioFailed),
+                  "only a failed engine reported after good settings");
             check(!Engine.applyAudioSettings(0, 12345, size), "bad sample rate refused");
             check(Engine.sampleRate === rate, "old settings kept after refusal");
             check(Engine.errorContext === Engine.ApplyingSettings
@@ -161,7 +162,8 @@ Item {
             const finalRate = Engine.sampleRates.includes(44100) ? 44100 : rate;
             const finalSize = Engine.bufferSizes.includes(512) ? 512 : size;
             check(Engine.applyAudioSettings(Math.min(1, device), finalRate, finalSize), "apply final settings");
-            check(Engine.errorContext !== Engine.ApplyingSettings, "settings error cleared by good settings");
+            check(Engine.errorContext === (Engine.running ? Engine.NoError : Engine.AudioFailed),
+                  "settings error cleared by good settings");
         },
         () => {
             // Older Kirigami (KF 6.13 in Debian 13) has no PageStack.closeDialog();
