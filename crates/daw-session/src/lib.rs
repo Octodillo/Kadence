@@ -14,12 +14,17 @@
 //!
 //! The session diffs snapshots itself instead of trusting a change list, so
 //! undo, redo and loading a file all take the same path.
+//!
+//! Plugin devices are loaded through a [`PluginLoader`] and kept across
+//! graph builds; see [`plugins`]. Call [`Session::tick`] about 60 times a
+//! second on the session's thread.
 
 mod build;
 pub mod capture;
 pub mod host;
 mod media;
 pub mod player;
+pub mod plugins;
 pub mod record;
 mod tempo;
 
@@ -38,6 +43,9 @@ use daw_model::{ClipId, DeviceId, LaneId, ProjectSnapshot, SendId, TrackId};
 pub use build::effective_mutes;
 pub use media::{MEMORY_LIMIT_SECONDS, MediaPool};
 use player::{LoopPoints, PlayerHandle};
+pub use plugins::{
+    LoadError, LoadedPlugin, PluginLoader, PluginState, PluginStatus, Plugins, SandboxLoader,
+};
 pub use tempo::tempo_map;
 
 #[derive(Clone, Debug)]
@@ -76,9 +84,28 @@ pub enum Warning {
     /// The project names a built-in device this build does not have.
     #[error("unknown built-in device {kind}")]
     UnknownDevice { kind: String },
-    /// A plugin device is bypassed until its plugin is loaded.
+    /// A plugin device is bypassed: the session has no plugin loader.
     #[error("plugin {plugin} is not loaded yet; it is bypassed")]
     PluginNotLoaded { device: String, plugin: String },
+    /// A plugin device is bypassed: its plugin is not installed.
+    #[error("plugin {plugin} is not installed; {device} is bypassed")]
+    PluginMissing { device: String, plugin: String },
+    /// A plugin device is bypassed: its plugin would not load. `detail` is
+    /// the plugin's or the format's own message.
+    #[error("plugin {plugin} would not load ({detail}); {device} is bypassed")]
+    PluginLoadFailed {
+        device: String,
+        plugin: String,
+        detail: String,
+    },
+    /// A sandboxed plugin crashed or hung; its device is bypassed until it
+    /// is reloaded.
+    #[error("plugin {plugin} of {device} crashed; it is bypassed")]
+    PluginCrashed { device: String, plugin: String },
+    /// A plugin would not hand over its state, so the project keeps the
+    /// one it had. `detail` is the plugin's or the format's own message.
+    #[error("{device} did not save its plugin state ({detail})")]
+    PluginStateNotSaved { device: String, detail: String },
     /// An audio file could not be streamed; its clips are silent.
     #[error("can't stream {}: {detail}", path.display())]
     CannotStream { path: PathBuf, detail: String },
@@ -133,9 +160,33 @@ pub struct Session {
     suspended: HashSet<LaneId>,
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
+    plugins: Plugins,
+    /// The snapshot last synced, for rebuilds the plugins ask for.
+    last: Option<ProjectSnapshot>,
+    /// Rebuild the graph on the next sync even if the project's shape is
+    /// unchanged.
+    force_rebuild: bool,
+    /// After the engine refused a graph: how long [`tick`](Self::tick)
+    /// waits before it tries again, and when.
+    retry: Option<(std::time::Duration, std::time::Instant)>,
     /// Audio tracks that monitor automatically (armed, monitoring on
     /// auto), as of the last sync.
     auto_monitor: HashSet<TrackId>,
+}
+
+/// How long [`Session::tick`] waits before resending a refused graph, at
+/// first and at most.
+const RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(15);
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a [`Session::tick`] has for the user.
+#[derive(Debug, Default)]
+pub struct TickReport {
+    /// Plugins that crashed, and problems a rebuild found (a plugin that
+    /// would not load).
+    pub warnings: Vec<Warning>,
+    /// The rebuild failed; it is retried on later ticks.
+    pub error: Option<SessionError>,
 }
 
 impl Session {
@@ -158,6 +209,10 @@ impl Session {
             master: None,
             suspended: HashSet::new(),
             live: HashMap::new(),
+            plugins: Plugins::default(),
+            last: None,
+            force_rebuild: false,
+            retry: None,
             auto_monitor: HashSet::new(),
         };
         (session, processor)
@@ -238,21 +293,248 @@ impl Session {
             self.tempo_data = Some(snapshot.tempo.clone());
             self.apply_loop()?;
         }
+        self.last = Some(snapshot.clone());
         let structure = build::Structure::of(snapshot, &self.suspended);
         // Automation is in samples, so a tempo change re-times it.
-        let rebuild = self.built.as_ref().is_none_or(|b| {
-            b.structure != structure || (tempo_changed && structure.has_automation())
-        });
+        let rebuild = std::mem::take(&mut self.force_rebuild)
+            || self.built.as_ref().is_none_or(|b| {
+                b.structure != structure || (tempo_changed && structure.has_automation())
+            });
         if rebuild {
             let old = self.built.take().unwrap_or_default();
             let (desc, built) = build::graph(self, snapshot, structure, old);
+            // Kept only once the engine has the graph: a refused graph's players never
+            // ran, so the next build must not take their handles for the running ones.
+            if let Err(e) = self.controller.set_graph(desc) {
+                let backoff = self
+                    .retry
+                    .map_or(RETRY_MIN, |(b, _)| (b * 2).min(RETRY_MAX));
+                self.retry = Some((backoff, std::time::Instant::now() + backoff));
+                return Err(e.into());
+            }
+            self.retry = None;
             self.built = Some(built);
-            self.controller.set_graph(desc)?;
+            let ids: HashSet<DeviceId> = snapshot
+                .all_tracks()
+                .flat_map(|t| t.devices.iter().map(|d| d.id))
+                .collect();
+            // After the new graph is queued, so the nodes of removed plugins aren't
+            // silenced while it is being built. Until the audio thread swaps it in (a
+            // block at most), the old graph plays them as silence.
+            self.plugins.retain(|id| ids.contains(&id));
         }
+        self.sync_plugin_states(snapshot);
         self.send_params(snapshot)?;
         self.send_clips(snapshot, tempo_changed);
         self.apply_inputs(snapshot);
         Ok(())
+    }
+
+    /// Runs the plugins' main-thread work and frees what the audio thread
+    /// is done with. Call it about 60 times a second, on the session's
+    /// thread.
+    ///
+    /// Rebuilds the graph when a plugin asks for a new layout or latency,
+    /// when a sandboxed plugin crashed (it is bypassed) or came back, and
+    /// when the last graph could not be sent (retried less and less often
+    /// while the engine keeps refusing). Returns what the user should hear
+    /// about.
+    pub fn tick(&mut self) -> TickReport {
+        self.collect_garbage();
+        let mut news = Vec::new();
+        let mut rebuild = self.built.is_none()
+            && self
+                .retry
+                .is_none_or(|(_, at)| std::time::Instant::now() >= at);
+        for slot in self.plugins.slots.values_mut() {
+            let plugins::Slot::Live(l) = slot else {
+                continue;
+            };
+            // Also runs a reload that was asked for.
+            if l.handle.pump() {
+                rebuild = true;
+            }
+            let crashed = l.monitor.as_ref().is_some_and(|m| m.is_crashed());
+            if crashed != l.crashed {
+                l.crashed = crashed;
+                rebuild = true;
+                // Back from a reload: it missed what was sent to the bypass meanwhile.
+                l.fresh = !crashed;
+                if crashed {
+                    news.push(Warning::PluginCrashed {
+                        device: l.name.clone(),
+                        plugin: plugin_id(&l.source),
+                    });
+                }
+            }
+        }
+        let mut error = None;
+        if rebuild && let Some(snapshot) = self.last.clone() {
+            self.force_rebuild = true;
+            match self.sync(&snapshot) {
+                // What loading or rebuilding found, which no app sync will show.
+                Ok(()) => news.extend(self.warnings.iter().cloned()),
+                Err(e) => error = Some(e),
+            }
+        }
+        TickReport {
+            warnings: news,
+            error,
+        }
+    }
+
+    /// Sets how plugin devices are loaded. Devices that could not load for
+    /// want of a loader are tried again on the next sync.
+    pub fn set_plugin_loader(&mut self, loader: Option<Box<dyn PluginLoader>>) {
+        self.plugins.set_loader(loader);
+        self.force_rebuild = true;
+    }
+
+    /// Takes the plugins out of this session, saving each one's state, so a
+    /// session that replaces this one (audio restarted) can carry on with
+    /// them through [`set_plugins`](Self::set_plugins). Plugin devices here
+    /// are bypassed after the next sync.
+    pub fn take_plugins(&mut self) -> Plugins {
+        let plugins = self.plugins.detach();
+        self.force_rebuild = true;
+        plugins
+    }
+
+    /// Takes over the plugins from [`take_plugins`](Self::take_plugins):
+    /// the loader, and the states to restore. Plugins load on the next sync.
+    pub fn set_plugins(&mut self, plugins: Plugins) {
+        self.plugins = plugins;
+        self.force_rebuild = true;
+    }
+
+    /// Frees every plugin, for a new document: the next sync loads them
+    /// from the document's state.
+    pub fn clear_plugins(&mut self) {
+        self.plugins.clear();
+        self.force_rebuild = true;
+    }
+
+    /// Restarts a crashed (or any) sandboxed plugin and restores its
+    /// state. Happens on the next [`tick`](Self::tick). Returns false if the
+    /// device has no sandboxed plugin.
+    pub fn reload_plugin(&mut self, device: DeviceId) -> bool {
+        match self.plugins.live(device).and_then(|l| l.monitor.as_ref()) {
+            Some(m) => {
+                m.request_reload();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// How a plugin device is doing. `None` for built-in devices and
+    /// devices not synced yet.
+    pub fn plugin_status(&self, device: DeviceId) -> Option<PluginStatus> {
+        self.plugins.status(device)
+    }
+
+    /// The sandbox of a device's plugin: its process, and how late its
+    /// audio has been.
+    pub fn plugin_monitor(&self, device: DeviceId) -> Option<daw_plugin_host::SandboxMonitor> {
+        self.plugins.live(device)?.monitor.clone()
+    }
+
+    /// A loaded plugin's parameters, as it described them when it loaded.
+    pub fn plugin_params(&self, device: DeviceId) -> Option<&[daw_core::plugin::ParamInfo]> {
+        self.plugins.live(device).map(|l| &l.params[..])
+    }
+
+    /// Runs `f` on a device's plugin, on this thread: for parameter
+    /// values, editors and state. Keep it short; see
+    /// [`daw_engine::PluginHandle::with`]. Edits that belong in the
+    /// document (parameters, state) still go through its commands.
+    pub fn with_plugin<R>(
+        &self,
+        device: DeviceId,
+        f: impl FnOnce(&mut dyn daw_core::plugin::PluginInstance) -> R,
+    ) -> Option<R> {
+        let l = self.plugins.live(device)?;
+        if l.crashed {
+            return None;
+        }
+        Some(l.handle.with(f))
+    }
+
+    /// Saves every running plugin's state and returns those that differ
+    /// from the document's, for the app to store (`DeviceField::State`)
+    /// before saving the document (`Document::store_plugin_state`). Once
+    /// stored and synced, they count as the document's, and are not loaded
+    /// back into the plugin. Only devices of the last synced snapshot.
+    pub fn plugin_states(&mut self) -> Vec<PluginState> {
+        let Some(snapshot) = &self.last else {
+            return Vec::new();
+        };
+        let ids: HashSet<DeviceId> = snapshot
+            .all_tracks()
+            .flat_map(|t| t.devices.iter().map(|d| d.id))
+            .collect();
+        let mut out: Vec<PluginState> = self
+            .plugins
+            .slots
+            .iter_mut()
+            .filter(|(id, _)| ids.contains(id))
+            .filter_map(|(&device, slot)| match slot {
+                plugins::Slot::Live(l) => {
+                    let state = l.changed_state()?;
+                    if let Ok(s) = &state {
+                        l.saved = Some(s.clone());
+                    }
+                    Some(PluginState { device, state })
+                }
+                plugins::Slot::Failed { .. } => None,
+            })
+            .collect();
+        out.sort_by_key(|s| s.device.0);
+        out
+    }
+
+    /// Loads a plugin's state into it when the document's changed under it
+    /// (undo or redo of a state change).
+    fn sync_plugin_states(&mut self, snapshot: &ProjectSnapshot) {
+        for d in snapshot.all_tracks().flat_map(|t| t.devices.iter()) {
+            let Some(l) = self.plugins.live_mut(d.id) else {
+                continue;
+            };
+            let same = |a: &Option<daw_model::StateBlob>| match (a, &d.state) {
+                (Some(a), Some(b)) => Arc::ptr_eq(&a.0, &b.0) || a.0 == b.0,
+                (None, None) => true,
+                _ => false,
+            };
+            if same(&l.state) {
+                continue;
+            }
+            // The state the plugin itself handed over for saving: it has it already.
+            let own = l.saved.is_some() && same(&l.saved);
+            l.saved = None;
+            l.state = d.state.clone();
+            // A state taken away (undone back to none) leaves the plugin as it is: there is
+            // nothing to go back to.
+            let Some(state) = d.state.as_ref().filter(|_| !own) else {
+                continue;
+            };
+            // A crashed sandbox keeps the state for its reload.
+            match l.handle.with(|p| p.load_state(&state.0)) {
+                Ok(()) => {
+                    // The state set the plugin's parameters; the document's go on top
+                    // again, as when it loads, and again after a rebuild in case the
+                    // load changed its ports and the values went to a retired node.
+                    l.fresh = true;
+                    let key = build::device_key(d.id);
+                    if let Some(b) = &mut self.built {
+                        b.params.retain(|(k, _), _| *k != key);
+                    }
+                }
+                Err(e) => self.warnings.push(Warning::DeviceStateRejected {
+                    device: d.name.clone(),
+                    detail: e.to_string(),
+                }),
+            }
+        }
     }
 
     /// Gives every input tap its track's channels and works out which
@@ -534,6 +816,14 @@ pub fn db_to_gain(db: f64) -> f64 {
         0.0
     } else {
         10f64.powf(db / 20.0).min(4.0)
+    }
+}
+
+/// How warnings name a plugin.
+pub(crate) fn plugin_id(source: &daw_model::DeviceSource) -> String {
+    match source {
+        daw_model::DeviceSource::Plugin { id, .. } => id.clone(),
+        daw_model::DeviceSource::Builtin { kind } => kind.clone(),
     }
 }
 
