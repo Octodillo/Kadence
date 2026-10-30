@@ -16,11 +16,14 @@ daw-midi = { path = "../daw-midi" }
 daw-media = { path = "../daw-media" }
 daw-devices = { path = "../daw-devices" }
 daw-backend = { path = "../daw-backend" }
+daw-plugins = { path = "../daw-plugins" }
+daw-plugin-host = { path = "../daw-plugin-host" }
 thiserror.workspace = true
 log = "0.4"
 
 [dev-dependencies]
 assert_no_alloc.workspace = true
+libc = "0.2"
 tempfile = "3"
 
 [lints]

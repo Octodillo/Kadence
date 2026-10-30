@@ -329,8 +329,11 @@ impl AudioHost {
         let playing = self.session.is_playing();
         let tempo = self.session.tempo().clone();
         let midi = std::mem::take(&mut self.midi_wanted);
+        // Saved while the old engine still plays them; restored at the new rate.
+        let plugins = self.session.take_plugins();
         let _ = self.backend.close();
         *self = Self::start(config);
+        self.session.set_plugins(plugins);
         self.set_midi_inputs(&midi);
         // Positions are in ticks: map them with the project's tempo, not the
         // fresh session's default, so the playhead stays on the same bar.
