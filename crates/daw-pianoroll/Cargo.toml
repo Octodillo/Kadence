@@ -1,0 +1,18 @@
+[package]
+name = "daw-pianoroll"
+description = "The piano roll editor without a toolkit: gestures, MIDI edit commands and a display list"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+daw-core.workspace = true
+daw-model = { path = "../daw-model" }
+daw-midi = { path = "../daw-midi" }
+daw-arrange = { path = "../daw-arrange" }
+
+[lints]
+workspace = true

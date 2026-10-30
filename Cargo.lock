@@ -610,6 +610,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "daw-pianoroll"
+version = "0.1.0"
+dependencies = [
+ "daw-arrange",
+ "daw-core",
+ "daw-midi",
+ "daw-model",
+]
+
+[[package]]
 name = "daw-plugin-host"
 version = "0.1.0"
 dependencies = [
