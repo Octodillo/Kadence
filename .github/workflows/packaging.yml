@@ -126,7 +126,7 @@ jobs:
             kf6-kirigami-dev qml6-module-org-kde-kirigami kf6-qqc2-desktop-style \
             kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
             kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme \
-            extra-cmake-modules libjack-jackd2-dev \
+            extra-cmake-modules gettext libjack-jackd2-dev \
             weston xvfb xauth
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -157,7 +157,7 @@ jobs:
             libkirigami-dev qml6-module-org-kde-kirigami qml6-module-org-kde-desktop \
             libkf6coreaddons-dev libkf6i18n-dev libkf6crash-dev libkf6config-dev \
             libkf6colorscheme-dev libkf6iconthemes-dev breeze-icon-theme \
-            extra-cmake-modules libjack-jackd2-dev \
+            extra-cmake-modules gettext libjack-jackd2-dev \
             weston xvfb xauth
           # Debian's Rust is older than the workspace's rust-version.
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
