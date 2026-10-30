@@ -83,8 +83,15 @@ pub trait Device: Node {
         for (id, value) in values.into_iter().enumerate() {
             self.set_param(id as ParamId, value);
         }
+        self.snap_smoothing();
         Ok(())
     }
+
+    /// Jump smoothed parameters straight to their current values, so the next
+    /// block starts there instead of gliding from the old ones. Loading state
+    /// does this; a preset restored after `prepare` would otherwise fade in
+    /// from the previous settings. Call off the real-time thread.
+    fn snap_smoothing(&mut self) {}
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;

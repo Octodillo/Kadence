@@ -63,8 +63,22 @@ pub fn render(
     events: &[(usize, EventKind)],
     setup: Setup,
 ) -> Rendered {
-    let ports = dev.ports();
     dev.prepare(setup.sample_rate, setup.block as u32);
+    render_prepared(dev, frames, input, events, setup, |_| setup.bpm)
+}
+
+/// Like [`render`], but without calling `prepare` first (the device must
+/// already be prepared for `setup`), and with the tempo of each block given
+/// by `bpm(first frame of the block)`.
+pub fn render_prepared(
+    dev: &mut dyn Device,
+    frames: usize,
+    input: &[Vec<f32>],
+    events: &[(usize, EventKind)],
+    setup: Setup,
+    bpm: impl Fn(usize) -> f64,
+) -> Rendered {
+    let ports = dev.ports();
     let mut out = vec![vec![0.0f32; frames]; ports.audio_out as usize];
     let mut in_blocks = vec![vec![0.0f32; setup.block]; ports.audio_in as usize];
     let mut out_blocks = vec![vec![0.0f32; setup.block]; ports.audio_out as usize];
@@ -97,7 +111,7 @@ pub fn render(
         let transport = TransportState {
             playing: setup.playing,
             position: SampleTime(pos as i64),
-            bpm: setup.bpm,
+            bpm: bpm(pos),
             sample_rate: setup.sample_rate,
         };
         {

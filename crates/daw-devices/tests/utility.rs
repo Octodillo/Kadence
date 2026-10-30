@@ -1,6 +1,7 @@
 mod common;
 
 use common::*;
+use daw_core::node::Node;
 use daw_devices::devices::utility::*;
 use daw_devices::{Device, Utility};
 
@@ -40,4 +41,21 @@ fn silence() {
 #[test]
 fn denormals() {
     check_denormals(&mut Utility::new(), &[impulse(4800)], &[], 1.0);
+}
+
+/// Issue #27: loading state after `prepare` only set smoother targets, so a
+/// Utility restored at -70 dB let a full-level transient through.
+#[test]
+fn load_state_after_prepare_does_not_glide() {
+    let s = Setup::default();
+    let mut quiet = Utility::new();
+    quiet.set_param(GAIN, -70.0);
+    let blob = quiet.save_state();
+
+    let mut u = Utility::new();
+    u.prepare(s.sample_rate, s.block as u32);
+    u.load_state(&blob).unwrap();
+    let input = [vec![1.0; 256]];
+    let r = render_prepared(&mut u, 256, &input, &[], s, |_| s.bpm);
+    assert!(peak(&r.channels[0]) < 1e-3, "{}", peak(&r.channels[0]));
 }
