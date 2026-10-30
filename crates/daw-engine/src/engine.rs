@@ -21,6 +21,11 @@ pub struct EngineConfig {
     pub event_capacity: usize,
     /// Capacity of the controller-to-processor command queue.
     pub command_capacity: usize,
+    /// How many separate event sources
+    /// [`EngineProcessor::process_sources`] takes (MIDI input ports, say),
+    /// so that a node can get the events of one source only. Sources past
+    /// this still reach nodes that take every source.
+    pub event_sources: usize,
 }
 
 impl Default for EngineConfig {
@@ -30,6 +35,7 @@ impl Default for EngineConfig {
             max_frames: 1024,
             event_capacity: 512,
             command_capacity: 256,
+            event_sources: 1,
         }
     }
 }
@@ -105,7 +111,10 @@ impl EngineController {
             commands: commands_rx,
             garbage: garbage_tx,
             transport: Transport::with_timeline(config.sample_rate, timeline.clone()),
-            external: EventList::with_capacity(config.event_capacity),
+            // One more for sources past `event_sources`.
+            external: (0..config.event_sources.max(1) + 1)
+                .map(|_| EventList::with_capacity(config.event_capacity))
+                .collect(),
             // Zero would never advance through a cycle. No graph compiles
             // with it, so the processor outputs silence.
             max_frames: config.max_frames.max(1) as usize,
@@ -354,7 +363,9 @@ pub struct EngineProcessor {
     commands: Consumer<Command>,
     garbage: Retirer<Box<CompiledGraph>>,
     transport: Transport,
-    external: EventList,
+    /// This block's external events, one list per source, then one for
+    /// every source past [`EngineConfig::event_sources`].
+    external: Vec<EventList>,
     max_frames: usize,
     shared: Arc<Shared>,
 }
@@ -373,6 +384,21 @@ impl EngineProcessor {
         audio_out: &mut [&mut [f32]],
         events: &EventList,
     ) {
+        self.process_sources(frames, audio_in, audio_out, &[events]);
+    }
+
+    /// Like [`process`](Self::process), with external events from several
+    /// sources. Source `i` reaches the nodes routed with
+    /// [`GraphDesc::route_external_events_from`] for `i`, and every source
+    /// reaches the nodes routed with
+    /// [`route_external_events`](GraphDesc::route_external_events).
+    pub fn process_sources(
+        &mut self,
+        frames: usize,
+        audio_in: &[&[f32]],
+        audio_out: &mut [&mut [f32]],
+        sources: &[&EventList],
+    ) {
         self.drain_commands();
         let mut offset = 0;
         while offset < frames {
@@ -380,12 +406,18 @@ impl EngineProcessor {
                 .transport
                 .block_len((frames - offset).min(self.max_frames));
             let last = offset + len == frames;
-            self.external.clear();
-            for e in events.iter() {
-                let f = e.frame as usize;
-                if f >= offset && (f < offset + len || last) {
-                    let frame = (f - offset).min(len - 1) as u32;
-                    let _ = self.external.push(Event { frame, ..*e });
+            for list in &mut self.external {
+                list.clear();
+            }
+            let overflow = self.external.len() - 1;
+            for (i, events) in sources.iter().enumerate() {
+                let list = &mut self.external[i.min(overflow)];
+                for e in events.iter() {
+                    let f = e.frame as usize;
+                    if f >= offset && (f < offset + len || last) {
+                        let frame = (f - offset).min(len - 1) as u32;
+                        let _ = list.push(Event { frame, ..*e });
+                    }
                 }
             }
             let state = self.transport.state();

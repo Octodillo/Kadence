@@ -706,6 +706,7 @@ dependencies = [
  "daw-media",
  "daw-midi",
  "daw-model",
+ "log",
  "tempfile",
  "thiserror 2.0.21",
 ]

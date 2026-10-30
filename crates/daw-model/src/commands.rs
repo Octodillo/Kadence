@@ -377,6 +377,8 @@ pub enum TrackField {
     Pan(f64),
     Mute(bool),
     Solo(bool),
+    Armed(bool),
+    MidiInput(MidiInput),
     Output(TrackOutput),
 }
 
@@ -402,6 +404,8 @@ impl SetTrack {
             TrackField::Pan(v) => mem::swap(&mut t.pan, v),
             TrackField::Mute(v) => mem::swap(&mut t.mute, v),
             TrackField::Solo(v) => mem::swap(&mut t.solo, v),
+            TrackField::Armed(v) => mem::swap(&mut t.armed, v),
+            TrackField::MidiInput(v) => mem::swap(&mut t.midi_input, v),
             TrackField::Output(v) => mem::swap(&mut t.output, v),
         }
         Ok(ChangeSet::one(Change::Track(self.id)))
@@ -417,6 +421,8 @@ impl Command for SetTrack {
             TrackField::Pan(_) => "Change Pan",
             TrackField::Mute(_) => "Mute Track",
             TrackField::Solo(_) => "Solo Track",
+            TrackField::Armed(_) => "Arm Track",
+            TrackField::MidiInput(_) => "Change MIDI Input",
             TrackField::Output(_) => "Change Track Output",
         }
         .into()
@@ -428,6 +434,11 @@ impl Command for SetTrack {
             TrackField::VolumeDb(v) => check_finite(v, "volume")?,
             TrackField::Pan(v) if !(-1.0..=1.0).contains(&v) => {
                 return Err(invalid("pan must be within -1..1"));
+            }
+            TrackField::MidiInput(MidiInput {
+                channel: Some(c), ..
+            }) if c > 15 => {
+                return Err(invalid("MIDI channel must be within 0..15"));
             }
             TrackField::Output(TrackOutput::Bus(b)) => {
                 if track.kind == TrackKind::Master {

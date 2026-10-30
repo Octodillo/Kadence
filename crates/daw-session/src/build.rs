@@ -6,6 +6,7 @@
 //! state, meters and players) whenever the object is still there.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use daw_core::meter::PeakMeter;
@@ -80,12 +81,32 @@ struct TrackShape {
     sends: Vec<(SendId, TrackId, bool)>,
     /// Automation is compiled into the graph, so a lane edit rebuilds it.
     lanes: Vec<daw_model::AutomationLane>,
+    /// Where an instrument track's live MIDI comes from.
+    live: LiveInput,
+}
+
+/// Which external event sources reach an instrument track's MIDI player.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LiveInput {
+    /// Not an instrument track.
+    None,
+    /// Every source.
+    All,
+    /// One source, by engine source index.
+    Source(usize),
+    /// The chosen device is not connected.
+    Missing,
 }
 
 impl Structure {
     /// The shape of `project`, leaving out the automation lanes in
-    /// `suspended`.
-    pub fn of(project: &Project, suspended: &HashSet<LaneId>) -> Self {
+    /// `suspended`. `sources` maps MIDI source port names to engine event
+    /// sources.
+    pub fn of(
+        project: &Project,
+        suspended: &HashSet<LaneId>,
+        sources: &HashMap<String, usize>,
+    ) -> Self {
         Self {
             tracks: project
                 .all_tracks()
@@ -109,6 +130,13 @@ impl Structure {
                         .filter(|l| !suspended.contains(&l.id))
                         .cloned()
                         .collect(),
+                    live: match (&t.kind, &t.midi_input.device) {
+                        (TrackKind::Instrument, None) => LiveInput::All,
+                        (TrackKind::Instrument, Some(d)) => sources
+                            .get(d)
+                            .map_or(LiveInput::Missing, |&i| LiveInput::Source(i)),
+                        _ => LiveInput::None,
+                    },
                 })
                 .collect(),
         }
@@ -120,6 +148,13 @@ impl Structure {
             .flat_map(|t| t.devices.iter())
             .find(|d| d.0 == id)
             .map(|d| &d.1)
+    }
+
+    fn live_input(&self, track: TrackId) -> LiveInput {
+        self.tracks
+            .iter()
+            .find(|t| t.id == track)
+            .map_or(LiveInput::None, |t| t.live)
     }
 
     pub fn has_automation(&self) -> bool {
@@ -249,7 +284,7 @@ pub(crate) fn graph(
                     id
                 }
                 _ => {
-                    let (node, meter, warning) = device_node(d);
+                    let (node, meter, warning) = device_node(d, session.media.root());
                     if let Some(w) = warning {
                         session.warnings.push(w);
                     }
@@ -284,10 +319,14 @@ pub(crate) fn graph(
             _ => chain.first().copied().unwrap_or(strip),
         };
         heads.insert(track.id, head);
-        // Live MIDI goes through every instrument track's player (which
-        // passes it on) for now; record arming will narrow it down.
+        // Live MIDI goes through the player, which passes on what its
+        // input gate lets through (see `Session::apply_gates`).
         if let Some(player) = midi {
-            g.route_external_events(player);
+            match built.structure.live_input(track.id) {
+                LiveInput::All => g.route_external_events(player),
+                LiveInput::Source(i) => g.route_external_events_from(player, i),
+                LiveInput::None | LiveInput::Missing => {}
+            }
             // The first device even when it is switched off: switching the
             // instrument off silences it, and it still gets the note-offs
             // of notes that were sounding.
@@ -556,15 +595,39 @@ fn join_contiguous(set: &mut ClipSet) {
     }
 }
 
+/// Restores a built-in device's saved state. A sampler's relative sample
+/// paths are relative to `root`.
+fn load_device_state(
+    dev: &mut dyn daw_devices::Device,
+    data: &[u8],
+    root: Option<&Path>,
+) -> Result<(), daw_devices::StateError> {
+    let Some(sampler) = dev.as_any_mut().downcast_mut::<daw_devices::Sampler>() else {
+        return dev.load_state(data);
+    };
+    sampler.load_state_with(data, |path| {
+        let path = match root {
+            Some(root) if path.is_relative() => root.join(path),
+            _ => path.to_path_buf(),
+        };
+        daw_devices::SampleBuffer::load(&path).ok().map(Arc::new)
+    })
+}
+
 /// The engine node for a model device, its gain reduction meter if it has
 /// one, and a warning if it can't be made.
-fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
+///
+/// Samplers find relative sample paths in `root`, the project bundle.
+fn device_node(
+    d: &Device,
+    root: Option<&Path>,
+) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
     match &d.source {
         DeviceSource::Builtin { kind } => match daw_devices::create(kind) {
             Some(mut dev) => {
                 let mut warning = None;
                 if let Some(state) = &d.state
-                    && let Err(e) = dev.load_state(&state.0)
+                    && let Err(e) = load_device_state(dev.as_mut(), &state.0, root)
                 {
                     warning = Some(Warning::DeviceStateRejected {
                         device: d.name.clone(),

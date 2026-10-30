@@ -415,6 +415,25 @@ pub enum TrackOutput {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Color(pub u8, pub u8, pub u8);
 
+/// Which live MIDI an instrument track listens to.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MidiInput {
+    /// The source's port name (`client:port`, as the audio system lists
+    /// it). `None` takes every input.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// MIDI channel, 0 to 15. `None` takes every channel.
+    #[serde(default)]
+    pub channel: Option<u8>,
+}
+
+impl MidiInput {
+    /// Whether an event on `channel` passes the channel filter.
+    pub fn accepts_channel(&self, channel: u8) -> bool {
+        self.channel.is_none_or(|c| c == channel)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: TrackId,
@@ -428,6 +447,12 @@ pub struct Track {
     pub pan: f64,
     pub mute: bool,
     pub solo: bool,
+    /// Armed for recording: an armed instrument track takes live MIDI.
+    #[serde(default)]
+    pub armed: bool,
+    /// The live MIDI an instrument track takes.
+    #[serde(default)]
+    pub midi_input: MidiInput,
     pub output: TrackOutput,
     /// Sorted by start tick.
     #[serde(default)]
@@ -452,6 +477,8 @@ impl Track {
             pan: 0.0,
             mute: false,
             solo: false,
+            armed: false,
+            midi_input: MidiInput::default(),
             output: TrackOutput::Master,
             clips: Vec::new(),
             devices: Vec::new(),
@@ -468,6 +495,9 @@ impl Track {
         check_finite(self.volume_db, "volume")?;
         if !(-1.0..=1.0).contains(&self.pan) {
             return bad(format!("track {} pan out of range", self.id));
+        }
+        if self.midi_input.channel.is_some_and(|c| c > 15) {
+            return bad(format!("track {} MIDI channel out of range", self.id));
         }
         if !self.clips.is_sorted_by_key(|c| c.start) {
             return bad(format!("clips on track {} are not sorted", self.id));

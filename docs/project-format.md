@@ -51,7 +51,7 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 ```json
 {
   "format": "kadence-project",
-  "version": 2,
+  "version": 3,
   "generator": "daw-model 0.1.0",
   "project": { ... }
 }
@@ -60,7 +60,7 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 | Field       | Meaning                                                        |
 |-------------|----------------------------------------------------------------|
 | `format`    | Always `kadence-project`. Anything else is rejected.           |
-| `version`   | Schema version (`daw_model::SCHEMA_VERSION`, currently 2).     |
+| `version`   | Schema version (`daw_model::SCHEMA_VERSION`, currently 3).     |
 | `generator` | What wrote the file. Informational only.                       |
 | `project`   | The `Project` tree below.                                      |
 
@@ -106,6 +106,8 @@ denominator a power of two.
 | `volume_db`  | number               | fader                                          |
 | `pan`        | number               |                                                |
 | `mute`, `solo` | bool               |                                                |
+| `armed`      | bool                 | armed for recording; default `false`           |
+| `midi_input` | `{device, channel}`  | live MIDI an instrument track takes: `device` is a source port name (`client:port`) or `null` for all; `channel` is 0–15 or `null` for all. Default: all |
 | `output`     | `"master"` or `{"bus": id}` | target must be a bus; no loops          |
 | `clips`      | Clip[]               | sorted by `start`; audio clips on audio tracks, MIDI clips on instrument tracks |
 | `devices`    | Device[]             | processing order                               |
@@ -174,3 +176,4 @@ fails is rejected rather than half-loaded.
 |---------|--------|
 | 1       | First schema. |
 | 2       | Default names are no longer saved in English: a project name of `"Untitled"` and a master named `"Master"` become `""`, and the UI words them in the user's language. |
+| 3       | Tracks gain `armed` (record arm, default `false`) and `midi_input` (`device`: a source port name or `null` for every input; `channel`: 0–15 or `null` for every channel). |

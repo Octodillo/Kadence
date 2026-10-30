@@ -242,7 +242,7 @@ fn ports_list_and_connect() {
         b.connect("test:nope", "system:playback_2").is_err(),
         "no such port"
     );
-    assert_eq!(b.connections().count(), 1);
+    assert_eq!(b.connections().len(), 1);
     b.disconnect("test:audio_out_1", "system:playback_1")
         .unwrap();
     assert!(
@@ -260,7 +260,11 @@ fn auto_connect_wires_physical_ports() {
     })
     .unwrap();
     b.start(Box::new(|_| {})).unwrap();
-    let mut c: Vec<_> = b.connections().map(|(a, b)| format!("{a}>{b}")).collect();
+    let mut c: Vec<_> = b
+        .connections()
+        .into_iter()
+        .map(|(a, b)| format!("{a}>{b}"))
+        .collect();
     c.sort();
     assert_eq!(
         c,
@@ -420,4 +424,100 @@ fn stop_does_not_wait_out_a_long_period() {
         Ok(true),
         "stop() hung"
     );
+}
+
+/// Starts `b` with a callback that sends `(slot, event)` for every event on
+/// the ports made by `add_midi_input`.
+fn start_forwarding_midi_inputs(b: &mut DummyBackend) -> mpsc::Receiver<(usize, Event)> {
+    let (tx, rx) = mpsc::sync_channel(64);
+    b.start(Box::new(move |c| {
+        assert_eq!(c.midi_inputs.len(), daw_backend::MAX_MIDI_INPUTS);
+        for (slot, list) in c.midi_inputs.iter().enumerate() {
+            for e in list.iter() {
+                let _ = tx.try_send((slot, *e));
+            }
+        }
+    }))
+    .unwrap();
+    rx
+}
+
+#[test]
+fn midi_inputs_added_while_running_keep_their_events_apart() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    let a = b.add_midi_input("keys").unwrap();
+    assert_eq!(a.name, "test:keys");
+    let rx = start_forwarding_midi_inputs(&mut b);
+    let c = b.add_midi_input("pads").unwrap();
+    assert_ne!(a.slot, c.slot);
+    assert!(matches!(
+        b.add_midi_input("keys"),
+        Err(BackendError::Port(_))
+    ));
+    let mut keys = b.midi_input_injector(a.slot).unwrap();
+    let mut pads = b.midi_input_injector(c.slot).unwrap();
+    assert!(
+        b.midi_input_injector(a.slot).is_none(),
+        "one injector per port"
+    );
+    assert!(keys.send(&CC));
+    assert_eq!(
+        rx.recv_timeout(WAIT).unwrap(),
+        (
+            a.slot,
+            Event {
+                frame: 0,
+                kind: EventKind::Midi(CC)
+            }
+        )
+    );
+    assert!(pads.send(&[0x90, 60, 100]));
+    let (slot, e) = rx.recv_timeout(WAIT).unwrap();
+    assert_eq!(slot, c.slot);
+    assert!(matches!(e.kind, EventKind::NoteOn { key: 60, .. }));
+
+    let ports: Vec<_> = b
+        .list_ports(&PortFilter {
+            kind: Some(PortKind::Midi),
+            direction: Some(PortDirection::Input),
+            physical_only: false,
+        })
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.is_ours)
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(ports, ["test:midi_in", "test:keys", "test:pads"]);
+    assert_eq!(b.midi_inputs().len(), 2);
+
+    // Connections to a removed port go with it.
+    b.connect("system:midi_capture_1", "test:keys").unwrap();
+    b.remove_midi_input(a.slot).unwrap();
+    assert!(b.connections().is_empty());
+    assert!(b.remove_midi_input(a.slot).is_err());
+    assert_eq!(b.midi_inputs(), [c.clone()]);
+    // Its slot is free for the next port.
+    assert_eq!(b.add_midi_input("more").unwrap().slot, a.slot);
+    b.stop().unwrap();
+
+    // The ports outlive a restart, but not a close.
+    let rx = start_forwarding_midi_inputs(&mut b);
+    assert!(pads.send(&CC));
+    assert_eq!(rx.recv_timeout(WAIT).unwrap().0, c.slot);
+    b.close().unwrap();
+    assert!(b.midi_inputs().is_empty());
+}
+
+#[test]
+fn other_clients_ports_come_and_go() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    let system = b.system();
+    system.add_port("keys:out", PortKind::Midi, PortDirection::Output, true);
+    let port = b.add_midi_input("keys").unwrap();
+    b.connect("keys:out", &port.name).unwrap();
+    system.remove_port("keys:out");
+    assert!(b.connections().is_empty(), "unplugging drops the link");
+    assert!(b.connect("keys:out", &port.name).is_err());
 }

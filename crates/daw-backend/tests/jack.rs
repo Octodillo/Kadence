@@ -381,3 +381,75 @@ fn stopped_links_match_aliases_and_loopbacks() {
     b.close().unwrap();
     sys.unset_alias("wu2-test:speaker").unwrap();
 }
+
+#[test]
+#[ignore = "needs a running JACK server"]
+fn added_midi_inputs_keep_their_sources_apart() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut src = JackBackend::new();
+    src.open(BackendConfig {
+        midi_output: true,
+        ..cfg("wu10-src")
+    })
+    .unwrap();
+    src.start(Box::new(|c| {
+        let on = Event {
+            frame: 1,
+            kind: EventKind::NoteOn {
+                channel: 0,
+                key: 61,
+                velocity: 1.0,
+                note_id: -1,
+            },
+        };
+        c.midi_out.push(on).unwrap();
+    }))
+    .unwrap();
+
+    let mut dst = JackBackend::new();
+    dst.open(cfg("wu10-dst")).unwrap();
+    // One port before start, one while running.
+    let before = dst.add_midi_input("keys").unwrap();
+    assert_eq!(before.name, "wu10-dst:keys");
+    let counts: Arc<Vec<AtomicU64>> = Arc::new(
+        (0..daw_backend::MAX_MIDI_INPUTS)
+            .map(|_| AtomicU64::new(0))
+            .collect(),
+    );
+    let general = Arc::new(AtomicU64::new(0));
+    let (c2, g2) = (counts.clone(), general.clone());
+    dst.start(Box::new(move |c| {
+        g2.fetch_add(c.midi_in.len() as u64, Relaxed);
+        for (slot, list) in c.midi_inputs.iter().enumerate() {
+            c2[slot].fetch_add(list.len() as u64, Relaxed);
+        }
+    }))
+    .unwrap();
+    let during = dst.add_midi_input("pads").unwrap();
+    dst.connect("wu10-src:midi_out", &during.name).unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while counts[during.slot].load(Relaxed) < 10 {
+        assert!(Instant::now() < end, "no MIDI on the added port");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(counts[before.slot].load(Relaxed), 0);
+    assert_eq!(general.load(Relaxed), 0);
+
+    // A link made while stopped comes back on start, and a removed port's
+    // links don't.
+    dst.stop().unwrap();
+    dst.connect("wu10-src:midi_out", &before.name).unwrap();
+    dst.remove_midi_input(during.slot).unwrap();
+    dst.start(Box::new(|_| {})).unwrap();
+    assert_eq!(connections_of(&before.name), ["wu10-src:midi_out"]);
+    assert!(
+        dst.list_ports(&PortFilter::default())
+            .unwrap()
+            .iter()
+            .all(|p| p.name != during.name),
+        "the removed port is unregistered"
+    );
+    assert_eq!(dst.stats().rt_alloc_violations, 0);
+    src.close().unwrap();
+    dst.close().unwrap();
+}

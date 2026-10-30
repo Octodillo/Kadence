@@ -129,6 +129,16 @@ pub struct Session {
     suspended: HashSet<LaneId>,
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
+    /// MIDI source port names, by the engine event source their own port
+    /// feeds. Tracks that pick one of these devices get only its events.
+    midi_sources: HashMap<String, usize>,
+    /// `midi_sources` changed since the graph was built.
+    midi_sources_changed: bool,
+    /// Each instrument track's arm state and channel filter, as of the
+    /// last sync, for [`apply_gates`](Self::apply_gates).
+    gates: Vec<(TrackId, bool, Option<u8>)>,
+    /// The track that takes live MIDI when none is armed.
+    input_focus: Option<TrackId>,
 }
 
 impl Session {
@@ -151,6 +161,10 @@ impl Session {
             master: None,
             suspended: HashSet::new(),
             live: HashMap::new(),
+            midi_sources: HashMap::new(),
+            midi_sources_changed: false,
+            gates: Vec::new(),
+            input_focus: None,
         };
         (session, processor)
     }
@@ -170,10 +184,58 @@ impl Session {
     /// Whether the last sync couldn't send everything (a player's queue was
     /// full) and should run again even if the document hasn't changed.
     pub fn wants_sync(&self) -> bool {
-        self.built.as_ref().is_some_and(|b| {
-            b.midi.keys().any(|t| !b.midi_clips.contains_key(t))
-                || b.players.keys().any(|t| !b.clips.contains_key(t))
-        })
+        self.midi_sources_changed
+            || self.built.as_ref().is_some_and(|b| {
+                b.midi.keys().any(|t| !b.midi_clips.contains_key(t))
+                    || b.players.keys().any(|t| !b.clips.contains_key(t))
+            })
+    }
+
+    /// Tells the session which engine event source each MIDI device's own
+    /// port feeds (see [`host::AudioHost`]). A track whose MIDI input names
+    /// a device takes only that source; one naming a device not in `sources`
+    /// takes nothing. Takes effect on the next [`sync`](Self::sync), which
+    /// [`wants_sync`](Self::wants_sync) asks for.
+    pub fn set_midi_sources(&mut self, sources: HashMap<String, usize>) {
+        if sources != self.midi_sources {
+            self.midi_sources = sources;
+            self.midi_sources_changed = true;
+        }
+    }
+
+    pub fn midi_sources(&self) -> &HashMap<String, usize> {
+        &self.midi_sources
+    }
+
+    /// The instrument track that takes live MIDI while no track is armed
+    /// (the selected one, say). With neither, every instrument track does.
+    pub fn set_input_focus(&mut self, track: Option<TrackId>) {
+        if self.input_focus != track {
+            self.input_focus = track;
+            self.apply_gates();
+        }
+    }
+
+    /// Opens the input gate of each instrument track that should hear live
+    /// MIDI: the armed ones, else the focus track, else all of them.
+    fn apply_gates(&mut self) {
+        let Some(built) = self.built.as_mut() else {
+            return;
+        };
+        let any_armed = self.gates.iter().any(|&(_, armed, _)| armed);
+        let focus = self
+            .input_focus
+            .filter(|f| self.gates.iter().any(|(t, _, _)| t == f));
+        for &(track, armed, channel) in &self.gates {
+            let open = if any_armed {
+                armed
+            } else {
+                focus.is_none_or(|f| f == track)
+            };
+            if let Some(player) = built.midi.get(&track) {
+                player.set_input(daw_midi::player::InputGate { open, channel });
+            }
+        }
     }
 
     /// The MIDI player of an instrument track, for record arming and
@@ -224,7 +286,8 @@ impl Session {
             self.tempo_data = Some(snapshot.tempo.clone());
             self.apply_loop()?;
         }
-        let structure = build::Structure::of(snapshot, &self.suspended);
+        let structure = build::Structure::of(snapshot, &self.suspended, &self.midi_sources);
+        self.midi_sources_changed = false;
         // Automation is in samples, so a tempo change re-times it.
         let rebuild = self.built.as_ref().is_none_or(|b| {
             b.structure != structure || (tempo_changed && structure.has_automation())
@@ -235,6 +298,13 @@ impl Session {
             self.built = Some(built);
             self.controller.set_graph(desc)?;
         }
+        self.gates = snapshot
+            .tracks
+            .iter()
+            .filter(|t| t.kind == daw_model::TrackKind::Instrument)
+            .map(|t| (t.id, t.armed, t.midi_input.channel))
+            .collect();
+        self.apply_gates();
         self.send_params(snapshot)?;
         self.send_clips(snapshot, tempo_changed);
         Ok(())

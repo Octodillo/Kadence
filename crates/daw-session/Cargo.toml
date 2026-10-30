@@ -17,6 +17,7 @@ daw-media = { path = "../daw-media" }
 daw-devices = { path = "../daw-devices" }
 daw-backend = { path = "../daw-backend" }
 thiserror.workspace = true
+log = "0.4"
 
 [dev-dependencies]
 assert_no_alloc.workspace = true
