@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-30 01:16+0000\n"
+"POT-Creation-Date: 2026-10-30 08:09+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,85 +18,172 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: crates/daw-app/qml/ArrangePage.qml:6 crates/daw-app/qml/SelfTest.qml:43
-#: crates/daw-app/qml/SelfTest.qml:69
+#: crates/daw-app/qml/ArrangePage.qml:19 crates/daw-app/qml/SelfTest.qml:48
+#: crates/daw-app/qml/SelfTest.qml:107
 msgctxt "@title"
 msgid "Arrange"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:8
+#: crates/daw-app/qml/ArrangePage.qml:26
+msgctxt "@action:button"
+msgid "Loop"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:31
+msgctxt "@info:tooltip"
+msgid ""
+"Loop the selection, or four bars from the playhead. Shift-drag in the ruler "
+"to set the loop."
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:36
+msgctxt "@action:button"
+msgid "Add Track"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:40
+msgctxt "@action:inmenu"
+msgid "Audio Track"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:46
+msgctxt "@action:inmenu"
+msgid "Instrument Track"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:52
+msgctxt "@action:inmenu"
+msgid "Bus"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:60
+msgctxt "@action:inmenu"
+msgid "Split at Playhead"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:67
+msgctxt "@action:inmenu"
+msgid "Duplicate"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:75
+msgctxt "@action:inmenu"
+msgid "Delete"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:83
+msgctxt "@action:inmenu"
+msgid "Select All"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:94
+msgctxt "@action:inmenu"
+msgid "Zoom In"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:101
+msgctxt "@action:inmenu"
+msgid "Zoom Out"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:108
+msgctxt "@action:inmenu"
+msgid "Zoom to Fit"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:182
+msgctxt "@info:accessible"
+msgid "Playhead position"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:255
+msgctxt "@info:accessible"
+msgid "Timeline"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:320
 msgctxt "@info:placeholder"
 msgid "No tracks yet"
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:9
+#: crates/daw-app/qml/ArrangePage.qml:321
 msgctxt "@info:placeholder"
-msgid "Tracks and clips will be arranged on a timeline here."
+msgid "Add a track, or drop audio files here."
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:39
-msgctxt "@info"
-msgid "Could not change audio settings: %1"
+#: crates/daw-app/qml/ArrangePage.qml:323
+msgctxt "@action:button"
+msgid "Add Audio Track"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:46
+#: crates/daw-app/qml/ArrangePage.qml:381
+msgctxt "@action:inmenu"
+msgid "Add Audio Track"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml:386
+msgctxt "@action:inmenu"
+msgid "Add Instrument Track"
+msgstr ""
+
+#: crates/daw-app/qml/AudioSettings.qml:52
 msgctxt "@label"
 msgid "Audio system:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:51
+#: crates/daw-app/qml/AudioSettings.qml:57
 msgctxt "@label"
 msgid "Status:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:52
+#: crates/daw-app/qml/AudioSettings.qml:58
 msgctxt "@info audio engine status"
 msgid "Running"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:53
+#: crates/daw-app/qml/AudioSettings.qml:59
 msgctxt "@info audio engine status"
 msgid "Stopped"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:62
+#: crates/daw-app/qml/AudioSettings.qml:68
 msgctxt "@label:listbox"
 msgid "Device:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:63
+#: crates/daw-app/qml/AudioSettings.qml:69
 msgctxt "@item:inlistbox audio device"
 msgid "System default"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:69
+#: crates/daw-app/qml/AudioSettings.qml:75
 msgctxt "@label:listbox"
 msgid "Sample rate:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:74
+#: crates/daw-app/qml/AudioSettings.qml:80
 msgctxt "@item:inlistbox sample rate"
 msgid "%1 Hz"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:81
+#: crates/daw-app/qml/AudioSettings.qml:87
 msgctxt "@label:listbox"
 msgid "Buffer size:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:86
+#: crates/daw-app/qml/AudioSettings.qml:92
 msgctxt "@item:inlistbox buffer size"
 msgid "%1 sample"
 msgid_plural "%1 samples"
 msgstr[0] ""
 msgstr[1] ""
 
-#: crates/daw-app/qml/AudioSettings.qml:92
+#: crates/daw-app/qml/AudioSettings.qml:98
 msgctxt "@label"
 msgid "Latency:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:94
+#: crates/daw-app/qml/AudioSettings.qml:100
 msgctxt "@info milliseconds"
 msgid "%1 ms"
 msgstr ""
@@ -208,6 +295,7 @@ msgid "M"
 msgstr ""
 
 #: crates/daw-app/qml/ChannelStrip.qml:296
+#: crates/daw-app/qml/TrackHeader.qml:88
 msgctxt "@action:button"
 msgid "Mute"
 msgstr ""
@@ -223,6 +311,7 @@ msgid "S"
 msgstr ""
 
 #: crates/daw-app/qml/ChannelStrip.qml:307
+#: crates/daw-app/qml/TrackHeader.qml:102
 msgctxt "@action:button"
 msgid "Solo"
 msgstr ""
@@ -232,7 +321,7 @@ msgctxt "@info:tooltip"
 msgid "Solo"
 msgstr ""
 
-#: crates/daw-app/qml/EditPage.qml:6 crates/daw-app/qml/SelfTest.qml:67
+#: crates/daw-app/qml/EditPage.qml:6 crates/daw-app/qml/SelfTest.qml:105
 msgctxt "@title"
 msgid "Edit"
 msgstr ""
@@ -247,6 +336,68 @@ msgctxt "@info:placeholder"
 msgid "Select a clip to edit its notes or audio here."
 msgstr ""
 
+#: crates/daw-app/qml/EngineErrorText.qml:17
+msgctxt "@info %1 is an audio device id"
+msgid "The audio device “%1” is not available."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:20
+#: crates/daw-app/qml/SelfTest.qml:145
+msgctxt "@info %1 is a number"
+msgid "The audio device does not support a sample rate of %1 Hz."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:23
+#: crates/daw-app/qml/SelfTest.qml:151
+msgctxt "@info"
+msgid "The audio device does not support a buffer size of %1 sample."
+msgid_plural "The audio device does not support a buffer size of %1 samples."
+msgstr[0] ""
+msgstr[1] ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:28
+msgctxt "@info %1 is a message from the audio system, which may be in English"
+msgid "The audio system reported: %1"
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:30
+msgctxt "@info"
+msgid "The chosen audio device is not in the list."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:32
+msgctxt "@info"
+msgid "The chosen sample rate is not valid."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:34
+msgctxt "@info"
+msgid "The chosen buffer size is not valid."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:43
+#: crates/daw-app/qml/SelfTest.qml:143
+msgctxt "@info %1 is the reason, a full sentence"
+msgid "Could not change the audio settings. %1"
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:47
+msgctxt "@info %1 is the reason, a full sentence"
+msgid ""
+"Your saved audio settings could not be used, so Kadence started with other "
+"ones. %1"
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:50
+msgctxt "@info %1 is the reason, a full sentence"
+msgid "Audio could not be started. %1"
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml:52
+msgctxt "@info %1 is the reason, a full sentence"
+msgid "Audio is not working. %1"
+msgstr ""
+
 #: crates/daw-app/qml/GainReductionMeter.qml:21
 msgctxt "@label"
 msgid "Gain reduction meter"
@@ -257,63 +408,143 @@ msgctxt "@label"
 msgid "Level meter"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:17
-msgctxt "@title:window"
-msgid "Kadence"
+#: crates/daw-app/qml/Main.qml:18
+msgctxt "@title:window %1 is the project name"
+msgid "%1 [modified] — Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:26
+#: crates/daw-app/qml/Main.qml:19
+msgctxt "@title:window %1 is the project name"
+msgid "%1 — Kadence"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:28
 msgctxt "@action:inmenu"
 msgid "Arrange"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:35
+#: crates/daw-app/qml/Main.qml:37
 msgctxt "@action:inmenu"
 msgid "Mix"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:43
+#: crates/daw-app/qml/Main.qml:45
 msgctxt "@action:inmenu"
 msgid "Edit"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:53
+#: crates/daw-app/qml/Main.qml:60
 msgctxt "@action:button"
 msgid "Stop"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:53
+#: crates/daw-app/qml/Main.qml:60
 msgctxt "@action:button"
 msgid "Play"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:66
-msgctxt "@action:inmenu"
-msgid "Configure Kadence…"
-msgstr ""
-
-#: crates/daw-app/qml/Main.qml:73
-msgctxt "@action:inmenu"
-msgid "About Kadence"
+#: crates/daw-app/qml/Main.qml:71
+msgctxt "@action"
+msgid "Go to Start"
 msgstr ""
 
 #: crates/daw-app/qml/Main.qml:79
 msgctxt "@action:inmenu"
+msgid "New Project"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:85
+msgctxt "@action:inmenu"
+msgid "Open Project…"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:91
+msgctxt "@action:inmenu"
+msgid "Save"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:97
+msgctxt "@action:inmenu"
+msgid "Save As…"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:106
+msgctxt "@action:inmenu %1 is an edit, like Move Clip"
+msgid "Undo %1"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:107
+msgctxt "@action:inmenu"
+msgid "Undo"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:114
+msgctxt "@action:inmenu %1 is an edit, like Move Clip"
+msgid "Redo %1"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:115
+msgctxt "@action:inmenu"
+msgid "Redo"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:130 crates/daw-app/qml/Main.qml:154
+msgctxt "@info"
+msgid "Could not save: %1"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:136
+msgctxt "@title:window"
+msgid "Open Project"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:137 crates/daw-app/qml/Main.qml:150
+msgctxt "@item:inlistbox"
+msgid "Kadence projects (*.kadence)"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:141
+msgctxt "@info"
+msgid "Could not open: %1"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:148
+msgctxt "@title:window"
+msgid "Save Project As"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:173
+msgctxt "@action:inmenu"
+msgid "Configure Kadence…"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:180
+msgctxt "@action:inmenu"
+msgid "About Kadence"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:186
+msgctxt "@action:inmenu"
 msgid "Quit"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:86 crates/daw-app/src/cpp/kadence.cpp:87
+#: crates/daw-app/qml/Main.qml:193 crates/daw-app/src/cpp/kadence.cpp:114
 #, kde-format
 msgctxt "@title"
 msgid "Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:140
+#: crates/daw-app/qml/Main.qml:258
+msgctxt "@action:button"
+msgid "Audio Settings…"
+msgstr ""
+
+#: crates/daw-app/qml/Main.qml:284
 msgctxt "@title:window"
 msgid "Configure — Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/MixPage.qml:16 crates/daw-app/qml/SelfTest.qml:48
+#: crates/daw-app/qml/MixPage.qml:16 crates/daw-app/qml/SelfTest.qml:86
 msgctxt "@title"
 msgid "Mix"
 msgstr ""
@@ -333,39 +564,49 @@ msgctxt "@title"
 msgid "Audio"
 msgstr ""
 
-#: crates/daw-app/src/cpp/kadence.cpp:89
+#: crates/daw-app/qml/TrackHeader.qml:120
+msgctxt "@action:inmenu"
+msgid "Rename…"
+msgstr ""
+
+#: crates/daw-app/qml/TrackHeader.qml:130
+msgctxt "@action:inmenu"
+msgid "Delete Track"
+msgstr ""
+
+#: crates/daw-app/src/cpp/kadence.cpp:116
 #, kde-format
 msgid "Make music on the Plasma desktop"
 msgstr ""
 
-#: crates/daw-app/src/cpp/kadence.cpp:91
+#: crates/daw-app/src/cpp/kadence.cpp:118
 #, kde-format
 msgid "© 2026 The Kadence developers"
 msgstr ""
 
-#: crates/daw-app/src/cpp/kadence.cpp:97
+#: crates/daw-app/src/cpp/kadence.cpp:124
 #, kde-format
 msgid "The Kadence developers"
 msgstr ""
 
-#: crates/daw-app/src/cpp/kadence.cpp:99
+#: crates/daw-app/src/cpp/kadence.cpp:126
 #, kde-format
 msgctxt "NAME OF TRANSLATORS"
 msgid "Your names"
 msgstr ""
 
-#: crates/daw-app/src/cpp/kadence.cpp:100
+#: crates/daw-app/src/cpp/kadence.cpp:127
 #, kde-format
 msgctxt "EMAIL OF TRANSLATORS"
 msgid "Your emails"
 msgstr ""
 
-#: crates/daw-app/src/cpp/kadence.cpp:110
+#: crates/daw-app/src/cpp/kadence.cpp:137
 #, kde-format
 msgid "Use this color scheme instead of the desktop's."
 msgstr ""
 
-#: crates/daw-app/src/cpp/kadence.cpp:111
+#: crates/daw-app/src/cpp/kadence.cpp:138
 #, kde-format
 msgctxt "@info:shell"
 msgid "name"

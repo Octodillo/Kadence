@@ -420,7 +420,9 @@ impl Link {
                 max_frames: max_frames.max(1),
                 event_capacity: EVENT_CAPACITY,
             };
-            let (shm, latency) = map_block(&control, layout, sample_rate, max_frames, config)?;
+            // Instantiating prepared the plugin with these settings already.
+            let (shm, latency, _) =
+                map_block(&control, layout, sample_rate, max_frames, false, config)?;
             Ok((control, info, shm, latency))
         })();
         let (control, info, shm, latency) = match started {
@@ -495,14 +497,16 @@ impl Link {
     }
 }
 
-/// Creates a block for `layout`, has the host map it (and prepare), then removes its file.
+/// Creates a block for `layout`, has the host map it (and prepare the plugin, if `prepare`),
+/// then removes its file. Returns the block, the plugin's latency and its ports.
 fn map_block(
     control: &UnixStream,
     layout: Layout,
     sample_rate: f64,
     max_frames: u32,
+    prepare: bool,
     config: &SandboxConfig,
-) -> Result<(Shm, u32), PluginError> {
+) -> Result<(Shm, u32, PortLayout), PluginError> {
     let (shm, path) = Shm::create(&shm_dir(), layout)
         .map_err(|e| PluginError::Load(format!("cannot create the audio block: {e}")))?;
     let path = RemoveOnDrop(path);
@@ -512,13 +516,14 @@ fn map_block(
             sample_rate,
             max_frames,
             shm: Some(path.0.clone()),
+            prepare,
         },
         &[],
         config.call_timeout,
     )
     .map_err(|e| PluginError::Load(format!("plugin host: {e}")))?;
     match response.reply {
-        Reply::Ok => Ok((shm, response.latency)),
+        Reply::Prepared(ports) => Ok((shm, response.latency, (&ports).into())),
         Reply::Err(e) => Err(e.into()),
         other => Err(PluginError::Load(format!(
             "plugin host: unexpected reply {other:?}"
@@ -698,6 +703,12 @@ pub struct SandboxedInstance {
     has_editor: bool,
     editor_open: bool,
     latency: u32,
+    /// The host reported that the plugin wants to be prepared again; see
+    /// [`PluginInstance::take_layout_changed`].
+    layout_changed: bool,
+    /// The settings the plugin in the host is prepared with, while nothing has asked for
+    /// another prepare since. A prepare with them has nothing to do.
+    prepared_with: Option<(f64, u32)>,
     sample_rate: f64,
     max_frames: u32,
     /// The last state saved from or loaded into the plugin.
@@ -734,6 +745,9 @@ impl SandboxedInstance {
             has_editor: false,
             editor_open: false,
             latency,
+            layout_changed: false,
+            // Instantiating prepared it.
+            prepared_with: Some((sample_rate, max_frames.max(1))),
             sample_rate,
             max_frames,
             state: None,
@@ -784,6 +798,7 @@ impl SandboxedInstance {
             }
         };
         self.link = Some(link);
+        let (old_ports, old_latency) = (self.ports.clone(), self.latency);
         self.latency = latency;
         let kept = std::mem::take(&mut self.rt.tracked);
         self.adopt(&info);
@@ -809,6 +824,17 @@ impl SandboxedInstance {
             self.editor_open = false;
             let _ = self.open_editor();
         }
+        // The new host's plugin may not match what the engine last prepared. Ports and latency
+        // stay as the engine has them until it prepares again; `process` copes with a block
+        // of other channel counts meanwhile.
+        // The new host prepared its plugin with the current settings.
+        self.prepared_with = Some((self.sample_rate, self.max_frames));
+        if self.ports != old_ports || self.latency != old_latency {
+            self.ports = old_ports;
+            self.latency = old_latency;
+            self.layout_changed = true;
+            self.prepared_with = None;
+        }
         restored
     }
 
@@ -826,6 +852,85 @@ impl SandboxedInstance {
             self.params = params.iter().map(ParamInfo::from).collect();
             self.rt.tracked = tracked_params(&self.params, &self.rt.tracked);
             self.rt.resend = self.rt.tracked.iter().any(|t| t.dirty).then_some(0);
+        }
+    }
+
+    /// Prepares the plugin in the host with `sample_rate` and `max_frames`, with a new audio
+    /// block when the plugin needs more frames or other channel counts than the current one.
+    fn prepare_host(&mut self) -> Result<(), PluginError> {
+        let link = self.link.as_ref().expect("checked by the caller");
+        let block = link.shm.layout();
+        let (shm, latency, ports) = if self.max_frames > block.max_frames {
+            let layout = Layout {
+                max_frames: self.max_frames,
+                ..block
+            };
+            let (shm, latency, ports) = map_block(
+                &link.control,
+                layout,
+                self.sample_rate,
+                self.max_frames,
+                true,
+                &self.config,
+            )?;
+            (Some(shm), latency, ports)
+        } else {
+            let request = Request::Prepare {
+                sample_rate: self.sample_rate,
+                max_frames: self.max_frames,
+                shm: None,
+                prepare: true,
+            };
+            match self.control(request, &[])? {
+                (Reply::Prepared(ports), _, latency) => (None, latency, (&ports).into()),
+                (other, _, _) => {
+                    return Err(PluginError::Load(format!(
+                        "plugin host: unexpected reply {other:?}"
+                    )));
+                }
+            }
+        };
+        if let Some(shm) = shm {
+            self.install_block(shm);
+        }
+        self.latency = latency;
+        self.ports = ports;
+
+        // A new layout can bring other channel counts, which the block must carry.
+        let link = self.link.as_ref().expect("still there");
+        let block = link.shm.layout();
+        let (audio_in, audio_out) = (
+            u32::from(self.ports.audio_in),
+            u32::from(self.ports.audio_out),
+        );
+        if (audio_in, audio_out) != (block.audio_in, block.audio_out) {
+            let layout = Layout {
+                audio_in,
+                audio_out,
+                ..block
+            };
+            // The plugin is prepared already; this only swaps the block.
+            let (shm, latency, ports) = map_block(
+                &link.control,
+                layout,
+                self.sample_rate,
+                self.max_frames,
+                false,
+                &self.config,
+            )?;
+            self.install_block(shm);
+            self.latency = latency;
+            self.ports = ports;
+        }
+        Ok(())
+    }
+
+    /// Makes `shm` the block that `process` and the watchdog use.
+    fn install_block(&mut self, shm: Shm) {
+        if let Some(link) = self.link.as_mut() {
+            let shm = Arc::new(shm);
+            *locked(&link.watched) = shm.clone();
+            link.shm = shm;
         }
     }
 
@@ -1085,44 +1190,24 @@ impl Node for SandboxedInstance {
         let new_rate = sample_rate != self.sample_rate;
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
+        self.layout_changed = false;
+        let settings = (sample_rate, self.max_frames);
+        // Skipping this is safe because a layout change clears `prepared_with`, and one the
+        // host reported that `on_main_thread` has not picked up yet is still in the block.
+        let reported = self
+            .running()
+            .is_some_and(|link| link.shm.header().layout_changed.load(Ordering::Acquire) != 0);
+        if self.prepared_with.take() == Some(settings) && !reported {
+            self.prepared_with = Some(settings);
+            return;
+        }
         let Some(link) = self.running() else {
             return;
         };
         let generation = link.generation;
-        let result = if self.max_frames > link.shm.layout().max_frames {
-            let layout = Layout {
-                max_frames: self.max_frames,
-                ..link.shm.layout()
-            };
-            map_block(
-                &link.control,
-                layout,
-                sample_rate,
-                self.max_frames,
-                &self.config,
-            )
-            .map(|(shm, latency)| (Some(shm), latency))
-        } else {
-            self.control(
-                Request::Prepare {
-                    sample_rate,
-                    max_frames: self.max_frames,
-                    shm: None,
-                },
-                &[],
-            )
-            .map(|(_, _, latency)| (None, latency))
-        };
-        match result {
-            Ok((shm, latency)) => {
-                if let Some(link) = self.link.as_mut()
-                    && let Some(shm) = shm
-                {
-                    let shm = Arc::new(shm);
-                    *locked(&link.watched) = shm.clone();
-                    link.shm = shm;
-                }
-                self.latency = latency;
+        match self.prepare_host() {
+            Ok(()) => {
+                self.prepared_with = Some(settings);
                 // Some ranges scale with the rate (LV2's lv2:sampleRate), and
                 // LV2 plugins are re-instantiated for a new rate.
                 if new_rate {
@@ -1304,11 +1389,22 @@ impl PluginInstance for SandboxedInstance {
         let _ = self.control(Request::CloseEditor, &[]);
     }
 
-    /// The host pumps the plugin's own main thread; this only performs requested reloads.
+    /// The host pumps the plugin's own main thread; this performs requested reloads and picks
+    /// up layout changes the host reported.
     fn on_main_thread(&mut self) {
         if self.shared.reload_requested.load(Ordering::Acquire) {
             let _ = self.reload();
         }
+        if let Some(link) = self.running()
+            && link.shm.header().layout_changed.swap(0, Ordering::AcqRel) != 0
+        {
+            self.layout_changed = true;
+            self.prepared_with = None;
+        }
+    }
+
+    fn take_layout_changed(&mut self) -> bool {
+        std::mem::take(&mut self.layout_changed)
     }
 }
 
