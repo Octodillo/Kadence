@@ -450,7 +450,8 @@ pub fn encode_event(e: &Event, out: &mut [u64]) {
             note_id,
         } => (
             2,
-            u64::from(channel) | u64::from(key) << 8,
+            // Bit 16 marks a wildcard key.
+            u64::from(channel) | key.map_or(1 << 16, |k| u64::from(k) << 8),
             u64::from(velocity.to_bits()),
             u64::from(note_id as u32),
         ),
@@ -481,7 +482,7 @@ pub fn decode_event(w: &[u64]) -> Option<Event> {
         },
         2 => EventKind::NoteOff {
             channel: byte(w[1], 0),
-            key: byte(w[1], 1),
+            key: (w[1] & 1 << 16 == 0).then(|| byte(w[1], 1)),
             velocity: f32::from_bits(w[2] as u32),
             note_id: w[3] as u32 as i32,
         },
@@ -549,9 +550,27 @@ mod tests {
                 frame: u32::MAX,
                 kind: EventKind::NoteOff {
                     channel: 0,
-                    key: 60,
+                    key: Some(60),
                     velocity: 0.0,
                     note_id: 123_456,
+                },
+            },
+            Event {
+                frame: 1,
+                kind: EventKind::NoteOff {
+                    channel: 15,
+                    key: None,
+                    velocity: 0.5,
+                    note_id: 9,
+                },
+            },
+            Event {
+                frame: 2,
+                kind: EventKind::NoteOff {
+                    channel: 3,
+                    key: Some(0),
+                    velocity: 0.5,
+                    note_id: -1,
                 },
             },
             Event {

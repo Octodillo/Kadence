@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{Node, ProcessContext, TransportState};
-use daw_core::plugin::{PluginDescriptor, PluginFormat, PluginFormatKind, PluginInstance};
+use daw_core::plugin::{
+    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+};
 use daw_plugin_host::{
     CrashReason, HostLauncher, SandboxConfig, SandboxFormat, SandboxStatus, SandboxedInstance,
 };
@@ -71,7 +73,9 @@ fn format() -> SandboxFormat {
 }
 
 fn descriptor() -> PluginDescriptor {
-    let mut found = format().scan(&test_plugin());
+    let mut found = format()
+        .scan(&test_plugin())
+        .expect("the test plugin loads");
     assert_eq!(found.len(), 1, "one plugin in the test bundle");
     found.remove(0)
 }
@@ -161,7 +165,11 @@ fn scanning_through_the_host_describes_the_plugin() {
     assert_eq!(d.format, PluginFormatKind::Clap);
     assert_eq!(d.id, ID);
     assert_eq!(d.ports, (2, 2));
-    assert!(format().scan(Path::new("/nonexistent.clap")).is_empty());
+    // A bundle that does not load says why.
+    match format().scan(Path::new("/nonexistent.clap")) {
+        Err(PluginError::Load(why)) => assert!(why.contains("/nonexistent.clap"), "{why}"),
+        other => panic!("expected a load error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -454,7 +462,7 @@ fn events_sent_while_the_host_is_busy_arrive_late_not_never() {
         frame: 5,
         kind: EventKind::NoteOff {
             channel: 0,
-            key: 60,
+            key: Some(60),
             velocity: 0.0,
             note_id: 3,
         },
@@ -487,7 +495,7 @@ fn events_sent_while_the_host_is_busy_arrive_late_not_never() {
     let keys: Vec<_> = seen
         .iter()
         .filter_map(|e| match e.kind {
-            EventKind::NoteOff { key, .. } | EventKind::NoteOn { key, .. } => Some(key),
+            EventKind::NoteOff { key: Some(key), .. } | EventKind::NoteOn { key, .. } => Some(key),
             _ => None,
         })
         .collect();

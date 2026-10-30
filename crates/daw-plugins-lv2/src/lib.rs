@@ -117,8 +117,10 @@ impl PluginFormat for Lv2Format {
         scan::default_search_paths()
     }
 
-    fn scan(&self, path: &Path) -> Vec<PluginDescriptor> {
-        scan::scan(path)
+    /// LV2 scans read only the bundles' Turtle data; plugin code loads on instantiation, so a
+    /// scan does not fail. Unparsable data gives no plugins.
+    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+        Ok(scan::scan(path))
     }
 
     fn instantiate(

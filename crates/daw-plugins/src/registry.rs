@@ -226,8 +226,8 @@ mod tests {
         fn default_search_paths(&self) -> Vec<PathBuf> {
             Vec::new()
         }
-        fn scan(&self, _path: &Path) -> Vec<PluginDescriptor> {
-            Vec::new()
+        fn scan(&self, _path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+            Ok(Vec::new())
         }
         fn shutdown(&self) {
             self.1.fetch_add(1, Ordering::Relaxed);

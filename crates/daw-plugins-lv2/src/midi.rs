@@ -1,6 +1,6 @@
 //! Conversions between engine events and raw MIDI bytes. RT-safe.
 
-use daw_core::event::EventKind;
+use daw_core::event::{EventKind, all_notes_off};
 
 /// Encodes a note or MIDI event. Returns the bytes and how many are used, or
 /// `None` for events that are not MIDI (parameter changes).
@@ -20,13 +20,16 @@ pub(crate) fn to_midi(kind: &EventKind) -> Option<([u8; 3], usize)> {
         }
         EventKind::NoteOff {
             channel,
-            key,
+            key: Some(key),
             velocity,
             ..
         } => {
             let v = (velocity * 127.0).round().clamp(0.0, 127.0) as u8;
             Some(([0x80 | (channel & 0x0f), key & 0x7f, v], 3))
         }
+        EventKind::NoteOff {
+            channel, key: None, ..
+        } => Some((all_notes_off(channel), 3)),
         EventKind::Midi(bytes) => Some((bytes, midi_len(bytes[0])?)),
         EventKind::ParamValue { .. } => None,
     }
@@ -63,7 +66,7 @@ pub(crate) fn from_midi(data: &[u8]) -> Option<EventKind> {
         }),
         0x80 | 0x90 => Some(EventKind::NoteOff {
             channel,
-            key: data[1],
+            key: Some(data[1]),
             velocity: if status & 0xf0 == 0x80 {
                 f32::from(data[2]) / 127.0
             } else {
@@ -97,13 +100,24 @@ mod tests {
 
         let off = EventKind::NoteOff {
             channel: 0,
-            key: 61,
+            key: Some(61),
             velocity: 0.0,
             note_id: -1,
         };
         let (bytes, len) = to_midi(&off).unwrap();
         assert_eq!(&bytes[..len], &[0x80, 61, 0]);
         assert_eq!(from_midi(&bytes[..len]), Some(off));
+    }
+
+    #[test]
+    fn wildcard_note_off_is_all_notes_off() {
+        let off = EventKind::NoteOff {
+            channel: 4,
+            key: None,
+            velocity: 1.0,
+            note_id: 3,
+        };
+        assert_eq!(to_midi(&off), Some(([0xb4, 123, 0], 3)));
     }
 
     #[test]
@@ -130,7 +144,7 @@ mod tests {
             from_midi(&[0x91, 64, 0]),
             Some(EventKind::NoteOff {
                 channel: 1,
-                key: 64,
+                key: Some(64),
                 ..
             })
         ));

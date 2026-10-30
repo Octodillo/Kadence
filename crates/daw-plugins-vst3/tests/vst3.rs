@@ -50,7 +50,7 @@ fn testgain_bundle() -> &'static Path {
 }
 
 fn testgain() -> PluginDescriptor {
-    let found = Vst3Format.scan(testgain_bundle());
+    let found = Vst3Format.scan(testgain_bundle()).unwrap();
     assert_eq!(found.len(), 1, "{found:?}");
     found.into_iter().next().unwrap()
 }
@@ -129,7 +129,7 @@ fn scans_the_test_plugin() {
     assert_eq!(d.id.len(), 32);
     // A directory scan finds the same bundle.
     let dir = testgain_bundle().parent().unwrap();
-    assert_eq!(Vst3Format.scan(dir).len(), 1);
+    assert_eq!(Vst3Format.scan(dir).unwrap().len(), 1);
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn many_instances_share_one_module() {
 fn again() -> Option<Vec<PluginDescriptor>> {
     match std::env::var_os("DAW_VST3_AGAIN") {
         Some(path) => {
-            let found = Vst3Format.scan(Path::new(&path));
+            let found = Vst3Format.scan(Path::new(&path)).unwrap();
             assert!(!found.is_empty(), "no classes in {path:?}");
             Some(found)
         }
