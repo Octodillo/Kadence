@@ -40,8 +40,9 @@ fn reused_node_keeps_its_state_across_swaps() {
     g.connect(synth, track);
     ctl.set_graph(g).unwrap();
     assert_eq!(run(&mut proc, 4), vec![1.0, 2.0, 3.0, 4.0]);
+    // Queued right before the swaps, so they must move with the nodes.
     ctl.set_param_by_key(TRACK, Strip::GAIN, 2.0).unwrap();
-    ctl.set_param_by_key(NodeKey::MASTER, Strip::GAIN, 0.5)
+    ctl.set_param_by_key(NodeKey::MASTER, Strip::GAIN, 0.75)
         .unwrap();
 
     // A structural edit: a new graph with an extra track, reusing the rest.
@@ -58,8 +59,8 @@ fn reused_node_keeps_its_state_across_swaps() {
         g.set_key(extra, NodeKey(1000 + round));
         ctl.set_graph(g).unwrap();
     }
-    // Gain 2 on the track and 0.5 on master both survived.
-    assert_eq!(run(&mut proc, 3), vec![5.0, 6.0, 7.0]);
+    // Gain 2 on the track and 0.75 on master both survived.
+    assert_eq!(run(&mut proc, 3), vec![7.5, 9.0, 10.5]);
     assert!(
         !ctl.has_node(NodeKey(1000)),
         "only the latest graph is live"

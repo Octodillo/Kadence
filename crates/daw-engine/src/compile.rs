@@ -304,6 +304,9 @@ impl CompiledGraph {
         }
         for &(from, to) in &self.transfers {
             std::mem::swap(&mut self.steps[to].node, &mut old.steps[from].node);
+            // Parameter changes queued on the old graph since its last block
+            // follow the node. Both lists have the same capacity.
+            std::mem::swap(&mut self.steps[to].params, &mut old.steps[from].params);
         }
     }
 
