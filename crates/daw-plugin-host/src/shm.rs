@@ -18,7 +18,7 @@ use daw_core::event::{Event, EventKind};
 use memmap2::MmapMut;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"KDSB");
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Bytes reserved for [`Header`] at the start of the block.
 const HEADER_BYTES: usize = 128;
 /// `u64` words per event record.
@@ -58,6 +58,11 @@ pub struct Header {
     /// cycles then output silence instead of waiting for it, and the watchdog does not count
     /// them as a hang.
     pub main_busy: AtomicU32,
+    /// Set by the host while its main thread is inside the plugin for any reason (a call or the
+    /// main-thread pump). Audio cycles wait for it as usual, but the watchdog gives a stalled
+    /// cycle the call timeout rather than the hang timeout, so slow main-thread work in a
+    /// healthy plugin is not mistaken for a hang.
+    pub main_in_plugin: AtomicU32,
     pub position: AtomicU64,
     /// `f64` bits.
     pub bpm: AtomicU64,
