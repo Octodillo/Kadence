@@ -132,6 +132,33 @@ fn midi_overflow_is_counted_not_fatal() {
 }
 
 #[test]
+fn malformed_midi_out_is_dropped_and_counted() {
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(1);
+    b.open(cfg(32)).unwrap();
+    let mut tap = b.midi_tap();
+    b.start(Box::new(|c| {
+        for kind in [
+            EventKind::Midi([0xB0, 7, 200]), // status bit in a data byte
+            EventKind::Midi([0xF0, 1, 2]),   // SysEx has no short form
+            EventKind::Midi([0xB0, 7, 100]),
+            EventKind::ParamValue {
+                param: 0,
+                value: 1.0,
+            },
+        ] {
+            c.midi_out.push(Event { frame: 0, kind }).unwrap();
+        }
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(1, WAIT));
+    b.stop().unwrap();
+    let sent: Vec<_> = std::iter::from_fn(|| tap.try_recv()).collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].as_bytes(), &[0xB0, 7, 100]);
+    assert_eq!(b.stats().midi_dropped, 2, "ParamValue is not a drop");
+}
+
+#[test]
 fn realtime_pacing_keeps_time() {
     // 20 cycles of 480 frames at 48 kHz = 200 ms.
     let mut b = DummyBackend::new(Pacing::RealTime);

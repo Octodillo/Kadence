@@ -465,15 +465,17 @@ impl Worker {
         if let Some(tx) = &mut self.midi_out_tx {
             for e in self.midi_out.iter() {
                 let mut bytes = [0; 3];
-                if let Some(len) = midi::encode(&e.kind, &mut bytes) {
-                    let msg = RawMessage {
-                        frame: frame_time + u64::from(e.frame),
-                        bytes,
-                        len: len as u8,
-                    };
-                    if tx.push(msg).is_err() {
-                        dropped += 1;
-                    }
+                let Some(len) = midi::encode(&e.kind, &mut bytes) else {
+                    dropped += u64::from(midi::is_malformed(&e.kind));
+                    continue;
+                };
+                let msg = RawMessage {
+                    frame: frame_time + u64::from(e.frame),
+                    bytes,
+                    len: len as u8,
+                };
+                if tx.push(msg).is_err() {
+                    dropped += 1;
                 }
             }
         }

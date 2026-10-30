@@ -579,17 +579,19 @@ impl Processor {
             let mut writer = port.writer(ps);
             for e in self.midi_out.iter() {
                 let mut bytes = [0; 3];
-                if let Some(len) = midi::encode(&e.kind, &mut bytes) {
-                    let time = e.frame.min(frames.saturating_sub(1));
-                    if writer
-                        .write(&RawMidi {
-                            time,
-                            bytes: &bytes[..len],
-                        })
-                        .is_err()
-                    {
-                        dropped += 1;
-                    }
+                let Some(len) = midi::encode(&e.kind, &mut bytes) else {
+                    dropped += u64::from(midi::is_malformed(&e.kind));
+                    continue;
+                };
+                let time = e.frame.min(frames.saturating_sub(1));
+                if writer
+                    .write(&RawMidi {
+                        time,
+                        bytes: &bytes[..len],
+                    })
+                    .is_err()
+                {
+                    dropped += 1;
                 }
             }
         }

@@ -10,7 +10,8 @@ pub struct BackendStats {
     /// Buffer under- or overruns reported by the audio system (or, for the
     /// dummy backend in real-time pacing, cycles that missed their deadline).
     pub xruns: u64,
-    /// MIDI events dropped because an event list was full.
+    /// MIDI events dropped because an event list was full, or because the
+    /// callback wrote a malformed `Midi` event to `midi_out`.
     pub midi_dropped: u64,
     /// Whether the process thread runs with a real-time scheduling policy
     /// (`SCHED_FIFO` or `SCHED_RR`). `None` until the first cycle has run.
