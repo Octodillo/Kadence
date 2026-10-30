@@ -86,8 +86,9 @@ impl UiInfo {
             let Some(uri) = ui.uri().as_uri().map(str::to_owned) else {
                 continue;
             };
-            // UI data usually lives in its own file, loaded on demand. The
-            // features may be optional or required, so any predicate counts.
+            // UI data often lives in a file of its own: make sure it is
+            // loaded. The features may be optional or required, so any
+            // predicate counts.
             let node = ui.uri();
             let _ = lilv.load_resource(&node);
             let fixed_size = lilv.ask(Some(&node), None, Some(&no_user_resize))
@@ -164,7 +165,9 @@ impl X11 {
             0,
             WindowClass::INPUT_OUTPUT,
             x11rb::COPY_FROM_PARENT,
-            &CreateWindowAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+            // Substructure: hear about the UI's widget resizing itself.
+            &CreateWindowAux::new()
+                .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_NOTIFY),
         )
         .map_err(|x| e(&x))?;
         let atom = |name: &[u8]| -> Result<u32, String> {
@@ -678,12 +681,13 @@ impl Editor {
                 }
                 XEvent::DestroyNotify(e) if e.window == x.window => return false,
                 XEvent::ConfigureNotify(e) if e.window == x.window => {
-                    x.size = (e.width, e.height);
                     if x.fixed {
                         // A fixed-size UI keeps its size even if the window
-                        // manager ignores the size hints.
+                        // manager ignores the size hints, and `size` stays the
+                        // size the hints pin.
                         None
                     } else {
+                        x.size = (e.width, e.height);
                         if x.child != 0 {
                             let aux = ConfigureWindowAux::new()
                                 .width(u32::from(e.width))
@@ -693,6 +697,12 @@ impl Editor {
                         }
                         Some((e.width, e.height))
                     }
+                }
+                // A fixed-size UI that resizes its own widget, without asking
+                // through ui:resize: the window and its hints follow.
+                XEvent::ConfigureNotify(e) if x.fixed && x.child != 0 && e.window == x.child => {
+                    x.resize(e.width, e.height);
+                    None
                 }
                 _ => None,
             };

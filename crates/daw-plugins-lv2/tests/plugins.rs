@@ -376,26 +376,47 @@ fn editors_open_as_floating_windows() {
     drop(p);
 }
 
-/// x42 Balance with its UI marked ui:noUserResize, under its own name so its
-/// window can be told apart from other tests' windows.
-fn fixed_size_balance_bundle(dir: &Path) -> tempfile::TempDir {
+/// x42 Balance with its UI marked ui:noUserResize, and described in a file of
+/// its own, as many bundles do. The plugin gets
+/// a name of its own so its window can be told apart from other tests'.
+fn fixed_size_balance_bundle(dir: &Path, name: &str) -> tempfile::TempDir {
+    const PLUGIN: &str = "http://gareus.org/oss/lv2/balance";
     let bundle = tempfile::tempdir().unwrap();
     let src = dir.join("balance.lv2");
-    for f in ["manifest.ttl", "balance.so", "balanceUI.so"] {
+    for f in ["balance.so", "balanceUI.so"] {
         std::os::unix::fs::symlink(src.join(f), bundle.path().join(f)).unwrap();
     }
+    let manifest = format!(
+        r#"@prefix lv2: <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ui: <http://lv2plug.in/ns/extensions/ui#> .
+<{PLUGIN}> a lv2:Plugin ; lv2:binary <balance.so> ; rdfs:seeAlso <balance.ttl> .
+<{PLUGIN}#ui> a ui:X11UI ; ui:binary <balanceUI.so> ; rdfs:seeAlso <ui.ttl> .
+"#
+    );
     let ttl = std::fs::read_to_string(src.join("balance.ttl")).unwrap();
-    let ttl = ttl
-        .replace(
-            "doap:name \"Stereo Balance Control\"",
-            "doap:name \"Fixed-size UI test\"",
-        )
-        .replace(
+    let ui_start = ttl.find(&format!("<{PLUGIN}#ui>\n")).unwrap();
+    let plugin_end = ttl[..ui_start].rfind("@prefix ui:").unwrap();
+    let prefixes = &ttl[..ttl.find("\n\n").unwrap()];
+    let plugin = ttl[..plugin_end].replace(
+        "doap:name \"Stereo Balance Control\"",
+        &format!("doap:name \"{name}\""),
+    );
+    assert!(plugin.contains(name));
+    let plugin =
+        format!("{plugin}\n<{PLUGIN}> <http://lv2plug.in/ns/extensions/ui#ui> <{PLUGIN}#ui> .\n");
+    let ui = format!(
+        "{prefixes}\n@prefix ui: <http://lv2plug.in/ns/extensions/ui#> .\n{}",
+        ttl[ui_start..].replacen(
             "\ta ui:X11UI;\n",
             "\ta ui:X11UI;\n\tlv2:optionalFeature ui:noUserResize ;\n",
-        );
-    assert!(ttl.contains("ui:noUserResize") && ttl.contains("Fixed-size UI test"));
-    std::fs::write(bundle.path().join("balance.ttl"), ttl).unwrap();
+            1
+        )
+    );
+    assert!(ui.contains("ui:noUserResize"));
+    std::fs::write(bundle.path().join("manifest.ttl"), manifest).unwrap();
+    std::fs::write(bundle.path().join("balance.ttl"), plugin).unwrap();
+    std::fs::write(bundle.path().join("ui.ttl"), ui).unwrap();
     bundle
 }
 
@@ -412,7 +433,9 @@ fn fixed_size_editors_have_fixed_windows() {
         eprintln!("skipped: no DISPLAY");
         return;
     }
-    let bundle = fixed_size_balance_bundle(&dir);
+    // Unique per process: other test processes may share the display.
+    let name = format!("Fixed-size UI test {}", std::process::id());
+    let bundle = fixed_size_balance_bundle(&dir, &name);
     let format = daw_plugins_lv2::format();
     let d = find(
         &*format,
@@ -420,7 +443,7 @@ fn fixed_size_editors_have_fixed_windows() {
         ".",
         "http://gareus.org/oss/lv2/balance",
     );
-    assert_eq!(d.name, "Fixed-size UI test");
+    assert_eq!(d.name, name);
     let mut p = format.instantiate(&d, SR, BLOCK).unwrap();
     p.prepare(SR, BLOCK);
     let _turn = EDITORS.lock().unwrap_or_else(|e| e.into_inner());
@@ -440,7 +463,7 @@ fn fixed_size_editors_have_fixed_windows() {
             conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 64)
                 .ok()
                 .and_then(|c| c.reply().ok())
-                .is_some_and(|r| r.value == b"Fixed-size UI test")
+                .is_some_and(|r| r.value == name.as_bytes())
         })
         .expect("no plugin window");
     let geometry = conn.get_geometry(window).unwrap().reply().unwrap();
@@ -468,6 +491,28 @@ fn fixed_size_editors_have_fixed_windows() {
     }
     let after = conn.get_geometry(child).unwrap().reply().unwrap();
     assert_eq!((after.width, after.height), (before.width, before.height));
+
+    // The widget resizing itself, as some toolkits do without ui:resize: the
+    // window and its hints follow.
+    let (w, h) = (before.width + 30, before.height + 20);
+    let aux = ConfigureWindowAux::new()
+        .width(u32::from(w))
+        .height(u32::from(h));
+    conn.configure_window(child, &aux).unwrap();
+    conn.flush().unwrap();
+    for _ in 0..20 {
+        p.on_main_thread();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let g = conn.get_geometry(window).unwrap().reply().unwrap();
+    assert_eq!((g.width, g.height), (w, h));
+    let hints = WmSizeHints::get_normal_hints(&conn, window)
+        .unwrap()
+        .reply()
+        .unwrap()
+        .unwrap();
+    let size = (i32::from(w), i32::from(h));
+    assert_eq!((hints.min_size, hints.max_size), (Some(size), Some(size)));
     p.close_editor();
 }
 
