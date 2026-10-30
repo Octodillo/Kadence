@@ -33,6 +33,9 @@ pub struct AppState {
     pub follow_playhead: bool,
     /// Tempo map for the view when no session runs.
     fallback_tempo: SegmentTempoMap,
+    /// Counts documents opened, so views can tell a new document from an
+    /// edit (document revisions start over).
+    pub doc_serial: u64,
 }
 
 thread_local! {
@@ -61,6 +64,7 @@ impl AppState {
             status: String::new(),
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
+            doc_serial: 0,
         };
         s.sync();
         s
@@ -205,6 +209,7 @@ impl AppState {
             let _ = s.set_loop(None);
         }
         self.doc = doc;
+        self.doc_serial += 1;
         self.arrange.selection.clear();
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;

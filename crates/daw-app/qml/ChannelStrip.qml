@@ -22,6 +22,7 @@ Item {
     required property list<string> inserts
     required property bool insertMeters
     required property list<string> sends
+    required property list<real> sendLevels
 
     required property double levelLeft
     required property double levelRight
@@ -107,10 +108,9 @@ Item {
                 Kirigami.ListSectionHeader {
                     Layout.fillWidth: true
                     text: i18nc("@title:group effect slots", "Effects")
-                    visible: !strip.isMaster
                 }
                 Repeater {
-                    model: strip.isMaster ? [] : strip.inserts
+                    model: strip.inserts
                     delegate: RowLayout {
                         id: insertRow
                         required property int index
@@ -136,7 +136,6 @@ Item {
                 }
                 QQC2.ToolButton {
                     Layout.fillWidth: true
-                    visible: !strip.isMaster
                     icon.name: "list-add"
                     text: i18nc("@action:button", "Add Effect")
                     onClicked: effectMenu.popup()
@@ -194,8 +193,9 @@ Item {
                             Layout.fillWidth: true
                             from: -60
                             to: 6
-                            value: Mixer.sendLevel(strip.index, sendRow.index)
+                            value: strip.sendLevels[sendRow.index] ?? -60
                             onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
+                            onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
                             QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.modelData, strip.dbText(value))
                             QQC2.ToolTip.visible: hovered || pressed
                             Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.modelData)
@@ -236,6 +236,7 @@ Item {
             to: 1
             value: strip.pan
             onMoved: Mixer.setPan(strip.index, value)
+            onPressedChanged: Mixer.touch(strip.index, "pan", -1, pressed)
             Accessible.name: i18nc("@label:slider", "Pan")
             QQC2.ToolTip.text: i18nc("@info:tooltip", "Pan: %1 (double-click to centre)", strip.panText(value))
             QQC2.ToolTip.visible: hovered || pressed
@@ -261,6 +262,7 @@ Item {
                 to: 6
                 value: strip.volumeDb
                 onMoved: Mixer.setVolume(strip.index, value)
+                onPressedChanged: Mixer.touch(strip.index, "volume", -1, pressed)
                 Accessible.name: i18nc("@label:slider", "Volume")
                 QQC2.ToolTip.text: i18nc("@info:tooltip", "Volume (double-click for 0 dB)")
                 QQC2.ToolTip.visible: hovered && !pressed
