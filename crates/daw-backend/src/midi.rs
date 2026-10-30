@@ -54,8 +54,12 @@ pub fn decode(frame: u32, bytes: &[u8]) -> Option<Event> {
 }
 
 /// Encodes an event as raw MIDI into `out`, returning the message length.
-/// Returns `None` for events with no MIDI form (`ParamValue`, or a `Midi`
-/// event whose first byte is not a valid status byte).
+/// Returns `None` for events with no MIDI form: `ParamValue`, and `Midi`
+/// events that are not a well-formed message (the first byte is not a status
+/// byte with a fixed length, or a data byte has its top bit set). Backends
+/// count the malformed ones in [`BackendStats::midi_dropped`].
+///
+/// [`BackendStats::midi_dropped`]: crate::BackendStats::midi_dropped
 pub fn encode(kind: &EventKind, out: &mut [u8; 3]) -> Option<usize> {
     match *kind {
         EventKind::NoteOn {
@@ -83,11 +87,22 @@ pub fn encode(kind: &EventKind, out: &mut [u8; 3]) -> Option<usize> {
         }
         EventKind::Midi(raw) => {
             let len = message_len(raw[0])?;
+            // A data byte with bit 7 set is a status byte to the receiver,
+            // which then misparses the rest of the stream.
+            if raw[1..len].iter().any(|b| b & 0x80 != 0) {
+                return None;
+            }
             *out = raw;
             Some(len)
         }
         EventKind::ParamValue { .. } => None,
     }
+}
+
+/// Whether `encode` drops this event as malformed rather than because it
+/// has no MIDI form at all.
+pub(crate) fn is_malformed(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Midi(_))
 }
 
 fn to_7bit(v: f32) -> u8 {
@@ -194,5 +209,24 @@ mod tests {
         };
         assert_eq!(encode(&param, &mut out), None);
         assert_eq!(encode(&EventKind::Midi([0x40, 0, 0]), &mut out), None);
+    }
+
+    #[test]
+    fn encode_rejects_status_bit_in_data_bytes() {
+        let mut out = [0; 3];
+        for raw in [
+            [0xB0, 7, 200],
+            [0x90, 0x80, 1],
+            [0xE0, 0, 0xFF],
+            [0xC0, 0x85, 0],
+        ] {
+            assert_eq!(encode(&EventKind::Midi(raw), &mut out), None, "{raw:02X?}");
+        }
+        // Bytes past the message length are padding and not sent.
+        assert_eq!(encode(&EventKind::Midi([0xC0, 5, 0xFF]), &mut out), Some(2));
+        assert_eq!(
+            encode(&EventKind::Midi([0xF8, 0xFF, 0xFF]), &mut out),
+            Some(1)
+        );
     }
 }

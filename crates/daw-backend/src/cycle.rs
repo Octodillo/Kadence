@@ -16,7 +16,10 @@ pub struct BackendCycle<'a> {
     /// `EventKind::NoteOn`/`NoteOff`, other short messages as `EventKind::Midi`.
     /// SysEx is not passed through.
     pub midi_in: &'a EventList,
-    /// MIDI to send this period. Starts empty. `ParamValue` events are ignored.
+    /// MIDI to send this period. Starts empty. `ParamValue` events are ignored;
+    /// malformed `Midi` events (no fixed-length status byte, or a data byte
+    /// with bit 7 set) are dropped and counted in
+    /// [`BackendStats::midi_dropped`](crate::BackendStats::midi_dropped).
     pub midi_out: &'a mut EventList,
     /// The backend's xrun count so far.
     pub xruns: u64,

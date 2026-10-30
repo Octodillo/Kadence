@@ -11,17 +11,18 @@
 //!   real-time pace or as fast as possible. Tests use it.
 //!
 //! The callback runs on the real-time thread. It must not allocate, lock, log
-//! or do I/O. In debug builds the backends wrap each cycle in
-//! [`assert_no_alloc::assert_no_alloc`]; when the binary installs
-//! `assert_no_alloc::AllocDisabler` as its global allocator, allocations in a
-//! cycle show up in [`BackendStats::rt_alloc_violations`].
+//! or do I/O. In debug builds, when the binary installs [`RtAllocCounter`] as
+//! its global allocator, allocations in a cycle show up in
+//! [`BackendStats::rt_alloc_violations`].
 
+mod alloc;
 mod cycle;
 mod dummy;
 mod jack_backend;
 pub mod midi;
 mod stats;
 
+pub use alloc::RtAllocCounter;
 pub use cycle::BackendCycle;
 pub use dummy::{DummyBackend, MidiInjector, MidiTap, Pacing};
 pub use jack_backend::JackBackend;
@@ -143,6 +144,12 @@ pub trait AudioBackend: Send {
 
     fn open(&mut self, cfg: BackendConfig) -> Result<(), BackendError>;
 
+    /// Begins calling `cb` once per period.
+    ///
+    /// If the audio system refuses to start (JACK: activation fails), the
+    /// backend is left closed and must be [`open`](Self::open)ed again. In
+    /// that case `cb` may never be dropped, because the JACK library can
+    /// still hold it, so don't rely on its drop to signal anything.
     fn start(&mut self, cb: ProcessCallback) -> Result<(), BackendError>;
 
     fn stop(&mut self) -> Result<(), BackendError>;
@@ -173,20 +180,20 @@ pub trait AudioBackend: Send {
 }
 
 /// Runs one cycle body under the debug-build allocation guard, and counts any
-/// allocation it catches in [`BackendStats::rt_alloc_violations`]. (The
-/// workspace builds `assert_no_alloc` with `warn_debug`, which counts per
-/// thread instead of aborting.)
+/// allocation it catches in [`BackendStats::rt_alloc_violations`]. It only
+/// counts: printing from the real-time thread would cost more than the
+/// allocation it reports.
 #[inline]
 pub(crate) fn rt_guard<R>(shared: &stats::SharedStats, f: impl FnOnce() -> R) -> R {
     #[cfg(debug_assertions)]
     {
-        let before = assert_no_alloc::violation_count();
-        let r = assert_no_alloc::assert_no_alloc(f);
-        let caught = assert_no_alloc::violation_count().wrapping_sub(before);
+        let before = alloc::violations();
+        let r = alloc::forbid(f);
+        let caught = alloc::violations().wrapping_sub(before);
         if caught > 0 {
             shared
                 .rt_alloc_violations
-                .fetch_add(u64::from(caught), std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(caught, std::sync::atomic::Ordering::Relaxed);
         }
         r
     }
