@@ -51,6 +51,9 @@ pub enum SendError {
     /// The graph reuses nodes from a graph that is no longer the latest
     /// sent. Build it again.
     Stale(Box<CompiledGraph>),
+    /// The graph was compiled for another sample rate or for blocks shorter
+    /// than [`EngineConfig::max_frames`].
+    Config(Box<CompiledGraph>),
 }
 
 impl std::fmt::Debug for SendError {
@@ -58,6 +61,7 @@ impl std::fmt::Debug for SendError {
         f.write_str(match self {
             Self::Full(_) => "SendError::Full",
             Self::Stale(_) => "SendError::Stale",
+            Self::Config(_) => "SendError::Config",
         })
     }
 }
@@ -97,7 +101,9 @@ impl EngineController {
             garbage: garbage_tx,
             transport: Transport::new(config.sample_rate),
             external: EventList::with_capacity(config.event_capacity),
-            max_frames: config.max_frames as usize,
+            // Zero would never advance through a cycle. No graph compiles
+            // with it, so the processor outputs silence.
+            max_frames: config.max_frames.max(1) as usize,
             shared: shared.clone(),
         };
         let controller = Self {
@@ -169,6 +175,7 @@ impl EngineController {
         self.send_graph(graph).map_err(|e| match e {
             SendError::Full(_) => EngineError::QueueFull,
             SendError::Stale(_) => EngineError::Compile(CompileError::StaleGraph),
+            SendError::Config(_) => EngineError::Compile(CompileError::InvalidConfig),
         })
     }
 
@@ -177,9 +184,16 @@ impl EngineController {
     /// A graph that reuses nodes must be sent right after the graph it was
     /// built from (the latest sent when its [`GraphDesc`] was made);
     /// otherwise it is refused with [`SendError::Stale`]. On a full queue it
-    /// comes back in [`SendError::Full`] so the caller can retry.
+    /// comes back in [`SendError::Full`] so the caller can retry. A graph
+    /// compiled for another sample rate, or for blocks shorter than the
+    /// engine's, is refused with [`SendError::Config`].
     pub fn send_graph(&mut self, graph: Box<CompiledGraph>) -> Result<(), SendError> {
         self.collect_garbage();
+        if graph.sample_rate() != self.config.sample_rate
+            || graph.max_frames() < self.config.max_frames
+        {
+            return Err(SendError::Config(graph));
+        }
         if graph.reuses_nodes() && graph.base != self.live.generation {
             return Err(SendError::Stale(graph));
         }

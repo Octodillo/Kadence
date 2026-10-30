@@ -1,3 +1,4 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -27,6 +28,14 @@ pub struct JackBackend {
     state: State,
     cfg: Option<BackendConfig>,
     shared: Arc<SharedStats>,
+    /// Connections to make on the next `start`. Deactivating a JACK client
+    /// drops all of its connections, and JACK refuses to connect an inactive
+    /// client's ports, so while stopped they are kept here: `stop` saves the
+    /// live ones and `connect`/`disconnect` edit the list.
+    links: Vec<(String, String)>,
+    /// Auto-connect has run since `open`. Later starts restore `links`
+    /// instead, so ports the user unplugged stay unplugged.
+    auto_connected: bool,
 }
 
 #[derive(Default)]
@@ -55,6 +64,72 @@ impl JackBackend {
             State::Open(c, _) => Ok(c),
             State::Running(a) => Ok(a.as_client()),
         }
+    }
+
+    /// Full names of our ports, each with whether it is an output.
+    fn our_ports(client: &Client, cfg: &BackendConfig) -> Vec<(String, bool)> {
+        let me = client.name();
+        let mut v = Vec::new();
+        v.extend((1..=cfg.audio_inputs).map(|i| (format!("{me}:audio_in_{i}"), false)));
+        v.extend((1..=cfg.audio_outputs).map(|i| (format!("{me}:audio_out_{i}"), true)));
+        if cfg.midi_input {
+            v.push((format!("{me}:midi_in"), false));
+        }
+        if cfg.midi_output {
+            v.push((format!("{me}:midi_out"), true));
+        }
+        v
+    }
+
+    /// Every live connection of our ports, as (output, input) pairs.
+    fn live_links(client: &Client, cfg: &BackendConfig) -> Vec<(String, String)> {
+        let mut links = Vec::new();
+        for (name, is_output) in Self::our_ports(client, cfg) {
+            let Some(port) = client.port_by_name(&name) else {
+                continue;
+            };
+            for other in port.get_connections() {
+                let link = if is_output {
+                    (name.clone(), other)
+                } else {
+                    (other, name.clone())
+                };
+                // A link between two of our own ports shows up on both.
+                if !links.contains(&link) {
+                    links.push(link);
+                }
+            }
+        }
+        links
+    }
+
+    /// The full name of a port given by any of its names (an alias, say), so
+    /// saved links compare equal to what `get_connections` reports.
+    fn full_name(client: &Client, name: &str) -> String {
+        client
+            .port_by_name(name)
+            .and_then(|p| p.name().ok())
+            .unwrap_or_else(|| name.to_owned())
+    }
+
+    /// Checks what JACK would check on connect, for a client that cannot
+    /// connect yet because it is inactive. Returns whether either port is
+    /// ours: a link between two other clients' ports does not depend on us
+    /// being active, so it goes to JACK at once.
+    fn check_link(client: &Client, from: &str, to: &str) -> Result<bool, String> {
+        let port = |name| {
+            client
+                .port_by_name(name)
+                .ok_or_else(|| format!("no port named {name}"))
+        };
+        let (a, b) = (port(from)?, port(to)?);
+        if !a.flags().contains(PortFlags::IS_OUTPUT) || !b.flags().contains(PortFlags::IS_INPUT) {
+            return Err("must connect an output to an input".into());
+        }
+        if a.port_type().ok() != b.port_type().ok() {
+            return Err("port types differ".into());
+        }
+        Ok(client.is_mine(&a) || client.is_mine(&b))
     }
 
     fn auto_connect(&self, client: &Client, cfg: &BackendConfig) {
@@ -174,6 +249,8 @@ impl AudioBackend for JackBackend {
         self.shared.buffer_size.store(client.buffer_size(), Relaxed);
         self.state = State::Open(client, ports);
         self.cfg = Some(cfg);
+        self.links.clear();
+        self.auto_connected = false;
         Ok(())
     }
 
@@ -196,15 +273,31 @@ impl AudioBackend for JackBackend {
             shared: self.shared.clone(),
             frame_time: 0,
             rt_check_in: 0,
+            panicked: false,
         };
+        self.shared.callback_panicked.store(false, Relaxed);
         let notifications = Notifications {
             shared: self.shared.clone(),
         };
         let active = client
             .activate_async(notifications, processor)
             .map_err(|e| BackendError::Other(format!("could not activate the JACK client: {e}")))?;
-        if cfg.auto_connect {
+        if cfg.auto_connect && !self.auto_connected {
             self.auto_connect(active.as_client(), &cfg);
+            self.auto_connected = true;
+        }
+        for (from, to) in std::mem::take(&mut self.links) {
+            let client = active.as_client();
+            // Auto-connect or the session manager may have made it already.
+            let made = client
+                .port_by_name(&from)
+                .is_some_and(|p| p.is_connected_to(&to).unwrap_or(false));
+            if made {
+                continue;
+            }
+            if let Err(e) = client.connect_ports_by_name(&from, &to) {
+                log::warn!("could not restore connection {from} -> {to}: {e}");
+            }
         }
         self.state = State::Running(active);
         Ok(())
@@ -213,6 +306,12 @@ impl AudioBackend for JackBackend {
     fn stop(&mut self) -> Result<(), BackendError> {
         match std::mem::take(&mut self.state) {
             State::Running(active) => {
+                // After a server shutdown there is nothing left to ask.
+                if let Some(cfg) = &self.cfg
+                    && !self.shared.server_gone.load(Relaxed)
+                {
+                    self.links = Self::live_links(active.as_client(), cfg);
+                }
                 let (client, _, processor) = active
                     .deactivate()
                     .map_err(|e| BackendError::Other(format!("could not deactivate: {e}")))?;
@@ -228,6 +327,7 @@ impl AudioBackend for JackBackend {
         self.stop()?;
         self.state = State::Closed;
         self.cfg = None;
+        self.links.clear();
         Ok(())
     }
 
@@ -285,23 +385,59 @@ impl AudioBackend for JackBackend {
     }
 
     fn connect(&mut self, from: &str, to: &str) -> Result<(), BackendError> {
-        self.client()?
-            .connect_ports_by_name(from, to)
-            .map_err(|e| BackendError::Connection {
-                from: from.into(),
-                to: to.into(),
-                reason: e.to_string(),
-            })
+        let err = |reason: String| BackendError::Connection {
+            from: from.into(),
+            to: to.into(),
+            reason,
+        };
+        match &self.state {
+            State::Closed => Err(BackendError::NotOpen),
+            State::Open(client, _) => {
+                if !Self::check_link(client, from, to).map_err(err)? {
+                    return client
+                        .connect_ports_by_name(from, to)
+                        .map_err(|e| err(e.to_string()));
+                }
+                let link = (Self::full_name(client, from), Self::full_name(client, to));
+                if self.links.contains(&link) {
+                    return Err(err("already connected".into()));
+                }
+                self.links.push(link);
+                Ok(())
+            }
+            State::Running(a) => a
+                .as_client()
+                .connect_ports_by_name(from, to)
+                .map_err(|e| err(e.to_string())),
+        }
     }
 
     fn disconnect(&mut self, from: &str, to: &str) -> Result<(), BackendError> {
-        self.client()?
-            .disconnect_ports_by_name(from, to)
-            .map_err(|e| BackendError::Connection {
-                from: from.into(),
-                to: to.into(),
-                reason: e.to_string(),
-            })
+        let err = |reason: String| BackendError::Connection {
+            from: from.into(),
+            to: to.into(),
+            reason,
+        };
+        match &self.state {
+            State::Closed => Err(BackendError::NotOpen),
+            State::Open(client, _) => {
+                let link = (Self::full_name(client, from), Self::full_name(client, to));
+                let before = self.links.len();
+                self.links.retain(|l| *l != link);
+                if self.links.len() < before {
+                    return Ok(());
+                }
+                // Not one of ours waiting for start; it may be a live link
+                // between two other clients.
+                client
+                    .disconnect_ports_by_name(from, to)
+                    .map_err(|e| err(e.to_string()))
+            }
+            State::Running(a) => a
+                .as_client()
+                .disconnect_ports_by_name(from, to)
+                .map_err(|e| err(e.to_string())),
+        }
     }
 
     fn stats(&self) -> BackendStats {
@@ -350,12 +486,30 @@ struct Processor {
     /// Cycles until the next real-time scheduling check; `u32::MAX` once
     /// the thread is known to be real-time.
     rt_check_in: u32,
+    /// The callback panicked; it is not called again.
+    panicked: bool,
 }
 
 impl ProcessHandler for Processor {
     fn process(&mut self, _: &Client, ps: &ProcessScope) -> Control {
-        let shared = self.shared.clone();
-        crate::rt_guard(&shared, || self.cycle(ps));
+        if !self.panicked {
+            let shared = self.shared.clone();
+            // Catch the panic here: the jack crate's own handler prints, leaks
+            // the payload and quits, which leaves us looking alive but silent.
+            let ok = crate::rt_guard(&shared, || {
+                catch_unwind(AssertUnwindSafe(|| self.cycle(ps))).is_ok()
+            });
+            if ok {
+                return Control::Continue;
+            }
+            self.panicked = true;
+            self.shared.callback_panicked.store(true, Relaxed);
+        }
+        self.silence(ps);
+        self.shared.cycles.fetch_add(1, Relaxed);
+        self.shared
+            .frames
+            .fetch_add(u64::from(ps.n_frames()), Relaxed);
         Control::Continue
     }
 
@@ -366,6 +520,17 @@ impl ProcessHandler for Processor {
 }
 
 impl Processor {
+    /// Writes silence to every output, for cycles without a callback.
+    fn silence(&mut self, ps: &ProcessScope) {
+        for port in &mut self.ports.audio_out {
+            port.as_mut_slice(ps).fill(0.0);
+        }
+        if let Some(port) = &mut self.ports.midi_out {
+            // Creating the writer clears the buffer.
+            let _ = port.writer(ps);
+        }
+    }
+
     fn cycle(&mut self, ps: &ProcessScope) {
         // PipeWire promotes its data thread to real-time asynchronously
         // (through rtkit or the xdg-desktop-portal), often after the first

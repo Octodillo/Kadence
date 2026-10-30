@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Flatpak build of Kadence on the KDE runtime. Cargo builds offline from
+# cargo-sources.json, which packaging/flatpak/cargo-sources.py makes from
+# Cargo.lock (CI regenerates it on every run; a Flathub submission commits it).
+#
+#   packaging/flatpak/cargo-sources.py
+#   flatpak-builder --user --install --force-clean build-flatpak \
+#       packaging/flatpak/io.github.octodillo.daw.yml
+id: io.github.octodillo.daw
+runtime: org.kde.Platform
+# KDE 6.11 is built on freedesktop 25.08. The SDK extensions and the plugin
+# extension below must use that same branch, so bump all of them together.
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm21
+command: kadence
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Audio and MIDI go through PipeWire's JACK interface. The PulseAudio
+  # socket covers systems where PipeWire's socket isn't exposed.
+  - --filesystem=xdg-run/pipewire-0
+  - --socket=pulseaudio
+  # Projects and samples usually live here; anything else goes through the
+  # file chooser portal.
+  - --filesystem=xdg-music
+  # Plugins installed in the user's home, read only.
+  - --filesystem=~/.clap:ro
+  - --filesystem=~/.lv2:ro
+  - --filesystem=~/.vst3:ro
+  # The CLAP and VST3 hosts search these before the standard locations.
+  # LV2_PATH would replace lilv's defaults instead, so the LV2 host will have
+  # to add /app/extensions/Plugins/lv2 itself (not done yet).
+  - --env=CLAP_PATH=/app/extensions/Plugins/clap
+  - --env=VST3_PATH=/app/extensions/Plugins/vst3
+
+# Plugins packaged for Flatpak (org.freedesktop.LinuxAudio.Plugins.*), the
+# same extension point Ardour, Zrythm and Bitwig use.
+add-extensions:
+  org.freedesktop.LinuxAudio.Plugins:
+    directory: extensions/Plugins
+    version: '25.08'
+    add-ld-path: lib
+    merge-dirs: clap;lv2;vst3;ladspa;dssi;lxvst
+    subdirectories: true
+    no-autodownload: true
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+
+modules:
+  - name: kadence
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin
+      env:
+        CARGO_HOME: /run/build/kadence/cargo
+        CARGO_NET_OFFLINE: 'true'
+    post-install:
+      - install -d /app/extensions/Plugins
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build
+          - build-ci
+          - build-flatpak
+          - .flatpak-builder
+      - cargo-sources.json

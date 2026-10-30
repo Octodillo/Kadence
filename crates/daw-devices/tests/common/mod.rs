@@ -297,3 +297,21 @@ pub fn check_silence(dev: &mut dyn Device) {
         );
     }
 }
+
+/// One NaN and one infinity in a steady input must not poison the device's
+/// state: a few seconds later the output is finite again.
+pub fn check_recovers_from_non_finite(dev: &mut dyn Device) {
+    let setup = Setup::default();
+    let frames = 4 * setup.sample_rate as usize;
+    let mut input = vec![0.1f32; frames];
+    input[4900] = f32::NAN;
+    input[9000] = f32::INFINITY;
+    let r = render(dev, frames, &[input], &[], setup);
+    for (c, ch) in r.channels.iter().enumerate() {
+        let tail = &ch[frames - frames / 4..];
+        assert!(
+            tail.iter().all(|s| s.is_finite()),
+            "channel {c} is still non-finite long after one bad input sample"
+        );
+    }
+}

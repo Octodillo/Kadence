@@ -46,8 +46,35 @@ impl Document {
     }
 
     /// Opens a bundle (its directory or its project file).
+    ///
+    /// Fails with [`FormatError::AutosavePending`] if the bundle holds an
+    /// autosave (saving always deletes it, so one means the app quit without
+    /// saving).
+    /// Ask the user, then call [`Document::recover`] or
+    /// [`Document::open_discarding_autosave`]. This way the open document
+    /// always owns the bundle's autosave file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FormatError> {
         let bundle = Bundle::open(path)?;
+        if bundle.has_autosave() {
+            return Err(FormatError::AutosavePending(bundle.autosave_file()));
+        }
+        Self::load(bundle)
+    }
+
+    /// Opens a bundle's project file, deleting any autosave first.
+    pub fn open_discarding_autosave(path: impl AsRef<Path>) -> Result<Self, FormatError> {
+        let bundle = Bundle::open(path)?;
+        // Load first: if the project file is missing or broken, the autosave
+        // may be the only copy of the work.
+        let doc = Self::load(bundle)?;
+        doc.bundle
+            .as_ref()
+            .expect("just loaded")
+            .discard_autosave()?;
+        Ok(doc)
+    }
+
+    fn load(bundle: Bundle) -> Result<Self, FormatError> {
         let project = bundle.load()?;
         Ok(Self {
             bundle: Some(bundle),
@@ -89,30 +116,41 @@ impl Document {
     }
 
     pub fn execute_boxed(&mut self, command: Box<dyn Command>) -> Result<ChangeSet, ModelError> {
-        let changes = self.history.execute(&mut self.project, command)?;
-        self.touch();
-        Ok(changes)
+        let result = self.history.execute(&mut self.project, command);
+        self.after(result)
     }
 
     pub fn undo(&mut self) -> Result<Option<ChangeSet>, ModelError> {
-        let changes = self.history.undo(&mut self.project)?;
-        if changes.is_some() {
-            self.touch();
-        }
-        Ok(changes)
+        let result = self.history.undo(&mut self.project);
+        self.after_step(result)
     }
 
     pub fn redo(&mut self) -> Result<Option<ChangeSet>, ModelError> {
-        let changes = self.history.redo(&mut self.project)?;
-        if changes.is_some() {
-            self.touch();
-        }
-        Ok(changes)
+        let result = self.history.redo(&mut self.project);
+        self.after_step(result)
     }
 
     /// Ends the current gesture so the next edit gets its own undo step.
     pub fn seal(&mut self) {
         self.history.seal();
+    }
+
+    fn after(&mut self, result: Result<ChangeSet, ModelError>) -> Result<ChangeSet, ModelError> {
+        // A partly applied edit changed the project even though it failed.
+        if matches!(result, Ok(_) | Err(ModelError::Inconsistent(_))) {
+            self.touch();
+        }
+        result
+    }
+
+    fn after_step(
+        &mut self,
+        result: Result<Option<ChangeSet>, ModelError>,
+    ) -> Result<Option<ChangeSet>, ModelError> {
+        if matches!(result, Ok(Some(_)) | Err(ModelError::Inconsistent(_))) {
+            self.touch();
+        }
+        result
     }
 
     fn touch(&mut self) {
@@ -149,7 +187,11 @@ impl Document {
             copy_dir_files(&old.audio_dir(), &new.audio_dir())?;
         }
         new.save(&self.project)?;
-        self.bundle = Some(new);
+        if let Some(old) = self.bundle.replace(new) {
+            // The unsaved edits it held now live in the new bundle. Failing
+            // to delete it only means a stale recovery offer later.
+            let _ = old.discard_autosave();
+        }
         self.mark_saved();
         Ok(())
     }
@@ -162,14 +204,23 @@ impl Document {
     }
 
     /// Writes an autosave if anything changed since the last save or
-    /// autosave. The app calls this on a timer. Returns whether it wrote one.
+    /// autosave, and removes it if the document is back to its saved state. The app calls this on a timer. Returns whether it wrote one.
     /// A document with no bundle yet has nowhere to autosave and returns
     /// `false`.
     pub fn autosave(&mut self) -> Result<bool, FormatError> {
         let Some(bundle) = &self.bundle else {
             return Ok(false);
         };
-        if !self.is_modified() || self.revision == self.autosaved_revision {
+        if !self.is_modified() {
+            // Undone back to the saved state: an older autosave would offer
+            // to "recover" edits the user took back.
+            if self.autosaved_revision != self.revision {
+                bundle.discard_autosave()?;
+                self.autosaved_revision = self.revision;
+            }
+            return Ok(false);
+        }
+        if self.revision == self.autosaved_revision {
             return Ok(false);
         }
         bundle.write_autosave(&self.project)?;

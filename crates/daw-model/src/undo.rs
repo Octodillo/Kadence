@@ -28,6 +28,10 @@ pub struct UndoStack {
     limit: usize,
     sealed: bool,
     next_seq: u64,
+    /// Position when `done` is empty. Nonzero once the oldest steps have been
+    /// dropped (by the limit or `clear`), because the project then no longer
+    /// matches the state before them.
+    base_seq: u64,
 }
 
 impl Default for UndoStack {
@@ -45,6 +49,7 @@ impl UndoStack {
             limit: limit.max(1),
             sealed: true,
             next_seq: 1,
+            base_seq: 0,
         }
     }
 
@@ -54,7 +59,7 @@ impl UndoStack {
         project: &mut Project,
         mut command: Box<dyn Command>,
     ) -> Result<ChangeSet, ModelError> {
-        let changes = command.apply(project)?;
+        let changes = command.apply(project).inspect_err(|e| self.on_error(e))?;
         self.undone.clear();
         let merged = !self.sealed
             && self
@@ -65,8 +70,10 @@ impl UndoStack {
             let seq = self.next_seq;
             self.next_seq += 1;
             self.done.push_back(Entry { seq, command });
-            if self.done.len() > self.limit {
-                self.done.pop_front();
+            if self.done.len() > self.limit
+                && let Some(dropped) = self.done.pop_front()
+            {
+                self.base_seq = dropped.seq;
             }
         }
         self.sealed = false;
@@ -86,6 +93,7 @@ impl UndoStack {
             }
             Err(e) => {
                 self.done.push_back(entry);
+                self.on_error(&e);
                 Err(e)
             }
         }
@@ -105,8 +113,20 @@ impl UndoStack {
             }
             Err(e) => {
                 self.undone.push(entry);
+                self.on_error(&e);
                 Err(e)
             }
+        }
+    }
+
+    /// After a command left the project partly edited, no step in the history
+    /// matches the project any more: drop it all and move to a fresh
+    /// position, so the document reads as modified.
+    fn on_error(&mut self, e: &ModelError) {
+        if matches!(e, ModelError::Inconsistent(_)) {
+            self.clear();
+            self.base_seq = self.next_seq;
+            self.next_seq += 1;
         }
     }
 
@@ -140,14 +160,15 @@ impl UndoStack {
         self.undone.len()
     }
 
-    /// Identifies the current point in history; 0 when nothing is done.
+    /// Identifies the current point in history; 0 at the very start.
     /// Two equal positions mean the project is in the same state.
     pub fn position(&self) -> u64 {
-        self.done.back().map_or(0, |e| e.seq)
+        self.done.back().map_or(self.base_seq, |e| e.seq)
     }
 
     /// Forgets all history.
     pub fn clear(&mut self) {
+        self.base_seq = self.position();
         self.done.clear();
         self.undone.clear();
         self.sealed = true;

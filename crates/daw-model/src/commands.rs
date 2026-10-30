@@ -9,7 +9,7 @@
 //! Structural commands (add, remove, move) remember exact indices so that
 //! undo restores the original order, not just the original contents.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::Arc;
 
@@ -71,11 +71,16 @@ impl Command for Batch {
             match self.commands[i].apply(project) {
                 Ok(c) => changes.extend(c),
                 Err(e) => {
-                    for done in self.commands[..i].iter_mut().rev() {
-                        // Reverting what we just applied can't fail.
-                        let _ = done.revert(project);
-                    }
-                    return Err(e);
+                    // Best effort: undo as much as possible even if one fails.
+                    let failed = self.commands[..i]
+                        .iter_mut()
+                        .rev()
+                        .filter_map(|done| done.revert(project).err())
+                        .last();
+                    return Err(match failed {
+                        Some(e2) => rollback_failed(&e, &e2),
+                        None => e,
+                    });
                 }
             }
         }
@@ -84,11 +89,34 @@ impl Command for Batch {
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         let mut changes = ChangeSet::new();
-        for c in self.commands.iter_mut().rev() {
-            changes.extend(c.revert(project)?);
+        for i in (0..self.commands.len()).rev() {
+            match self.commands[i].revert(project) {
+                Ok(c) => changes.extend(c),
+                Err(e) => {
+                    // Put back what this revert already undid, so a failed
+                    // undo leaves the project as it was.
+                    let failed = self.commands[i + 1..]
+                        .iter_mut()
+                        .filter_map(|undone| undone.apply(project).err())
+                        .last();
+                    return Err(match failed {
+                        Some(e2) => rollback_failed(&e, &e2),
+                        None => e,
+                    });
+                }
+            }
         }
         Ok(changes)
     }
+}
+
+/// A command broke the `apply`/`revert` inverse contract while a batch was
+/// rolling back. Every command keeps the project valid, so the project is
+/// still usable, but it holds part of the batch and the history can't be
+/// trusted; the undo stack clears itself on this error.
+#[cold]
+fn rollback_failed(original: &ModelError, rollback: &ModelError) -> ModelError {
+    ModelError::Inconsistent(format!("{original}; rolling back failed with: {rollback}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -178,12 +206,20 @@ impl Command for AddTrack {
         if self.index > project.tracks.len() {
             return Err(invalid("track index out of range"));
         }
-        project.tracks.insert(self.index, self.track.clone());
-        // A whole track can carry routing, IDs and lanes, so check all of it.
-        if let Err(e) = project.validate() {
-            project.tracks.remove(self.index);
-            return Err(e);
+        let t = &self.track;
+        t.check()?;
+        let ids: Vec<Uuid> = t.ids().collect();
+        check_ids_free(project, &ids)?;
+        // Nothing routes into a new track yet, so only its own outputs and
+        // sends need checking.
+        let targets = match t.output {
+            TrackOutput::Bus(b) => Some(b),
+            TrackOutput::Master => None,
+        };
+        for target in targets.into_iter().chain(t.sends.iter().map(|s| s.target)) {
+            project.can_route(t.id, target)?;
         }
+        project.tracks.insert(self.index, self.track.clone());
         Ok(ChangeSet::one(Change::TrackList))
     }
 
@@ -808,13 +844,15 @@ pub struct EditNotes {
 impl EditNotes {
     fn swap(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         let m = midi_mut(project, self.clip)?;
+        let index: HashMap<NoteUid, usize> =
+            m.notes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+        for new in &self.notes {
+            if !index.contains_key(&new.id) {
+                return Err(ModelError::NoteNotFound(new.id));
+            }
+        }
         for new in &mut self.notes {
-            let old = m
-                .notes
-                .iter_mut()
-                .find(|n| n.id == new.id)
-                .ok_or(ModelError::NoteNotFound(new.id))?;
-            mem::swap(old, new);
+            mem::swap(&mut m.notes[index[&new.id]], new);
         }
         m.sort();
         Ok(ChangeSet::one(Change::Clip(self.clip)))
@@ -832,14 +870,20 @@ impl Command for EditNotes {
     }
 
     fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
-        let m = midi(project, self.clip)?;
+        let existing: HashSet<NoteUid> = midi(project, self.clip)?
+            .notes
+            .iter()
+            .map(|n| n.id)
+            .collect();
         let mut seen = HashSet::new();
         for n in &self.notes {
             n.check()?;
             if !seen.insert(n.id) {
                 return Err(invalid("a note is listed twice"));
             }
-            if !m.notes.iter().any(|x| x.id == n.id) {
+            if !existing.contains(&n.id) {
+                // Checked before `swap` so a failed edit doesn't copy a clip
+                // that a snapshot shares.
                 return Err(ModelError::NoteNotFound(n.id));
             }
         }
@@ -852,11 +896,11 @@ impl Command for EditNotes {
 
     fn merge(&mut self, next: &dyn Command) -> bool {
         next.downcast_ref::<Self>().is_some_and(|n| {
-            n.clip == self.clip
-                && n.notes.len() == self.notes.len()
-                && n.notes
-                    .iter()
-                    .all(|a| self.notes.iter().any(|b| a.id == b.id))
+            if n.clip != self.clip || n.notes.len() != self.notes.len() {
+                return false;
+            }
+            let mine: HashSet<NoteUid> = self.notes.iter().map(|x| x.id).collect();
+            n.notes.iter().all(|x| mine.contains(&x.id))
         })
     }
 }

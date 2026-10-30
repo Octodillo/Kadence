@@ -117,15 +117,11 @@ fn latency_is_compensated() {
     assert_eq!(compiled.delay_lines(), 1);
 
     let out = render(latency_graph(), &opts(64)).unwrap();
-    let sine = Sine::reference(FRAMES);
-    let expected: Vec<f32> = (0..FRAMES)
-        .map(|i| {
-            if i < 37 {
-                0.0
-            } else {
-                (0.0 + sine[i - 37] + sine[i - 37]) * 1.0
-            }
-        })
+    // The render drops the graph's latency, so the output lines up with
+    // the timeline and keeps its last 37 samples.
+    let expected: Vec<f32> = Sine::reference(FRAMES)
+        .iter()
+        .map(|s| (0.0 + s + s) * 1.0)
         .collect();
     assert_bits_eq(&out, &expected);
     check_golden("latency_compensated", &out);

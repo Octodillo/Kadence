@@ -11,7 +11,9 @@ pub struct RenderOptions {
     pub sample_rate: f64,
     /// Block size the graph is driven with.
     pub block_size: u32,
-    /// Length of the render in frames.
+    /// Length of the render in frames. The graph runs `latency` frames
+    /// longer and the first `latency` are dropped, so the output lines up
+    /// with the timeline.
     pub frames: usize,
     /// Starts the transport before rendering.
     pub play: bool,
@@ -46,6 +48,7 @@ pub fn render(graph: GraphDesc, opts: &RenderOptions) -> Result<Vec<f32>, Render
     let (mut ctl, mut proc) = EngineController::new(config);
     let compiled = ctl.compile(graph)?;
     let channels = compiled.output_channels();
+    let latency = compiled.latency() as usize;
     let _ = ctl.send_graph(Box::new(compiled));
     if opts.play {
         // A fresh queue has room for the graph and this command.
@@ -56,12 +59,13 @@ pub fn render(graph: GraphDesc, opts: &RenderOptions) -> Result<Vec<f32>, Render
     let mut bufs = vec![vec![0.0f32; block]; channels];
     let events = EventList::with_capacity(0);
     let mut out = Vec::with_capacity(opts.frames * channels);
+    let total = opts.frames + latency;
     let mut done = 0;
-    while done < opts.frames {
-        let n = block.min(opts.frames - done);
+    while done < total {
+        let n = block.min(total - done);
         let mut outs: Vec<&mut [f32]> = bufs.iter_mut().map(|b| &mut b[..n]).collect();
         proc.process(n, &[], &mut outs, &events);
-        for i in 0..n {
+        for i in latency.saturating_sub(done).min(n)..n {
             out.extend(bufs.iter().map(|b| b[i]));
         }
         done += n;

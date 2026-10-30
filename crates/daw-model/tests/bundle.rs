@@ -155,7 +155,10 @@ fn autosave_and_recover() {
     let recovered = Document::recover(&path).unwrap();
     assert!(recovered.is_modified());
     assert_eq!(recovered.project(), doc.project());
-    assert!(!Document::open(&path).unwrap().project().tracks[0].mute);
+    assert!(matches!(
+        Document::open(&path),
+        Err(FormatError::AutosavePending(_))
+    ));
 
     doc.save().unwrap();
     assert!(!bundle.autosave_file().exists(), "save clears the autosave");

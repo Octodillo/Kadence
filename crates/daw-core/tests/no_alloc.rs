@@ -2,7 +2,9 @@
 //!
 //! `warn_debug` makes violations count instead of abort, so everything runs inside one
 //! test: the violation counter is global and parallel tests would see each other's.
-#![cfg(not(loom))]
+//! `assert_no_alloc` checks nothing without debug assertions and leaves out the items
+//! used here, so the binary is empty in release builds.
+#![cfg(all(not(loom), debug_assertions))]
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::dispose::deferred_drop;
@@ -23,7 +25,6 @@ fn allocations_in(f: impl FnOnce()) -> u32 {
 }
 
 #[test]
-#[cfg(debug_assertions)]
 fn rt_operations_do_not_allocate() {
     // The checker itself must notice an allocation.
     assert!(allocations_in(|| drop(vec![1u8])) > 0);

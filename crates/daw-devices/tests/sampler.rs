@@ -3,6 +3,7 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
+use daw_core::event::EventKind;
 use daw_devices::devices::sampler::*;
 use daw_devices::{Device, SampleBuffer, Sampler, Zone};
 
@@ -98,6 +99,22 @@ fn key_mapped_releases_on_note_off() {
 }
 
 #[test]
+fn note_off_with_id_releases_note_without_id() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 48000], s.sample_rate);
+    sampler.set_param(RELEASE, 10.0);
+    let off = EventKind::NoteOff {
+        channel: 0,
+        key: 60,
+        velocity: 0.0,
+        note_id: 7,
+    };
+    let events = [(0, EventKind::Midi([0x90, 60, 100])), (1000, off)];
+    render(&mut sampler, 48000, &[], &events, s);
+    assert_eq!(sampler.active_voices(), 0);
+}
+
+#[test]
 fn voices_are_bounded() {
     let s = Setup::default();
     let mut sampler = sampler_with(vec![0.1; 48000], s.sample_rate);
@@ -106,6 +123,29 @@ fn voices_are_bounded() {
         .collect();
     render(&mut sampler, 2000, &[], &events, s);
     assert_eq!(sampler.active_voices(), 32);
+}
+
+/// Stealing a sounding voice fades it out rather than cutting it mid-cycle.
+#[test]
+fn stealing_does_not_click() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(sine(100.0, 0.05, s.sample_rate, 48000), s.sample_rate);
+    let events: Vec<_> = (0..40).map(|i| (i * 100, note_on(60, 1.0))).collect();
+    let r = render(&mut sampler, 6000, &[], &events, s);
+    let step = |x: &[f32]| {
+        x.windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    };
+    let x = &r.channels[0];
+    // Every voice plays the same quiet sine, offset in time; 32 of them sum to a
+    // smooth signal whose largest step comes just before the first steal.
+    let before = step(&x[..3200]);
+    let after = step(&x[3200..]);
+    assert!(
+        after < before * 1.5,
+        "step {after} after stealing vs {before}"
+    );
 }
 
 #[test]

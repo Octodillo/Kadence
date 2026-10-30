@@ -113,19 +113,22 @@ pub fn from_json_with(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bundle {
     root: PathBuf,
-    /// The project file's name without extension.
+    /// The project file's name without extension, for naming backups.
     stem: String,
+    /// The project file's name as it is on disk (the extension's case may
+    /// differ from `.kadence`).
+    file_name: String,
 }
 
 impl Bundle {
     /// Creates a new bundle directory `dir` holding `<dir name>.kadence`.
-    /// The directory may exist but must not already hold a project file.
+    /// The directory may exist but must not already hold any project file.
     pub fn create(dir: impl AsRef<Path>) -> Result<Self, FormatError> {
         let root = dir.as_ref().to_path_buf();
         let stem = root
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.strip_suffix(".kadence").unwrap_or(n).to_owned())
+            .map(|n| strip_suffix_ci(n, PROJECT_SUFFIX).unwrap_or(n).to_owned())
             .filter(|n| !n.is_empty())
             .ok_or_else(|| FormatError::Io {
                 path: root.clone(),
@@ -134,10 +137,16 @@ impl Bundle {
                     "bundle needs a directory name",
                 ),
             })?;
-        let bundle = Self { root, stem };
-        if bundle.project_file().exists() {
+        let file_name = format!("{stem}.{EXTENSION}");
+        let bundle = Self {
+            root,
+            stem,
+            file_name,
+        };
+        // Any other project file there would make the bundle ambiguous to open.
+        if let Some(existing) = project_files(&bundle.root)?.into_iter().next() {
             return Err(FormatError::Io {
-                path: bundle.project_file(),
+                path: existing,
                 source: std::io::ErrorKind::AlreadyExists.into(),
             });
         }
@@ -146,35 +155,46 @@ impl Bundle {
     }
 
     /// Opens an existing bundle, given either its directory or its project
-    /// file.
+    /// file. Backups and autosaves are not bundles; read them with
+    /// [`read_project`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FormatError> {
         let path = path.as_ref();
-        if path.is_file() {
-            let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| FormatError::io(path)(std::io::ErrorKind::InvalidInput.into()))?;
-            return Ok(Self {
-                root,
-                stem: stem.to_owned(),
-            });
-        }
-        let mut found = None;
-        for entry in fs::read_dir(path).map_err(FormatError::io(path))? {
-            let p = entry.map_err(FormatError::io(path))?.path();
-            if p.extension().is_some_and(|e| e == EXTENSION) && p.is_file() {
-                if found.is_some() {
-                    return Err(FormatError::io(path)(std::io::Error::other(
-                        "bundle holds more than one project file",
-                    )));
-                }
-                found = Some(p);
+        let invalid = |msg: &str| FormatError::io(path)(std::io::Error::other(msg.to_owned()));
+        if !path.is_file() {
+            let mut files = project_files(path)?;
+            if files.is_empty() {
+                // The project file is gone but an autosave may be left to
+                // recover from.
+                files = files_with_suffix(path, AUTOSAVE_SUFFIX)?;
             }
+            return match files.len() {
+                0 => Err(FormatError::io(path)(std::io::ErrorKind::NotFound.into())),
+                1 => Self::open(files.remove(0)),
+                _ => Err(invalid("bundle holds more than one project file")),
+            };
         }
-        let file =
-            found.ok_or_else(|| FormatError::io(path)(std::io::ErrorKind::NotFound.into()))?;
-        Self::open(file)
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| invalid("project file name is not valid UTF-8"))?;
+        // An autosave path stands for the project file next to it.
+        let file_name = strip_suffix_ci(name, ".autosave")
+            .filter(|n| has_suffix_ci(n, PROJECT_SUFFIX))
+            .unwrap_or(name);
+        let stem = strip_suffix_ci(file_name, PROJECT_SUFFIX)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| invalid("not a .kadence project file"))?;
+        let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        if is_backup(&root, stem)? {
+            return Err(invalid(
+                "this is a backup; open it with read_project and save it into a bundle",
+            ));
+        }
+        Ok(Self {
+            root,
+            stem: stem.to_owned(),
+            file_name: file_name.to_owned(),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -182,12 +202,11 @@ impl Bundle {
     }
 
     pub fn project_file(&self) -> PathBuf {
-        self.root.join(format!("{}.{EXTENSION}", self.stem))
+        self.root.join(&self.file_name)
     }
 
     pub fn autosave_file(&self) -> PathBuf {
-        self.root
-            .join(format!("{}.{EXTENSION}.autosave", self.stem))
+        self.root.join(format!("{}.autosave", self.file_name))
     }
 
     pub fn audio_dir(&self) -> PathBuf {
@@ -219,12 +238,7 @@ impl Bundle {
             self.backup(&file)?;
         }
         write_atomic(&file, project)?;
-        match fs::remove_file(self.autosave_file()) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Err(FormatError::io(self.autosave_file())(e))
-            }
-            _ => Ok(()),
-        }
+        self.discard_autosave()
     }
 
     fn backup(&self, file: &Path) -> Result<(), FormatError> {
@@ -239,7 +253,10 @@ impl Bundle {
         let mut backups: Vec<PathBuf> = fs::read_dir(self.backups_dir())
             .map_err(FormatError::io(self.backups_dir()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == EXTENSION))
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
+            })
             .collect();
         backups.sort();
         let excess = backups.len().saturating_sub(BACKUPS_KEPT);
@@ -258,7 +275,10 @@ impl Bundle {
         let mut v: Vec<PathBuf> = fs::read_dir(&dir)
             .map_err(FormatError::io(&dir))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == EXTENSION))
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
+            })
             .collect();
         v.sort();
         Ok(v)
@@ -272,6 +292,12 @@ impl Bundle {
 
     /// Whether an autosave exists that is newer than the project file, which
     /// means the app quit without saving. Offer to recover it.
+    /// Whether an autosave exists. Saving deletes it, so this means unsaved
+    /// changes from a session that ended without saving.
+    pub fn has_autosave(&self) -> bool {
+        self.autosave_file().is_file()
+    }
+
     pub fn has_newer_autosave(&self) -> bool {
         let modified = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
         match (
@@ -288,8 +314,14 @@ impl Bundle {
         read_project(&self.autosave_file())
     }
 
+    /// Deletes the autosave, if there is one.
     pub fn discard_autosave(&self) -> Result<(), FormatError> {
-        fs::remove_file(self.autosave_file()).map_err(FormatError::io(self.autosave_file()))
+        match fs::remove_file(self.autosave_file()) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(FormatError::io(self.autosave_file())(e))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Copies an audio file into `audio/` under a name that doesn't clash, and
@@ -317,7 +349,8 @@ impl Bundle {
             .find(|n| !dir.join(n).exists())
             .expect("some name is free");
         fs::copy(src, dir.join(&file)).map_err(FormatError::io(src))?;
-        Ok(Path::new(AUDIO_DIR).join(file))
+        // Always `/`, so bundles open the same on every platform.
+        Ok(PathBuf::from(format!("{AUDIO_DIR}/{file}")))
     }
 
     /// Resolves an [`crate::AudioClip::source`] against this bundle.
@@ -326,7 +359,64 @@ impl Bundle {
     }
 }
 
-fn read_project(path: &Path) -> Result<Project, FormatError> {
+const PROJECT_SUFFIX: &str = ".kadence";
+const AUTOSAVE_SUFFIX: &str = ".kadence.autosave";
+
+fn has_suffix_ci(name: &str, suffix: &str) -> bool {
+    strip_suffix_ci(name, suffix).is_some()
+}
+
+/// `name` without `suffix`, ignoring ASCII case.
+fn strip_suffix_ci<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    let split = name.len().checked_sub(suffix.len())?;
+    let (head, tail) = (name.get(..split)?, name.get(split..)?);
+    tail.eq_ignore_ascii_case(suffix).then_some(head)
+}
+
+/// The project files directly inside `dir`.
+fn project_files(dir: &Path) -> Result<Vec<PathBuf>, FormatError> {
+    files_with_suffix(dir, PROJECT_SUFFIX)
+}
+
+fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>, FormatError> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).map_err(FormatError::io(dir))? {
+        let p = entry.map_err(FormatError::io(dir))?.path();
+        let matches = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| has_suffix_ci(n, suffix));
+        if matches && p.is_file() {
+            files.push(p);
+        }
+    }
+    Ok(files)
+}
+
+/// Whether a project file in `dir` named `stem` is a backup: it sits in a
+/// `backups/` folder and either has the `<name>-<16-digit timestamp>` name
+/// [`Bundle::save`] gives backups or the folder belongs to a bundle.
+fn is_backup(dir: &Path, stem: &str) -> Result<bool, FormatError> {
+    if dir.file_name().is_none_or(|n| n != BACKUPS_DIR) {
+        return Ok(false);
+    }
+    let timestamped = stem
+        .rsplit_once('-')
+        .is_some_and(|(_, ts)| ts.len() == 16 && ts.bytes().all(|b| b.is_ascii_digit()));
+    if timestamped {
+        return Ok(true);
+    }
+    match dir.parent() {
+        Some(parent) => Ok(!project_files(parent)?.is_empty()),
+        None => Ok(false),
+    }
+}
+
+/// Reads any project file on its own, such as a backup or an autosave.
+pub fn read_project(path: &Path) -> Result<Project, FormatError> {
     let json = fs::read_to_string(path).map_err(FormatError::io(path))?;
     from_json(&json)
 }
@@ -337,18 +427,33 @@ fn write_atomic(path: &Path, project: &Project) -> Result<(), FormatError> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let file = File::create(&tmp).map_err(FormatError::io(&tmp))?;
-    let mut w = BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut w, &envelope(project))?;
-    w.write_all(b"\n").map_err(FormatError::io(&tmp))?;
-    let file = w
-        .into_inner()
-        .map_err(|e| FormatError::io(&tmp)(e.into_error()))?;
-    file.sync_all().map_err(FormatError::io(&tmp))?;
-    fs::rename(&tmp, path).map_err(FormatError::io(path))?;
+    let result = write_synced(&tmp, project)
+        .and_then(|()| fs::rename(&tmp, path).map_err(FormatError::io(path)));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+        return result;
+    }
     if let Some(dir) = path.parent() {
         // Persist the rename itself. Not every filesystem allows this.
         let _ = File::open(dir).and_then(|d| d.sync_all());
     }
     Ok(())
+}
+
+fn write_synced(path: &Path, project: &Project) -> Result<(), FormatError> {
+    let file = File::create(path).map_err(FormatError::io(path))?;
+    let mut w = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut w, &envelope(project)).map_err(|e| {
+        // A full disk is an I/O error, not a malformed file.
+        if e.is_io() {
+            FormatError::io(path)(e.into())
+        } else {
+            e.into()
+        }
+    })?;
+    w.write_all(b"\n").map_err(FormatError::io(path))?;
+    let file = w
+        .into_inner()
+        .map_err(|e| FormatError::io(path)(e.into_error()))?;
+    file.sync_all().map_err(FormatError::io(path))
 }

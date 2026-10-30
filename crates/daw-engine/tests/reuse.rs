@@ -40,8 +40,9 @@ fn reused_node_keeps_its_state_across_swaps() {
     g.connect(synth, track);
     ctl.set_graph(g).unwrap();
     assert_eq!(run(&mut proc, 4), vec![1.0, 2.0, 3.0, 4.0]);
+    // Queued right before the swaps, so they must move with the nodes.
     ctl.set_param_by_key(TRACK, Strip::GAIN, 2.0).unwrap();
-    ctl.set_param_by_key(NodeKey::MASTER, Strip::GAIN, 0.5)
+    ctl.set_param_by_key(NodeKey::MASTER, Strip::GAIN, 0.75)
         .unwrap();
 
     // A structural edit: a new graph with an extra track, reusing the rest.
@@ -58,8 +59,8 @@ fn reused_node_keeps_its_state_across_swaps() {
         g.set_key(extra, NodeKey(1000 + round));
         ctl.set_graph(g).unwrap();
     }
-    // Gain 2 on the track and 0.5 on master both survived.
-    assert_eq!(run(&mut proc, 3), vec![5.0, 6.0, 7.0]);
+    // Gain 2 on the track and 0.75 on master both survived.
+    assert_eq!(run(&mut proc, 3), vec![7.5, 9.0, 10.5]);
     assert!(
         !ctl.has_node(NodeKey(1000)),
         "only the latest graph is live"
@@ -133,6 +134,41 @@ fn meters_follow_reused_nodes() {
     let same = ctl.meter(TRACK).unwrap();
     assert!(Arc::ptr_eq(&same, &meter));
     assert_eq!(meter.take(), vec![0.25]);
+}
+
+#[test]
+fn automation_does_not_crowd_out_notes() {
+    use support::{EventProbe, NoteSource};
+    // 32 linear lanes emit about 1024 events per 1024-frame block, twice the
+    // default event capacity.
+    let mut g = GraphDesc::new(0, 1);
+    let src = g.add_device("notes", Box::new(NoteSource { frame: 500 }));
+    let probe = g.add_device("probe", Box::new(EventProbe));
+    g.connect_events(src, probe);
+    g.connect(probe, g.master());
+    for p in 0..32 {
+        let pt = |t, value, curve| AutomationPoint {
+            time: SampleTime(t),
+            value,
+            curve,
+        };
+        g.automate(
+            probe,
+            100 + p,
+            AutomationLane::new(vec![
+                pt(0, 0.0, Curve::Linear),
+                pt(100_000, 1.0, Curve::Step),
+            ]),
+        );
+    }
+    let opts = RenderOptions {
+        block_size: 1024,
+        frames: 1024,
+        ..Default::default()
+    };
+    let out = render(g, &opts).unwrap();
+    // The note plus any automation events that land on the same frame.
+    assert!(out[500] >= 1.0, "the note was dropped");
 }
 
 fn automated(block_size: u32, curve: Curve) -> Vec<f32> {

@@ -81,6 +81,7 @@ fn runs_cycles_and_lists_ports() {
     let before = b.stats().cycles;
     b.start(Box::new(|_| {})).unwrap();
     wait(&b, |s| s.cycles >= before + 5);
+    assert_eq!(b.stats().rt_alloc_violations, 0);
     b.close().unwrap();
 }
 
@@ -89,10 +90,12 @@ fn runs_cycles_and_lists_ports() {
 fn audio_and_midi_flow_between_two_clients() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut src = JackBackend::new();
+    // Every port kind in both directions on both sides, so the allocation
+    // check covers the whole JACK cycle.
     src.open(BackendConfig {
-        audio_inputs: 0,
+        audio_inputs: 1,
         audio_outputs: 1,
-        midi_input: false,
+        midi_input: true,
         midi_output: true,
         ..cfg("wu2-src")
     })
@@ -100,8 +103,9 @@ fn audio_and_midi_flow_between_two_clients() {
     let mut dst = JackBackend::new();
     dst.open(BackendConfig {
         audio_inputs: 1,
-        audio_outputs: 0,
+        audio_outputs: 1,
         midi_input: true,
+        midi_output: true,
         ..cfg("wu2-dst")
     })
     .unwrap();
@@ -125,6 +129,7 @@ fn audio_and_midi_flow_between_two_clients() {
     let notes = Arc::new(AtomicU64::new(0));
     let (a, n) = (audio_ok.clone(), notes.clone());
     dst.start(Box::new(move |c| {
+        c.audio_out[0].fill(0.0);
         if c.audio_in[0].iter().all(|&x| x == 0.25) {
             a.fetch_add(1, Relaxed);
         }
@@ -152,6 +157,8 @@ fn audio_and_midi_flow_between_two_clients() {
         src.connect("wu2-dst:audio_in_1", "wu2-src:audio_out_1")
             .is_err()
     );
+    assert_eq!(src.stats().rt_alloc_violations, 0);
+    assert_eq!(dst.stats().rt_alloc_violations, 0);
     src.close().unwrap();
     dst.close().unwrap();
 }
@@ -178,5 +185,199 @@ fn auto_connect_reaches_physical_ports() {
         // Try to connect again: JACK reports the existing connection.
         assert!(b.connect("wu2-auto:audio_out_1", &first.name).is_err());
     }
+    wait(&b, |s| s.cycles >= 5);
+    assert_eq!(b.stats().rt_alloc_violations, 0);
     b.close().unwrap();
+}
+
+/// The connections of one port, read through a separate client the way a
+/// patchbay sees them.
+fn connections_of(port: &str) -> Vec<String> {
+    let (probe, _) = jack::Client::new("wu2-probe", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let mut v = probe.port_by_name(port).unwrap().get_connections();
+    v.sort();
+    v
+}
+
+#[test]
+#[ignore = "needs a running JACK server"]
+fn connections_survive_stop_and_start() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 1,
+        audio_outputs: 2,
+        midi_input: false,
+        ..cfg("wu2-keep")
+    })
+    .unwrap();
+    // Before start: restoring saved routing must work on an inactive client.
+    b.connect("wu2-keep:audio_out_1", "system:playback_2")
+        .unwrap();
+    // Bad connections are still refused before start.
+    assert!(
+        b.connect("system:playback_2", "wu2-keep:audio_out_1")
+            .is_err()
+    );
+    assert!(b.connect("wu2-keep:audio_out_1", "nobody:nothing").is_err());
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-keep:audio_out_1"),
+        ["system:playback_2"]
+    );
+
+    // A connection made in a patchbay, and one made through us.
+    {
+        let (other, _) =
+            jack::Client::new("wu2-patchbay", jack::ClientOptions::NO_START_SERVER).unwrap();
+        other
+            .connect_ports_by_name("system:capture_1", "wu2-keep:audio_in_1")
+            .unwrap();
+    }
+    b.connect("wu2-keep:audio_out_2", "system:playback_1")
+        .unwrap();
+
+    b.stop().unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-keep:audio_out_1"),
+        ["system:playback_2"]
+    );
+    assert_eq!(
+        connections_of("wu2-keep:audio_out_2"),
+        ["system:playback_1"]
+    );
+    assert_eq!(connections_of("wu2-keep:audio_in_1"), ["system:capture_1"]);
+
+    // A disconnect while stopped stays disconnected after start.
+    b.stop().unwrap();
+    b.disconnect("wu2-keep:audio_out_2", "system:playback_1")
+        .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(connections_of("wu2-keep:audio_out_2").is_empty());
+    assert_eq!(b.stats().rt_alloc_violations, 0);
+    b.close().unwrap();
+}
+
+#[test]
+#[ignore = "needs a running JACK server"]
+fn a_panicking_callback_is_contained() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(cfg("wu2-panic")).unwrap();
+    // A listener on our first output, counting cycles with sound in them.
+    let mut ear = JackBackend::new();
+    ear.open(BackendConfig {
+        audio_inputs: 1,
+        audio_outputs: 0,
+        midi_input: false,
+        midi_output: false,
+        ..cfg("wu2-ear")
+    })
+    .unwrap();
+    let loud = Arc::new(AtomicU64::new(0));
+    let l2 = loud.clone();
+    ear.start(Box::new(move |c| {
+        if c.audio_in[0].iter().any(|&x| x != 0.0) {
+            l2.fetch_add(1, Relaxed);
+        }
+    }))
+    .unwrap();
+    let calls = Arc::new(AtomicU64::new(0));
+    let c2 = calls.clone();
+    b.start(Box::new(move |c| {
+        for out in c.audio_out.iter_mut() {
+            out.fill(0.5);
+        }
+        if c2.fetch_add(1, Relaxed) == 10 {
+            panic!("callback bug");
+        }
+    }))
+    .unwrap();
+    ear.connect("wu2-panic:audio_out_1", "wu2-ear:audio_in_1")
+        .unwrap();
+    wait(&b, |s| s.callback_panicked);
+    // The backend keeps running (silently) and no longer calls the callback.
+    let after = b.stats().cycles;
+    wait(&b, |s| s.cycles >= after + 2);
+    let loud_after = loud.load(Relaxed);
+    wait(&b, |s| s.cycles >= after + 12);
+    assert_eq!(calls.load(Relaxed), 11);
+    assert!(b.is_running());
+    // The panicking cycle's half-written output is not left playing.
+    assert_eq!(loud.load(Relaxed), loud_after, "output not silenced");
+    ear.close().unwrap();
+    // Teardown is clean, and a new callback starts afresh.
+    b.stop().unwrap();
+    let before = b.stats().cycles;
+    b.start(Box::new(|_| {})).unwrap();
+    wait(&b, |s| s.cycles >= before + 5);
+    assert!(!b.stats().callback_panicked);
+    b.close().unwrap();
+}
+
+/// Connecting two other clients' ports needs nothing from us, so it happens
+/// at once even while we are stopped, and is not tied to our start and stop.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn connects_other_clients_ports_while_stopped() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(cfg("wu2-route")).unwrap();
+    // Other tests may link system ports at the same time (nextest runs each
+    // test in its own process, so SERIAL does not cover them): only look at
+    // this pair.
+    let linked = || connections_of("system:capture_1").contains(&"system:playback_1".to_string());
+    b.connect("system:capture_1", "system:playback_1").unwrap();
+    assert!(linked());
+    b.disconnect("system:capture_1", "system:playback_1")
+        .unwrap();
+    assert!(!linked());
+    b.close().unwrap();
+}
+
+/// Saved links are kept by full port name, so a port named by its alias in
+/// one call and by its full name in the next is the same port.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn stopped_links_match_aliases_and_loopbacks() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (probe, _) =
+        jack::Client::new("wu2-alias-probe", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let mut sys = probe.port_by_name("system:playback_1").unwrap();
+    sys.set_alias("wu2-test:speaker").unwrap();
+
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 1,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-alias")
+    })
+    .unwrap();
+    b.connect("wu2-alias:audio_out_1", "wu2-test:speaker")
+        .unwrap();
+    // The same link under its full name.
+    assert!(
+        b.connect("wu2-alias:audio_out_1", "system:playback_1")
+            .is_err()
+    );
+    b.disconnect("wu2-alias:audio_out_1", "system:playback_1")
+        .unwrap();
+    // A link from our output to our own input.
+    b.connect("wu2-alias:audio_out_1", "wu2-alias:audio_in_1")
+        .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-alias:audio_out_1"),
+        ["wu2-alias:audio_in_1"]
+    );
+    b.stop().unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-alias:audio_out_1"),
+        ["wu2-alias:audio_in_1"]
+    );
+    b.close().unwrap();
+    sys.unset_alias("wu2-test:speaker").unwrap();
 }

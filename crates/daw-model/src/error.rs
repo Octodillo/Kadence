@@ -19,6 +19,13 @@ pub enum ModelError {
     LaneNotFound(LaneId),
     #[error("invalid edit: {0}")]
     Invalid(String),
+    /// A command failed and so did undoing its partial work. The project is
+    /// still valid but holds part of the edit, and the undo history has been
+    /// cleared because it no longer matches. There is no change set for the
+    /// partial edit, so refresh everything that shows the project. This is a
+    /// bug in a command.
+    #[error("edit partly applied and history cleared: {0}")]
+    Inconsistent(String),
 }
 
 /// Saving or loading a project failed.
@@ -44,6 +51,8 @@ pub enum FormatError {
     Model(#[from] ModelError),
     #[error("document has no bundle; save it somewhere first")]
     NoBundle,
+    #[error("{0} holds unsaved changes from an earlier session; recover or discard them")]
+    AutosavePending(PathBuf),
 }
 
 impl FormatError {
