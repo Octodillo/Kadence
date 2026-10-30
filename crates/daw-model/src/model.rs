@@ -166,18 +166,23 @@ impl Project {
 
     /// Whether audio could flow from `from` to `to` through outputs and sends.
     pub fn feeds(&self, from: TrackId, to: TrackId) -> bool {
+        from == to || self.downstream(from).contains(&to)
+    }
+
+    /// Every track that audio from `from` reaches through outputs and sends,
+    /// directly or through other tracks; `from` itself only if it loops.
+    /// A bus can take `source` when it isn't `source` and its downstream set
+    /// lacks `source`, so routing choices need one call per bus, not per pair.
+    pub fn downstream(&self, from: TrackId) -> HashSet<TrackId> {
         let edges = self.routing_edges();
         let mut seen = HashSet::new();
-        let mut stack = vec![from];
+        let mut stack: Vec<TrackId> = edges.get(&from).into_iter().flatten().copied().collect();
         while let Some(t) = stack.pop() {
-            if t == to {
-                return true;
-            }
             if seen.insert(t) {
                 stack.extend(edges.get(&t).into_iter().flatten().copied());
             }
         }
-        false
+        seen
     }
 
     /// Whether `target` can receive audio from `source` (as its output or a

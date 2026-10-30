@@ -89,6 +89,10 @@ pub enum Warning {
     /// A track's clips did not reach the engine; the next sync retries.
     #[error("clip update for track {track} was dropped")]
     ClipsDropped { track: String },
+    /// A track's output or send would have made audio loop back into it,
+    /// so it is left out. Edits never allow this; a damaged project could.
+    #[error("routing from track {track} would loop; it is left out")]
+    RoutingLoop { track: String },
 }
 
 /// What the running graph was built from, and what was last sent to it.

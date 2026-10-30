@@ -100,7 +100,7 @@ Item {
             // A slow load can block the event loop past this step's timer,
             // so both timers are overdue at once; refresh before reading.
             Project.tick();
-            check(Project.trackCount === 3, "demo has three tracks");
+            check(Project.trackCount === 4, "demo has three tracks and a bus");
             // Peaks load in the background; give them a step, then shoot.
             window.pageStack.currentItem.view.refresh();
             shoot(window.title, "arrange-demo");
@@ -122,8 +122,8 @@ Item {
         },
         () => {
             // The mixer has caught up with the project on its clock.
-            // The demo's three tracks and the master.
-            check(Mixer.levels.length === 4 * 5, "a strip per track");
+            // The demo's three tracks, its reverb bus and the master.
+            check(Mixer.levels.length === 5 * 5, "a strip per track");
             const compressor = Mixer.effectNames.indexOf("Compressor");
             check(compressor >= 0 && Mixer.addInsert(0, compressor), "add a compressor to Bass");
             // Play so the meters have something to show.
@@ -151,6 +151,27 @@ Item {
         () => {
             check(Project.undoText === "Add Automation Lane", "fader move written as automation");
             check(!Mixer.writeAutomation, "writing off");
+            // Routing on Keys (row 2): a send to the reverb bus, tapped
+            // before the fader, and the output through the bus and back.
+            // Project picks up mixer edits on its clock; tick to read them.
+            check(Mixer.addSend(2, 0), "add a send to Reverb");
+            Project.tick();
+            check(Project.undoText === "Add Send", "sends undo");
+            Mixer.setSendPreFader(2, 0, true);
+            Project.tick();
+            check(Project.undoText === "Change Send Tap", "pre-fader send");
+            Mixer.setOutput(2, 1);
+            Project.tick();
+            check(Project.undoText === "Change Track Output", "output to the bus");
+            Project.undo();
+            Mixer.removeSend(1, 0);
+            Project.tick();
+            check(Project.undoText === "Remove Send", "remove Lead's send");
+            Project.undo();
+        },
+        () => {
+            // The mixer has picked up the undo on its clock.
+            shoot(window.title, "mix-routing");
         },
         () => {
             window.pageActions[2].trigger();

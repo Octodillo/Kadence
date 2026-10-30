@@ -69,6 +69,9 @@ QtObject {
         case Project.ClipsDropped:
             return i18nc("@info %1 is a track name",
                          "Changes to the clips on “%1” have not reached the audio engine yet.", m.name);
+        case Project.RoutingLoop:
+            return i18nc("@info %1 is a track name",
+                         "An output or send of “%1” would feed its sound back into itself, so it is left out.", m.name);
         case Project.NoInstrumentTrack:
             return i18nc("@info", "Add an instrument track to record MIDI on.");
         case Project.EngineNotRunning:

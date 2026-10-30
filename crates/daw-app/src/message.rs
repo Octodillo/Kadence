@@ -72,6 +72,8 @@ pub enum Reason {
     NotesDropped,
     /// Clips of track `name` did not reach the engine yet.
     ClipsDropped,
+    /// An output or send of track `name` would loop, so it is left out.
+    RoutingLoop,
     /// Recording needs an instrument track.
     NoInstrumentTrack,
     /// Recording needs the audio engine running.
@@ -263,6 +265,9 @@ impl Message {
                 }
                 Warning::ClipsDropped { track } => {
                     Fields::new(C::Playback, R::ClipsDropped).name(track)
+                }
+                Warning::RoutingLoop { track } => {
+                    Fields::new(C::Playback, R::RoutingLoop).name(track)
                 }
             },
         }

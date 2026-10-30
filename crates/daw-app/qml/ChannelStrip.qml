@@ -7,7 +7,8 @@ import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
 
-// One mixer channel: inserts, sends, pan, fader with meter, mute and solo.
+// One mixer channel: inserts, sends, pan, fader with meter, mute, solo and
+// where its output goes.
 Item {
     id: strip
 
@@ -23,6 +24,10 @@ Item {
     required property bool insertMeters
     required property list<string> sends
     required property list<real> sendLevels
+    required property list<bool> sendPreFader
+    required property list<string> sendChoices
+    required property list<string> outputChoices
+    required property int outputIndex
 
     required property double levelLeft
     required property double levelRight
@@ -175,7 +180,7 @@ Item {
                 Kirigami.ListSectionHeader {
                     Layout.fillWidth: true
                     text: i18nc("@title:group", "Sends")
-                    visible: strip.sends.length > 0
+                    visible: !strip.isMaster
                 }
                 Repeater {
                     model: strip.sends
@@ -188,22 +193,80 @@ Item {
                         readonly property string target: modelData || strip.masterName
                         Layout.fillWidth: true
                         spacing: 0
-                        QQC2.Label {
+                        RowLayout {
                             Layout.fillWidth: true
-                            text: sendRow.target
-                            elide: Text.ElideRight
-                            font: Kirigami.Theme.smallFont
+                            spacing: 0
+                            QQC2.Label {
+                                Layout.fillWidth: true
+                                text: sendRow.target
+                                elide: Text.ElideRight
+                                font: Kirigami.Theme.smallFont
+                                leftPadding: Kirigami.Units.smallSpacing
+                            }
+                            QQC2.ToolButton {
+                                icon.name: "list-remove"
+                                display: QQC2.AbstractButton.IconOnly
+                                text: i18nc("@action:button", "Remove send to %1", sendRow.target)
+                                QQC2.ToolTip.text: text
+                                QQC2.ToolTip.visible: hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                onClicked: Mixer.removeSend(strip.index, sendRow.index)
+                            }
                         }
-                        QQC2.Slider {
+                        RowLayout {
                             Layout.fillWidth: true
-                            from: -60
-                            to: 6
-                            value: strip.sendLevels[sendRow.index] ?? -60
-                            onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
-                            onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
-                            QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.target, strip.dbText(value))
-                            QQC2.ToolTip.visible: hovered || pressed
-                            Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.target)
+                            spacing: 0
+                            QQC2.Slider {
+                                Layout.fillWidth: true
+                                from: -60
+                                to: 6
+                                value: strip.sendLevels[sendRow.index] ?? -60
+                                onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
+                                onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
+                                QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.target, strip.dbText(value))
+                                QQC2.ToolTip.visible: hovered || pressed
+                                Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.target)
+                            }
+                            // Pre-fader sends ignore the fader: for monitor
+                            // mixes. Post-fader (the default) follows it.
+                            QQC2.ToolButton {
+                                checkable: true
+                                checked: strip.sendPreFader[sendRow.index] ?? false
+                                text: i18nc("@action:button short for pre-fader send", "Pre")
+                                font: Kirigami.Theme.smallFont
+                                Accessible.name: i18nc("@action:button", "Send to %1 before the fader", sendRow.target)
+                                QQC2.ToolTip.text: checked
+                                    ? i18nc("@info:tooltip", "Sends before the fader; click to send after it")
+                                    : i18nc("@info:tooltip", "Sends after the fader; click to send before it")
+                                QQC2.ToolTip.visible: hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                onToggled: Mixer.setSendPreFader(strip.index, sendRow.index, checked)
+                            }
+                        }
+                    }
+                }
+                // Only buses this strip doesn't already send to, and that
+                // don't feed it, so a send can never loop back.
+                QQC2.ToolButton {
+                    Layout.fillWidth: true
+                    visible: !strip.isMaster
+                    enabled: strip.sendChoices.length > 0
+                    icon.name: "list-add"
+                    text: i18nc("@action:button", "Add Send")
+                    QQC2.ToolTip.text: i18nc("@info:tooltip", "Send this channel to a bus")
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onClicked: sendMenu.popup()
+                    QQC2.Menu {
+                        id: sendMenu
+                        Repeater {
+                            model: strip.sendChoices
+                            delegate: QQC2.MenuItem {
+                                required property int index
+                                required property string modelData
+                                text: modelData
+                                onTriggered: Mixer.addSend(strip.index, index)
+                            }
                         }
                     }
                 }
@@ -317,6 +380,22 @@ Item {
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                 onToggled: Mixer.setSoloed(strip.index, checked)
             }
+        }
+
+        // Output: the master or a bus that doesn't feed this strip. The
+        // master's own output is the hardware, so its space stays empty.
+        QQC2.ComboBox {
+            Layout.fillWidth: true
+            opacity: strip.isMaster ? 0 : 1
+            enabled: !strip.isMaster
+            Accessible.ignored: strip.isMaster
+            model: strip.outputChoices.map(name => name || strip.masterName)
+            currentIndex: strip.outputIndex
+            onActivated: index => Mixer.setOutput(strip.index, index)
+            Accessible.name: i18nc("@label:listbox", "Output")
+            QQC2.ToolTip.text: i18nc("@info:tooltip", "Output: %1", displayText)
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         }
     }
 }

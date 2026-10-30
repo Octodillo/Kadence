@@ -72,6 +72,16 @@ pub mod qobject {
         fn send_level(self: &Mixer, row: i32, send: i32) -> f64;
         #[qinvokable]
         fn set_send_level(self: Pin<&mut Mixer>, row: i32, send: i32, db: f64);
+        /// Adds a send to the bus at `choice` in the row's `sendChoices`.
+        #[qinvokable]
+        fn add_send(self: Pin<&mut Mixer>, row: i32, choice: i32) -> bool;
+        #[qinvokable]
+        fn remove_send(self: Pin<&mut Mixer>, row: i32, send: i32);
+        #[qinvokable]
+        fn set_send_pre_fader(self: Pin<&mut Mixer>, row: i32, send: i32, pre_fader: bool);
+        /// Routes the row's output to `choice` in its `outputChoices`.
+        #[qinvokable]
+        fn set_output(self: Pin<&mut Mixer>, row: i32, choice: i32);
         /// Appends the effect at `effect` in `effect_names` to the strip.
         #[qinvokable]
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
@@ -144,6 +154,10 @@ const ROLES: &[&str] = &[
     "insertMeters",
     "sends",
     "sendLevels",
+    "sendPreFader",
+    "sendChoices",
+    "outputChoices",
+    "outputIndex",
     "levelLeft",
     "levelRight",
     "holdLeft",
@@ -310,6 +324,59 @@ impl qobject::Mixer {
         }
     }
 
+    /// The strip at `row` and the target of its send at `send`.
+    fn send_target(&self, row: i32, send: i32) -> Option<(StripId, StripId)> {
+        let strip = self.strips.get(usize::try_from(row).ok()?)?;
+        let target = strip.sends.get(usize::try_from(send).ok()?)?.target;
+        Some((strip.id, target))
+    }
+
+    fn add_send(mut self: Pin<&mut Self>, row: i32, choice: i32) -> bool {
+        let target = usize::try_from(row)
+            .ok()
+            .and_then(|r| self.strips.get(r))
+            .and_then(|s| Some((s.id, s.send_choices.get(usize::try_from(choice).ok()?)?.id)));
+        let Some((id, target)) = target else {
+            return false;
+        };
+        let added = self.as_mut().rust_mut().mixer.add_send(id, target);
+        self.reload();
+        added
+    }
+
+    fn remove_send(mut self: Pin<&mut Self>, row: i32, send: i32) {
+        if let Some((id, target)) = self.send_target(row, send) {
+            self.as_mut().rust_mut().mixer.remove_send(id, target);
+            self.reload();
+        }
+    }
+
+    fn set_send_pre_fader(mut self: Pin<&mut Self>, row: i32, send: i32, pre_fader: bool) {
+        if let Some((id, target)) = self.send_target(row, send) {
+            self.as_mut()
+                .rust_mut()
+                .mixer
+                .set_send_pre_fader(id, target, pre_fader);
+            self.reload();
+        }
+    }
+
+    fn set_output(mut self: Pin<&mut Self>, row: i32, choice: i32) {
+        let target = usize::try_from(row)
+            .ok()
+            .and_then(|r| self.strips.get(r))
+            .and_then(|s| {
+                Some((
+                    s.id,
+                    s.output_choices.get(usize::try_from(choice).ok()?)?.id,
+                ))
+            });
+        if let Some((id, target)) = target {
+            self.as_mut().rust_mut().mixer.set_output(id, target);
+            self.reload();
+        }
+    }
+
     fn add_insert(mut self: Pin<&mut Self>, row: i32, effect: i32) -> bool {
         let device = usize::try_from(effect)
             .ok()
@@ -457,6 +524,26 @@ impl qobject::Mixer {
                     levels.append(x.level_db);
                 }
                 QVariant::from(&levels)
+            }
+            Some("sendPreFader") => {
+                let mut pre = QList::<bool>::default();
+                for x in &s.sends {
+                    pre.append(x.pre_fader);
+                }
+                QVariant::from(&pre)
+            }
+            Some("sendChoices") => {
+                QVariant::from(&string_list(s.send_choices.iter().map(|c| c.name.as_str())))
+            }
+            Some("outputChoices") => QVariant::from(&string_list(
+                s.output_choices.iter().map(|c| c.name.as_str()),
+            )),
+            Some("outputIndex") => {
+                let i = s
+                    .output
+                    .as_ref()
+                    .and_then(|o| s.output_choices.iter().position(|c| c.id == o.id));
+                QVariant::from(&i.map_or(-1, |i| i as i32))
             }
             Some("levelLeft") => QVariant::from(&m.level[0]),
             Some("levelRight") => QVariant::from(&m.level[1]),
