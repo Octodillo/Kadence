@@ -504,6 +504,7 @@ dependencies = [
  "daw-plugin-host",
  "daw-plugins",
  "daw-session",
+ "tempfile",
 ]
 
 [[package]]
