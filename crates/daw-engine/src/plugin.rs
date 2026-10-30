@@ -15,10 +15,11 @@
 //!
 //! Only one node of a handle plays at a time: the newest one handed out, from the first block
 //! it processes. Older nodes, and nodes made for a layout the plugin has since left, output
-//! silence, and `pump` keeps returning true while one of them is the one asked to play (say,
-//! the next graph failed to compile), so the host rebuilds until a current node plays. A
-//! handle serves one engine; to render offline while the engine runs, instantiate the
-//! plugin again.
+//! silence, and `pump` keeps returning true while the newest node that played is out of date
+//! (say, the next graph failed to compile), so the host rebuilds until a current node plays.
+//! Until a new graph is swapped in, that can ask for an extra rebuild, which does not
+//! prepare the plugin again. A handle serves one engine; to render offline while the engine
+//! runs, instantiate the plugin again.
 //!
 //! The handle is neither `Send` nor `Sync`: every method, and compiling a graph that holds
 //! one of its nodes, runs on the thread that created it, as some formats (CLAP) require.
@@ -35,7 +36,7 @@ use daw_core::plugin::PluginInstance;
 
 /// How many times the audio thread retries a plugin the main thread holds before it outputs
 /// silence for that block: a few microseconds, enough for a short main-thread call.
-const AUDIO_RETRIES: u32 = 2000;
+const AUDIO_RETRIES: u32 = 100;
 
 struct Inner {
     /// `None` once the handle is dropped.
@@ -50,8 +51,14 @@ struct Inner {
     /// The node that last played. A newer node takes over on its first block; older ones
     /// stay quiet.
     owner: u64,
-    /// The plugin asked for another layout and has not been prepared since.
+    /// The plugin asked for another layout and has not been prepared since. Also set while
+    /// a prepare runs, so one that panicked is done again.
     layout_changed: bool,
+    /// The node asked to play last, if it was the owner or newer, could not: it was made
+    /// for an older layout.
+    stale: bool,
+    /// A node caught up with ports other than the ones it was made, and wired, with.
+    rewire: bool,
 }
 
 impl Inner {
@@ -59,6 +66,7 @@ impl Inner {
         // Retire every node first, so a prepare that panics halfway leaves none calling the
         // plugin with a layout it was not compiled for.
         self.epoch += 1;
+        self.layout_changed = true;
         let Some(p) = self.plugin.as_mut() else {
             return;
         };
@@ -79,10 +87,14 @@ impl Inner {
         if p.take_layout_changed() {
             self.layout_changed = true;
         }
-        if p.ports() != self.ports || p.latency() != self.latency {
-            // Changed without our prepare: no node was compiled for this.
+        if p.ports() != self.ports {
+            // Changed without our prepare: no node was compiled for these ports.
             self.epoch += 1;
             self.ports = p.ports();
+            self.layout_changed = true;
+        }
+        if p.latency() != self.latency {
+            // Running nodes can go on playing; compensation follows with the next graph.
             self.latency = p.latency();
             self.layout_changed = true;
         }
@@ -97,9 +109,6 @@ struct Shared {
     main_inside: AtomicBool,
     /// Last node handed out.
     nodes: AtomicU64,
-    /// The node asked to play last could not, because it was older than another node or
-    /// made for an older layout.
-    stale: AtomicBool,
     /// Blocks the audio thread output silence for because the main thread held the plugin.
     busy: AtomicU64,
 }
@@ -149,11 +158,12 @@ impl PluginHandle {
                     epoch: 0,
                     owner: 0,
                     layout_changed: false,
+                    stale: false,
+                    rewire: false,
                 }),
                 thread: thread::current().id(),
                 main_inside: AtomicBool::new(false),
                 nodes: AtomicU64::new(0),
-                stale: AtomicBool::new(false),
                 busy: AtomicU64::new(0),
             }),
             _not_send: PhantomData,
@@ -189,9 +199,14 @@ impl PluginHandle {
         self.needs_rebuild()
     }
 
-    /// What [`pump`](Self::pump) returns, without running the callbacks.
+    /// What [`pump`](Self::pump) returns, without running the callbacks. Always false while
+    /// no graph holds a node of this handle.
     pub fn needs_rebuild(&self) -> bool {
-        self.shared.main(|i| i.layout_changed) || self.shared.stale.load(Ordering::Relaxed)
+        let in_graph = Arc::strong_count(&self.shared) > 1;
+        in_graph
+            && self
+                .shared
+                .main(|i| i.layout_changed || i.stale || i.rewire)
     }
 
     /// A node for the next graph, with the plugin's current ports and latency. Prepares the
@@ -202,6 +217,7 @@ impl PluginHandle {
             if i.layout_changed || i.prepared != (sample_rate, max_frames) {
                 i.prepare(sample_rate, max_frames);
             }
+            i.rewire = false;
             (i.epoch, i.ports.clone(), i.latency)
         });
         PluginNode {
@@ -249,14 +265,17 @@ impl PluginNode {
     fn on_audio<R>(&mut self, mut f: impl FnMut(&mut dyn PluginInstance) -> R) -> Option<R> {
         let (id, epoch) = (self.id, self.epoch);
         let mut call = |i: &mut Inner| {
-            let current = i.epoch == epoch && id >= i.owner;
-            let p = i.plugin.as_mut().filter(|_| current)?;
+            if id < i.owner {
+                // A newer node plays; it, not this one, tells the host about its state.
+                return None;
+            }
+            i.stale = i.epoch != epoch;
+            let p = i.plugin.as_mut().filter(|_| !i.stale)?;
             i.owner = id;
             Some(f(p.as_mut()))
         };
         for _ in 0..AUDIO_RETRIES {
             if let Some(r) = self.shared.inner.try_audio(&mut call) {
-                self.shared.stale.store(r.is_none(), Ordering::Relaxed);
                 return r;
             }
             std::hint::spin_loop();
@@ -272,11 +291,17 @@ impl Node for PluginNode {
     }
 
     /// Catches up with the plugin when it was prepared again after this node was made, and
-    /// prepares it if the graph is compiled for other settings than the plugin has.
+    /// prepares it if the graph is compiled for other settings than the plugin has, or the
+    /// plugin asked for another layout. If that changes the node's ports, `pump` asks for a
+    /// rebuild so the next graph is wired for them.
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
         let (epoch, ports, latency) = self.shared.main(|i| {
-            if i.prepared != (sample_rate, max_frames) {
+            if i.layout_changed || i.prepared != (sample_rate, max_frames) {
                 i.prepare(sample_rate, max_frames);
+            }
+            if i.ports != self.ports {
+                // The graph was wired for the ports this node was made with.
+                i.rewire = true;
             }
             (i.epoch, i.ports.clone(), i.latency)
         });

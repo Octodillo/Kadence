@@ -143,11 +143,15 @@ fn a_node_made_before_a_prepare_catches_up_when_it_is_compiled() {
     assert!(plugin.pump());
     drop(plugin.node(RATE, FRAMES));
     // `early` was made for one output and the graph is wired for that. Compiling it picks
-    // up the plugin's new layout, so it plays rather than staying silent; the second
-    // channel waits for a graph wired for it.
+    // up the plugin's new layout, so it plays rather than staying silent, and the host is
+    // asked for a graph wired for the second channel.
     send_node(&mut ctl, early);
     assert_eq!(run(&mut proc, 2), [ramp(1, 3), vec![0.0; 2]]);
+    assert!(plugin.pump());
+    send(&mut ctl, &plugin);
+    assert_eq!(run(&mut proc, 1), [vec![3.0], vec![3.0]]);
     assert!(!plugin.pump());
+    assert_eq!(control.prepares.load(Relaxed), 1);
 }
 
 #[test]
@@ -162,10 +166,8 @@ fn only_the_newest_node_plays_the_plugin() {
     send(&mut other, &plugin);
     assert_eq!(run(&mut other_proc, 2)[0], ramp(3, 5));
     assert_eq!(run(&mut proc, 2)[0], vec![0.0; 2]);
-    assert!(
-        plugin.pump(),
-        "the first engine needs a rebuild to play it again"
-    );
+    // A handle serves one engine, so nothing asks the first one to rebuild; one that
+    // does anyway takes the plugin back.
     send(&mut ctl, &plugin);
     assert_eq!(run(&mut proc, 2)[0], ramp(5, 7));
     assert_eq!(run(&mut other_proc, 2)[0], vec![0.0; 2]);
@@ -256,7 +258,7 @@ fn dropping_the_handle_frees_the_plugin_on_its_thread() {
 #[should_panic(expected = "from inside one of its own calls")]
 fn using_the_handle_from_inside_its_own_call_panics() {
     let (plugin, _) = plugin(1);
-    plugin.with(|_| plugin.needs_rebuild());
+    plugin.with(|_| plugin.pump());
 }
 
 #[test]
@@ -269,4 +271,65 @@ fn nodes_compiled_on_another_thread_are_refused() {
     })
     .join();
     assert!(r.is_err());
+}
+
+#[test]
+fn a_plugin_in_no_graph_never_asks_for_a_rebuild() {
+    let (plugin, control) = plugin(1);
+    ask_for(&control, 2);
+    assert!(!plugin.pump(), "nothing to rebuild");
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    run(&mut proc, 1);
+    // The plugin leaves the graph while a change is pending and its node is stale.
+    ask_for(&control, 1);
+    assert!(plugin.pump());
+    drop(plugin.node(RATE, FRAMES));
+    run(&mut proc, 1);
+    assert!(plugin.pump());
+    ctl.set_graph(ctl.graph(0, 2)).unwrap();
+    run(&mut proc, 1);
+    ctl.collect_garbage();
+    assert!(!plugin.pump(), "the host removed it; nothing to rebuild");
+}
+
+#[test]
+fn a_second_copy_in_one_graph_stays_quiet_without_asking_for_rebuilds() {
+    let (plugin, _) = plugin(1);
+    let (mut ctl, mut proc) = engine();
+    for _ in 0..3 {
+        let mut g = ctl.graph(0, 2);
+        // The newer node comes first in the graph and plays; the older one, processed
+        // after it, stays quiet.
+        let older = plugin.node(RATE, FRAMES);
+        let newer = g.add_device("newer", Box::new(plugin.node(RATE, FRAMES)));
+        let older = g.add_device("older", Box::new(older));
+        g.connect_audio(newer, 0, g.master(), 0);
+        g.connect_audio(older, 0, g.master(), 1);
+        ctl.set_graph(g).unwrap();
+        let [l, r] = run(&mut proc, 2);
+        assert!(l.iter().all(|&v| v > 0.0));
+        assert_eq!(r, vec![0.0; 2]);
+        assert!(!plugin.pump());
+        ctl.collect_garbage();
+    }
+}
+
+#[test]
+fn a_latency_change_from_a_state_load_keeps_the_running_graph_playing() {
+    let (plugin, control) = plugin(1);
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    run(&mut proc, 1);
+    // A format that takes the new latency at once, without a prepare.
+    control.next_latency.store(16, Relaxed);
+    plugin.with(|p| {
+        p.load_state(&1f32.to_le_bytes()).unwrap();
+        p.prepare(RATE, FRAMES);
+    });
+    assert!(plugin.needs_rebuild());
+    assert_eq!(run(&mut proc, 1)[0], vec![2.0], "still playing");
+    send(&mut ctl, &plugin);
+    run(&mut proc, 1);
+    assert_eq!(ctl.latency(), 16);
 }
