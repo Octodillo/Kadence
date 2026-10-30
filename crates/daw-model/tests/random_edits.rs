@@ -179,11 +179,7 @@ fn build(p: &Project, op: &Op) -> Option<Box<dyn Command>> {
             let content = if p.track(t)?.kind == TrackKind::Instrument {
                 ClipContent::Midi(MidiClip::default())
             } else {
-                ClipContent::Audio(AudioClip {
-                    source: "audio/a.wav".into(),
-                    offset: SampleTime(0),
-                    gain_db: 0.0,
-                })
+                ClipContent::Audio(AudioClip::new("audio/a.wav", SampleTime(0)))
             };
             Box::new(AddClip::new(
                 t,

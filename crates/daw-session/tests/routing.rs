@@ -41,11 +41,7 @@ impl Rig {
             "clip",
             TickTime(0),
             TickTime(PPQ),
-            ClipContent::Audio(AudioClip {
-                source: "a.wav".into(),
-                offset: SampleTime(0),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new("a.wav", SampleTime(0))),
         );
         doc.execute(AddClip::new(id, clip)).unwrap();
         let (mut session, proc) = Session::new(SessionConfig {

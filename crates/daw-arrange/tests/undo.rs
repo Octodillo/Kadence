@@ -10,11 +10,7 @@ fn aclip(start: i64) -> Clip {
         "a",
         TickTime(start),
         TickTime(PPQ),
-        ClipContent::Audio(AudioClip {
-            source: "x.wav".into(),
-            offset: SampleTime(0),
-            gain_db: 0.0,
-        }),
+        ClipContent::Audio(AudioClip::new("x.wav", SampleTime(0))),
     )
 }
 
