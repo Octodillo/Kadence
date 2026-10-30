@@ -66,6 +66,15 @@ Kirigami.ApplicationWindow {
         onTriggered: Project.togglePlay()
     }
 
+    readonly property Kirigami.Action recordAction: Kirigami.Action {
+        text: Project.recording ? i18nc("@action:button", "Stop Recording") : i18nc("@action:button", "Record")
+        icon.name: "media-record"
+        shortcut: "R"
+        tooltip: i18nc("@info:tooltip", "Record MIDI into the open clip, or into a new clip on the selected instrument track")
+        displayHint: Kirigami.DisplayHint.KeepVisible
+        onTriggered: Project.toggleRecord()
+    }
+
     Kirigami.Action {
         id: goToStartAction
         text: i18nc("@action", "Go to Start")
@@ -222,17 +231,17 @@ Kirigami.ApplicationWindow {
     ArrangePage {
         id: arrangePage
         visible: false
-        transportActions: [root.playAction]
+        transportActions: [root.playAction, root.recordAction]
     }
     MixPage {
         id: mixPage
         visible: false
-        transportActions: [root.playAction]
+        transportActions: [root.playAction, root.recordAction]
     }
     EditPage {
         id: editPage
         visible: false
-        transportActions: [root.playAction]
+        transportActions: [root.playAction, root.recordAction]
     }
 
     // Double-clicking a clip in the arrange view opens it in the editor.
