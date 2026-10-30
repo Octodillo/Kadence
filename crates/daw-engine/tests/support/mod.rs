@@ -233,17 +233,51 @@ pub struct FakeControl {
     pub prepares: std::sync::atomic::AtomicU32,
     /// The thread the plugin was dropped on.
     pub dropped_on: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    /// Audio halves taken back, for a plugin made with [`FakePlugin::splitting`].
+    pub joins: std::sync::atomic::AtomicU32,
 }
 
 /// A plugin that outputs a sample counter on every channel. The counter is its state: it
-/// survives prepares, and `load_state` sets it.
+/// survives prepares, and `load_state` sets it. One made with [`splitting`](Self::splitting)
+/// hands out its audio half, which shares the counter.
 pub struct FakePlugin {
     pub control: std::sync::Arc<FakeControl>,
     descriptor: daw_core::plugin::PluginDescriptor,
     outputs: u16,
     latency: u32,
-    count: f32,
+    count: std::sync::Arc<std::sync::atomic::AtomicU32>,
     changed: bool,
+    splits: bool,
+    split_after_prepare: bool,
+    /// The audio half is out.
+    out: bool,
+}
+
+/// The audio half of a splitting [`FakePlugin`].
+pub struct FakeProcessor {
+    count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    outputs: u16,
+}
+
+fn count_frames(count: &std::sync::atomic::AtomicU32, outputs: u16, ctx: &mut ProcessContext) {
+    use std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(ctx.audio_out.len(), outputs as usize);
+    for i in 0..ctx.frames as usize {
+        let v = f32::from_bits(count.load(Relaxed)) + 1.0;
+        count.store(v.to_bits(), Relaxed);
+        for ch in ctx.audio_out.iter_mut() {
+            ch[i] = v;
+        }
+    }
+}
+
+impl daw_core::plugin::PluginProcessor for FakeProcessor {
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        count_frames(&self.count, self.outputs, ctx);
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
 }
 
 impl FakePlugin {
@@ -265,9 +299,29 @@ impl FakePlugin {
             },
             outputs,
             latency: 0,
-            count: 0.0,
+            count: Default::default(),
             changed: false,
+            splits: false,
+            split_after_prepare: false,
+            out: false,
         }
+    }
+
+    pub fn splitting(outputs: u16) -> Self {
+        let mut p = Self::new(outputs);
+        p.splits = true;
+        p
+    }
+
+    /// Splits from its first prepare on, like a format that instantiates inactive.
+    pub fn splitting_after_prepare(outputs: u16) -> Self {
+        let mut p = Self::new(outputs);
+        p.split_after_prepare = true;
+        p
+    }
+
+    fn count(&self) -> f32 {
+        f32::from_bits(self.count.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -282,20 +336,17 @@ impl Node for FakePlugin {
 
     fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {
         use std::sync::atomic::Ordering::Relaxed;
+        assert!(!self.out, "prepared while the audio half is out");
         let c = &self.control;
         c.prepares.fetch_add(1, Relaxed);
+        self.splits |= self.split_after_prepare;
         self.outputs = c.next_outputs.load(Relaxed) as u16;
         self.latency = c.next_latency.load(Relaxed);
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        assert_eq!(ctx.audio_out.len(), self.outputs as usize);
-        for i in 0..ctx.frames as usize {
-            self.count += 1.0;
-            for ch in ctx.audio_out.iter_mut() {
-                ch[i] = self.count;
-            }
-        }
+        assert!(!self.out, "processed while the audio half is out");
+        count_frames(&self.count, self.outputs, ctx);
     }
 
     fn latency(&self) -> u32 {
@@ -305,6 +356,9 @@ impl Node for FakePlugin {
 
 impl Drop for FakePlugin {
     fn drop(&mut self) {
+        if !std::thread::panicking() {
+            assert!(!self.out, "dropped while the audio half is out");
+        }
         *self.control.dropped_on.lock().unwrap() = Some(std::thread::current().id());
     }
 }
@@ -320,7 +374,7 @@ impl daw_core::plugin::PluginInstance for FakePlugin {
         0.0
     }
     fn save_state(&mut self) -> Result<Vec<u8>, daw_core::plugin::PluginError> {
-        Ok(self.count.to_le_bytes().to_vec())
+        Ok(self.count().to_le_bytes().to_vec())
     }
     /// Takes the counter and, like a plugin whose latency depends on its settings, asks for
     /// a new layout.
@@ -328,7 +382,10 @@ impl daw_core::plugin::PluginInstance for FakePlugin {
         let bytes = data
             .try_into()
             .map_err(|_| daw_core::plugin::PluginError::State("4 bytes".into()))?;
-        self.count = f32::from_le_bytes(bytes);
+        self.count.store(
+            f32::from_le_bytes(bytes).to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.changed = true;
         Ok(())
     }
@@ -350,5 +407,26 @@ impl daw_core::plugin::PluginInstance for FakePlugin {
     }
     fn take_layout_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+    fn split(&mut self) -> Option<Box<dyn daw_core::plugin::PluginProcessor>> {
+        if !self.splits || self.out {
+            return None;
+        }
+        self.out = true;
+        Some(Box::new(FakeProcessor {
+            count: self.count.clone(),
+            outputs: self.outputs,
+        }))
+    }
+    fn join(&mut self, processor: Box<dyn daw_core::plugin::PluginProcessor>) {
+        let half = processor
+            .into_any()
+            .downcast::<FakeProcessor>()
+            .expect("our own half");
+        assert!(std::sync::Arc::ptr_eq(&half.count, &self.count));
+        self.out = false;
+        self.control
+            .joins
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }

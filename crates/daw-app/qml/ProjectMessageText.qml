@@ -69,6 +69,16 @@ QtObject {
         case Project.ClipsDropped:
             return i18nc("@info %1 is a track name",
                          "Changes to the clips on “%1” have not reached the audio engine yet.", m.name);
+        case Project.NoInstrumentTrack:
+            return i18nc("@info", "Add an instrument track to record MIDI on.");
+        case Project.EngineNotRunning:
+            return i18nc("@info", "The audio engine is not running.");
+        case Project.NoMidiPlayer:
+            return i18nc("@info", "The track is not ready to record yet; try again in a moment.");
+        case Project.MidiInputDropped:
+            return i18nc("@info", "Some MIDI input arrived too fast to be recorded, so the take may be missing notes.");
+        case Project.NothingRecorded:
+            return i18nc("@info", "Nothing was played inside the song.");
         }
         return "";
     }
@@ -97,6 +107,12 @@ QtObject {
             return i18nc("@info %1 is the reason, a full sentence", "That edit could not be made. %1", why);
         case Project.PlaybackContext:
             return i18nc("@info %1 is the reason, a full sentence", "Playback may be incomplete. %1", why);
+        case Project.RecordContext:
+            // The take was kept; the reason says what it may lack.
+            if (m.reason === Project.MidiInputDropped) {
+                return why;
+            }
+            return i18nc("@info %1 is the reason, a full sentence", "Nothing was recorded. %1", why);
         }
         return "";
     }

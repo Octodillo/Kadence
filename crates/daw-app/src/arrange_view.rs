@@ -75,10 +75,15 @@ pub mod qobject {
         fn double_click(self: Pin<&mut ArrangeView>, x: f64, y: f64, modifiers: i32);
         #[qinvokable]
         fn cancel_drag(self: Pin<&mut ArrangeView>);
-        /// Names for a new MIDI clip and for audio from a file without a
-        /// name, in the user's language.
+        /// Names for a new MIDI clip, for audio from a file without a name
+        /// and for a recorded clip, in the user's language.
         #[qinvokable]
-        fn set_default_names(self: Pin<&mut ArrangeView>, midi_clip: &QString, audio: &QString);
+        fn set_default_names(
+            self: Pin<&mut ArrangeView>,
+            midi_clip: &QString,
+            audio: &QString,
+            recording: &QString,
+        );
         #[qinvokable]
         fn hover(self: Pin<&mut ArrangeView>, x: f64, y: f64);
         /// Pixel deltas, positive when the content should move right/down.
@@ -336,11 +341,17 @@ impl qobject::ArrangeView {
         self.after(out);
     }
 
-    fn set_default_names(self: Pin<&mut Self>, midi_clip: &QString, audio: &QString) {
+    fn set_default_names(
+        self: Pin<&mut Self>,
+        midi_clip: &QString,
+        audio: &QString,
+        recording: &QString,
+    ) {
         state::with(|s| {
             s.arrange.names = daw_arrange::DefaultNames {
                 midi_clip: midi_clip.to_string(),
                 audio: audio.to_string(),
+                recording: recording.to_string(),
             };
         });
     }

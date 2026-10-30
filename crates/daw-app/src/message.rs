@@ -23,6 +23,8 @@ pub enum Context {
     Import,
     Edit,
     Playback,
+    /// Recording MIDI.
+    Record,
 }
 
 /// Why, which picks the second sentence.
@@ -70,6 +72,16 @@ pub enum Reason {
     NotesDropped,
     /// Clips of track `name` did not reach the engine yet.
     ClipsDropped,
+    /// Recording needs an instrument track.
+    NoInstrumentTrack,
+    /// Recording needs the audio engine running.
+    EngineNotRunning,
+    /// The track to record on has no MIDI player yet.
+    NoMidiPlayer,
+    /// MIDI input arrived faster than it could be recorded.
+    MidiInputDropped,
+    /// The take has no notes inside the song.
+    NothingRecorded,
 }
 
 /// A message, flattened for a front end.
@@ -124,6 +136,18 @@ impl Fields {
     }
 }
 
+/// What went wrong with recording MIDI.
+#[derive(Debug)]
+pub enum RecordProblem {
+    NoInstrumentTrack,
+    EngineNotRunning,
+    NoMidiPlayer,
+    InputDropped,
+    NothingRecorded,
+    /// The model refused the take.
+    Refused(ModelError),
+}
+
 /// Something to tell the user about the project.
 #[derive(Debug)]
 pub enum Message {
@@ -140,6 +164,7 @@ pub enum Message {
     Edit(Refusal),
     Playback(daw_session::SessionError),
     Warning(Warning),
+    Record(RecordProblem),
 }
 
 impl From<ModelError> for Message {
@@ -207,6 +232,14 @@ impl Message {
             Self::Edit(Refusal::Edit(e)) => Fields::new(C::Edit, R::EditRefused).detail(e),
             Self::Edit(Refusal::NoteOutsideClip) => Fields::new(C::Edit, R::NoteOutsideClip),
             Self::Playback(e) => Fields::new(C::Playback, R::EngineRefused).detail(e),
+            Self::Record(p) => match p {
+                RecordProblem::NoInstrumentTrack => Fields::new(C::Record, R::NoInstrumentTrack),
+                RecordProblem::EngineNotRunning => Fields::new(C::Record, R::EngineNotRunning),
+                RecordProblem::NoMidiPlayer => Fields::new(C::Record, R::NoMidiPlayer),
+                RecordProblem::InputDropped => Fields::new(C::Record, R::MidiInputDropped),
+                RecordProblem::NothingRecorded => Fields::new(C::Record, R::NothingRecorded),
+                RecordProblem::Refused(e) => Fields::new(C::Record, R::EditRefused).detail(e),
+            },
             Self::Warning(w) => match w {
                 Warning::DeviceStateRejected { device, detail } => {
                     Fields::new(C::Playback, R::DeviceStateRejected)
@@ -338,6 +371,20 @@ mod tests {
         })
         .fields();
         assert_eq!(f.path.as_deref(), Some(Path::new("/a.wav")));
+    }
+
+    #[test]
+    fn recording_problems() {
+        let f = Message::Record(RecordProblem::NoInstrumentTrack).fields();
+        assert_eq!(
+            (f.context, f.reason),
+            (Context::Record, Reason::NoInstrumentTrack)
+        );
+        let f = Message::Record(RecordProblem::Refused(ModelError::Invalid("x".into()))).fields();
+        assert_eq!(
+            (f.reason, f.detail.is_empty()),
+            (Reason::EditRefused, false)
+        );
     }
 
     #[test]

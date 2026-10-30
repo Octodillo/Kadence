@@ -264,6 +264,8 @@ pub struct DefaultNames {
     pub midi_clip: String,
     /// An audio clip, and its new track, when the file name has no stem.
     pub audio: String,
+    /// A MIDI clip made by recording.
+    pub recording: String,
 }
 
 impl Default for DefaultNames {
@@ -271,6 +273,7 @@ impl Default for DefaultNames {
         Self {
             midi_clip: "MIDI clip".into(),
             audio: "Audio".into(),
+            recording: "Recording".into(),
         }
     }
 }

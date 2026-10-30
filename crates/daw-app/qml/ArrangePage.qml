@@ -286,7 +286,8 @@ Kirigami.Page {
                     Component.onCompleted: {
                         setDefaultNames(
                             i18nc("@label default name of a new MIDI clip", "MIDI clip"),
-                            i18nc("@label default name of audio from a file without a name", "Audio"));
+                            i18nc("@label default name of audio from a file without a name", "Audio"),
+                            i18nc("@label default name of a recorded MIDI clip", "Recording"));
                         refresh();
                     }
 

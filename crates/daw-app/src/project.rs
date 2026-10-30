@@ -35,6 +35,7 @@ pub mod qobject {
         ImportContext,
         EditContext,
         PlaybackContext,
+        RecordContext,
     }
 
     /// The `reason` of a message map. See `crate::message::Reason` for
@@ -62,6 +63,11 @@ pub mod qobject {
         CannotRead,
         NotesDropped,
         ClipsDropped,
+        NoInstrumentTrack,
+        EngineNotRunning,
+        NoMidiPlayer,
+        MidiInputDropped,
+        NothingRecorded,
     }
 
     #[auto_cxx_name]
@@ -81,6 +87,8 @@ pub mod qobject {
         #[qproperty(QString, undo_text)]
         #[qproperty(QString, redo_text)]
         #[qproperty(bool, playing)]
+        /// A MIDI take is being recorded.
+        #[qproperty(bool, recording)]
         #[qproperty(bool, looping)]
         /// Bar.beat of the playhead, like "12.3".
         #[qproperty(QString, position_text)]
@@ -149,6 +157,10 @@ pub mod qobject {
         fn toggle_play(self: Pin<&mut Project>);
         #[qinvokable]
         fn stop(self: Pin<&mut Project>);
+        /// Starts recording MIDI on the open clip's track (or the selected
+        /// or first instrument track), or stops and keeps the take.
+        #[qinvokable]
+        fn toggle_record(self: Pin<&mut Project>);
         #[qinvokable]
         fn go_to_start(self: Pin<&mut Project>);
         /// Turns looping on (over the selection, or the four bars from the
@@ -189,6 +201,7 @@ pub struct ProjectRust {
     undo_text: QString,
     redo_text: QString,
     playing: bool,
+    recording: bool,
     looping: bool,
     position_text: QString,
     time_text: QString,
@@ -236,6 +249,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Context::Import => QC::ImportContext,
         Context::Edit => QC::EditContext,
         Context::Playback => QC::PlaybackContext,
+        Context::Record => QC::RecordContext,
     };
     let reason = match f.reason {
         Reason::NotLocalFile => QR::NotLocalFile,
@@ -259,6 +273,11 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::CannotRead => QR::CannotRead,
         Reason::NotesDropped => QR::NotesDropped,
         Reason::ClipsDropped => QR::ClipsDropped,
+        Reason::NoInstrumentTrack => QR::NoInstrumentTrack,
+        Reason::EngineNotRunning => QR::EngineNotRunning,
+        Reason::NoMidiPlayer => QR::NoMidiPlayer,
+        Reason::MidiInputDropped => QR::MidiInputDropped,
+        Reason::NothingRecorded => QR::NothingRecorded,
     };
     let text = |s: &str| QVariant::from(&QString::from(s));
     // Numbers are schema versions; they fit an i32.
@@ -379,6 +398,8 @@ impl qobject::Project {
         this.as_mut()
             .set_redo_text(QString::from(redo_text.as_str()));
         this.as_mut().set_playing(playing);
+        this.as_mut()
+            .set_recording(state::with(|s| s.is_recording()));
         this.as_mut().set_looping(looping);
         this.as_mut()
             .set_position_text(QString::from(position.as_str()));
@@ -420,6 +441,13 @@ impl qobject::Project {
             if s.engine.is_playing() && s.follow_playhead && !s.arrange.dragging() {
                 let at = s.playhead();
                 if s.arrange.follow(at) {
+                    s.touch();
+                }
+            }
+            if s.is_recording() {
+                s.poll_recording();
+                if !s.is_recording() {
+                    s.sync();
                     s.touch();
                 }
             }
@@ -605,7 +633,9 @@ impl qobject::Project {
 
     fn toggle_play(self: Pin<&mut Self>) {
         self.edit(|s| {
-            if s.engine.is_playing() {
+            if s.is_recording() {
+                s.stop_recording();
+            } else if s.engine.is_playing() {
                 s.engine.stop();
             } else {
                 s.engine.play();
@@ -614,7 +644,20 @@ impl qobject::Project {
     }
 
     fn stop(self: Pin<&mut Self>) {
-        self.edit(|s| s.engine.stop());
+        self.edit(|s| {
+            s.stop_recording();
+            s.engine.stop();
+        });
+    }
+
+    fn toggle_record(self: Pin<&mut Self>) {
+        self.edit(|s| {
+            if s.is_recording() {
+                s.stop_recording();
+            } else if let Err(e) = s.start_recording() {
+                s.report(e);
+            }
+        });
     }
 
     fn go_to_start(self: Pin<&mut Self>) {

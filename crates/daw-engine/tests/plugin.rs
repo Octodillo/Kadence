@@ -21,7 +21,14 @@ fn engine() -> (EngineController, EngineProcessor) {
 }
 
 fn plugin(outputs: u16) -> (PluginHandle, Arc<FakeControl>) {
-    let fake = FakePlugin::new(outputs);
+    plugin_with(FakePlugin::new(outputs))
+}
+
+fn splitting(outputs: u16) -> (PluginHandle, Arc<FakeControl>) {
+    plugin_with(FakePlugin::splitting(outputs))
+}
+
+fn plugin_with(fake: FakePlugin) -> (PluginHandle, Arc<FakeControl>) {
     let control = fake.control.clone();
     (PluginHandle::new(Box::new(fake), RATE, FRAMES), control)
 }
@@ -367,4 +374,100 @@ fn a_rewire_is_asked_for_until_a_rewired_graph_plays() {
     send(&mut ctl, &plugin);
     assert_eq!(run(&mut proc, 1), [vec![3.0], vec![3.0]]);
     assert!(!plugin.pump());
+}
+
+#[test]
+fn a_split_plugin_plays_on_during_a_long_main_thread_call() {
+    let (plugin, _) = splitting(2);
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    // An editor opening or a big state save holds the main side for a whole cycle.
+    let held = plugin.with(|p| {
+        p.save_state().unwrap();
+        run(&mut proc, 8)
+    });
+    assert_eq!(held, [ramp(1, 9), ramp(1, 9)]);
+    assert_eq!(plugin.busy_blocks(), 0);
+}
+
+#[test]
+fn a_split_plugin_follows_layout_changes_and_keeps_its_state() {
+    let (plugin, control) = splitting(1);
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    assert_eq!(run(&mut proc, 3)[0], ramp(1, 4));
+    // A plain rebuild neither prepares nor takes the half back.
+    send(&mut ctl, &plugin);
+    assert_eq!(control.joins.load(Relaxed), 0);
+
+    control.next_latency.store(8, Relaxed);
+    ask_for(&control, 2);
+    assert!(plugin.pump());
+    assert_eq!(
+        run(&mut proc, 1)[0],
+        vec![4.0],
+        "plays on until the rebuild"
+    );
+    send(&mut ctl, &plugin);
+    assert_eq!(
+        control.joins.load(Relaxed),
+        1,
+        "the half came back for the prepare"
+    );
+    assert_eq!(control.prepares.load(Relaxed), 1);
+    let [l, r] = run(&mut proc, 2);
+    assert_eq!(ctl.latency(), 8);
+    assert_eq!(l, ramp(5, 7));
+    assert_eq!(r, l);
+    assert!(!plugin.pump());
+
+    plugin
+        .with(|p| p.load_state(&100f32.to_le_bytes()))
+        .unwrap();
+    assert!(plugin.needs_rebuild());
+    send(&mut ctl, &plugin);
+    assert_eq!(run(&mut proc, 1)[0], vec![101.0]);
+}
+
+#[test]
+fn a_split_plugin_gets_its_half_back_before_it_is_dropped() {
+    let (plugin, control) = splitting(1);
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    run(&mut proc, 1);
+    // FakePlugin asserts in drop that its half is back.
+    drop(plugin);
+    assert_eq!(control.joins.load(Relaxed), 1);
+    assert_eq!(run(&mut proc, 2)[0], vec![0.0; 2]);
+}
+
+#[test]
+fn a_split_plugin_retires_stale_nodes_like_a_whole_one() {
+    let (plugin, control) = splitting(1);
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    run(&mut proc, 2);
+    ask_for(&control, 2);
+    assert!(plugin.pump());
+    // The next graph never arrives; the running one must not play the two-channel half.
+    drop(plugin.node(RATE, FRAMES));
+    assert_eq!(run(&mut proc, 2)[0], vec![0.0; 2]);
+    assert!(plugin.pump());
+    send(&mut ctl, &plugin);
+    assert_eq!(run(&mut proc, 1), [vec![3.0], vec![3.0]]);
+}
+
+#[test]
+fn a_plugin_that_splits_only_once_prepared_is_split_from_then_on() {
+    let (plugin, control) = plugin_with(FakePlugin::splitting_after_prepare(1));
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    run(&mut proc, 1);
+    let held = plugin.with(|_| run(&mut proc, 1));
+    assert_eq!(held[0], vec![0.0], "whole: the main thread holds it");
+    ask_for(&control, 1);
+    plugin.pump();
+    send(&mut ctl, &plugin);
+    let held = plugin.with(|_| run(&mut proc, 2));
+    assert_eq!(held[0], ramp(2, 4), "split now: plays during the call");
 }

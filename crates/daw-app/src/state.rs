@@ -23,6 +23,8 @@ pub struct AppState {
     pub arrange: Arrange,
     /// The piano roll on the Edit page.
     pub piano: PianoRoll,
+    /// The MIDI take in progress.
+    pub recording: Option<crate::recording::Recording>,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -63,6 +65,7 @@ impl AppState {
             engine: default_engine(),
             arrange: Arrange::new(),
             piano: PianoRoll::new(),
+            recording: None,
             synced: None,
             view_revision: 0,
             status: None,
@@ -230,6 +233,8 @@ impl AppState {
     }
 
     pub fn replace_document(&mut self, doc: Document) {
+        // A take belongs to the document it was recorded for.
+        self.discard_recording();
         if let Some(s) = self.engine.session_mut() {
             let _ = s.stop();
             let _ = s.locate(TickTime(0));

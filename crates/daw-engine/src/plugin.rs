@@ -2,6 +2,9 @@
 //!
 //! A [`PluginInstance`] puts main-thread calls and `process` on one object, and a plugin can
 //! ask for a new port layout or latency at any time ([`PluginInstance::take_layout_changed`]).
+//! A format that can [`split`](PluginInstance::split) its instances hands the audio thread
+//! their audio half, so main-thread calls, however slow, never cost the plugin's audio; for
+//! the rest, the two threads take turns on the instance.
 //! [`PluginHandle`] owns the instance on the main thread and hands the audio thread a
 //! [`PluginNode`] for each graph. The node shares the instance, so state lives in the handle,
 //! not in the graph: build every graph with a fresh [`PluginHandle::node`] rather than
@@ -28,51 +31,85 @@
 //! Dropping the handle frees the instance there too, even while a graph still holds nodes.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, ThreadId};
 
 use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext};
-use daw_core::plugin::PluginInstance;
+use daw_core::plugin::{PluginInstance, PluginProcessor};
 
 /// How many times the audio thread retries a plugin the main thread holds before it outputs
 /// silence for that block: a few microseconds, enough for a short main-thread call.
 const AUDIO_RETRIES: u32 = 100;
 
+/// What the audio thread plays.
+enum Audio {
+    /// The whole instance, for a format that cannot [`split`](PluginInstance::split): the
+    /// main thread takes turns with the audio thread on it.
+    Whole(Box<dyn PluginInstance>),
+    /// The audio half of a split instance, which lives in [`Main`]. `None` while the main
+    /// thread prepares the plugin, or when the prepared plugin has nothing to play.
+    Split(Option<Box<dyn PluginProcessor>>),
+    /// The handle was dropped.
+    Gone,
+}
+
+/// One call on whichever half the audio thread holds.
+enum Target<'a> {
+    Whole(&'a mut dyn PluginInstance),
+    Split(&'a mut dyn PluginProcessor),
+}
+
+impl Target<'_> {
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        match self {
+            Self::Whole(p) => p.process(ctx),
+            Self::Split(p) => p.process(ctx),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Whole(p) => p.reset(),
+            Self::Split(p) => p.reset(),
+        }
+    }
+}
+
+/// What the audio thread and the main thread share; the main thread holds it only briefly
+/// for a split instance.
 struct Inner {
-    /// `None` once the handle is dropped.
-    plugin: Option<Box<dyn PluginInstance>>,
+    audio: Audio,
+    /// The node that last played. A newer node takes over on its first block; older ones
+    /// stay quiet.
+    owner: u64,
+}
+
+/// Main-thread state. Only the handle's thread locks it, so the audio thread never waits on
+/// it.
+struct Main {
+    /// A split instance; `None` for a whole one, which lives in [`Audio::Whole`], and once
+    /// the handle is dropped.
+    instance: Option<Box<dyn PluginInstance>>,
+    state: MainState,
+}
+
+struct MainState {
     /// Settings of the last `prepare`.
     prepared: (f64, u32),
     /// Ports and latency as of the last `prepare`.
     ports: PortLayout,
     latency: u32,
-    /// Bumped on every `prepare`: a node built for an older layout must not call the plugin.
-    epoch: u64,
-    /// The node that last played. A newer node takes over on its first block; older ones
-    /// stay quiet.
-    owner: u64,
     /// The plugin asked for another layout and has not been prepared since. Also set while
     /// a prepare runs, so one that panicked is done again.
     layout_changed: bool,
-    /// The node asked to play last, if it was the owner or newer, could not: it was made
-    /// for an older layout.
-    stale: bool,
-    /// The node that last played caught up with ports other than the ones it was made, and
-    /// wired, with.
-    rewire: bool,
 }
 
-impl Inner {
-    fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
-        // Retire every node first, so a prepare that panics halfway leaves none calling the
-        // plugin with a layout it was not compiled for.
-        self.epoch += 1;
+impl MainState {
+    /// Prepares `p` after every node was retired, and reads what the prepare changed.
+    fn prepare(&mut self, p: &mut dyn PluginInstance, sample_rate: f64, max_frames: u32) {
         self.layout_changed = true;
-        let Some(p) = self.plugin.as_mut() else {
-            return;
-        };
         p.prepare(sample_rate, max_frames);
         self.prepared = (sample_rate, max_frames);
         self.ports = p.ports();
@@ -83,17 +120,9 @@ impl Inner {
     }
 
     /// Picks up a layout change the plugin reported or a caller made through `with`.
-    fn note_layout_change(&mut self) {
-        let Some(p) = self.plugin.as_mut() else {
-            return;
-        };
+    /// Returns true when no node was compiled for the plugin's ports any more.
+    fn note_layout_change(&mut self, p: &mut dyn PluginInstance) -> bool {
         if p.take_layout_changed() {
-            self.layout_changed = true;
-        }
-        if p.ports() != self.ports {
-            // Changed without our prepare: no node was compiled for these ports.
-            self.epoch += 1;
-            self.ports = p.ports();
             self.layout_changed = true;
         }
         if p.latency() != self.latency {
@@ -101,26 +130,46 @@ impl Inner {
             self.latency = p.latency();
             self.layout_changed = true;
         }
+        if p.ports() != self.ports {
+            self.ports = p.ports();
+            self.layout_changed = true;
+            return true;
+        }
+        false
     }
 }
 
 struct Shared {
     inner: Exclusive<Inner>,
+    /// Bumped on every `prepare`: a node built for an older layout must not call the plugin.
+    /// Read by the audio thread inside `inner`; bumped by the main thread while it holds
+    /// `inner` or, for a split instance, before it takes the audio half back.
+    epoch: AtomicU64,
+    main: Mutex<Main>,
     thread: ThreadId,
-    /// Set while the main thread is inside the plugin, to catch re-entry, which would spin
-    /// forever.
+    /// Set while the main thread is inside the plugin, to catch re-entry, which would
+    /// deadlock or spin forever.
     main_inside: AtomicBool,
     /// Last node handed out.
     nodes: AtomicU64,
     /// `Inner::owner` while that node lives, 0 once it is dropped: then an older node may
     /// take over.
     live_owner: AtomicU64,
+    /// The node asked to play last, if it was the owner or newer, could not: it was made
+    /// for an older layout. Written by the audio thread; atomic so `pump` reads it without
+    /// stopping the audio.
+    stale: AtomicBool,
+    /// The node that last played caught up with ports other than the ones it was made, and
+    /// wired, with.
+    rewire: AtomicBool,
     /// Blocks the audio thread output silence for because the main thread held the plugin.
     busy: AtomicU64,
 }
 
 impl Shared {
-    fn main<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
+    /// Runs `f` on the plugin and the main-thread state. A split instance is reached without
+    /// stopping the audio thread; a whole one waits for it to leave the plugin.
+    fn main<R>(&self, f: impl FnOnce(Option<&mut dyn PluginInstance>, &mut MainState) -> R) -> R {
         assert_eq!(
             thread::current().id(),
             self.thread,
@@ -137,7 +186,69 @@ impl Shared {
             }
         }
         let _leave = Leave(&self.main_inside);
-        self.inner.main(f)
+        let mut main = self.lock_main();
+        let Main { instance, state } = &mut *main;
+        match instance {
+            Some(p) => f(Some(p.as_mut()), state),
+            None => self.inner.main(|i| match &mut i.audio {
+                Audio::Whole(p) => f(Some(p.as_mut()), state),
+                _ => f(None, state),
+            }),
+        }
+    }
+
+    fn lock_main(&self) -> MutexGuard<'_, Main> {
+        self.main.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn retire_nodes(&self) {
+        self.epoch.fetch_add(1, Ordering::Release);
+    }
+
+    /// Prepares the plugin: takes the audio half back from a split instance, prepares, and
+    /// hands out a fresh half. Every node is retired first, so a prepare that panics halfway
+    /// leaves none calling the plugin with a layout it was not compiled for.
+    fn prepare(&self, sample_rate: f64, max_frames: u32) {
+        let split = self.lock_main().instance.is_some();
+        if !split {
+            self.main(|p, state| {
+                if let Some(p) = p {
+                    self.retire_nodes();
+                    state.prepare(p, sample_rate, max_frames);
+                }
+            });
+            // A plugin that could not split before it was prepared may now.
+            let instance = self.inner.main(|i| {
+                let Audio::Whole(p) = &mut i.audio else {
+                    return None;
+                };
+                let half = p.split()?;
+                match std::mem::replace(&mut i.audio, Audio::Split(Some(half))) {
+                    Audio::Whole(p) => Some(p),
+                    _ => unreachable!("matched above"),
+                }
+            });
+            if instance.is_some() {
+                self.lock_main().instance = instance;
+            }
+            return;
+        }
+        let half = self.inner.main(|i| {
+            self.retire_nodes();
+            match &mut i.audio {
+                Audio::Split(half) => half.take(),
+                _ => None,
+            }
+        });
+        let half = self.main(|p, state| {
+            let p = p.expect("a split instance stays in Main while the handle lives");
+            if let Some(half) = half {
+                p.join(half);
+            }
+            state.prepare(p, sample_rate, max_frames);
+            p.split()
+        });
+        self.inner.main(|i| i.audio = Audio::Split(half));
     }
 }
 
@@ -152,43 +263,49 @@ impl PluginHandle {
     /// activates it, so the first graph does not need to restart it.
     ///
     /// [`PluginFormat::instantiate`]: daw_core::plugin::PluginFormat::instantiate
-    pub fn new(plugin: Box<dyn PluginInstance>, sample_rate: f64, max_frames: u32) -> Self {
-        let (ports, latency) = (plugin.ports(), plugin.latency());
+    pub fn new(mut plugin: Box<dyn PluginInstance>, sample_rate: f64, max_frames: u32) -> Self {
+        let state = MainState {
+            prepared: (sample_rate, max_frames),
+            ports: plugin.ports(),
+            latency: plugin.latency(),
+            layout_changed: false,
+        };
+        let (audio, instance) = match plugin.split() {
+            Some(half) => (Audio::Split(Some(half)), Some(plugin)),
+            None => (Audio::Whole(plugin), None),
+        };
         Self {
             shared: Arc::new(Shared {
-                inner: Exclusive::new(Inner {
-                    plugin: Some(plugin),
-                    prepared: (sample_rate, max_frames),
-                    ports,
-                    latency,
-                    epoch: 0,
-                    owner: 0,
-                    layout_changed: false,
-                    stale: false,
-                    rewire: false,
-                }),
+                inner: Exclusive::new(Inner { audio, owner: 0 }),
+                epoch: AtomicU64::new(0),
+                main: Mutex::new(Main { instance, state }),
                 thread: thread::current().id(),
                 main_inside: AtomicBool::new(false),
                 nodes: AtomicU64::new(0),
                 live_owner: AtomicU64::new(0),
+                stale: AtomicBool::new(false),
+                rewire: AtomicBool::new(false),
                 busy: AtomicU64::new(0),
             }),
             _not_send: PhantomData,
         }
     }
 
-    /// Runs `f` on the plugin, for state, parameters and editors. While it runs, the audio
-    /// thread waits a few microseconds, then outputs silence for this plugin, so keep `f`
-    /// short. Leave `prepare`, `process` and `take_layout_changed` to the handle.
+    /// Runs `f` on the plugin, for state, parameters and editors. For a format that splits
+    /// its instances (CLAP), the audio thread plays on meanwhile.
+    /// For one that does not, it waits a few microseconds, then outputs silence for this
+    /// plugin, so keep `f` short. Leave `prepare`, `process`, `split`, `join` and
+    /// `take_layout_changed` to the handle.
     pub fn with<R>(&self, f: impl FnOnce(&mut dyn PluginInstance) -> R) -> R {
-        self.shared.main(|i| {
-            let p = i
-                .plugin
-                .as_mut()
-                .expect("the handle holds the plugin while it lives");
-            let r = f(p.as_mut());
-            // A state load can change the latency.
-            i.note_layout_change();
+        let shared = &*self.shared;
+        shared.main(|p, state| {
+            let p = p.expect("the handle holds the plugin while it lives");
+            let r = f(p);
+            // A state load can change the latency. A whole instance is still held here, so
+            // no node plays it with ports it was not compiled for.
+            if state.note_layout_change(p) {
+                shared.retire_nodes();
+            }
             r
         })
     }
@@ -197,11 +314,14 @@ impl PluginHandle {
     /// and sent again with a fresh [`node`](Self::node): the plugin wants another layout or
     /// latency, or the node asked to play is out of date.
     pub fn pump(&self) -> bool {
-        self.shared.main(|i| {
-            if let Some(p) = i.plugin.as_mut() {
+        let shared = &*self.shared;
+        shared.main(|p, state| {
+            if let Some(p) = p {
                 p.on_main_thread();
+                if state.note_layout_change(p) {
+                    shared.retire_nodes();
+                }
             }
-            i.note_layout_change();
         });
         self.needs_rebuild()
     }
@@ -211,21 +331,16 @@ impl PluginHandle {
     pub fn needs_rebuild(&self) -> bool {
         let in_graph = Arc::strong_count(&self.shared) > 1;
         in_graph
-            && self
-                .shared
-                .main(|i| i.layout_changed || i.stale || i.rewire)
+            && (self.shared.main(|_, state| state.layout_changed)
+                || self.shared.stale.load(Ordering::Relaxed)
+                || self.shared.rewire.load(Ordering::Relaxed))
     }
 
     /// A node for the next graph, with the plugin's current ports and latency. Prepares the
     /// plugin first if it was prepared with other settings or asked for another layout; the
     /// node in the running graph then outputs silence until the new graph is swapped in.
     pub fn node(&self, sample_rate: f64, max_frames: u32) -> PluginNode {
-        let (epoch, ports, latency) = self.shared.main(|i| {
-            if i.layout_changed || i.prepared != (sample_rate, max_frames) {
-                i.prepare(sample_rate, max_frames);
-            }
-            (i.epoch, i.ports.clone(), i.latency)
-        });
+        let (epoch, ports, latency) = self.shared.current(sample_rate, max_frames);
         PluginNode {
             shared: self.shared.clone(),
             id: self.shared.nodes.fetch_add(1, Ordering::Relaxed) + 1,
@@ -243,15 +358,42 @@ impl PluginHandle {
     }
 }
 
+impl Shared {
+    /// Prepares the plugin if it was prepared with other settings or asked for another
+    /// layout, and returns the epoch, ports and latency a node for these settings has.
+    fn current(&self, sample_rate: f64, max_frames: u32) -> (u64, PortLayout, u32) {
+        let due = self
+            .main(|_, state| state.layout_changed || state.prepared != (sample_rate, max_frames));
+        if due {
+            self.prepare(sample_rate, max_frames);
+        }
+        let (ports, latency) = self.main(|_, state| (state.ports.clone(), state.latency));
+        (self.epoch.load(Ordering::Acquire), ports, latency)
+    }
+}
+
 impl Drop for PluginHandle {
     /// Frees the instance here, on its thread, not wherever the last graph holding a node
     /// is dropped. Those nodes output silence.
     fn drop(&mut self) {
-        let plugin = self.shared.main(|i| {
-            i.epoch += 1;
-            i.plugin.take()
-        });
-        drop(plugin);
+        self.shared.retire_nodes();
+        let audio = self
+            .shared
+            .inner
+            .main(|i| std::mem::replace(&mut i.audio, Audio::Gone));
+        let instance = self.shared.lock_main().instance.take();
+        match (audio, instance) {
+            (Audio::Split(half), Some(mut p)) => {
+                if let Some(half) = half {
+                    p.join(half);
+                }
+                drop(p);
+            }
+            (audio, instance) => {
+                drop(audio);
+                drop(instance);
+            }
+        }
     }
 }
 
@@ -283,22 +425,30 @@ impl Drop for PluginNode {
 impl PluginNode {
     /// Runs `f` on the plugin if this node may play it, retrying briefly while a main-thread
     /// call finishes. Real-time safe: no clock reads or system calls.
-    fn on_audio<R>(&mut self, mut f: impl FnMut(&mut dyn PluginInstance) -> R) -> Option<R> {
+    fn on_audio<R>(&mut self, mut f: impl FnMut(Target) -> R) -> Option<R> {
         let (id, epoch, rewired) = (self.id, self.epoch, self.rewired);
-        let live_owner = &self.shared.live_owner;
+        let shared = &*self.shared;
         let mut call = |i: &mut Inner| {
-            if id < i.owner && live_owner.load(Ordering::Relaxed) == i.owner {
+            if id < i.owner && shared.live_owner.load(Ordering::Relaxed) == i.owner {
                 // A newer node plays; it, not this one, tells the host about its state.
                 return None;
             }
-            i.stale = i.epoch != epoch;
-            let p = i.plugin.as_mut().filter(|_| !i.stale)?;
+            let stale = shared.epoch.load(Ordering::Acquire) != epoch;
+            shared.stale.store(stale, Ordering::Relaxed);
+            if stale {
+                return None;
+            }
+            let target = match &mut i.audio {
+                Audio::Whole(p) => Target::Whole(p.as_mut()),
+                Audio::Split(Some(p)) => Target::Split(p.as_mut()),
+                Audio::Split(None) | Audio::Gone => return None,
+            };
             if i.owner != id {
                 i.owner = id;
-                live_owner.store(id, Ordering::Relaxed);
+                shared.live_owner.store(id, Ordering::Relaxed);
             }
-            i.rewire = rewired;
-            Some(f(p.as_mut()))
+            shared.rewire.store(rewired, Ordering::Relaxed);
+            Some(f(target))
         };
         for _ in 0..AUDIO_RETRIES {
             if let Some(r) = self.shared.inner.try_audio(&mut call) {
@@ -321,12 +471,7 @@ impl Node for PluginNode {
     /// plugin asked for another layout. If that changes the node's ports, `pump` asks for a
     /// rebuild so the next graph is wired for them.
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
-        let (epoch, ports, latency) = self.shared.main(|i| {
-            if i.layout_changed || i.prepared != (sample_rate, max_frames) {
-                i.prepare(sample_rate, max_frames);
-            }
-            (i.epoch, i.ports.clone(), i.latency)
-        });
+        let (epoch, ports, latency) = self.shared.current(sample_rate, max_frames);
         // The graph was wired for the ports this node was made with.
         self.rewired |= ports != self.ports;
         self.epoch = epoch;
@@ -335,7 +480,7 @@ impl Node for PluginNode {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        if self.on_audio(|p| p.process(ctx)).is_none() {
+        if self.on_audio(|mut p| p.process(ctx)).is_none() {
             for out in ctx.audio_out.iter_mut() {
                 out.fill(0.0);
             }
@@ -347,6 +492,6 @@ impl Node for PluginNode {
     }
 
     fn reset(&mut self) {
-        self.on_audio(|p| p.reset());
+        self.on_audio(|mut p| p.reset());
     }
 }

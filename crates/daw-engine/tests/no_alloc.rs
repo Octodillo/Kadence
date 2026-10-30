@@ -176,7 +176,15 @@ fn steady_state_processing_never_allocates() {
 
 #[test]
 fn plugins_never_allocate_while_the_main_thread_uses_and_restarts_them() {
-    let fake = FakePlugin::new(1);
+    stress_plugin(FakePlugin::new(1));
+}
+
+#[test]
+fn split_plugins_never_allocate_while_the_main_thread_uses_and_restarts_them() {
+    stress_plugin(FakePlugin::splitting(1));
+}
+
+fn stress_plugin(fake: FakePlugin) {
     let control = fake.control.clone();
     let (mut ctl, mut proc) = EngineController::new(EngineConfig {
         max_frames: 64,
