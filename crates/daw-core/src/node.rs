@@ -19,6 +19,31 @@ pub struct TransportState {
     pub sample_rate: f64,
     /// Bars and beats at `position`.
     pub music: MusicalPosition,
+    /// The loop, when one is set. Playback wraps from its end to its start
+    /// on a block boundary, so a block never runs past the end.
+    pub looping: Option<TransportLoop>,
+}
+
+/// A loop from `start` (inclusive) to `end` (exclusive), in samples and in
+/// quarter notes from tick 0.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TransportLoop {
+    pub start: SampleTime,
+    pub end: SampleTime,
+    pub start_beats: f64,
+    pub end_beats: f64,
+}
+
+impl TransportLoop {
+    /// The loop from `start` to `end` on `timeline`.
+    pub fn at(timeline: &Timeline, start: SampleTime, end: SampleTime, sample_rate: f64) -> Self {
+        Self {
+            start,
+            end,
+            start_beats: timeline.position(start, sample_rate).beats,
+            end_beats: timeline.position(end, sample_rate).beats,
+        }
+    }
 }
 
 impl TransportState {
@@ -30,6 +55,7 @@ impl TransportState {
             bpm: timeline.bpm_at(position, sample_rate),
             sample_rate,
             music: timeline.position(position, sample_rate),
+            looping: None,
         }
     }
 
