@@ -58,10 +58,10 @@ pub struct Header {
     /// cycles then output silence instead of waiting for it, and the watchdog does not count
     /// them as a hang.
     pub main_busy: AtomicU32,
-    /// Set by the host while its main thread is inside the plugin for any reason (a call or the
-    /// main-thread pump). Audio cycles wait for it as usual, but the watchdog gives a stalled
-    /// cycle the call timeout rather than the hang timeout, so slow main-thread work in a
-    /// healthy plugin is not mistaken for a hang.
+    /// Set by the host while its main thread holds the plugin for any reason (a call or the
+    /// main-thread pump), but not while it only waits for the lock. Audio cycles wait for it as
+    /// usual, but the watchdog gives a stalled cycle the call timeout rather than the hang
+    /// timeout, so slow main-thread work in a healthy plugin is not mistaken for a hang.
     pub main_in_plugin: AtomicU32,
     pub position: AtomicU64,
     /// `f64` bits.

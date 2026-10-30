@@ -150,8 +150,7 @@ impl Host<'_> {
                 Err(e) => return Err(e),
             }
             if last_pump.elapsed() >= PUMP_INTERVAL {
-                let _inside = self.inside_plugin();
-                if let Some(p) = lock(&self.plugin).as_mut() {
+                if let Some(p) = self.lock_inside().as_mut() {
                     p.on_main_thread();
                 }
                 last_pump = Instant::now();
@@ -159,13 +158,9 @@ impl Host<'_> {
         }
     }
 
-    /// Flags the audio block while the main thread may hold the plugin, until dropped.
-    fn inside_plugin(&self) -> InsidePlugin {
-        let shm = self.audio.as_ref().map(|a| a.shm.clone());
-        if let Some(shm) = &shm {
-            shm.header().main_in_plugin.store(1, Ordering::SeqCst);
-        }
-        InsidePlugin(shm)
+    /// Locks the plugin for the main thread, flagged in the audio block while held.
+    fn lock_inside(&self) -> InsidePlugin<'_> {
+        InsidePlugin::lock(&self.plugin, self.audio.as_ref().map(|a| a.shm.clone()))
     }
 
     fn handle(&mut self, request: Request, blob: &[u8]) -> (Reply, Vec<u8>) {
@@ -174,7 +169,6 @@ impl Host<'_> {
             request,
             Request::SaveState | Request::LoadState | Request::OpenEditor | Request::CloseEditor
         );
-        let _inside = self.inside_plugin();
         let busy = self.audio.as_ref().map(|a| a.shm.clone()).filter(|_| slow);
         if let Some(shm) = &busy {
             shm.header().main_busy.store(1, Ordering::SeqCst);
@@ -248,7 +242,7 @@ impl Host<'_> {
         &self,
         f: impl FnOnce(&mut dyn PluginInstance) -> Result<T, PluginError>,
     ) -> Result<T, PluginError> {
-        match lock(&self.plugin).as_mut() {
+        match self.lock_inside().as_mut() {
             Some(p) => f(p.as_mut()),
             None => Err(PluginError::Load("no plugin loaded".into())),
         }
@@ -272,7 +266,9 @@ impl Host<'_> {
             None => old,
         };
         if self.prepared != (sample_rate, max_frames) {
-            if let Some(p) = lock(&self.plugin).as_mut() {
+            // The audio thread is stopped, so flag the block it restarts with: a cycle the
+            // application posts meanwhile waits for this.
+            if let Some(p) = InsidePlugin::lock(&self.plugin, block.clone()).as_mut() {
                 p.prepare(sample_rate, max_frames);
             }
             self.prepared = (sample_rate, max_frames);
@@ -293,12 +289,43 @@ impl Host<'_> {
     }
 }
 
-/// Clears [`Header::main_in_plugin`](crate::shm::Header::main_in_plugin) when dropped.
-struct InsidePlugin(Option<Arc<Shm>>);
+/// The plugin locked by the host's main thread. [`Header::main_in_plugin`] is set only once
+/// the lock is held, and cleared before it is released: a main thread still waiting for an
+/// audio thread stuck in the plugin must leave the hang timeout in force.
+///
+/// [`Header::main_in_plugin`]: crate::shm::Header::main_in_plugin
+struct InsidePlugin<'a> {
+    guard: MutexGuard<'a, Option<Box<dyn PluginInstance>>>,
+    shm: Option<Arc<Shm>>,
+}
 
-impl Drop for InsidePlugin {
+impl<'a> InsidePlugin<'a> {
+    fn lock(plugin: &'a SharedPlugin, shm: Option<Arc<Shm>>) -> Self {
+        let guard = lock(plugin);
+        if let Some(shm) = &shm {
+            shm.header().main_in_plugin.store(1, Ordering::SeqCst);
+        }
+        Self { guard, shm }
+    }
+}
+
+impl std::ops::Deref for InsidePlugin<'_> {
+    type Target = Option<Box<dyn PluginInstance>>;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for InsidePlugin<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for InsidePlugin<'_> {
+    // Runs before the guard field drops, so the flag is clear by the time the lock is free.
     fn drop(&mut self) {
-        if let Some(shm) = &self.0 {
+        if let Some(shm) = &self.shm {
             shm.header().main_in_plugin.store(0, Ordering::SeqCst);
         }
     }
@@ -625,6 +652,40 @@ mod tests {
         host.stop_audio();
         // 2 means the flag was set while the pump ran.
         assert_eq!(in_plugin.load(Ordering::SeqCst), 2);
+        assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_main_thread_waiting_on_a_stuck_audio_thread_is_not_flagged_as_inside_the_plugin() {
+        let shm = block();
+        let plugin = shared(Probe::default());
+        let registry = PluginRegistry::new();
+        let (stream, peer) = UnixStream::pair().unwrap();
+        // Holding the lock stands in for an audio thread stuck in process().
+        let stuck = lock(&plugin);
+        std::thread::scope(|s| {
+            let pumping = s.spawn(|| {
+                let mut host = Host {
+                    registry: &registry,
+                    stream,
+                    plugin: plugin.clone(),
+                    audio: Some(AudioThread::start(shm.clone(), plugin.clone(), None)),
+                    prepared: (48_000.0, 64),
+                    rt_priority: None,
+                };
+                host.run().unwrap();
+                host.stop_audio();
+            });
+            // Several pump intervals: the pump is blocked on the lock by now.
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(200) {
+                assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(peer);
+            drop(stuck);
+            pumping.join().unwrap();
+        });
         assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
     }
 
