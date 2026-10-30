@@ -43,17 +43,13 @@ pub enum CompileError {
     DuplicateKey(NodeKey),
     #[error("the graph reuses nodes from a graph that is no longer the latest sent")]
     StaleGraph,
-    #[error("node {node:?} is {latency} samples late; the limit is {max}")]
-    LatencyTooLarge {
-        node: NodeId,
-        latency: u32,
-        max: u32,
-    },
 }
 
-/// The most latency a path through the graph may have, in seconds. Each
-/// early edge gets a delay line of up to this length, so a plugin reporting a
-/// huge latency must not make compile allocate gigabytes.
+/// The most latency compile compensates on any path through the graph, in
+/// seconds. Each early edge gets a delay line of up to this length, so a
+/// plugin reporting a huge latency must not make compile allocate gigabytes.
+/// Latency past the limit is clamped: the graph still plays, only that
+/// path's compensation is off.
 pub const MAX_LATENCY_SECONDS: f64 = 10.0;
 
 /// One summing input of a step: a source channel, optionally through a
@@ -266,14 +262,7 @@ impl CompiledGraph {
                 .max()
                 .unwrap_or(0);
             in_latency[s] = latest;
-            out_latency[s] = latest.saturating_add(steps[s].latency);
-            if out_latency[s] > max_latency {
-                return Err(CompileError::LatencyTooLarge {
-                    node: steps[s].id,
-                    latency: out_latency[s],
-                    max: max_latency,
-                });
-            }
+            out_latency[s] = latest.saturating_add(steps[s].latency).min(max_latency);
         }
 
         let mut delays = Vec::new();

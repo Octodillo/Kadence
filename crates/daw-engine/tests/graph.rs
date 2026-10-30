@@ -389,40 +389,41 @@ impl daw_core::node::Node for ReportsLatency {
 
 /// A source feeding the master both directly and through a node with
 /// `latency`, so the direct edge needs a delay line of that length.
-fn parallel_paths(latency: u32) -> (GraphDesc, NodeId) {
+fn parallel_paths(latency: u32) -> GraphDesc {
     let mut g = GraphDesc::new(0, 1);
     let sine = g.add_device("sine", Box::new(Sine::new(1)));
     let late = g.add_device("late", Box::new(ReportsLatency(latency)));
     g.connect(sine, late);
     g.connect(sine, g.master());
     g.connect(late, g.master());
-    (g, late)
+    g
 }
 
 #[test]
-fn refuses_unbounded_plugin_latency() {
+fn clamps_unbounded_plugin_latency() {
     // 0xFFFFFFFF from getLatencySamples would otherwise ask for a 16 GiB
-    // delay line on the direct edge and abort the process.
-    let (g, late) = parallel_paths(u32::MAX);
+    // delay line on the direct edge and abort the process. The graph must
+    // still compile so the project keeps playing.
     let max = (48_000.0 * daw_engine::MAX_LATENCY_SECONDS) as u32;
-    assert!(matches!(
-        CompiledGraph::compile(g, 48_000.0, 64, 16),
-        Err(CompileError::LatencyTooLarge { node, latency: u32::MAX, max: m }) if node == late && m == max
-    ));
-
-    // Latency that only adds up past the limit along a chain is refused too.
-    let mut g = GraphDesc::new(0, 1);
-    let a = g.add_device("a", Box::new(ReportsLatency(max / 2 + 1)));
-    let b = g.add_device("b", Box::new(ReportsLatency(max / 2 + 1)));
-    g.connect(a, b);
-    g.connect(b, g.master());
-    assert!(matches!(
-        CompiledGraph::compile(g, 48_000.0, 64, 16),
-        Err(CompileError::LatencyTooLarge { node, .. }) if node == b
-    ));
-
-    // A large but plausible latency still compiles and is compensated.
-    let (g, _) = parallel_paths(max);
+    let g = parallel_paths(u32::MAX);
     let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
     assert_eq!(compiled.latency(), max);
+
+    // Latency that only adds up past the limit along a chain is clamped too,
+    // so a delay line for a parallel edge stays bounded.
+    let mut g = GraphDesc::new(0, 1);
+    let sine = g.add_device("sine", Box::new(Sine::new(1)));
+    let a = g.add_device("a", Box::new(ReportsLatency(max / 2 + 1)));
+    let b = g.add_device("b", Box::new(ReportsLatency(max / 2 + 1)));
+    g.connect(sine, a);
+    g.connect(a, b);
+    g.connect(b, g.master());
+    g.connect(sine, g.master());
+    let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
+    assert_eq!(compiled.latency(), max);
+
+    // A large but plausible latency is compensated exactly.
+    let g = parallel_paths(max - 1);
+    let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
+    assert_eq!(compiled.latency(), max - 1);
 }
