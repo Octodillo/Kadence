@@ -22,6 +22,7 @@ QtObject {
         "Change Fade In": i18nc("@item:inmenu name of an edit", "Change Fade In"),
         "Change Fade Out": i18nc("@item:inmenu name of an edit", "Change Fade Out"),
         "Change Fade Shape": i18nc("@item:inmenu name of an edit", "Change Fade Shape"),
+        "Change Instrument": i18nc("@item:inmenu name of an edit", "Change Instrument"),
         "Change Pan": i18nc("@item:inmenu name of an edit", "Change Pan"),
         "Change Parameter": i18nc("@item:inmenu name of an edit", "Change Parameter"),
         "Change Plugin State": i18nc("@item:inmenu name of an edit", "Change Plugin State"),

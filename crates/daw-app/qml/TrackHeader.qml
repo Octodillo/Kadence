@@ -8,11 +8,12 @@ import org.kde.kirigami as Kirigami
 import io.github.octodillo.daw
 
 // One row of the track list beside the timeline: colour, drag handle,
-// name, MIDI input, arm, mute, solo. Everything is read from Project by
-// index; `revision` re-reads it after any change. The bindings use
-// `revision` in an expression: a bare `revision;` statement is dropped by
-// the QML compiler, and then the binding never re-reads. Dragging the
-// handle reorders tracks; the list view shows where the track will land
+// name, instrument (on instrument tracks), MIDI input, arm, mute, solo.
+// Everything is read from Project by index; `revision` re-reads it after
+// any change. The bindings use `revision` in an expression: a bare
+// `revision;` statement is dropped by the QML compiler, and then the
+// binding never re-reads. Dragging the handle reorders tracks; the list
+// view shows where the track will land
 // (`dragFrom`, `dragTo`).
 QQC2.ItemDelegate {
     id: header
@@ -26,6 +27,7 @@ QQC2.ItemDelegate {
     readonly property bool soloed: revision >= 0 ? Project.trackSoloed(index) : false
     readonly property bool armed: revision >= 0 ? Project.trackArmed(index) : false
     readonly property color trackColor: revision >= 0 ? Project.trackColor(index) : "transparent"
+    readonly property string instrument: revision >= 0 && kind === 1 ? Project.trackInstrument(index) : ""
 
     highlighted: Project.selectedTrack === index
     opacity: ListView.view && ListView.view.dragFrom === index ? 0.5 : 1
@@ -129,6 +131,15 @@ QQC2.ItemDelegate {
             }
             onActiveFocusChanged: if (!activeFocus) visible = false
             Keys.onEscapePressed: visible = false
+        }
+
+        InstrumentButton {
+            Layout.alignment: Qt.AlignVCenter
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 5
+            visible: header.kind === 1
+            instrument: header.instrument
+            currentChoice: header.revision >= 0 ? Project.trackInstrumentChoice(header.index) : -1
+            onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
         }
 
         MidiInputButton {

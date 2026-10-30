@@ -230,8 +230,8 @@ Kirigami.Page {
                 Layout.fillHeight: true
                 // A child that fills makes a layout fill too; pin the width.
                 Layout.fillWidth: false
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 14
-                Layout.maximumWidth: Kirigami.Units.gridUnit * 14
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 19
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 19
                 spacing: 0
 
                 Rectangle {

@@ -10,6 +10,8 @@ pub mod bridge;
 mod demo;
 pub mod engine;
 mod ffi;
+pub mod instrument;
+pub mod instruments_bridge;
 pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;
