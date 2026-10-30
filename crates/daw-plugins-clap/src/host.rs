@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
@@ -91,6 +91,8 @@ pub(crate) struct HostShared {
     pub(crate) flush_requested: AtomicBool,
     pub(crate) gui_closed: AtomicBool,
     pub(crate) state_dirty: AtomicBool,
+    /// An embedded editor's requested size, `width << 32 | height`, or 0 for none.
+    pub(crate) pending_resize: AtomicU64,
 }
 
 impl HostShared {
@@ -102,6 +104,7 @@ impl HostShared {
             flush_requested: AtomicBool::new(false),
             gui_closed: AtomicBool::new(false),
             state_dirty: AtomicBool::new(false),
+            pending_resize: AtomicU64::new(0),
         }
     }
 
@@ -153,8 +156,10 @@ impl HostParamsImplShared for HostShared {
 impl HostGuiImpl for HostShared {
     fn resize_hints_changed(&self) {}
 
-    fn request_resize(&self, _new_size: GuiSize) -> Result<(), HostError> {
-        // Floating windows are sized by the plugin itself.
+    fn request_resize(&self, new_size: GuiSize) -> Result<(), HostError> {
+        // Applied to the host window by the main-thread pump; floating windows ignore it.
+        let packed = (u64::from(new_size.width) << 32) | u64::from(new_size.height);
+        self.pending_resize.store(packed, Ordering::Release);
         Ok(())
     }
 
