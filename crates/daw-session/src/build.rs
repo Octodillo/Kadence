@@ -238,7 +238,11 @@ pub(crate) fn graph(
         for d in &track.devices {
             let key = device_key(d.id);
             let same_source = old.structure.device_source(d.id) == Some(&d.source);
+            let plugin = matches!(d.source, DeviceSource::Plugin { .. });
             let id = match (same_source, g.can_reuse(key)) {
+                // A plugin keeps its state in its handle; every graph gets a fresh node of
+                // it, with its current ports and latency.
+                _ if plugin => plugin_node(session, &mut g, &mut built, &old, d),
                 (true, true) => {
                     let id = g.reuse(key).expect("checked");
                     g.rename(id, &d.name);
@@ -556,6 +560,37 @@ fn join_contiguous(set: &mut ClipSet) {
     }
 }
 
+/// The node of a plugin device: a fresh node of its loaded plugin, or a
+/// bypass when it can't play.
+fn plugin_node(
+    session: &mut Session,
+    g: &mut GraphDesc,
+    built: &mut Built,
+    old: &Built,
+    d: &Device,
+) -> NodeId {
+    let key = device_key(d.id);
+    let (sample_rate, max_frames) = (session.sample_rate(), session.config.engine.max_frames);
+    let node: Box<dyn Node> =
+        match session
+            .plugins
+            .ensure(d, sample_rate, max_frames, &mut session.warnings)
+        {
+            Some(live) => {
+                if !std::mem::take(&mut live.fresh) {
+                    carry_params(built, old, key);
+                }
+                // A fresh plugin has had none of the document's values: the session sends
+                // them all once the graph is in.
+                Box::new(live.handle.node(sample_rate, max_frames))
+            }
+            None => Box::new(Bypass),
+        };
+    let id = g.add_device(&d.name, node);
+    g.set_key(id, key);
+    id
+}
+
 /// The engine node for a model device, its gain reduction meter if it has
 /// one, and a warning if it can't be made.
 fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
@@ -583,14 +618,7 @@ fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<War
                 Some(Warning::UnknownDevice { kind: kind.clone() }),
             ),
         },
-        DeviceSource::Plugin { id, .. } => (
-            Box::new(Bypass),
-            None,
-            Some(Warning::PluginNotLoaded {
-                device: d.name.clone(),
-                plugin: id.to_string(),
-            }),
-        ),
+        DeviceSource::Plugin { .. } => unreachable!("plugins are made by plugin_node"),
     }
 }
 

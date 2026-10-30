@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use daw_arrange::{Arrange, Env};
 use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
-use daw_model::{Document, FormatError, Project};
+use daw_model::commands::{Batch, DeviceField, SetDevice};
+use daw_model::{Command, Document, FormatError, Project};
 use daw_pianoroll::PianoRoll;
 
 use crate::engine::{EngineHandle, default_engine};
@@ -121,6 +122,72 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Runs the plugins' main-thread work and frees what the audio thread
+    /// is done with. Called by the UI's refresh timer, about 60 times a
+    /// second.
+    pub fn tick_engine(&mut self) {
+        let Some(session) = self.engine.session_mut() else {
+            return;
+        };
+        match session.tick() {
+            Ok(news) => {
+                if let Some(w) = news.into_iter().next() {
+                    self.report(Message::Warning(w));
+                }
+            }
+            Err(e) => {
+                // Retried every tick; shown once.
+                let fields = Message::Playback(e).fields();
+                if self.status.as_ref() != Some(&fields) {
+                    self.status = Some(fields);
+                    self.touch();
+                }
+            }
+        }
+    }
+
+    /// Stores each plugin's current state in the document, as one undo
+    /// step, so saving keeps it. Plugins whose state is unchanged add
+    /// nothing.
+    pub fn store_plugin_states(&mut self) {
+        let Some(session) = self.engine.session() else {
+            return;
+        };
+        let mut commands: Vec<Box<dyn Command>> = Vec::new();
+        for s in session.plugin_states() {
+            match s.state {
+                Ok(state) => commands.push(Box::new(SetDevice {
+                    id: s.device,
+                    field: DeviceField::State(Some(state)),
+                })),
+                Err(detail) => {
+                    let device = self
+                        .doc
+                        .project()
+                        .all_tracks()
+                        .flat_map(|t| t.devices.iter())
+                        .find(|d| d.id == s.device)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_default();
+                    self.report(Message::Warning(
+                        daw_session::Warning::PluginStateNotSaved { device, detail },
+                    ));
+                }
+            }
+        }
+        if commands.is_empty() {
+            return;
+        }
+        self.end_drag();
+        if let Err(e) = self
+            .doc
+            .execute(Batch::new("Change Plugin State", commands))
+        {
+            self.report(e.into());
+        }
+        self.sync();
     }
 
     /// Forces a full resync, after the engine was restarted.
@@ -248,6 +315,9 @@ impl AppState {
             let _ = s.stop();
             let _ = s.locate(TickTime(0));
             let _ = s.set_loop(None);
+            // The new document's plugins start from its own saved state, even where it
+            // has the same devices (reopening a project).
+            s.clear_plugins();
         }
         self.doc = doc;
         self.autosave_failed = None;
