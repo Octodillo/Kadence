@@ -269,6 +269,47 @@ fn forgotten_failures_are_scanned_again() {
     assert_eq!((report.scanned, report.failed.len()), (1, 0));
 }
 
+/// A bundle that does not load is a cached failure that says why, not a bundle without plugins.
+#[test]
+fn bundles_that_do_not_load_are_reported_and_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    let broken = dir.path().join("broken.clap");
+    std::fs::write(&broken, b"not a shared library").unwrap();
+    match scanner().scan(&PluginFormatKind::Clap, &broken) {
+        Err(e @ ScanError::LoadFailed(_)) => {
+            assert!(e.is_plugin_fault());
+            assert!(e.to_string().contains("broken.clap"), "{e}");
+        }
+        other => panic!("expected a load failure, got {other:?}"),
+    }
+
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert_eq!(report.failed[0].0, broken);
+    assert!(report.failed[0].1.contains("did not load"), "{report:?}");
+    assert_eq!(cache.len(), 1);
+
+    // The reason counts even when the scanner crashes on its way out.
+    match sh(r#"printf '{"load_failed":"boom"}'; kill -SEGV $$"#)
+        .scan(&PluginFormatKind::Clap, &broken)
+    {
+        Err(ScanError::LoadFailed(why)) => assert_eq!(why, "boom"),
+        other => panic!("expected a load failure, got {other:?}"),
+    }
+
+    // The cached failure is reported again without a scan, until a rescan forgets it.
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!(
+        (report.cached, report.scanned, report.failed.len()),
+        (1, 0, 1)
+    );
+    cache.forget_failures();
+    assert!(cache.is_empty());
+}
+
 #[test]
 fn scanner_problems_are_not_cached_as_plugin_failures() {
     let dir = plugin_dir();

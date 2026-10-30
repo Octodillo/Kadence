@@ -48,6 +48,7 @@ macro_rules! need_plugins {
 fn find(format: &dyn PluginFormat, dir: &Path, bundle: &str, id: &str) -> PluginDescriptor {
     format
         .scan(&dir.join(bundle))
+        .unwrap()
         .into_iter()
         .find(|d| d.id == id)
         .unwrap_or_else(|| panic!("{id} not found"))
@@ -134,7 +135,7 @@ fn param_id(p: &dyn PluginInstance, name: &str) -> u32 {
 fn scan_describes_plugins() {
     let dir = need_plugins!();
     let format = daw_plugins_lv2::format();
-    let found = format.scan(&dir.join("mda.lv2"));
+    let found = format.scan(&dir.join("mda.lv2")).unwrap();
     assert!(found.len() >= 30, "only {} mda plugins", found.len());
     let piano = found
         .iter()
@@ -151,7 +152,7 @@ fn scan_describes_plugins() {
     assert!(!delay.is_instrument);
     assert_eq!(delay.ports, (2, 2));
     // Scanning the parent directory finds the same bundles and more.
-    assert!(format.scan(&dir).len() > found.len());
+    assert!(format.scan(&dir).unwrap().len() > found.len());
 }
 
 #[test]

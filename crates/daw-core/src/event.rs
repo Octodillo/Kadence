@@ -14,9 +14,12 @@ pub enum EventKind {
         velocity: f32,
         note_id: NoteId,
     },
+    /// Releases notes on `channel`. `key: None` is a wildcard: every key, or with a `note_id` of
+    /// 0 or more, that note whatever its key. Targets with no wildcard form (MIDI, LV2, VST3)
+    /// get MIDI all notes off (CC 123) on the channel for a wildcard.
     NoteOff {
         channel: u8,
-        key: u8,
+        key: Option<u8>,
         velocity: f32,
         note_id: NoteId,
     },
@@ -26,6 +29,12 @@ pub enum EventKind {
         param: ParamId,
         value: f64,
     },
+}
+
+/// MIDI all notes off (CC 123) on `channel`: the MIDI form of a wildcard
+/// [`EventKind::NoteOff`].
+pub const fn all_notes_off(channel: u8) -> [u8; 3] {
+    [0xb0 | (channel & 0x0f), 123, 0]
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

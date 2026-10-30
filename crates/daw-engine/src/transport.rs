@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use daw_core::node::TransportState;
+use daw_core::node::{TransportLoop, TransportState};
 use daw_core::time::{SampleTime, Timeline};
 
 /// A loop from `start` (inclusive) to `end` (exclusive).
@@ -70,12 +70,16 @@ impl Transport {
 
     /// The state at the current position, with bars and beats. RT-safe.
     pub fn state(&self) -> TransportState {
-        TransportState::at(
-            &self.timeline,
-            self.playing,
-            SampleTime(self.position),
-            self.sample_rate,
-        )
+        let position = SampleTime(self.position);
+        let mut state =
+            TransportState::at(&self.timeline, self.playing, position, self.sample_rate);
+        // Past the end the loop no longer wraps (see `advance`), so plugins
+        // must not expect it to.
+        state.looping = self
+            .loop_range
+            .filter(|r| self.position < r.end.0)
+            .map(|r| TransportLoop::at(&self.timeline, r.start, r.end, self.sample_rate));
+        state
     }
 
     pub fn is_playing(&self) -> bool {
@@ -167,6 +171,27 @@ mod tests {
             end: SampleTime(10),
         })));
         assert_eq!(t.loop_range(), None);
+    }
+
+    #[test]
+    fn state_reports_the_loop_in_beats() {
+        let mut t = Transport::new(48_000.0);
+        assert_eq!(t.state().looping, None);
+        // Bars 2 and 3 at 120 bpm in 4/4.
+        t.apply(TransportCommand::SetLoop(Some(LoopRange {
+            start: SampleTime(96_000),
+            end: SampleTime(192_000),
+        })));
+        let l = t.state().looping.unwrap();
+        assert_eq!((l.start, l.end), (SampleTime(96_000), SampleTime(192_000)));
+        assert_eq!((l.start_beats, l.end_beats), (4.0, 8.0));
+        // Past the end playback runs on, so there is no loop to report.
+        t.apply(TransportCommand::Locate(SampleTime(192_000)));
+        assert_eq!(t.state().looping, None);
+        t.apply(TransportCommand::Locate(SampleTime(191_999)));
+        assert!(t.state().looping.is_some());
+        t.apply(TransportCommand::SetLoop(None));
+        assert_eq!(t.state().looping, None);
     }
 
     #[test]

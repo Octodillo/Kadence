@@ -29,7 +29,7 @@ Kirigami.Page {
         onRunningChanged: last = Date.now()
         onTriggered: {
             const now = Date.now();
-            Mixer.tick(Engine.playing, (now - last) / 1000);
+            Mixer.tick(Project.playing, (now - last) / 1000);
             last = now;
         }
     }

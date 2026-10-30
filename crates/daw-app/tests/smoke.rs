@@ -12,6 +12,7 @@ fn kadence(config_home: &Path) -> Command {
     cmd.env("QT_QPA_PLATFORM", "offscreen")
         .env("QT_FORCE_STDERR_LOGGING", "1")
         .env("XDG_CONFIG_HOME", config_home)
+        .env("KADENCE_AUDIO", "stub")
         .env_remove("KADENCE_SMOKE_TEST_CONFIG")
         .env_remove("QT_SCALE_FACTOR");
     cmd

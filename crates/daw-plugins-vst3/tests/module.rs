@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use daw_core::PluginFormat;
+use daw_core::plugin::PluginError;
 use daw_plugins_vst3::Vst3Format;
 use libloading::os::unix::Library;
 
@@ -69,7 +70,11 @@ fn a_module_is_entered_once_however_many_threads_load_it() {
         for _ in 0..8 {
             s.spawn(|| {
                 for _ in 0..10 {
-                    let d = Vst3Format.scan(&bundle).pop().expect("testgain scans");
+                    let d = Vst3Format
+                        .scan(&bundle)
+                        .unwrap()
+                        .pop()
+                        .expect("testgain scans");
                     let p = Vst3Format.instantiate(&d, 48_000.0, 64).unwrap();
                     assert_eq!(p.descriptor().name, "Test Gain");
                 }
@@ -84,7 +89,7 @@ fn a_module_is_entered_once_however_many_threads_load_it() {
     assert_eq!((entries, exits), (1, 0));
 
     // Shutdown exits only modules no instance uses, and a later load enters them again.
-    let d = Vst3Format.scan(&bundle).pop().unwrap();
+    let d = Vst3Format.scan(&bundle).unwrap().pop().unwrap();
     let p = Vst3Format.instantiate(&d, 48_000.0, 64).unwrap();
     daw_plugins_vst3::shutdown();
     assert_eq!(counts(), [1, 0, 0], "exited a module in use");
@@ -102,7 +107,11 @@ fn a_module_is_entered_once_however_many_threads_load_it() {
 fn a_module_without_a_factory_is_left_as_it_was() {
     let (bundle, so) = bundle("nofactory", "NoFactory");
     let lib = counters(&so);
-    assert!(Vst3Format.scan(&bundle).is_empty());
+    // The scan says why there are no plugins.
+    match Vst3Format.scan(&bundle) {
+        Err(PluginError::Load(why)) => assert!(why.contains("GetPluginFactory"), "{why}"),
+        other => panic!("expected a load error, got {other:?}"),
+    }
     let mut out = [0u32; 2];
     unsafe {
         let f = lib

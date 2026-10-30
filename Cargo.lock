@@ -493,9 +493,25 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
+ "daw-arrange",
  "daw-core",
  "daw-devices",
  "daw-engine",
+ "daw-media",
+ "daw-model",
+ "daw-session",
+]
+
+[[package]]
+name = "daw-arrange"
+version = "0.1.0"
+dependencies = [
+ "daw-core",
+ "daw-media",
+ "daw-midi",
+ "daw-model",
+ "proptest",
+ "tempfile",
 ]
 
 [[package]]
@@ -663,6 +679,22 @@ dependencies = [
  "tempfile",
  "vst3",
  "x11rb",
+]
+
+[[package]]
+name = "daw-session"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+ "daw-backend",
+ "daw-core",
+ "daw-devices",
+ "daw-engine",
+ "daw-media",
+ "daw-midi",
+ "daw-model",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

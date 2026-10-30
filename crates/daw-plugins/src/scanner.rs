@@ -9,7 +9,8 @@ use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
+use daw_core::plugin::{PluginDescriptor, PluginError, PluginFormatKind};
+use serde::{Deserialize, Serialize};
 
 use crate::registry::PluginRegistry;
 
@@ -42,6 +43,9 @@ pub enum ScanError {
     BadOutput(String),
     #[error("the scanner does not support this format")]
     Unsupported,
+    /// The bundle did not load: a missing library, no entry point, a factory that failed.
+    #[error("the plugin did not load: {0}")]
+    LoadFailed(String),
 }
 
 impl ScanError {
@@ -53,7 +57,7 @@ impl ScanError {
     pub fn is_plugin_fault(&self) -> bool {
         matches!(
             self,
-            Self::Crashed(_) | Self::BadOutput(_) | Self::TimedOut(_)
+            Self::Crashed(_) | Self::BadOutput(_) | Self::TimedOut(_) | Self::LoadFailed(_)
         )
     }
 }
@@ -184,9 +188,11 @@ impl Scanner {
         let out = out.lock().unwrap();
         // Plugins often crash at exit, in destructors that run after the result was written, so
         // a complete result counts even from a scanner that crashed.
+        let exited = status.success() || status.code() == Some(i32::from(EXIT_LOAD_FAILED));
         match serde_json::from_slice(&out) {
-            Ok(found) => Ok(found),
-            Err(e) if status.success() => Err(ScanError::BadOutput(e.to_string())),
+            Ok(ScanOutput::Found(found)) => Ok(found),
+            Ok(ScanOutput::Failed(f)) => Err(ScanError::LoadFailed(f.load_failed)),
+            Err(e) if exited => Err(ScanError::BadOutput(e.to_string())),
             Err(_) => Err(ScanError::Crashed(status)),
         }
     }
@@ -196,9 +202,27 @@ impl Scanner {
 /// without, or no way to set up its output. Not the plugin's fault, so not cached.
 const EXIT_UNSUPPORTED: u8 = 64;
 
+/// The scanner's exit code when the bundle did not load. Its output is a [`LoadFailure`].
+const EXIT_LOAD_FAILED: u8 = 65;
+
+/// What the scanner writes when the bundle did not load.
+#[derive(Serialize, Deserialize)]
+struct LoadFailure {
+    load_failed: String,
+}
+
+/// What the scanner writes: the descriptors, or why the bundle did not load.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScanOutput {
+    Found(Vec<PluginDescriptor>),
+    Failed(LoadFailure),
+}
+
 /// The child side of a scan. If `args` (without the program name) are
 /// `--scan <format> <bundle>`, scans the bundle with `registry`'s format, prints the descriptors
-/// as JSON to stdout and returns `Some` exit code. Otherwise returns `None`, so an application
+/// as JSON to stdout and returns `Some` exit code. A bundle that does not load prints
+/// `{"load_failed": <reason>}` instead and exits with code 65. Otherwise returns `None`, so an application
 /// can call this first thing in `main` and carry on normally when it is not a scan.
 pub fn run_scan_child(
     registry: &PluginRegistry,
@@ -223,12 +247,27 @@ pub fn run_scan_child(
     let Some(redirect) = StdoutRedirect::to_stderr() else {
         return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
-    let found = format.scan(Path::new(bundle));
-    let json = serde_json::to_vec(&found).expect("descriptors serialize");
+    let (json, code) = match format.scan(Path::new(bundle)) {
+        Ok(found) => (
+            serde_json::to_vec(&found).expect("descriptors serialize"),
+            ExitCode::SUCCESS,
+        ),
+        Err(e) => {
+            let load_failed = match e {
+                PluginError::Load(why) => why,
+                other => other.to_string(),
+            };
+            let failure = LoadFailure { load_failed };
+            (
+                serde_json::to_vec(&failure).expect("a string serializes"),
+                ExitCode::from(EXIT_LOAD_FAILED),
+            )
+        }
+    };
     let written = redirect.write_result(&json);
     drop(redirect);
     Some(if written.is_ok() {
-        ExitCode::SUCCESS
+        code
     } else {
         ExitCode::FAILURE
     })
