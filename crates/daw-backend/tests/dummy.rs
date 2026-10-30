@@ -327,3 +327,97 @@ fn stop_drops_the_callback() {
     b.stop().unwrap();
     assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
 }
+
+/// Starts `b` with a callback that sends every MIDI input event to the
+/// returned channel.
+fn start_forwarding_midi_in(b: &mut DummyBackend) -> mpsc::Receiver<Event> {
+    let (tx, rx) = mpsc::sync_channel(64);
+    b.start(Box::new(move |c| {
+        for e in c.midi_in.iter() {
+            let _ = tx.try_send(*e);
+        }
+    }))
+    .unwrap();
+    rx
+}
+
+const CC: [u8; 3] = [0xB0, 7, 99];
+
+#[test]
+fn injector_made_while_running_delivers_after_restart() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    let _first = b.midi_injector();
+    b.start(Box::new(|_| {})).unwrap();
+    let mut second = b.midi_injector();
+    b.stop().unwrap();
+    let rx = start_forwarding_midi_in(&mut b);
+    assert!(second.send(&CC));
+    let e = rx.recv_timeout(WAIT).expect("MIDI from the newer injector");
+    assert_eq!(e.kind, EventKind::Midi(CC));
+    b.stop().unwrap();
+}
+
+#[test]
+fn queues_survive_a_panicking_callback() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    let mut inject = b.midi_injector();
+    let (tx, rx) = mpsc::sync_channel(1);
+    b.start(Box::new(move |_| {
+        let _ = tx.try_send(());
+        panic!("callback bug");
+    }))
+    .unwrap();
+    rx.recv_timeout(WAIT).unwrap();
+    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
+    let rx = start_forwarding_midi_in(&mut b);
+    assert!(inject.send(&CC));
+    let e = rx.recv_timeout(WAIT).expect("MIDI after the panic");
+    assert_eq!(e.kind, EventKind::Midi(CC));
+    b.stop().unwrap();
+}
+
+#[test]
+fn queue_survives_a_run_without_the_midi_port() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(BackendConfig {
+        midi_input: false,
+        ..cfg(32)
+    })
+    .unwrap();
+    let mut inject = b.midi_injector();
+    b.start(Box::new(|_| {})).unwrap();
+    b.stop().unwrap();
+    b.close().unwrap();
+    b.open(cfg(32)).unwrap();
+    let rx = start_forwarding_midi_in(&mut b);
+    assert!(inject.send(&CC));
+    let e = rx.recv_timeout(WAIT).expect("MIDI once the port is back");
+    assert_eq!(e.kind, EventKind::Midi(CC));
+    b.stop().unwrap();
+}
+
+#[test]
+fn stop_does_not_wait_out_a_long_period() {
+    // One period of a million frames at 1 Hz is eleven days.
+    let mut b = DummyBackend::new(Pacing::RealTime);
+    b.open(BackendConfig {
+        sample_rate: Some(1),
+        buffer_size: Some(1_000_000),
+        ..cfg(32)
+    })
+    .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(1, WAIT));
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let r = b.stop();
+        let _ = tx.send(r.is_ok());
+    });
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)),
+        Ok(true),
+        "stop() hung"
+    );
+}
