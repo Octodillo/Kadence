@@ -22,7 +22,7 @@ mod sync;
 pub mod time;
 
 pub use event::{Event, EventKind, EventList, NoteId, ParamId};
-pub use node::{Node, PortLayout, ProcessContext, TransportState};
+pub use node::{Node, PortLayout, ProcessContext, TransportLoop, TransportState};
 pub use plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
