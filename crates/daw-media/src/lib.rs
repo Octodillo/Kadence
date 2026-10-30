@@ -21,6 +21,6 @@ pub use peaks::{BASE_FRAMES_PER_PEAK, PeakBuilder, PeakCache, PeakLevel};
 pub use record::{RecordInput, RecordedFile, Recorder, RecordingStats};
 pub use resample::{ChunkResampler, resample};
 pub use stream::{ClipReader, DiskStreamer, ReadStatus, StreamerConfig};
-pub use write::{FlacBits, WavFormat, write_flac, write_wav};
+pub use write::{AudioWriter, FileFormat, FlacBits, WavFormat, write_flac, write_wav};
 
 pub type Result<T, E = MediaError> = std::result::Result<T, E>;
