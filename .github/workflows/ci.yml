@@ -24,11 +24,13 @@ jobs:
       - name: system packages
         # jack-sys needs jack.pc to build; jackd2 runs the JACK integration tests.
         # lilv links daw-plugins-lv2; mda-lv2 and x42-plugins are its test
-        # plugins; Xvfb lets its tests open plugin UIs.
+        # plugins; Xvfb lets its tests open plugin UIs. lv2-dev and
+        # lv2-examples are for the vendored livi's tests.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb
+            libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb \
+            lv2-dev lv2-examples
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -48,6 +50,10 @@ jobs:
         run: xvfb-run -a -s "-noreset" cargo nextest run --workspace --exclude daw-app --no-tests=warn
         env:
           DAW_REQUIRE_LV2_PLUGINS: 1
+      - name: vendored livi tests
+        # Its own workspace (see third_party/livi/KADENCE.md); its tests
+        # build small C plugins and use the LV2 example plugins.
+        run: cargo test --manifest-path third_party/livi/Cargo.toml
       - name: JACK integration tests
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &

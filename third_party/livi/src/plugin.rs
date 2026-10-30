@@ -645,6 +645,10 @@ impl Instance {
         if expected != actual {
             return Err(StateError::PluginMismatch { expected, actual });
         }
+        // restore() is in LV2's Instantiation threading class, so it must not
+        // run while the worker thread is inside this plugin's work(). The
+        // worker holds this lock for as long as it runs work().
+        let _no_work = self.is_alive.lock().unwrap_or_else(|e| e.into_inner());
         let mut setter = PortValueSetter {
             controls: &mut self.control_inputs,
             symbols: &self.control_input_symbols,
@@ -834,6 +838,44 @@ mod tests {
         }
         // Only the two valid runs may invoke plugin code.
         assert_eq!(instance.control_output(PortIndex(2)), Some(2.0));
+    }
+
+    #[test]
+    fn restore_waits_for_running_work() {
+        let fixture = crate::test_support::Fixture::with_source(
+            include_str!("../tests/fixtures/worker_probe.c"),
+            r#"
+            lv2:requiredFeature <http://lv2plug.in/ns/ext/worker#schedule>;
+            lv2:extensionData <http://lv2plug.in/ns/ext/worker#interface>,
+                <http://lv2plug.in/ns/ext/state#interface>;
+            lv2:port
+                [ a lv2:OutputPort, lv2:ControlPort; lv2:index 0; lv2:symbol "busy"; lv2:name "Busy" ],
+                [ a lv2:OutputPort, lv2:ControlPort; lv2:index 1; lv2:symbol "overlap"; lv2:name "Overlap" ]
+        "#,
+        );
+        let world = crate::World::with_load_bundle(&fixture.bundle_uri);
+        let plugin = world.plugin_by_uri("urn:livi:test").unwrap();
+        let features = world
+            .try_build_features(crate::FeaturesBuilder::default())
+            .expect("invalid feature block bounds");
+        let mut instance = unsafe { plugin.instantiate(features, 44100.0).unwrap() };
+        let state = instance.state().unwrap();
+        // Schedules work that takes 400 ms on the features' worker thread.
+        unsafe { instance.run(1, crate::EmptyPortConnections::new()).unwrap() };
+        let start = std::time::Instant::now();
+        while instance.control_output(PortIndex(0)) != Some(1.0) {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "work never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        instance.restore_state(&state).unwrap();
+        assert_eq!(
+            instance.control_output(PortIndex(1)),
+            Some(0.0),
+            "restore() ran while work() was running"
+        );
     }
 
     #[test]

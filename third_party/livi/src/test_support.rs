@@ -6,9 +6,14 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) fn new(metadata: &str) -> Self {
+        Self::with_source(include_str!("../tests/fixtures/probe.c"), metadata)
+    }
+
+    /// A bundle whose binary is built from the C `source_code`.
+    pub(crate) fn with_source(source_code: &str, metadata: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("probe.c");
-        std::fs::write(&source, include_str!("../tests/fixtures/probe.c")).unwrap();
+        std::fs::write(&source, source_code).unwrap();
         let status = std::process::Command::new("cc")
             .args(["-shared", "-fPIC", "-o"])
             .arg(directory.path().join("probe.so"))
