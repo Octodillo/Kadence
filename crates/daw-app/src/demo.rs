@@ -49,11 +49,7 @@ pub fn build() -> Result<Document, String> {
             name,
             TickTime(start * BAR),
             TickTime(bars * BAR),
-            ClipContent::Audio(AudioClip {
-                source: format!("audio/{file}").into(),
-                offset: SampleTime(offset),
-                gain_db: 0.0,
-            }),
+            ClipContent::Audio(AudioClip::new(format!("audio/{file}"), SampleTime(offset))),
         ))
     };
     let mut drums = Track::new(TrackKind::Audio, "Bass");
