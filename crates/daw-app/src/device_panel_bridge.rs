@@ -302,12 +302,13 @@ impl qobject::DevicePanel {
         self.reload();
     }
 
-    fn refresh(mut self: Pin<&mut Self>) {
+    fn refresh(self: Pin<&mut Self>) {
         if self.panel.revision() != self.revision {
-            self.as_mut().reload();
+            self.reload();
+        } else {
+            // A crash or a reload changes no revision.
+            self.update_plugin_status();
         }
-        // A crash or a reload changes no revision.
-        self.update_plugin_status();
     }
 
     fn reload_plugin(mut self: Pin<&mut Self>) {

@@ -620,13 +620,16 @@ impl AppDevicePanel {
         let Some(device) = self.inner.device() else {
             return false;
         };
-        // Its values are read again once it is back.
-        self.plugins.clear();
-        crate::state::with(|s| {
+        let reloading = crate::state::with(|s| {
             s.engine
                 .session_mut()
                 .is_some_and(|session| session.reload_plugin(device))
-        })
+        });
+        if reloading {
+            // Its values are read again once it is back.
+            self.plugins.clear();
+        }
+        reloading
     }
 
     /// Changes whenever the view may have changed from elsewhere.
