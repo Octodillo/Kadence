@@ -472,9 +472,9 @@ fn many_changes_in_one_segment_keep_their_order() {
     );
 }
 
-/// A copy of mda Delay's metadata whose Feedback port has its bounds the wrong
-/// way round, using the installed binary.
-fn inverted_range_bundle(dir: &Path) -> tempfile::TempDir {
+/// A copy of mda Delay's metadata, using the installed binary, with the given
+/// range declarations for its Feedback and Output ports.
+fn mda_delay_bundle(dir: &Path, feedback: &str, output: &str) -> tempfile::TempDir {
     let bundle = tempfile::tempdir().unwrap();
     let binary = dir.join("mda.lv2/Delay.so");
     let ttl = format!(
@@ -495,7 +495,7 @@ fn inverted_range_bundle(dir: &Path) -> tempfile::TempDir {
 	] , [
 		a lv2:InputPort , lv2:ControlPort ;
 		lv2:index 2 ; lv2:symbol "feedback" ; lv2:name "Feedback" ;
-		lv2:default 0.7 ; lv2:minimum 1.0 ; lv2:maximum 0.0
+		{feedback}
 	] , [
 		a lv2:InputPort , lv2:ControlPort ;
 		lv2:index 3 ; lv2:symbol "fb_tone" ; lv2:name "Fb Tone" ;
@@ -507,7 +507,7 @@ fn inverted_range_bundle(dir: &Path) -> tempfile::TempDir {
 	] , [
 		a lv2:InputPort , lv2:ControlPort ;
 		lv2:index 5 ; lv2:symbol "output" ; lv2:name "Output" ;
-		lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0
+		{output}
 	] , [
 		a lv2:InputPort , lv2:AudioPort ; lv2:index 6 ; lv2:symbol "left_in" ; lv2:name "Left In"
 	] , [
@@ -529,11 +529,51 @@ fn inverted_range_bundle(dir: &Path) -> tempfile::TempDir {
 #[test]
 fn a_port_with_an_inverted_range_is_refused() {
     let dir = need_plugins!();
-    let bundle = inverted_range_bundle(&dir);
+    // Feedback has its bounds the wrong way round.
+    let bundle = mda_delay_bundle(
+        &dir,
+        "lv2:default 0.7 ; lv2:minimum 1.0 ; lv2:maximum 0.0",
+        "lv2:default 0.5 ; lv2:minimum 0.0 ; lv2:maximum 1.0",
+    );
     let format = daw_plugins_lv2::format();
     let d = find(&*format, bundle.path(), ".", &format!("{MDA}Delay"));
     let Err(e) = format.instantiate(&d, SR, BLOCK) else {
         panic!("instantiated a plugin whose control writes would panic");
     };
     assert!(e.to_string().contains("Feedback"), "{e}");
+}
+
+/// Under lv2:sampleRate, a port's bounds and default are fractions of the
+/// sample rate.
+#[test]
+fn sample_rate_ports_are_scaled() {
+    let dir = need_plugins!();
+    // Output declared like a LADSPA-style cutoff.
+    let bundle = mda_delay_bundle(
+        &dir,
+        "lv2:default 0.7 ; lv2:minimum 0.0 ; lv2:maximum 1.0",
+        "lv2:portProperty lv2:sampleRate ; lv2:default 0.1 ; lv2:minimum 0.0 ; lv2:maximum 0.45",
+    );
+    let format = daw_plugins_lv2::format();
+    let d = find(&*format, bundle.path(), ".", &format!("{MDA}Delay"));
+    let mut p = format.instantiate(&d, SR, BLOCK).unwrap();
+    p.prepare(SR, BLOCK);
+    let out = param_id(&*p, "Output");
+    let info = p.params().into_iter().find(|i| i.id == out).unwrap();
+    assert_eq!(info.min, 0.0);
+    assert!((info.max - 0.45 * SR).abs() < 0.01, "{info:?}");
+    assert!((info.default - 4800.0).abs() < 0.01, "{info:?}");
+    assert!((p.param_value(out) - 4800.0).abs() < 0.01);
+    // A write above the unscaled maximum is kept.
+    let t = TransportState::default();
+    run(&mut *p, &silence(2), &[param(0, out, 1000.0)], &t);
+    assert_eq!(p.param_value(out), 1000.0);
+
+    // A new rate re-instantiates the plugin: the range follows the rate and
+    // the value, which is stored as an absolute value as in jalv and Ardour,
+    // survives while it fits the new range.
+    p.prepare(2.0 * SR, BLOCK);
+    let info = p.params().into_iter().find(|i| i.id == out).unwrap();
+    assert!((info.max - 0.45 * 2.0 * SR).abs() < 0.1, "{info:?}");
+    assert_eq!(p.param_value(out), 1000.0);
 }

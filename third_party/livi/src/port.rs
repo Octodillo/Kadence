@@ -86,6 +86,26 @@ pub struct Port {
 
     /// The index of this port within the plugin.
     pub index: PortIndex,
+
+    /// Whether the port has the `lv2:sampleRate` property: its default,
+    /// minimum and maximum are then fractions of the sample rate, and
+    /// [`Port::scaled`] gives the actual values.
+    pub sample_rate: bool,
+}
+
+impl Port {
+    /// The port with its default, minimum and maximum multiplied by
+    /// `sample_rate` if it has the `lv2:sampleRate` property, and unchanged
+    /// otherwise. Instances use these bounds for their control ports.
+    pub fn scaled(mut self, sample_rate: f64) -> Port {
+        if self.sample_rate {
+            let scale = |v: f32| (f64::from(v) * sample_rate) as f32;
+            self.min_value = self.min_value.map(scale);
+            self.max_value = self.max_value.map(scale);
+            self.default_value = scale(self.default_value);
+        }
+        self
+    }
 }
 
 /// A `PortConnections` object with no connections.
