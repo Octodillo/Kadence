@@ -137,13 +137,13 @@ QQC2.ItemDelegate {
             trackIndex: header.index
         }
 
-        // Audio and instrument tracks record; buses don't.
+        // Instrument tracks record MIDI. (Audio recording adds audio tracks.)
         // Breeze's record icon is always red, so draw the light: a ring
         // when off, filled red when armed.
         QQC2.ToolButton {
             id: armButton
             Layout.alignment: Qt.AlignVCenter
-            visible: header.kind === 0 || header.kind === 1
+            visible: header.kind === 1
             contentItem: Item {
                 implicitWidth: Kirigami.Units.iconSizes.smallMedium
                 implicitHeight: Kirigami.Units.iconSizes.smallMedium

@@ -101,3 +101,16 @@ fn a_source_that_is_not_there_yet_is_connected_when_it_appears() {
     assert!(host.refresh_midi());
     assert!(linked(&system, "pads:out", "Kadence:out"));
 }
+
+#[test]
+fn a_source_replugged_between_polls_is_connected_again() {
+    let (mut host, system) = host();
+    assert!(host.set_midi_inputs(&["keys:out".into()]).is_empty());
+    assert!(linked(&system, "keys:out", "Kadence:out"));
+    // Gone and back before the next poll (a USB reset): the link is lost.
+    system.remove_port("keys:out");
+    system.add_port("keys:out", PortKind::Midi, PortDirection::Output, true);
+    assert!(!linked(&system, "keys:out", "Kadence:out"));
+    host.refresh_midi();
+    assert!(linked(&system, "keys:out", "Kadence:out"));
+}

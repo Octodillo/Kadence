@@ -61,12 +61,37 @@ fn targets(state: &AppState) -> Vec<(TrackId, Option<ClipId>)> {
 }
 
 /// The instrument track that hears live MIDI while none is armed: the one
-/// recording would go to.
+/// recording goes to, else the selected track, else the open clip's track,
+/// else the first instrument track. Unlike [`target`] it ignores the
+/// playhead, so live input doesn't jump between tracks (cutting held
+/// notes) as playback crosses the open clip.
 pub fn input_focus(state: &AppState) -> Option<TrackId> {
-    match &state.recording {
-        Some(rec) => rec.takes.first().map(|t| t.track),
-        None => target(state).map(|(track, _)| track),
+    if let Some(rec) = &state.recording {
+        return rec.takes.first().map(|t| t.track);
     }
+    let project = state.doc.project();
+    let is_instrument = |id: TrackId| {
+        project
+            .track(id)
+            .is_some_and(|t| t.kind == TrackKind::Instrument)
+    };
+    let open = state
+        .piano
+        .clip
+        .and_then(|c| project.clip_location(c))
+        .map(|(track, _)| track);
+    state
+        .arrange
+        .selected_track
+        .filter(|&t| is_instrument(t))
+        .or(open.filter(|&t| is_instrument(t)))
+        .or_else(|| {
+            project
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Instrument)
+                .map(|t| t.id)
+        })
 }
 
 /// The track to record on: the open clip's track when the playhead is in

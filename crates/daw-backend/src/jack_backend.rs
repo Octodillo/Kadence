@@ -70,7 +70,7 @@ impl JackBackend {
     }
 
     /// Unregisters the extra MIDI inputs the audio thread has let go of.
-    fn collect_removed(&mut self) {
+    fn unregister_removed(&mut self) {
         let (Ok(client), Some(extra)) = (client_of(&self.state), self.extra.as_mut()) else {
             return;
         };
@@ -86,7 +86,7 @@ impl JackBackend {
         if let State::Open(_, ports) = &mut self.state {
             ports.extra.begin_cycle();
         }
-        self.collect_removed();
+        self.unregister_removed();
     }
 
     /// Full names of our ports, each with whether it is an output.
@@ -512,7 +512,7 @@ impl AudioBackend for JackBackend {
     }
 
     fn add_midi_input(&mut self, name: &str) -> Result<MidiInputPort, BackendError> {
-        self.collect_removed();
+        self.unregister_removed();
         let client = client_of(&self.state)?;
         let extra = self.extra.as_mut().ok_or(BackendError::NotOpen)?;
         let slot = extra.free_slot().ok_or_else(|| {
@@ -536,6 +536,10 @@ impl AudioBackend for JackBackend {
         }
         self.apply_extra_now();
         Ok(MidiInputPort { slot, name: full })
+    }
+
+    fn collect_removed(&mut self) {
+        self.unregister_removed();
     }
 
     fn remove_midi_input(&mut self, slot: usize) -> Result<(), BackendError> {

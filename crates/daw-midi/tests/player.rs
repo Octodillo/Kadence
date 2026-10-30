@@ -420,3 +420,78 @@ fn moving_the_gate_ends_every_live_note_on_the_old_channel() {
         "nothing live on channel 0 any more: {out:?}"
     );
 }
+
+#[test]
+fn a_take_ends_notes_the_gate_cut_off() {
+    let mut rig = Rig::new();
+    rig.handle.set_armed(true);
+    rig.block(0, 64, true, &[live(on(0, 60))]);
+    // Disarming the track (closing its gate) mid-note while recording.
+    rig.handle.set_input(InputGate {
+        open: false,
+        channel: None,
+    });
+    rig.block(64, 64, true, &[]);
+    // The real note-off arrives later and is not recorded twice.
+    rig.block(128, 64, true, &[live(off(0, Some(60)))]);
+    let events: Vec<_> = rig
+        .handle
+        .drain_captured()
+        .filter_map(|c| match c {
+            Captured::Event { time, kind } => Some((time, kind)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (SampleTime(0), on(0, 60)),
+            (SampleTime(64), off(0, Some(60)))
+        ]
+    );
+}
+
+#[test]
+fn a_take_keeps_the_end_of_a_note_that_started_through_the_gate() {
+    let mut rig = Rig::new();
+    rig.handle.set_armed(true);
+    rig.handle.set_input(InputGate {
+        open: true,
+        channel: Some(0),
+    });
+    // A wildcard note-off on another channel would not pass; one that ends
+    // a captured note does, even after the channel filter moved.
+    rig.block(0, 64, true, &[live(on(0, 60))]);
+    let out = rig.block(64, 64, true, &[live(off(0, Some(60)))]);
+    assert_eq!(simple(&out), [(64, 60, false)]);
+    let ends = rig
+        .handle
+        .drain_captured()
+        .filter(|c| {
+            matches!(
+                c,
+                Captured::Event {
+                    kind: EventKind::NoteOff { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(ends, 1);
+}
+
+#[test]
+fn closing_the_gate_lifts_a_held_sustain_pedal() {
+    let mut rig = Rig::new();
+    let pedal_down = EventKind::Midi([0xB0, 64, 127]);
+    rig.block(0, 64, false, &[live(pedal_down)]);
+    rig.handle.set_input(InputGate {
+        open: false,
+        channel: None,
+    });
+    let out = rig.block(64, 64, false, &[]);
+    let kinds: Vec<_> = out.iter().map(|(_, k)| *k).collect();
+    assert_eq!(kinds, [EventKind::Midi([0xB0, 64, 0])]);
+    // Only once.
+    assert!(rig.block(128, 64, false, &[]).is_empty());
+}

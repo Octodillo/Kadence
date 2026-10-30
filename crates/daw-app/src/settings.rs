@@ -133,11 +133,17 @@ impl MidiSettings {
     }
 
     /// The sources to give ports to, given the ones there now (name, is
-    /// hardware) and the ones that have ports already. Sources turned on
-    /// keep their port while unplugged, and so do ones used automatically,
-    /// so tracks keep their input across a replug; only turning one off
-    /// drops it.
-    pub fn wanted(&self, present: &[(String, bool)], current: &[String]) -> Vec<String> {
+    /// hardware), the ones that have ports already, and the ones tracks
+    /// listen to. Sources turned on keep their port while unplugged, and
+    /// so do automatic ones a track listens to, so the track keeps its
+    /// input across a replug. Other automatic ones lose it, so devices
+    /// that come back under a new name don't pile up ports.
+    pub fn wanted(
+        &self,
+        present: &[(String, bool)],
+        current: &[String],
+        listened: &[String],
+    ) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut add = |s: &str| {
             if !out.iter().any(|o| o == s) {
@@ -145,8 +151,9 @@ impl MidiSettings {
             }
         };
         for s in current {
-            let physical = present.iter().find(|(n, _)| n == s).is_none_or(|p| p.1);
-            if self.uses(s, physical) {
+            let here = present.iter().find(|(n, _)| n == s);
+            let kept = here.is_some() || listened.contains(s) || self.enabled.contains(s);
+            if kept && self.uses(s, here.is_none_or(|p| p.1)) {
                 add(s);
             }
         }
@@ -316,14 +323,17 @@ mod tests {
             ("hw:off".to_owned(), true),
             ("other:out".to_owned(), false),
         ];
-        let wanted = s.wanted(&present, &[]);
+        let listened = ["hw:keys".to_owned()];
+        let wanted = s.wanted(&present, &[], &listened);
         assert_eq!(wanted, ["seq:out", "hw:keys"]);
-        // Keys unplugged: still wanted, since it has a port.
-        let wanted = s.wanted(&present[1..], &wanted);
+        // Keys unplugged: still wanted, since a track listens to it.
+        let wanted = s.wanted(&present[1..], &wanted, &listened);
         assert_eq!(wanted, ["seq:out", "hw:keys"]);
+        // ... but not when no track does.
+        assert_eq!(s.wanted(&present[1..], &wanted, &[]), ["seq:out"]);
         // Turned off: dropped.
         s.set_used("hw:keys", false);
-        assert_eq!(s.wanted(&present, &wanted), ["seq:out"]);
+        assert_eq!(s.wanted(&present, &wanted, &listened), ["seq:out"]);
     }
 
     #[test]

@@ -205,6 +205,12 @@ pub trait AudioBackend: Send {
     /// The ports made by [`add_midi_input`](Self::add_midi_input) that are
     /// still there.
     fn midi_inputs(&self) -> Vec<MidiInputPort>;
+
+    /// Finishes removals the audio thread has caught up with since
+    /// [`remove_midi_input`](Self::remove_midi_input), such as
+    /// unregistering ports. Call it now and then (the host does on every
+    /// MIDI refresh).
+    fn collect_removed(&mut self) {}
 }
 
 /// The short name for a port made from `name`: JACK separates client and

@@ -50,6 +50,8 @@ pub struct AppState {
     pub autosave_every: Option<Duration>,
     /// When the last autosave was tried.
     last_autosave: Option<Instant>,
+    /// The MIDI inputs last asked of the engine.
+    midi_tried: Option<Vec<String>>,
 }
 
 thread_local! {
@@ -84,6 +86,7 @@ impl AppState {
             midi: MidiSettings::default(),
             autosave_every: Some(Duration::from_secs(60)),
             last_autosave: None,
+            midi_tried: None,
         };
         s.sync();
         s
@@ -157,9 +160,19 @@ impl AppState {
             .map(|s| (s.name, s.is_physical))
             .collect();
         let current: Vec<String> = self.engine.midi_inputs().into_iter().map(|i| i.0).collect();
-        let wanted = self.midi.wanted(&present, &current);
-        if wanted != current {
+        let listened: Vec<String> = self
+            .doc
+            .project()
+            .tracks
+            .iter()
+            .filter_map(|t| t.midi_input.device.clone())
+            .collect();
+        let wanted = self.midi.wanted(&present, &current, &listened);
+        // A source that can't get a port stays wanted; don't retry it
+        // every poll, only when what is wanted changes.
+        if wanted != current && self.midi_tried.as_ref() != Some(&wanted) {
             self.engine.set_midi_inputs(&wanted);
+            self.midi_tried = Some(wanted);
             changed = true;
         }
         // A source got or lost its port: the session wants a rebuild.

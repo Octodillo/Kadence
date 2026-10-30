@@ -201,3 +201,35 @@ fn with_nothing_armed_the_focus_track_takes_live_input() {
     rig.set(t[0], TrackField::Armed(true));
     assert!(rig.play_note(0, 0) < HEARD);
 }
+
+#[test]
+fn rerouting_a_track_ends_the_notes_it_holds() {
+    let (mut rig, t) = Rig::new(1);
+    let mut on = EventList::with_capacity(4);
+    on.push(Event {
+        frame: 0,
+        kind: EventKind::NoteOn {
+            channel: 0,
+            key: 60,
+            velocity: 0.9,
+            note_id: -1,
+        },
+    })
+    .unwrap();
+    let none = EventList::with_capacity(0);
+    rig.run(&[&none, &on, &none]);
+    assert!(rig.run(&[&none]) > HEARD);
+    // Switched to another device while the key is held: its note-off will
+    // never arrive from there.
+    rig.set(
+        t[0],
+        TrackField::MidiInput(MidiInput {
+            device: Some("keys:b".into()),
+            channel: None,
+        }),
+    );
+    for _ in 0..200 {
+        rig.run(&[&none]);
+    }
+    assert!(rig.run(&[&none]) < HEARD, "the held note was ended");
+}

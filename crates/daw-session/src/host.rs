@@ -251,6 +251,7 @@ impl AudioHost {
     /// Call now and then (a second is fine) so devices plugged back in are
     /// heard again. Returns whether a source came or went.
     pub fn refresh_midi(&mut self) -> bool {
+        self.backend.collect_removed();
         let present: Vec<String> = self.midi_sources().into_iter().map(|s| s.name).collect();
         let mut changed = false;
         for link in &mut self.midi {
@@ -260,9 +261,10 @@ impl AudioHost {
                 link.connected = false;
                 continue;
             }
-            if link.connected {
-                continue;
-            }
+            // Connect even when we think it is: the source may have gone
+            // and come back between two polls (a USB reset), which drops
+            // the link without us seeing it. "Already connected" is fine.
+            let was = link.connected;
             match self.backend.connect(&link.source, &link.port.name) {
                 Ok(()) => {}
                 // Made already (by a session manager, or before a restart).
@@ -277,7 +279,7 @@ impl AudioHost {
                 }
             }
             link.connected = true;
-            changed = true;
+            changed |= !was;
         }
         changed
     }

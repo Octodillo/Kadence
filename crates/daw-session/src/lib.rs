@@ -287,14 +287,28 @@ impl Session {
             self.apply_loop()?;
         }
         let structure = build::Structure::of(snapshot, &self.suspended, &self.midi_sources);
-        self.midi_sources_changed = false;
+        let sources_changed = std::mem::take(&mut self.midi_sources_changed);
         // Automation is in samples, so a tempo change re-times it.
         let rebuild = self.built.as_ref().is_none_or(|b| {
             b.structure != structure || (tempo_changed && structure.has_automation())
         });
         if rebuild {
             let old = self.built.take().unwrap_or_default();
+            let old_live: Vec<(TrackId, build::LiveInput)> = old
+                .midi
+                .keys()
+                .map(|&t| (t, old.structure.live_input(t)))
+                .collect();
             let (desc, built) = build::graph(self, snapshot, structure, old);
+            // A track whose live MIDI now comes from elsewhere would never
+            // get the note-offs of what it holds.
+            for (track, was) in old_live {
+                if (sources_changed || built.structure.live_input(track) != was)
+                    && let Some(player) = built.midi.get(&track)
+                {
+                    player.end_live();
+                }
+            }
             self.built = Some(built);
             self.controller.set_graph(desc)?;
         }

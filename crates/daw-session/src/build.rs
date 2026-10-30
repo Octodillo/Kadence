@@ -150,7 +150,7 @@ impl Structure {
             .map(|d| &d.1)
     }
 
-    fn live_input(&self, track: TrackId) -> LiveInput {
+    pub(crate) fn live_input(&self, track: TrackId) -> LiveInput {
         self.tracks
             .iter()
             .find(|t| t.id == track)
