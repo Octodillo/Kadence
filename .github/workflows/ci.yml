@@ -122,8 +122,8 @@ jobs:
     steps:
       - name: Add the KDE neon archive
         # archive.neon.kde.org has had outages (502s for hours). When it is
-        # unreachable, skip this job with a warning instead of failing it;
-        # once the archive answers, build and test failures still fail.
+        # unreachable on a pull request, skip this job with a warning instead
+        # of failing it; once it answers, build and test failures still fail.
         id: neon
         shell: bash
         env:
@@ -132,22 +132,30 @@ jobs:
           echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl gnupg
+          neon=https://archive.neon.kde.org
+          # Probe only neon, so an Ubuntu mirror hiccup still fails below.
           if curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
-                -o /tmp/neon.key https://archive.neon.kde.org/public.key \
-              && gpg --dearmor -o /usr/share/keyrings/neon.gpg /tmp/neon.key \
-              && echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
-                > /etc/apt/sources.list.d/neon.list \
-              && apt-get update --error-on=any; then
+                -o /tmp/neon.key "$neon/public.key" \
+              && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /dev/null "$neon/user/dists/noble/InRelease"; then
+            gpg --batch --yes --dearmor -o /usr/share/keyrings/neon.gpg /tmp/neon.key
+            echo "deb [signed-by=/usr/share/keyrings/neon.gpg] $neon/user noble main" \
+              > /etc/apt/sources.list.d/neon.list
             echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning title=KDE neon archive unreachable::Skipping this job: archive.neon.kde.org did not answer. This is not a failure of the code under test."
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "::warning title=KDE neon archive unreachable::Skipping this job: $neon did not answer. This is not a failure of the code under test."
             echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            # On main and scheduled runs, stay red so the gap gets noticed.
+            echo "::error title=KDE neon archive unreachable::$neon did not answer."
+            exit 1
           fi
       - name: Install system packages
         if: steps.neon.outputs.available == 'true'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          apt-get update
           apt-get install -y --no-install-recommends \
             build-essential git cmake ninja-build clang pkg-config \
             qt6-base-dev qt6-base-dev-tools qt6-declarative-dev \
