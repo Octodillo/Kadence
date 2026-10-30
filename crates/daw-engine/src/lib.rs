@@ -28,7 +28,7 @@ pub mod nodes;
 mod render;
 mod transport;
 
-pub use automation::{AutomationLane, AutomationPoint, Curve, RAMP_INTERVAL};
+pub use automation::{AutomationLane, AutomationPoint, AutomationRecorder, Curve, RAMP_INTERVAL};
 pub use compile::{CompileError, CompiledGraph, MAX_CHANNELS};
 pub use engine::{EngineConfig, EngineController, EngineError, EngineProcessor, SendError};
 pub use graph::{AudioEdge, EventEdge, GraphDesc, NodeId, NodeKey, NodeKind};
