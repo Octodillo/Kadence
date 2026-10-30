@@ -26,8 +26,31 @@ Kirigami.OverlayDrawer {
 
     readonly property string masterName: i18nc("@title name of the master bus", "Master")
 
+    // Kirigami closes the drawer when it turns modal or back (the window
+    // was resized); open it again rather than dropping the device.
+    property bool reopening: false
+    onModalChanged: {
+        if (DevicePanel.active) {
+            reopening = true;
+            Qt.callLater(() => {
+                reopening = false;
+                if (DevicePanel.active) {
+                    drawer.open();
+                }
+            });
+        }
+    }
+
     onAboutToShow: DevicePanel.refresh()
-    onClosed: DevicePanel.close()
+    onClosed: {
+        if (!reopening) {
+            DevicePanel.close();
+        }
+    }
+
+    DeviceNames {
+        id: deviceNames
+    }
 
     Connections {
         target: DevicePanel
@@ -57,7 +80,7 @@ Kirigami.OverlayDrawer {
             return value >= 0.5 ? i18nc("@label parameter switched on", "On")
                                 : i18nc("@label parameter switched off", "Off");
         case "choice":
-            return choices[Math.round(value)] ?? "";
+            return deviceNames.name(choices[Math.round(value)] ?? "");
         case "integer":
             return num(Math.round(value), 0);
         }
@@ -112,7 +135,7 @@ Kirigami.OverlayDrawer {
                     Kirigami.Heading {
                         Layout.fillWidth: true
                         level: 2
-                        text: DevicePanel.deviceName
+                        text: deviceNames.name(DevicePanel.deviceName)
                         elide: Text.ElideRight
                     }
                     QQC2.ToolButton {
@@ -217,6 +240,8 @@ Kirigami.OverlayDrawer {
         required property string unit
         required property list<string> choices
         required property bool isDefault
+        required property bool automated
+        readonly property string label: deviceNames.name(name)
 
         readonly property string valueText: drawer.valueText(value, control, unit, choices)
         readonly property string defaultText: drawer.valueText(defaultValue, control, unit, choices)
@@ -233,8 +258,19 @@ Kirigami.OverlayDrawer {
             visible: row.control !== "toggle"
             QQC2.Label {
                 Layout.fillWidth: true
-                text: row.name
+                text: row.label
                 elide: Text.ElideRight
+            }
+            Kirigami.Icon {
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                visible: row.automated
+                source: "media-record-symbolic"
+                HoverHandler { id: automatedHover }
+                QQC2.ToolTip.text: i18nc("@info:tooltip", "Automated: an automation lane sets this while playing")
+                QQC2.ToolTip.visible: automatedHover.hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                Accessible.name: i18nc("@info", "Automated")
             }
             QQC2.Label {
                 text: row.control === "continuous" && slider.pressed
@@ -249,6 +285,8 @@ Kirigami.OverlayDrawer {
             id: slider
             Layout.fillWidth: true
             visible: row.control === "continuous"
+            // The lane overrides an edit here, so don't offer one.
+            enabled: !row.automated
             from: 0
             to: 1
             value: row.position
@@ -258,7 +296,7 @@ Kirigami.OverlayDrawer {
                     DevicePanel.endGesture();
                 }
             }
-            Accessible.name: row.name
+            Accessible.name: row.label
             QQC2.ToolTip.text: i18nc("@info:tooltip %1 is a parameter's default value",
                                      "Double-click to reset to %1", row.defaultText)
             QQC2.ToolTip.visible: hovered && !pressed
@@ -271,30 +309,33 @@ Kirigami.OverlayDrawer {
         QQC2.SpinBox {
             Layout.fillWidth: true
             visible: row.control === "integer"
+            // The lane overrides an edit here, so don't offer one.
+            enabled: !row.automated
             from: Math.round(row.minimum)
             to: Math.round(row.maximum)
             value: Math.round(row.value)
             editable: true
             onValueModified: DevicePanel.setValue(row.index, value, false)
-            Accessible.name: row.name
-            TapHandler {
-                onDoubleTapped: DevicePanel.reset(row.index)
-            }
+            Accessible.name: row.label
         }
 
         QQC2.ComboBox {
             Layout.fillWidth: true
             visible: row.control === "choice"
-            model: row.choices
+            // The lane overrides an edit here, so don't offer one.
+            enabled: !row.automated
+            model: row.choices.map(c => deviceNames.name(c))
             currentIndex: Math.round(row.value)
             onActivated: index => DevicePanel.setValue(row.index, index, false)
-            Accessible.name: row.name
+            Accessible.name: row.label
         }
 
         QQC2.Switch {
             Layout.fillWidth: true
             visible: row.control === "toggle"
-            text: row.name
+            // The lane overrides an edit here, so don't offer one.
+            enabled: !row.automated
+            text: row.label
             checked: row.value >= 0.5
             onToggled: DevicePanel.setValue(row.index, checked ? 1 : 0, false)
         }

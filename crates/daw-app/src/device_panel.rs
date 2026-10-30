@@ -13,7 +13,10 @@
 use daw_core::event::ParamId;
 use daw_devices::{ParamKind, ParamSpec, ParamUnit, Taper};
 use daw_model::commands::{DeviceField, MoveDevice, SetDevice, SetParam};
-use daw_model::{Device, DeviceId, DeviceSource, Document, Project, TrackKind};
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+use daw_model::{AutomationTarget, Device, DeviceId, DeviceSource, Document, Project, TrackKind};
 
 use crate::message::Message;
 
@@ -147,6 +150,9 @@ impl ParamSource for BuiltinParams {
 pub struct ParamView {
     pub desc: ParamDesc,
     pub value: f64,
+    /// An automation lane plays this parameter, so it overrides the
+    /// value here during playback.
+    pub automated: bool,
 }
 
 impl ParamView {
@@ -197,7 +203,15 @@ impl DeviceView {
 pub struct DevicePanel {
     sources: Vec<Box<dyn ParamSource>>,
     device: Option<DeviceId>,
+    /// The undo step the latest edit started: its parameter, when it
+    /// started, and the document revision after its last edit. A reset
+    /// right after it (the first click of a double-click moves a slider)
+    /// takes it back first.
+    click: Cell<Option<(ParamId, Instant, u64)>>,
 }
+
+/// How soon after a click a reset counts as the same double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(600);
 
 impl Default for DevicePanel {
     fn default() -> Self {
@@ -210,6 +224,7 @@ impl DevicePanel {
         Self {
             sources,
             device: None,
+            click: Cell::new(None),
         }
     }
 
@@ -248,7 +263,20 @@ impl DevicePanel {
                     .params
                     .get(&desc.id)
                     .map_or(desc.default, |&v| desc.sanitize(v));
-                ParamView { desc, value }
+                let automated = track.automation.iter().any(|l| {
+                    l.enabled
+                        && !l.points.is_empty()
+                        && l.target
+                            == (AutomationTarget::DeviceParam {
+                                device: id,
+                                param: desc.id,
+                            })
+                });
+                ParamView {
+                    desc,
+                    value,
+                    automated,
+                }
             })
             .collect();
         Some(DeviceView {
@@ -284,13 +312,20 @@ impl DevicePanel {
         if value == p.value {
             return Ok(());
         }
+        let step = doc.history().position();
         doc.execute(SetParam {
             device,
             param,
             value: Some(value),
         })
-        .map(|_| ())
-        .map_err(Message::from)
+        .map_err(Message::from)?;
+        let started = match self.click.get() {
+            _ if doc.history().position() != step => Instant::now(),
+            Some((p, t, _)) if p == param => t,
+            _ => return Ok(()),
+        };
+        self.click.set(Some((param, started, doc.revision())));
+        Ok(())
     }
 
     /// Sets a parameter from a slider position (0 to 1, along its taper).
@@ -317,6 +352,13 @@ impl DevicePanel {
         let Some(device) = self.device else {
             return Ok(());
         };
+        if let Some((p, started, revision)) = self.click.take()
+            && p == param
+            && revision == doc.revision()
+            && started.elapsed() < DOUBLE_CLICK
+        {
+            doc.undo().map_err(Message::from)?;
+        }
         let Some(d) = doc
             .project()
             .device_location(device)
@@ -552,6 +594,8 @@ mod tests {
     fn reset_returns_to_the_default_as_its_own_step() {
         let (mut doc, panel, _, ids) = rig(TrackKind::Audio);
         panel.set_value(&mut doc, eq::OUTPUT, -6.0).unwrap();
+        // Long after the edit (not a double-click's first click).
+        panel.click.set(None);
         // Reset while the drag hasn't been sealed still undoes on its own.
         panel.reset(&mut doc, eq::OUTPUT).unwrap();
         assert_eq!(value(&doc, &panel, eq::OUTPUT), 0.0);
@@ -565,6 +609,40 @@ mod tests {
         let revision = doc.revision();
         panel.reset(&mut doc, eq::OUTPUT).unwrap();
         assert_eq!(doc.revision(), revision);
+    }
+
+    #[test]
+    fn a_double_click_reset_takes_back_its_first_click() {
+        let (mut doc, panel, _, _) = rig(TrackKind::Audio);
+        panel.set_value(&mut doc, eq::OUTPUT, -6.0).unwrap();
+        panel.end_gesture(&mut doc);
+        // The first click of the double-click jumped the slider.
+        panel.set_value(&mut doc, eq::OUTPUT, -3.0).unwrap();
+        panel.end_gesture(&mut doc);
+        panel.reset(&mut doc, eq::OUTPUT).unwrap();
+        assert_eq!(value(&doc, &panel, eq::OUTPUT), 0.0);
+        doc.undo().unwrap();
+        assert_eq!(value(&doc, &panel, eq::OUTPUT), -6.0, "one undo");
+    }
+
+    #[test]
+    fn automated_params_are_marked() {
+        let (mut doc, panel, track, ids) = rig(TrackKind::Audio);
+        let mut lane = daw_model::AutomationLane::new(AutomationTarget::DeviceParam {
+            device: ids[0],
+            param: eq::OUTPUT,
+        });
+        lane.points.push(daw_model::AutomationPoint {
+            tick: daw_core::time::TickTime(0),
+            value: -3.0,
+            curve: 0.0,
+            step: true,
+        });
+        doc.execute(daw_model::commands::AddLane { track, lane })
+            .unwrap();
+        let view = panel.view(doc.project()).unwrap();
+        assert!(view.params[eq::OUTPUT as usize].automated);
+        assert!(!view.params[eq::LOW_GAIN as usize].automated);
     }
 
     #[test]

@@ -20,6 +20,7 @@ const QML_FILES: &[&str] = &[
     "qml/MixPage.qml",
     "qml/ChannelStrip.qml",
     "qml/DevicePanelDrawer.qml",
+    "qml/DeviceNames.qml",
     "qml/LevelMeter.qml",
     "qml/GainReductionMeter.qml",
     "qml/EditPage.qml",

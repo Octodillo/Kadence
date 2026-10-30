@@ -157,6 +157,8 @@ const ROLES: &[&str] = &[
     "unit",
     "choices",
     "isDefault",
+    // An automation lane plays the parameter.
+    "automated",
 ];
 const USER_ROLE: i32 = 0x0100;
 
@@ -408,6 +410,7 @@ impl qobject::DevicePanel {
                 QVariant::from(&list)
             }
             Some("isDefault") => QVariant::from(&p.is_default()),
+            Some("automated") => QVariant::from(&p.automated),
             _ => QVariant::default(),
         }
     }
