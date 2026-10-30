@@ -61,12 +61,13 @@ pub(crate) fn push_clap(out: &mut EventBuffer, e: &Event, frame: u32, notes_as_m
             }
         }
         EventKind::Midi(data) => out.push(&MidiEvent::new(frame, 0, data)),
-        EventKind::ParamValue { param, value } => out.push(&ParamValueEvent::new(
-            frame,
-            ClapId::new(param),
-            Pckn::match_all(),
-            value,
-        )),
+        EventKind::ParamValue { param, value } => {
+            // `u32::MAX` is CLAP's invalid id, which `ClapId::new` panics on; a hand-edited
+            // project could name it, so it is dropped here instead.
+            if let Some(id) = ClapId::from_raw(param) {
+                out.push(&ParamValueEvent::new(frame, id, Pckn::match_all(), value));
+            }
+        }
     }
 }
 
@@ -429,5 +430,19 @@ mod tests {
         let mut buf = EventBuffer::with_capacity(1);
         buf.push(&NoteOnEvent::new(0, Pckn::from_raw(0, 0, -1, -1), 1.0));
         assert!(converted(buf.get(0).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn invalid_param_ids_are_dropped() {
+        let bad = EventKind::ParamValue {
+            param: u32::MAX,
+            value: 1.0,
+        };
+        assert!(sent(bad, false).is_empty());
+        let good = EventKind::ParamValue {
+            param: 3,
+            value: 1.0,
+        };
+        assert_eq!(sent(good, false).len(), 1);
     }
 }
