@@ -115,6 +115,18 @@ pub trait EngineHandle {
     fn stop(&mut self);
     fn is_playing(&self) -> bool;
 
+    /// The audio system's round trip, input plus output latency, in
+    /// samples. Recording moves takes back by this much (plus the graph's
+    /// own latency) so they line up with what the player heard.
+    fn round_trip_latency(&self) -> u32 {
+        0
+    }
+
+    /// Cycles the audio system missed (xruns) so far.
+    fn xruns(&self) -> u64 {
+        0
+    }
+
     /// The session playing the project. After
     /// [`apply_audio_config`](Self::apply_audio_config) it may be a new one
     /// that has to be synced with the document again.
@@ -273,6 +285,14 @@ impl EngineHandle for SessionEngine {
         self.host.session().is_playing()
     }
 
+    fn round_trip_latency(&self) -> u32 {
+        self.host.latency().total()
+    }
+
+    fn xruns(&self) -> u64 {
+        self.host.xruns()
+    }
+
     fn session(&self) -> Option<&Session> {
         Some(self.host.session())
     }
@@ -385,6 +405,14 @@ impl EngineHandle for StubEngine {
 
     fn is_playing(&self) -> bool {
         self.host.session().is_playing()
+    }
+
+    fn round_trip_latency(&self) -> u32 {
+        self.host.latency().total()
+    }
+
+    fn xruns(&self) -> u64 {
+        self.host.xruns()
     }
 
     fn session(&self) -> Option<&Session> {
