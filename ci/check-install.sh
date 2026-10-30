@@ -18,11 +18,17 @@ for f in \
     usr/share/applications/$id.desktop \
     usr/share/metainfo/$id.metainfo.xml \
     usr/share/mime/packages/$id.mime.xml \
-    usr/share/icons/hicolor/scalable/apps/$id.svg
+    usr/share/icons/hicolor/scalable/apps/$id.svg \
+    usr/share/licenses/kadence/LICENSE \
+    usr/share/licenses/kadence/THIRD-PARTY-LICENSES
 do
     test -f "$stage/$f" || { echo "missing: $f"; exit 1; }
     echo "ok: $f"
 done
+
+# symphonia is the MPL-2.0 code whose notice must ship with the binary.
+grep -q '^symphonia .*: MPL-2.0$' "$stage/usr/share/licenses/kadence/THIRD-PARTY-LICENSES" ||
+    { echo "THIRD-PARTY-LICENSES lacks the symphonia notice"; exit 1; }
 
 desktop-file-validate "$stage/usr/share/applications/$id.desktop"
 appstreamcli validate --no-net --pedantic "$stage/usr/share/metainfo/$id.metainfo.xml"
