@@ -1343,6 +1343,11 @@ fn fill_context(c: &mut VstProcessContext, transport: &TransportState, sample_ra
     c.barPositionMusic = m.bar_start;
     c.timeSigNumerator = i32::from(m.numerator);
     c.timeSigDenominator = i32::from(m.denominator);
+    if let Some(l) = &t.looping {
+        c.state |= StatesAndFlags_::kCycleValid as u32 | StatesAndFlags_::kCycleActive as u32;
+        c.cycleStartMusic = l.start_beats;
+        c.cycleEndMusic = l.end_beats;
+    }
 }
 
 #[cfg(test)]
@@ -1393,6 +1398,21 @@ mod tests {
             | StatesAndFlags_::kBarPositionValid as u32
             | StatesAndFlags_::kTimeSigValid as u32;
         assert_eq!(c.state & valid, valid);
+        assert_eq!(c.state & StatesAndFlags_::kCycleActive as u32, 0);
+
+        let looping = TransportState {
+            looping: Some(daw_core::node::TransportLoop::at(
+                &tl,
+                SampleTime(96_000),
+                SampleTime(192_000),
+                48_000.0,
+            )),
+            ..t
+        };
+        fill_context(&mut c, &looping, 44_100.0);
+        let cycle = StatesAndFlags_::kCycleValid as u32 | StatesAndFlags_::kCycleActive as u32;
+        assert_eq!(c.state & cycle, cycle);
+        assert_eq!((c.cycleStartMusic, c.cycleEndMusic), (4.0, 8.0));
 
         // No tempo: 120 bpm in 4/4 from sample 0, at the plugin's rate.
         let stopped = TransportState {

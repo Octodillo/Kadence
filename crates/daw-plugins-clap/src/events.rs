@@ -173,6 +173,18 @@ pub(crate) fn transport(t: &TransportState, offset: u32) -> TransportEvent {
             | TransportFlags::HAS_BEATS_TIMELINE
             | TransportFlags::HAS_TIME_SIGNATURE;
     }
+    let (mut loop_beats, mut loop_seconds) = ((0.0, 0.0), (0.0, 0.0));
+    if let Some(l) = &t.looping {
+        flags |= TransportFlags::IS_LOOP_ACTIVE;
+        if t.sample_rate > 0.0 {
+            #[allow(clippy::cast_precision_loss)]
+            let secs = |s: i64| s as f64 / t.sample_rate;
+            loop_seconds = (secs(l.start.0), secs(l.end.0));
+        }
+        if t.bpm > 0.0 {
+            loop_beats = (l.start_beats, l.end_beats);
+        }
+    }
     TransportEvent {
         header: EventHeader::new_core(0, EventFlags::empty()),
         flags,
@@ -180,10 +192,10 @@ pub(crate) fn transport(t: &TransportState, offset: u32) -> TransportEvent {
         song_pos_seconds: SecondsTime::from_float(seconds),
         tempo: t.bpm,
         tempo_inc: 0.0,
-        loop_start_beats: BeatTime::from_int(0),
-        loop_end_beats: BeatTime::from_int(0),
-        loop_start_seconds: SecondsTime::from_int(0),
-        loop_end_seconds: SecondsTime::from_int(0),
+        loop_start_beats: BeatTime::from_float(loop_beats.0),
+        loop_end_beats: BeatTime::from_float(loop_beats.1),
+        loop_start_seconds: SecondsTime::from_float(loop_seconds.0),
+        loop_end_seconds: SecondsTime::from_float(loop_seconds.1),
         bar_start: BeatTime::from_float(m.bar_start),
         #[allow(clippy::cast_possible_truncation)]
         bar_number: m.bar.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
@@ -237,6 +249,28 @@ mod tests {
                 | TransportFlags::HAS_BEATS_TIMELINE
                 | TransportFlags::HAS_TIME_SIGNATURE
         ));
+    }
+
+    #[test]
+    fn transport_has_the_loop() {
+        use daw_core::node::TransportLoop;
+        use daw_core::time::{SampleTime, Timeline};
+        let tl = Timeline::default();
+        let mut t = TransportState::at(&tl, true, SampleTime(100_000), 48_000.0);
+        let e = transport(&t, 0);
+        assert!(!e.flags.contains(TransportFlags::IS_LOOP_ACTIVE));
+        t.looping = Some(TransportLoop::at(
+            &tl,
+            SampleTime(96_000),
+            SampleTime(192_000),
+            48_000.0,
+        ));
+        let e = transport(&t, 0);
+        assert!(e.flags.contains(TransportFlags::IS_LOOP_ACTIVE));
+        assert!((e.loop_start_beats.to_float() - 4.0).abs() < 1e-6);
+        assert!((e.loop_end_beats.to_float() - 8.0).abs() < 1e-6);
+        assert!((e.loop_start_seconds.to_float() - 2.0).abs() < 1e-6);
+        assert!((e.loop_end_seconds.to_float() - 4.0).abs() < 1e-6);
     }
 
     #[test]
