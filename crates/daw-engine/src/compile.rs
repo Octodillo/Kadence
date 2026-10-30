@@ -353,17 +353,20 @@ impl CompiledGraph {
     }
 
     /// Queues a parameter change for `node`, applied at the start of the next
-    /// cycle. RT-safe. Returns `false` if the node is unknown or its queue is
-    /// full.
+    /// cycle. RT-safe. Returns `false` if the node is unknown, has no event
+    /// input to deliver the change to, or its queue is full.
     pub(crate) fn queue_param(&mut self, node: NodeId, param: u32, value: f64) -> bool {
         let Some(&step) = self.index.get(node.0 as usize) else {
             return false;
         };
+        let step = &mut self.steps[step];
+        // The Input node is never processed, and a node without an event
+        // input has no room in `events_in`, so the change would be lost.
+        if step.kind == NodeKind::Input || !step.ports.event_in {
+            return false;
+        }
         let kind = daw_core::event::EventKind::ParamValue { param, value };
-        self.steps[step]
-            .params
-            .push(Event { frame: 0, kind })
-            .is_ok()
+        step.params.push(Event { frame: 0, kind }).is_ok()
     }
 
     /// The master's output for the last processed block.

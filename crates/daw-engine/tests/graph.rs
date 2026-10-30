@@ -162,6 +162,28 @@ fn set_param_reaches_node() {
 }
 
 #[test]
+fn set_param_without_event_input_is_counted_as_dropped() {
+    let mut g = GraphDesc::new(1, 1);
+    let sine = g.add_device("sine", Box::new(Sine::new(1)));
+    g.connect(sine, g.master());
+    let input = g.input();
+    let (mut ctl, mut proc) = EngineController::new(config(64));
+    ctl.set_graph(g).unwrap();
+    // Neither the Input node nor a node without an event input can take a
+    // parameter change, so both must show up as dropped.
+    ctl.set_param(sine, 0, 1.0).unwrap();
+    ctl.set_param(input, 0, 1.0).unwrap();
+    let mut out = vec![0.0; 32];
+    proc.process(
+        32,
+        &[&[0.0; 32]],
+        &mut [&mut out],
+        &EventList::with_capacity(0),
+    );
+    assert_eq!(ctl.dropped_params(), 2);
+}
+
+#[test]
 fn transport_loops_inside_a_block() {
     let mut g = GraphDesc::new(0, 1);
     let pos = g.add_device("pos", Box::new(Position));

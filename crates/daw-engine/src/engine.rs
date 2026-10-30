@@ -277,8 +277,8 @@ impl EngineController {
         self.shared.swaps.load(Ordering::Relaxed)
     }
 
-    /// Parameter changes dropped because a node's queue was full or the node
-    /// was not in the running graph.
+    /// Parameter changes dropped because a node's queue was full, the node
+    /// was not in the running graph, or it has no event input.
     pub fn dropped_params(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
     }
