@@ -164,8 +164,9 @@ impl Session {
             // the project's bars and beats.
             let timeline = daw_midi::model::timeline(&snapshot.tempo);
             self.tempo = timeline.tempo.clone();
-            self.tempo_data = Some(snapshot.tempo.clone());
+            // Marked as sent only once it is, so a full queue retries next sync.
             self.controller.set_timeline(timeline)?;
+            self.tempo_data = Some(snapshot.tempo.clone());
             self.apply_loop()?;
         }
         let structure = build::Structure::of(snapshot);
