@@ -32,6 +32,11 @@ jobs:
             libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb \
             lv2-dev lv2-examples
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The vendored livi is its own workspace with its own target dir.
+          workspaces: |
+            . -> target
+            third_party/livi -> target
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
