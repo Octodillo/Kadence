@@ -63,6 +63,9 @@ Item {
         },
         () => {
             check(TestHelper.loadDemoProject(), "load demo project");
+            // Building the demo can outlast the 33 ms tick, and then this
+            // timer may fire before it: refresh Project's properties now.
+            Project.tick();
         },
         () => {
             // A slow load can block the event loop past this step's timer,
