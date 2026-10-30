@@ -144,6 +144,12 @@ pub trait AudioBackend: Send {
 
     fn open(&mut self, cfg: BackendConfig) -> Result<(), BackendError>;
 
+    /// Begins calling `cb` once per period.
+    ///
+    /// If the audio system refuses to start (JACK: activation fails), the
+    /// backend is left closed and must be [`open`](Self::open)ed again. In
+    /// that case `cb` may never be dropped, because the JACK library can
+    /// still hold it, so don't rely on its drop to signal anything.
     fn start(&mut self, cb: ProcessCallback) -> Result<(), BackendError>;
 
     fn stop(&mut self) -> Result<(), BackendError>;
