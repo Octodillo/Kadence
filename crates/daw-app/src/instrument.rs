@@ -144,20 +144,25 @@ pub fn set_plugin_effects<'a>(plugins: impl IntoIterator<Item = &'a PluginDescri
 }
 
 /// The instrument choices for the plugin instruments in `plugins`, named
-/// after them. A name more than one format has gets its format added, as
-/// in "Surge XT (CLAP)".
+/// after them. A name more than one plugin has gets its format added, as
+/// in "Surge XT (CLAP)", and its vendor too if that is not enough.
 pub fn plugin_choices(plugins: &[PluginDescriptor]) -> Vec<InstrumentChoice> {
     let instruments: Vec<&PluginDescriptor> = plugins.iter().filter(|d| d.is_instrument).collect();
+    let shared = |d: &PluginDescriptor, same_format: bool| {
+        instruments
+            .iter()
+            .filter(|o| o.name == d.name && (!same_format || o.format == d.format))
+            .count()
+            > 1
+    };
     instruments
         .iter()
         .map(|d| {
-            let shared = instruments.iter().filter(|o| o.name == d.name).count() > 1;
-            let name = if shared {
-                format!(
-                    "{} ({})",
-                    d.name,
-                    crate::plugins_bridge::format_label(&d.format)
-                )
+            let format = crate::plugins_bridge::format_label(&d.format);
+            let name = if shared(d, true) && !d.vendor.is_empty() {
+                format!("{} ({}, {format})", d.name, d.vendor)
+            } else if shared(d, false) {
+                format!("{} ({format})", d.name)
             } else {
                 d.name.clone()
             };
@@ -275,12 +280,29 @@ mod tests {
             plugin(PluginFormatKind::Vst3, "surge3", "Surge XT", true),
             plugin(PluginFormatKind::Lv2, "urn:dexed", "Dexed", true),
             plugin(PluginFormatKind::Clap, "gain", "Gain", false),
+            PluginDescriptor {
+                vendor: "One".into(),
+                ..plugin(PluginFormatKind::Clap, "one.pad", "Pad", true)
+            },
+            PluginDescriptor {
+                vendor: "Two".into(),
+                ..plugin(PluginFormatKind::Clap, "two.pad", "Pad", true)
+            },
         ];
         let names: Vec<String> = plugin_choices(&plugins)
             .into_iter()
             .map(|c| c.name)
             .collect();
-        assert_eq!(names, ["Surge XT (CLAP)", "Surge XT (VST3)", "Dexed"]);
+        assert_eq!(
+            names,
+            [
+                "Surge XT (CLAP)",
+                "Surge XT (VST3)",
+                "Dexed",
+                "Pad (One, CLAP)",
+                "Pad (Two, CLAP)"
+            ]
+        );
     }
 
     #[test]

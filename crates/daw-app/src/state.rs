@@ -53,7 +53,7 @@ pub struct AppState {
     /// background once the browser's model starts it.
     pub plugins: PluginCatalog,
     /// The catalog list revision last handed to the session.
-    known_plugins: Option<u64>,
+    pub known_plugins: Option<u64>,
 }
 
 /// The app's plugin catalog: scanned by this executable (which answers

@@ -784,9 +784,14 @@ impl MixerHandle for AppMixer {
     }
 
     fn revision(&self) -> u64 {
-        // Strips depend only on the document; a new document restarts its
-        // revision count, so its serial goes in the high bits.
-        state::with(|s| (s.doc_serial << 40) ^ s.doc.revision())
+        // Strips depend on the document, and on which plugins a scan found
+        // to be effects (that moves where an instrument track's inserts
+        // start). A new document restarts its revision count, so its serial
+        // goes in the high bits, the plugin list's in the middle.
+        state::with(|s| {
+            let plugins = s.known_plugins.map_or(0, |r| r + 1);
+            (s.doc_serial << 40) ^ (plugins << 24) ^ s.doc.revision()
+        })
     }
 
     fn set_write_automation(&mut self, on: bool) {
