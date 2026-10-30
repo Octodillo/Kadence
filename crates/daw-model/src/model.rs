@@ -818,6 +818,28 @@ pub enum AutomationTarget {
     DeviceParam { device: DeviceId, param: ParamId },
 }
 
+/// Level lanes ramp from this level up: a ramp between silence (or any
+/// lower level) and a louder level plays from here, as the arrange view
+/// draws it, instead of spending most of its length far below hearing.
+pub const LEVEL_FLOOR_DB: f64 = -60.0;
+
+impl AutomationTarget {
+    /// Whether the target is a level in dB (volume, send level).
+    pub fn is_level(self) -> bool {
+        matches!(self, Self::Volume | Self::SendLevel { .. })
+    }
+
+    /// The lowest value ramps on this target pass through: see
+    /// [`LEVEL_FLOOR_DB`]. Other targets ramp over their whole range.
+    pub fn ramp_floor(self) -> f64 {
+        if self.is_level() {
+            LEVEL_FLOOR_DB
+        } else {
+            f64::NEG_INFINITY
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutomationLane {
     pub id: LaneId,
@@ -849,7 +871,7 @@ impl AutomationLane {
             return Some(p.value);
         };
         let x = (tick.0 - p.tick.0) as f64 / (next.tick.0 - p.tick.0) as f64;
-        Some(p.value + (next.value - p.value) * p.shape(x))
+        Some(p.towards(next.value, x, self.target.ramp_floor()))
     }
 }
 
@@ -895,5 +917,22 @@ impl AutomationPoint {
         }
         let c = self.curve.clamp(-MAX_CURVE, MAX_CURVE);
         if c == 0.0 { x } else { x.powf((-c).exp2()) }
+    }
+
+    /// The value `x` (0 to 1) of the way from this point to the next one,
+    /// whose value is `next`. Between the points both ends count as at
+    /// least `floor` (see [`AutomationTarget::ramp_floor`]), unless both
+    /// are below it.
+    pub fn towards(&self, next: f64, x: f64, floor: f64) -> f64 {
+        let s = self.shape(x);
+        if s <= 0.0 && x < 1.0 {
+            return self.value;
+        }
+        if x >= 1.0 {
+            return next;
+        }
+        let floor = floor.min(self.value.max(next));
+        let (a, b) = (self.value.max(floor), next.max(floor));
+        a + (b - a) * s
     }
 }

@@ -376,6 +376,9 @@ pub struct Arrange {
     /// Height of one automation lane.
     pub lane_height: f64,
     /// Selected automation points: a lane and indices into its points.
+    /// Dropped when the lane's points change other than by this view's own
+    /// gestures (undo, a touch-write take), as the indices may then point
+    /// elsewhere.
     pub points: Option<(LaneId, BTreeSet<usize>)>,
     /// Ranges and parameter lists of device parameters, for lanes that
     /// automate them. Without one, device parameter lanes show 0 to 1.
@@ -389,6 +392,9 @@ pub struct Arrange {
     /// first track), and the bottom of the last: rows are as tall as a
     /// track plus its shown lanes. See [`Arrange::relayout`].
     tops: Vec<f64>,
+    /// The selected lane's points when [`points`](Self::points) was last
+    /// set or edited here.
+    points_seen: Vec<AutomationPoint>,
 }
 
 impl Default for Arrange {
@@ -421,6 +427,7 @@ impl Arrange {
             drag: None,
             rates: HashMap::new(),
             tops: Vec::new(),
+            points_seen: Vec::new(),
         }
     }
 
@@ -431,6 +438,7 @@ impl Arrange {
     /// [`expanded`](Self::expanded) changed and before asking for geometry;
     /// every input method and [`scene`](Self::scene) call it themselves.
     pub fn relayout(&mut self, project: &Project) {
+        self.check_points(project);
         self.tops.clear();
         self.tops.reserve(project.tracks.len() + 1);
         let mut y = 0.0;
@@ -766,7 +774,9 @@ impl Arrange {
         let project = doc.project();
         let hit = self.hit(project, p.x, p.y);
         if let Hit::Automation { .. } = hit {
-            return self.press_lane(doc, p, hit);
+            let o = self.press_lane(doc, p, hit);
+            self.saw_points(doc.project());
+            return o;
         }
         if p.button != Button::Middle && !matches!(hit, Hit::Ruler(_)) {
             self.points = None;
@@ -982,6 +992,7 @@ impl Arrange {
                 // selects only it.
                 if !edited && !p.shift && !p.ctrl {
                     self.points = Some((lane, BTreeSet::from([lead])));
+                    self.saw_points(doc.project());
                 }
                 Outcome::view()
             }
@@ -1063,6 +1074,7 @@ impl Arrange {
                 ..
             } => {
                 self.points = Some((lane, BTreeSet::from([i])));
+                self.saw_points(doc.project());
                 self.delete_points(doc)
             }
             // Double-clicking a handle resets what it sets.
@@ -1473,7 +1485,7 @@ impl Arrange {
 
     pub fn delete_selection(&mut self, doc: &mut Document) -> Outcome {
         self.end_drag(doc);
-        if self.points.as_ref().is_some_and(|(_, p)| !p.is_empty()) {
+        if self.points_selected(doc.project()) {
             return self.delete_points(doc);
         }
         let ids: Vec<ClipId> = self
@@ -1790,7 +1802,8 @@ impl Arrange {
     }
 
     /// The track a drop at view `y` lands on.
-    pub fn drop_track(&self, project: &Project, y: f64) -> Option<TrackId> {
+    pub fn drop_track(&mut self, project: &Project, y: f64) -> Option<TrackId> {
+        self.relayout(project);
         self.row_at(y, project.tracks.len())
             .map(|r| project.tracks[r].id)
     }

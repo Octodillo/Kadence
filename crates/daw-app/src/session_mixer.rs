@@ -382,13 +382,10 @@ impl SessionMixer {
                     return Ok(());
                 };
                 // Start from what is heard: the lane's value, if it has one.
+                let now = session.samples_to_ticks(session.controller().position());
                 let value = lane_of(&track, target)
                     .filter(|l| l.enabled)
-                    .and_then(|l| {
-                        session
-                            .engine_lane(&l.points)
-                            .value_at(session.controller().position())
-                    })
+                    .and_then(|l| l.value_at(now))
                     .unwrap_or(value);
                 let mut take = Take {
                     track: track.id,
@@ -398,16 +395,15 @@ impl SessionMixer {
                     value,
                 };
                 record(&mut take, session);
-                self.takes.push(take);
-                self.suspend(doc, session)?;
-                if let Some((key, param, v)) =
-                    live_param(doc.project(), session, self.takes.last().expect("pushed"))
-                {
+                // Hold the take's value before the lane stops playing, so
+                // the graph without it never plays the static value.
+                if let Some((key, param, v)) = live_param(doc.project(), session, &take) {
                     session
                         .set_live_param(key, param, Some(v))
                         .map_err(Message::from)?;
                 }
-                Ok(())
+                self.takes.push(take);
+                self.suspend(doc, session)
             }
             (false, running) => {
                 let mut r = Ok(());

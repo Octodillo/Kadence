@@ -399,16 +399,11 @@ fn automate(
                     (find(g, device_key(device)), param, |v| v)
                 }
             };
-            // Levels are drawn in dB: play their ramps in dB too.
-            let dense = matches!(
-                lane.target,
-                AutomationTarget::Volume | AutomationTarget::SendLevel { .. }
-            );
             let Some(node) = node else { continue };
             if let Some(key) = g.key(node) {
                 built.automated.insert((key, param));
             }
-            g.automate(node, param, session.playback_lane(lane, dense, to_value));
+            g.automate(node, param, session.playback_lane(lane, to_value));
         }
     }
 }

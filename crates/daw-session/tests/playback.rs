@@ -391,6 +391,23 @@ fn level_ramps_play_in_db_as_drawn_and_lane_edits_change_the_output() {
     let want = 0.5 * db(-20.0 * 0.5f64.powf(0.25));
     assert!((out[beat] - want).abs() < 2e-3, "{} vs {want}", out[beat]);
 
+    // A fade in from silence ramps from -60 dB, as the lane draws it: half
+    // way is -30 dB, not the -72 dB a ramp from -144 dB would give.
+    let mut fade = ramp_lane(0.0, 0.0).points;
+    fade[0].value = -144.0;
+    rig.doc
+        .execute(SetLane {
+            id,
+            field: LaneField::Points(fade),
+        })
+        .unwrap();
+    rig.sync();
+    rig.session.locate(TickTime(0)).unwrap();
+    let out = rig.run(2 * beat - 200);
+    assert!(out[0].abs() < 1e-3, "{}", out[0]);
+    let want = 0.5 * db(-30.0);
+    assert!((out[beat] - want).abs() < 2e-3, "{} vs {want}", out[beat]);
+
     // Switched off, the lane is not heard.
     rig.doc
         .execute(SetLane {

@@ -287,7 +287,9 @@ impl qobject::ArrangeView {
         let (scene, geometry) = state::with(|s| {
             s.arrange.palette = palette;
             s.arrange.ruler_height = ruler;
-            s.arrange.lane_height = lane_height.max(daw_arrange::MIN_TRACK_HEIGHT);
+            // Unclamped (but never zero), so rows stay level with the lane
+            // headers, which use the property as it is.
+            s.arrange.lane_height = lane_height.max(1.0);
             let project = s.doc.project().clone();
             s.arrange.resize(&project, w, h);
             s.arrange.peaks.poll();

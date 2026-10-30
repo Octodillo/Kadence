@@ -475,3 +475,66 @@ fn many_expanded_lanes_draw_quickly() {
     // Generous for debug builds on slow CI; release is far below a frame.
     assert!(per_frame.as_millis() < 100, "{per_frame:?}");
 }
+
+#[test]
+fn undo_and_cancel_drop_a_point_selection_they_made_stale() {
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Pan);
+    r.click(r.x(0), r.y(0, 0, 0.5));
+    r.click(r.x(4 * BAR), r.y(0, 0, 0.5));
+    r.doc.seal();
+    // Adding a point between selects it (index 1); undo takes it away, and
+    // Delete must not then remove the point at 4 bars in its place.
+    r.click(r.x(2 * BAR), r.y(0, 0, 0.75));
+    assert!(r.arrange.points_selected(r.doc.project()));
+    r.doc.undo().unwrap();
+    assert!(!r.arrange.points_selected(r.doc.project()));
+    r.arrange.delete_selection(&mut r.doc);
+    assert_eq!(r.points(lane).len(), 2);
+    assert_eq!(r.points(lane)[1].tick, TickTime(4 * BAR));
+
+    // The same after Escape during a click that added a point.
+    let at = Pointer::left(r.x(2 * BAR), r.y(0, 0, 0.75));
+    r.arrange.press(&mut r.doc, at);
+    r.arrange.cancel(&mut r.doc);
+    assert_eq!(r.points(lane).len(), 2);
+    r.arrange.delete_points(&mut r.doc);
+    assert_eq!(r.points(lane).len(), 2);
+    let tempo = r.tempo.clone();
+    r.arrange.scene(&r.doc.project().clone(), &env(&tempo));
+    assert!(r.arrange.points.is_none());
+
+    // Edits made here keep it.
+    r.click(r.x(4 * BAR), r.y(0, 0, 0.5));
+    r.arrange.set_point_shape(&mut r.doc, PointShape::Step);
+    r.arrange.set_point_shape(&mut r.doc, PointShape::Linear);
+    assert!(r.arrange.points_selected(r.doc.project()));
+}
+
+#[test]
+fn moving_points_in_time_keeps_their_values() {
+    use daw_model::commands::{LaneField, SetLane};
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Volume);
+    // Values the lane can't show, as a take or a file may leave them.
+    let pts = vec![
+        AutomationPoint::new(TickTime(BAR), -80.0),
+        AutomationPoint::new(TickTime(2 * BAR), 12.0),
+    ];
+    r.doc
+        .execute(SetLane {
+            id: lane,
+            field: LaneField::Points(pts),
+        })
+        .unwrap();
+    r.doc.seal();
+    for (from, to) in [(BAR, BAR + BEAT), (2 * BAR, 2 * BAR + BEAT)] {
+        let y = r.y(0, 0, if from == BAR { 0.0 } else { 1.0 });
+        r.drag((r.x(from), y), (r.x(to), y), |_| {});
+    }
+    let pts = r.points(lane);
+    assert_eq!(pts[0].tick, TickTime(BAR + BEAT));
+    assert_eq!(pts[0].value, -80.0);
+    assert_eq!(pts[1].tick, TickTime(2 * BAR + BEAT));
+    assert_eq!(pts[1].value, 12.0);
+}

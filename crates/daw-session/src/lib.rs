@@ -307,15 +307,17 @@ impl Session {
     /// A lane as the engine plays it, values turned into the engine's unit
     /// by `to_value`. The engine only steps or ramps in straight lines, so
     /// curved segments are played as short straight pieces, and so is
-    /// every ramp when `dense` is set (levels drawn in dB, which the engine
+    /// every ramp on a level (drawn in dB from
+    /// [`LEVEL_FLOOR_DB`](daw_model::LEVEL_FLOOR_DB) up, which the engine
     /// would otherwise ramp in linear gain). What plays then follows the
     /// line the arrange view draws.
     pub fn playback_lane(
         &self,
         lane: &daw_model::AutomationLane,
-        dense: bool,
         to_value: fn(f64) -> f64,
     ) -> AutomationLane {
+        let dense = lane.target.is_level();
+        let floor = lane.target.ramp_floor();
         let mut out = Vec::with_capacity(lane.points.len());
         for (i, p) in lane.points.iter().enumerate() {
             let time = self.ticks_to_samples(p.tick);
@@ -336,7 +338,7 @@ impl Session {
                 let tick = TickTime(p.tick.0 + ((next.tick.0 - p.tick.0) as f64 * x) as i64);
                 out.push(daw_engine::AutomationPoint {
                     time: self.ticks_to_samples(tick),
-                    value: to_value(p.value + (next.value - p.value) * p.shape(x)),
+                    value: to_value(p.towards(next.value, x, floor)),
                     curve: Curve::Linear,
                 });
             }

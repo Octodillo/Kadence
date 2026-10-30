@@ -327,13 +327,15 @@ fn draw_lane(
         if p.step {
             line(s, xa, ya, xb, ya);
             line(s, xb, ya, xb, yb);
-        } else if p.curve == 0.0 || (xb - xa) < 4.0 {
+        } else if (p.curve == 0.0 && scale.is_linear()) || (xb - xa) < 4.0 {
             line(s, xa, ya, xb, yb);
         } else {
+            let floor = lane.target.ramp_floor();
             let at = |k: usize| {
                 let x = k as f64 / CURVE_SEGMENTS as f64;
-                // The value moves along the shape; heights follow the scale.
-                let v = p.value + (q.value - p.value) * p.shape(x);
+                // The value moves along the shape as it plays; heights
+                // follow the scale.
+                let v = p.towards(q.value, x, floor);
                 (xa + (xb - xa) * x, a.norm_to_y(&r, scale.to_norm(v)))
             };
             for k in 0..CURVE_SEGMENTS {

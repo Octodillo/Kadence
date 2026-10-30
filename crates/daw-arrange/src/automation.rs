@@ -25,8 +25,9 @@ use crate::{Arrange, Button, Drag, Hit, Outcome, Pointer};
 /// Levels at the bottom of a dB lane are stored as this (what the mixer
 /// stores for a fader pulled all the way down).
 pub const SILENCE_DB: f64 = -144.0;
-/// The range a level lane shows, in dB.
-pub const LEVEL_FLOOR_DB: f64 = -60.0;
+/// The range a level lane shows, in dB. Ramps from below the floor play
+/// from it (see [`AutomationTarget::ramp_floor`]).
+pub const LEVEL_FLOOR_DB: f64 = daw_model::LEVEL_FLOOR_DB;
 pub const LEVEL_MAX_DB: f64 = 6.0;
 
 /// Pixels a point's square is wide.
@@ -70,6 +71,12 @@ impl LaneScale {
         log: false,
         steps: false,
     };
+
+    /// Whether heights are proportional to values (in dB for levels), so
+    /// a straight ramp is a straight line.
+    pub fn is_linear(self) -> bool {
+        !matches!(self, Self::Range { log: true, .. })
+    }
 
     /// `v` as a height from 0 (bottom) to 1 (top).
     pub fn to_norm(self, v: f64) -> f64 {
@@ -312,6 +319,34 @@ impl Arrange {
         }
     }
 
+    /// Notes the selected lane's points as they are now, after a gesture
+    /// here selected or edited them.
+    pub(crate) fn saw_points(&mut self, project: &Project) {
+        self.points_seen.clear();
+        if let Some((_, l)) = self
+            .points
+            .as_ref()
+            .and_then(|(lane, _)| Self::lane_of(project, *lane))
+        {
+            self.points_seen.extend_from_slice(&l.points);
+        }
+    }
+
+    /// The point selection, if its lane's points are as this view left them.
+    fn valid_points(&self, project: &Project) -> Option<&(LaneId, BTreeSet<usize>)> {
+        self.points.as_ref().filter(|(lane, _)| {
+            Self::lane_of(project, *lane).is_some_and(|(_, l)| l.points == self.points_seen)
+        })
+    }
+
+    /// Drops a point selection that something else (undo, a take) has
+    /// made stale.
+    pub(crate) fn check_points(&mut self, project: &Project) {
+        if self.valid_points(project).is_none() {
+            self.points = None;
+        }
+    }
+
     fn lane_of(project: &Project, lane: LaneId) -> Option<(&Track, &AutomationLane)> {
         let (track, index) = project.lane_location(lane)?;
         let t = project.track(track)?;
@@ -530,7 +565,11 @@ impl Arrange {
         for &i in moving {
             let q = &mut points[i];
             q.tick = TickTime(orig[i].tick.0 + delta);
-            q.value = scale.from_norm(scale.to_norm(orig[i].value) + dn);
+            // Moving only in time keeps values exactly, even ones outside
+            // what the lane shows.
+            if dn != 0.0 {
+                q.value = scale.from_norm(scale.to_norm(orig[i].value) + dn);
+            }
         }
         if points == l.points {
             return Outcome::default();
@@ -541,6 +580,7 @@ impl Arrange {
                 field: LaneField::Points(points),
             })
             .map(|_| ());
+        self.saw_points(doc.project());
         Outcome::from_result(r)
     }
 
@@ -590,6 +630,7 @@ impl Arrange {
     /// Deletes the selected automation points.
     pub fn delete_points(&mut self, doc: &mut Document) -> Outcome {
         self.end_drag(doc);
+        self.check_points(doc.project());
         let Some((lane, sel)) = self.points.take() else {
             return Outcome::default();
         };
@@ -612,6 +653,7 @@ impl Arrange {
     /// Gives the segments after the selected points `shape`.
     pub fn set_point_shape(&mut self, doc: &mut Document, shape: PointShape) -> Outcome {
         self.end_drag(doc);
+        self.check_points(doc.project());
         let Some((lane, sel)) = self.points.clone() else {
             return Outcome::default();
         };
@@ -624,13 +666,15 @@ impl Arrange {
                 shape.apply(p);
             }
         }
-        self.set_points(doc, lane, points)
+        let o = self.set_points(doc, lane, points);
+        self.saw_points(doc.project());
+        o
     }
 
     /// The shape of the segment after the first selected point, for the
     /// context menu to check.
     pub fn selected_shape(&self, project: &Project) -> Option<PointShape> {
-        let (lane, sel) = self.points.as_ref()?;
+        let (lane, sel) = self.valid_points(project)?;
         let p = Self::lane_of(project, *lane)?.1.points.get(*sel.first()?)?;
         Some(if p.step {
             PointShape::Step
@@ -733,8 +777,9 @@ impl Arrange {
     }
 
     /// Whether automation points are selected (for enabling Delete).
-    pub fn points_selected(&self) -> bool {
-        self.points.as_ref().is_some_and(|(_, s)| !s.is_empty())
+    pub fn points_selected(&self, project: &Project) -> bool {
+        self.valid_points(project)
+            .is_some_and(|(_, s)| !s.is_empty())
     }
 }
 

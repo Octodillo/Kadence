@@ -14,11 +14,17 @@ QQC2.Menu {
     required property int track
     // Read when the menu opens, so it lists what is current.
     property int targets: 0
+    // Bumped on every opening, so items keep their names current when the
+    // count stays the same but the targets changed.
+    property int showCount: 0
 
     title: i18nc("@title:menu", "Add Automation Lane")
     icon.name: "list-add"
 
-    onAboutToShow: targets = Automation.targetCount(track)
+    onAboutToShow: {
+        targets = Automation.targetCount(track);
+        showCount++;
+    }
 
     LaneName {
         id: laneName
@@ -35,7 +41,7 @@ QQC2.Menu {
         model: menu.targets
         delegate: QQC2.MenuItem {
             required property int index
-            text: laneName.text(Automation.targetKind(menu.track, index),
+            text: menu.showCount < 0 ? "" : laneName.text(Automation.targetKind(menu.track, index),
                                 Automation.targetDetail(menu.track, index),
                                 Automation.targetParam(menu.track, index))
             onTriggered: Automation.addLane(menu.track, index)
