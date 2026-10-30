@@ -6,8 +6,8 @@ use std::sync::Arc;
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_media::{AudioData, WavFormat, write_wav};
 use daw_model::{
-    AudioClip, Clip, ClipContent, Color, Device, DeviceSource, Document, MidiClip, Note, Project,
-    Track, TrackKind,
+    AudioClip, Clip, ClipContent, Color, Device, DeviceSource, Document, Fade, FadeShape, MidiClip,
+    Note, Project, Track, TrackKind,
 };
 
 const RATE: u32 = 48_000;
@@ -61,10 +61,14 @@ pub fn build() -> Result<Document, String> {
     ];
     let mut leads = Track::new(TrackKind::Audio, "Lead");
     leads.color = Some(Color(0xf6, 0x74, 0x00));
-    leads.clips = vec![
-        audio_clip("Lead", "lead.wav", 2, 2, 0),
-        audio_clip("Lead take 2", "lead.wav", 6, 2, 12_000),
-    ];
+    // A faded, quieter take so the screenshots show fades and clip gain.
+    let mut take2 = audio_clip("Lead take 2", "lead.wav", 6, 2, 12_000);
+    if let ClipContent::Audio(a) = &mut Arc::make_mut(&mut take2).content {
+        a.gain_db = -4.0;
+        a.fade_in = Fade::new(TickTime(BAR / 2), FadeShape::EqualPower);
+        a.fade_out = Fade::new(TickTime(BAR), FadeShape::SCurve);
+    }
+    leads.clips = vec![audio_clip("Lead", "lead.wav", 2, 2, 0), take2];
     let mut keys = Track::new(TrackKind::Instrument, "Keys");
     keys.color = Some(Color(0x9b, 0x59, 0xb6));
     keys.devices.push(Device::new(
