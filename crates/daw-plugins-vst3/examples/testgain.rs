@@ -1,6 +1,9 @@
 //! A tiny split processor/controller VST3 used by this crate's tests.
 //!
-//! - Stereo in and out, multiplied by parameter 0 ("Gain", plain = normalized, 0..1).
+//! - Stereo in and out, multiplied by parameter 0 ("Gain", plain = normalized, 0..1). A
+//!   `set_outputs` message with an int attribute `channels` (1 or 2) switches the output to
+//!   mono or back; the host is expected to call `restartComponent(kIoChanged)` after it. With
+//!   a nonzero int attribute `locked`, the plugin then refuses any other output arrangement.
 //! - Parameter 1 ("Peak") is read only; the processor reports the output peak through it.
 //! - Parameter 2 ("Activations") is read only; the processor reports how many times it has
 //!   been activated through it, as the count / 100.
@@ -17,7 +20,7 @@
 use std::ffi::{c_char, c_void};
 use std::slice;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use vst3::Steinberg::Vst::*;
@@ -66,6 +69,10 @@ unsafe fn write_f64(stream: *mut IBStream, v: f64) -> tresult {
 struct Processor {
     gain: AtomicU64,
     activations: AtomicU32,
+    /// Output channels, 1 or 2.
+    outputs: AtomicI32,
+    /// Refuse output arrangements other than `outputs`.
+    locked: AtomicBool,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
 }
 
@@ -78,6 +85,16 @@ impl Processor {
 
     fn gain(&self) -> f64 {
         f64::from_bits(self.gain.load(Ordering::Relaxed))
+    }
+
+    fn arrangement(&self, dir: BusDirection) -> SpeakerArrangement {
+        if dir == BusDirections_::kOutput as BusDirection
+            && self.outputs.load(Ordering::Relaxed) == 1
+        {
+            SpeakerArr::kMono
+        } else {
+            SpeakerArr::kStereo
+        }
     }
 }
 
@@ -102,7 +119,27 @@ impl IConnectionPointTrait for Processor {
         kResultOk
     }
 
-    unsafe fn notify(&self, _message: *mut IMessage) -> tresult {
+    unsafe fn notify(&self, message: *mut IMessage) -> tresult {
+        let Some(message) = (unsafe { ComRef::from_raw(message) }) else {
+            return kInvalidArgument;
+        };
+        let id = unsafe { std::ffi::CStr::from_ptr(message.getMessageID()) };
+        if id != c"set_outputs" {
+            return kResultFalse;
+        }
+        let Some(attrs) = (unsafe { ComRef::from_raw(message.getAttributes()) }) else {
+            return kInvalidArgument;
+        };
+        let mut channels = 0i64;
+        if unsafe { attrs.getInt(c"channels".as_ptr(), &mut channels) } != kResultOk
+            || !(1..=2).contains(&channels)
+        {
+            return kInvalidArgument;
+        }
+        let mut locked = 0i64;
+        unsafe { attrs.getInt(c"locked".as_ptr(), &mut locked) };
+        self.outputs.store(channels as i32, Ordering::Relaxed);
+        self.locked.store(locked != 0, Ordering::Relaxed);
         kResultOk
     }
 }
@@ -137,7 +174,11 @@ impl IComponentTrait for Processor {
         bus.busType = BusTypes_::kMain as BusType;
         bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
         if media == MediaTypes_::kAudio as MediaType {
-            bus.channelCount = 2;
+            bus.channelCount = if dir == BusDirections_::kOutput as BusDirection {
+                self.outputs.load(Ordering::Relaxed)
+            } else {
+                2
+            };
             copy_wstr("Main", &mut bus.name);
         } else {
             bus.channelCount = 16;
@@ -184,22 +225,31 @@ impl IAudioProcessorTrait for Processor {
         outputs: *mut SpeakerArrangement,
         num_outs: i32,
     ) -> tresult {
-        let ok = num_ins == 1
-            && num_outs == 1
-            && unsafe { *inputs == SpeakerArr::kStereo && *outputs == SpeakerArr::kStereo };
-        if ok { kResultTrue } else { kResultFalse }
+        if num_ins != 1 || num_outs != 1 || unsafe { *inputs } != SpeakerArr::kStereo {
+            return kResultFalse;
+        }
+        let channels = match unsafe { *outputs } {
+            SpeakerArr::kMono => 1,
+            SpeakerArr::kStereo => 2,
+            _ => return kResultFalse,
+        };
+        if self.locked.load(Ordering::Relaxed) && channels != self.outputs.load(Ordering::Relaxed) {
+            return kResultFalse;
+        }
+        self.outputs.store(channels, Ordering::Relaxed);
+        kResultTrue
     }
 
     unsafe fn getBusArrangement(
         &self,
-        _d: BusDirection,
+        dir: BusDirection,
         index: i32,
         arr: *mut SpeakerArrangement,
     ) -> tresult {
         if index != 0 {
             return kInvalidArgument;
         }
-        unsafe { *arr = SpeakerArr::kStereo };
+        unsafe { *arr = self.arrangement(dir) };
         kResultOk
     }
 
@@ -498,6 +548,8 @@ impl IPluginFactoryTrait for Factory {
             Processor::CID => ComWrapper::new(Processor {
                 gain: AtomicU64::new(1.0f64.to_bits()),
                 activations: AtomicU32::new(0),
+                outputs: AtomicI32::new(2),
+                locked: AtomicBool::new(false),
                 peer: Mutex::new(None),
             })
             .to_com_ptr::<FUnknown>(),
