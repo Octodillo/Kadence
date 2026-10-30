@@ -16,6 +16,10 @@ Item {
     property Item settingsPage
     property int failures: 0
 
+    EngineErrorText {
+        id: engineError
+    }
+
     function check(ok: bool, what: string): void {
         if (!ok) {
             console.error("smoke test: FAILED:", what);
@@ -37,6 +41,7 @@ Item {
             // What the engine started with, i.e. what was loaded from
             // kadencerc; the integration test checks this line.
             console.info("startup audio:", Engine.deviceIndex, Engine.sampleRate, Engine.bufferSize);
+            console.info("startup message:", engineError.active ? engineError.text : "none");
         },
         () => {
             check(window.visible, "window visible");
@@ -60,6 +65,9 @@ Item {
             check(TestHelper.loadDemoProject(), "load demo project");
         },
         () => {
+            // A slow load can block the event loop past this step's timer,
+            // so both timers are overdue at once; refresh before reading.
+            Project.tick();
             check(Project.trackCount === 3, "demo has three tracks");
             // Peaks load in the background; give them a step, then shoot.
             window.pageStack.currentItem.view.refresh();
@@ -163,18 +171,42 @@ Item {
             const device = Engine.deviceNames.length - 1;
             const rate = Engine.sampleRates[Engine.sampleRates.length - 1];
             const size = Engine.bufferSizes[1];
-            check(Engine.applyAudioSettings(device, rate, size) === "", "apply good audio settings");
+            check(Engine.applyAudioSettings(device, rate, size), "apply good audio settings");
             check(Engine.deviceIndex === device && Engine.sampleRate === rate && Engine.bufferSize === size,
                   "settings took effect");
-            check(Engine.applyAudioSettings(0, 12345, size) !== "", "bad sample rate refused");
+            // Without an audio server the real engine reports AudioFailed;
+            // only a settings error must be gone.
+            check(Engine.errorContext === (Engine.running ? Engine.NoError : Engine.AudioFailed),
+                  "only a failed engine reported after good settings");
+            check(!Engine.applyAudioSettings(0, 12345, size), "bad sample rate refused");
             check(Engine.sampleRate === rate, "old settings kept after refusal");
-            check(Engine.errorText !== "", "error shown");
+            check(Engine.errorContext === Engine.ApplyingSettings
+                  && Engine.errorKind === Engine.UnsupportedSampleRate
+                  && Engine.errorNumber === 12345, "refusal reported as data");
+            check(engineError.text === i18nc("@info %1 is the reason, a full sentence",
+                                             "Could not change the audio settings. %1",
+                                             i18nc("@info %1 is a number",
+                                                   "The audio device does not support a sample rate of %1 Hz.",
+                                                   (12345).toLocaleString(Qt.locale(), "f", 0))),
+                  "refusal worded in QML");
+            check(!Engine.applyAudioSettings(0, rate, 100), "bad buffer size refused");
+            check(Engine.errorKind === Engine.UnsupportedBufferSize && Engine.errorNumber === 100
+                  && engineError.reason === i18ncp("@info",
+                                                   "The audio device does not support a buffer size of %1 sample.",
+                                                   "The audio device does not support a buffer size of %1 samples.",
+                                                   100),
+                  "buffer size refusal worded with plural");
+            check(!Engine.applyAudioSettings(Engine.deviceNames.length + 3, rate, size),
+                  "unknown device index refused");
+            check(Engine.errorKind === Engine.InvalidDeviceChoice
+                  && Engine.errorNumber === Engine.deviceNames.length + 3, "bad device index reported");
             // Leave a known state in the config file for the test to read
             // (the stub offers 44100 and 512; a running server may not).
             const finalRate = Engine.sampleRates.includes(44100) ? 44100 : rate;
             const finalSize = Engine.bufferSizes.includes(512) ? 512 : size;
-            check(Engine.applyAudioSettings(Math.min(1, device), finalRate, finalSize) === "",
-                  "apply final settings");
+            check(Engine.applyAudioSettings(Math.min(1, device), finalRate, finalSize), "apply final settings");
+            check(Engine.errorContext === (Engine.running ? Engine.NoError : Engine.AudioFailed),
+                  "settings error cleared by good settings");
         },
         () => {
             // Older Kirigami (KF 6.13 in Debian 13) has no PageStack.closeDialog();

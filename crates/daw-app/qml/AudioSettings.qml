@@ -15,10 +15,10 @@ ColumnLayout {
     spacing: Kirigami.Units.largeSpacing
 
     function apply(): void {
-        const error = Engine.applyAudioSettings(deviceBox.currentIndex,
-                                                rateBox.currentValue,
-                                                bufferBox.currentValue);
-        if (error !== "") {
+        const ok = Engine.applyAudioSettings(deviceBox.currentIndex,
+                                             rateBox.currentValue,
+                                             bufferBox.currentValue);
+        if (!ok) {
             // Show what is actually running again.
             settings.syncFromEngine();
         }
@@ -32,11 +32,17 @@ ColumnLayout {
 
     Component.onCompleted: syncFromEngine()
 
+    EngineErrorText {
+        id: engineError
+    }
+
     Kirigami.InlineMessage {
         Layout.fillWidth: true
-        type: Kirigami.MessageType.Error
-        visible: Engine.errorText !== ""
-        text: i18nc("@info", "Could not change audio settings: %1", Engine.errorText)
+        // A fallback at startup worked, so audio runs: a warning, not an error.
+        type: Engine.errorContext === Engine.StartupFallback ? Kirigami.MessageType.Warning
+                                                             : Kirigami.MessageType.Error
+        visible: engineError.active
+        text: engineError.text
     }
 
     Kirigami.FormLayout {
