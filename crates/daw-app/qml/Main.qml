@@ -300,7 +300,8 @@ Kirigami.ApplicationWindow {
 
     Component.onCompleted: {
         PluginEditors.setTitles(
-            i18nc("@title:window a plugin's own editor; %1 is the device, %2 its track", "%1 — %2"),
+            // The placeholders stay for the window titles to fill in.
+            i18nc("@title:window a plugin's own editor; %1 is the device, %2 its track", "%1 — %2", "%1", "%2"),
             i18nc("@title name of the master bus", "Master"));
         notifyEngineError();
     }

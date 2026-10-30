@@ -191,8 +191,8 @@ pub struct TickReport {
     pub warnings: Vec<Warning>,
     /// The rebuild failed; it is retried on later ticks.
     pub error: Option<SessionError>,
-    /// Plugin devices whose plugin said its state changed while its editor was open, or whose
-    /// editor was closed, since the last tick. The app can record their new state
+    /// Plugin devices whose plugin said its state changed while its editor was open (a change
+    /// the plugin noticed as its editor closed included), since the last tick. The app can record their new state
     /// ([`plugin_state`](Session::plugin_state)) as an edit.
     pub state_changed: Vec<DeviceId>,
 }
@@ -366,12 +366,12 @@ impl Session {
             let (changed, open) = l
                 .handle
                 .with(|p| (p.take_state_changed(), p.is_editor_open()));
-            // Closing the editor is when a plugin that never reports changes is checked.
             // Without an editor, a report is more likely the host's doing (automation) than
-            // the user's, and saving the document picks the state up anyway.
+            // the user's, and saving the document picks the state up anyway. Closing the
+            // editor is no report of its own: the state then also holds what the host set
+            // (parameters, automation), which is no change of the plugin's.
             let was_open = std::mem::replace(&mut l.editor_open, open);
-            let closed = was_open && !open;
-            if ((changed && was_open) || closed) && !l.crashed {
+            if changed && (was_open || open) && !l.crashed {
                 state_changed.push(device);
             }
             let crashed = l.monitor.as_ref().is_some_and(|m| m.is_crashed());
@@ -495,24 +495,23 @@ impl Session {
         let Some(l) = self.plugins.live_mut(device).filter(|l| !l.crashed) else {
             return Err("the plugin is not running".into());
         };
+        // Every format leaves an open editor as it is. Asked even when it reads as open: a
+        // sandboxed editor the user just closed reads as open until the next tick.
         let opened = l.handle.with(|p| {
             p.set_editor_title(title);
-            if p.is_editor_open() {
-                return Ok(());
-            }
             p.open_editor()
         });
         match opened {
             Ok(()) => {
                 l.editor_open = true;
+                l.editor_title = Some(title.to_owned());
                 Ok(())
             }
             Err(e) => Err(e.to_string()),
         }
     }
 
-    /// Closes a device's plugin editor. The next [`tick`](Self::tick) reports the device in
-    /// [`TickReport::state_changed`], as when the user closes the window.
+    /// Closes a device's plugin editor.
     pub fn close_plugin_editor(&mut self, device: DeviceId) {
         self.with_plugin(device, |p| p.close_editor());
     }
@@ -526,7 +525,13 @@ impl Session {
     /// Retitles a device's plugin editor window, for a renamed device or track. Cheap when
     /// the title is unchanged.
     pub fn set_plugin_editor_title(&mut self, device: DeviceId, title: &str) {
-        self.with_plugin(device, |p| p.set_editor_title(title));
+        let Some(l) = self.plugins.live_mut(device).filter(|l| !l.crashed) else {
+            return;
+        };
+        if l.editor_title.as_deref() != Some(title) {
+            l.editor_title = Some(title.to_owned());
+            l.handle.with(|p| p.set_editor_title(title));
+        }
     }
 
     /// Saves one device's plugin state, if it differs from the document's, for the app to

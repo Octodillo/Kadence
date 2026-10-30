@@ -583,18 +583,15 @@ fn an_editor_change_becomes_an_undo_step() {
         None
     );
 
-    // The user turns the gain down in the editor, then closes it.
+    // The user turns the gain down in the editor. (A load is no report of the plugin's own;
+    // showing the test plugin's editor again is.)
     let set = rig
         .session
         .with_plugin(rig.device, |p| p.load_state(&gain_state(0.5)));
     set.unwrap().unwrap();
     rig.settles_at(LEVEL * 0.5);
-    let closed = rig
-        .session
-        .with_plugin(rig.device, |p| p.load_state(b"DAWC"));
-    closed.unwrap().unwrap();
+    rig.session.open_plugin_editor(rig.device, "Gain").unwrap();
     rig.reports_change();
-    assert!(!rig.session.plugin_editor_open(rig.device));
     let steps = rig.doc.history().undo_len();
     rig.record_state();
     assert_eq!(rig.doc.history().undo_len(), steps + 1);
@@ -615,15 +612,51 @@ fn an_editor_change_becomes_an_undo_step() {
 }
 
 #[test]
-fn without_an_editor_a_change_is_not_reported() {
+fn closing_the_editor_is_no_change() {
     let mut rig = Rig::new();
     rig.session.open_plugin_editor(rig.device, "Gain").unwrap();
     rig.reports_change();
-    rig.session.close_plugin_editor(rig.device);
-    // Closing it is reported: the plugin may have changed without saying so.
-    rig.reports_change();
+    // The host sets a parameter while the editor is open, then the user closes it.
+    rig.doc
+        .execute(SetParam {
+            device: rig.device,
+            param: GAIN,
+            value: Some(0.5),
+        })
+        .unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 0.5);
+    let closed = rig
+        .session
+        .with_plugin(rig.device, |p| p.load_state(b"DAWC"));
+    closed.unwrap().unwrap();
+    // The sandbox host notices at its own pace.
+    let start = Instant::now();
+    while rig.session.plugin_editor_open(rig.device) {
+        assert!(start.elapsed() < Duration::from_secs(20), "close unnoticed");
+        rig.run(BLOCK);
+        std::thread::sleep(Duration::from_millis(5));
+    }
     rig.run(BLOCK * 8);
     assert!(rig.changed.is_empty(), "{:?}", rig.changed);
+}
+
+#[test]
+fn an_open_editor_opens_again_after_audio_restarts() {
+    let mut rig = Rig::new();
+    rig.session
+        .open_plugin_editor(rig.device, "Gain — Audio 1")
+        .unwrap();
+    let plugins = rig.session.take_plugins();
+    let (mut session, proc) = Session::new(config());
+    session.media_mut().set_memory_limit(60.0);
+    session.set_plugins(plugins);
+    rig.session = session;
+    rig.proc = proc;
+    rig.sync();
+    rig.session.play().unwrap();
+    assert_eq!(rig.status(), Some(PluginStatus::Running));
+    assert!(rig.session.plugin_editor_open(rig.device));
 }
 
 #[test]

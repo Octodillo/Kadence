@@ -218,7 +218,11 @@ impl Host<'_> {
         // Calls that can take long make audio cycles skip (output silence) rather than wait.
         let slow = matches!(
             request,
-            Request::SaveState | Request::LoadState | Request::OpenEditor | Request::CloseEditor
+            Request::SaveState
+                | Request::LoadState
+                | Request::OpenEditor
+                | Request::CloseEditor
+                | Request::SetEditorTitle(_)
         );
         // A split plugin's audio never waits for this thread, so there is nothing to flag.
         let busy = self

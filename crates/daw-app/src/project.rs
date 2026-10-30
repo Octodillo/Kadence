@@ -431,7 +431,7 @@ impl qobject::Project {
                 playhead.0,
                 p.tracks.len() as i32,
                 shown_name(p, s.doc.bundle()),
-                s.doc.is_modified(),
+                s.doc.is_modified() || s.has_pending_plugin_changes(),
                 s.doc.bundle().is_some(),
                 h.can_undo(),
                 h.can_redo(),
@@ -506,6 +506,8 @@ impl qobject::Project {
         state::with(|s| {
             // A button may still be held on the timeline.
             s.end_drag();
+            // A change made in a plugin's editor comes before this edit.
+            s.flush_plugin_changes();
             f(s);
             s.sync();
             s.touch();

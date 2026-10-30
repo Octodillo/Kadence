@@ -263,6 +263,24 @@ impl AppState {
         }
     }
 
+    /// Records every plugin change reported and not recorded yet, without
+    /// waiting for the plugin to go quiet: before an undo, redo or other edit
+    /// would put it in the wrong place in the history, and before saving.
+    pub fn flush_plugin_changes(&mut self) {
+        let mut due: Vec<daw_model::DeviceId> =
+            self.plugin_changes.drain().map(|(d, _)| d).collect();
+        due.sort_by_key(|d| d.0);
+        for device in due {
+            self.record_plugin_state(device);
+        }
+    }
+
+    /// A plugin reported a change that is not an undo step yet: unsaved,
+    /// like any other edit.
+    pub fn has_pending_plugin_changes(&self) -> bool {
+        !self.plugin_changes.is_empty()
+    }
+
     /// Records a plugin device's state, if it changed, as an undo step.
     fn record_plugin_state(&mut self, device: daw_model::DeviceId) {
         // The plugin's state is compared with the document's as the engine
@@ -349,6 +367,8 @@ impl AppState {
     /// it. Not an undo step: the plugin changed, not the project, so undo
     /// must not throw a plugin's own changes away.
     pub fn store_plugin_states(&mut self) {
+        // Reported changes become undo steps; only the rest is stored quietly.
+        self.flush_plugin_changes();
         let Some(session) = self.engine.session_mut() else {
             return;
         };
