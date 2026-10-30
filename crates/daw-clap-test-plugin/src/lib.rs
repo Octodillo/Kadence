@@ -5,7 +5,9 @@
 //! reports back to the host as an output parameter event.
 //!
 //! Loading the state `b"DAWL"` followed by a little-endian `u32` changes the reported latency;
-//! `b"DAWR"` does the same and asks the host to restart the plugin.
+//! `b"DAWR"` does the same and asks the host to restart the plugin. `b"DAWS"` followed by a
+//! little-endian `u32` takes that many milliseconds to load and changes nothing, standing in
+//! for a slow main-thread call.
 
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
@@ -280,6 +282,14 @@ impl PluginStateImpl for MainThread<'_> {
             if &magic == b"DAWR" {
                 self.host.request_restart();
             }
+            return Ok(());
+        }
+        if &magic == b"DAWS" {
+            let mut ms = [0; 4];
+            input.read_exact(&mut ms)?;
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(
+                u32::from_le_bytes(ms),
+            )));
             return Ok(());
         }
         let mut buf = [0; 12];

@@ -1,6 +1,7 @@
 //! The application side of a sandbox: [`SandboxedInstance`] is a [`PluginInstance`] whose plugin
 //! runs in a host process.
 
+use std::any::Any;
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
@@ -15,8 +16,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use daw_core::event::{Event, EventKind, EventList, ParamId};
+use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext};
-use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance};
+use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor};
 use daw_plugins::Scanner;
 
 use crate::child::HOST_ARG;
@@ -166,6 +168,8 @@ struct Shared {
     on_crash: Option<CrashHook>,
     /// The last generation the crash hook was called for.
     notified: AtomicU64,
+    /// The engine asked for a reset, which goes out with the next cycle.
+    reset: AtomicBool,
 }
 
 impl Shared {
@@ -662,11 +666,12 @@ struct TrackedParam {
     value: f64,
     /// Changed since the last saved or loaded state.
     dirty: bool,
+    /// [`Rt::seq`] when it last changed, so a save only cleans what it can contain.
+    seq: u64,
 }
 
-/// What to track for `params`: the automatable ones, sorted by id, taking value and dirty flag
-/// from `old` (sorted by id too) where it has them.
-fn tracked_params(params: &[ParamInfo], old: &[TrackedParam]) -> Vec<TrackedParam> {
+/// What to track for `params`: the automatable ones, sorted by id, at their defaults.
+fn tracked_params(params: &[ParamInfo]) -> Vec<TrackedParam> {
     let mut tracked: Vec<_> = params
         .iter()
         .filter(|p| p.automatable)
@@ -674,16 +679,22 @@ fn tracked_params(params: &[ParamInfo], old: &[TrackedParam]) -> Vec<TrackedPara
             id: p.id,
             value: p.default,
             dirty: false,
+            seq: 0,
         })
         .collect();
     tracked.sort_by_key(|t| t.id);
     tracked.dedup_by_key(|t| t.id);
-    for t in &mut tracked {
+    tracked
+}
+
+/// Takes value and dirty flag from `old` (sorted by id) into `tracked` where it has them.
+/// Without allocating, so it can run while the audio path waits.
+fn keep_tracked(tracked: &mut [TrackedParam], old: &[TrackedParam]) {
+    for t in tracked {
         if let Ok(i) = old.binary_search_by_key(&t.id, |o| o.id) {
             *t = old[i];
         }
     }
-    tracked
 }
 
 /// A [`PluginInstance`] whose plugin runs in its own host process.
@@ -713,7 +724,64 @@ pub struct SandboxedInstance {
     max_frames: u32,
     /// The last state saved from or loaded into the plugin.
     state: Option<Vec<u8>>,
+    /// What `process` works on, shared with the [`SandboxProcessor`] that `split` hands out.
+    audio: Arc<Exclusive<Audio>>,
+    /// The processor half is out, so this object's own `process` and `reset` do nothing.
+    lent: bool,
+}
+
+/// What the audio path works on. The instance and its [`SandboxProcessor`] share it through
+/// an [`Exclusive`]: the audio thread takes it for one cycle, the main thread only to swap the
+/// block or update the tracked parameters, never across a call to the host. So a slow
+/// main-thread call (saving state, opening the editor) does not hold the audio up. The other
+/// way round, a cycle holds it while it waits for the host, so a main-thread caller can wait
+/// up to one cycle's timeout.
+struct Audio {
+    /// The running host's block; `None` while there is none.
+    shm: Option<Arc<Shm>>,
     rt: Rt,
+    shared: Arc<Shared>,
+    process_timeout: Option<Duration>,
+    sample_rate: f64,
+}
+
+/// The audio-thread half of a [`SandboxedInstance`], from [`PluginInstance::split`].
+///
+/// A cycle that comes while the main thread updates the shared state waits a few
+/// microseconds for it, then is silent and carries its events to the next cycle.
+pub struct SandboxProcessor {
+    audio: Arc<Exclusive<Audio>>,
+    shared: Arc<Shared>,
+}
+
+/// How many times a [`SandboxProcessor`] cycle retries the state the main thread holds.
+const AUDIO_RETRIES: u32 = 100;
+
+impl PluginProcessor for SandboxProcessor {
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        for _ in 0..AUDIO_RETRIES {
+            if self.audio.try_audio(|a| a.process(ctx)).is_some() {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+        skip(ctx);
+    }
+
+    fn reset(&mut self) {
+        // Through the shared flag, so a reset is never lost to a busy state.
+        self.shared.reset.store(true, Ordering::Release);
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+}
+
+/// A cycle the audio state could not be had for: silence. Its events are lost, as they are for
+/// any node the engine cannot run in time.
+fn skip(ctx: &mut ProcessContext) {
+    SandboxedInstance::silence(ctx, 0);
 }
 
 impl SandboxedInstance {
@@ -734,8 +802,16 @@ impl SandboxedInstance {
             late_cycles: AtomicU64::new(0),
             on_crash: config.on_crash.clone(),
             notified: AtomicU64::new(0),
+            reset: AtomicBool::new(false),
         });
         let (link, info, latency) = Link::start(&config, &shared, 1, sample_rate, max_frames)?;
+        let audio = Audio {
+            shm: Some(link.shm.clone()),
+            rt: Rt::new(),
+            shared: shared.clone(),
+            process_timeout: config.process_timeout,
+            sample_rate,
+        };
         let mut instance = Self {
             config,
             shared,
@@ -751,7 +827,8 @@ impl SandboxedInstance {
             sample_rate,
             max_frames,
             state: None,
-            rt: Rt::new(),
+            audio: Arc::new(Exclusive::new(audio)),
+            lent: false,
         };
         instance.adopt(&info);
         Ok(instance)
@@ -766,8 +843,11 @@ impl SandboxedInstance {
     /// old host crashed.
     pub fn reload(&mut self) -> Result<(), PluginError> {
         self.shared.reload_requested.store(false, Ordering::Release);
+        // The audio path lets go of the old block first, so no cycle goes to a host that is
+        // going away.
+        self.audio.main(|a| a.shm = None);
         // A new generation, so the old host's watchdog can no longer report, and a clean slate
-        // for the new one's. Nothing processes while this runs: it has `&mut self`.
+        // for the new one's.
         let generation = {
             let mut reason = self.shared.reason();
             *reason = None;
@@ -797,13 +877,12 @@ impl SandboxedInstance {
                 return Err(e);
             }
         };
+        let shm = link.shm.clone();
         self.link = Some(link);
         let (old_ports, old_latency) = (self.ports.clone(), self.latency);
         self.latency = latency;
-        let kept = std::mem::take(&mut self.rt.tracked);
-        self.adopt(&info);
-        // Events carried for the old host are kept; a late cycle's outputs are gone with it.
-        self.rt.late_pending = false;
+        // Changes made from here on are tracked in the new list, and are newer than `kept`.
+        let kept = self.adopt(&info);
         let restored = match self.state.clone() {
             Some(state) => self
                 .control_with(Request::LoadState, &state, self.config.load_timeout)
@@ -814,12 +893,22 @@ impl SandboxedInstance {
                 }),
             None => Ok(()),
         };
-        for t in kept.into_iter().filter(|t| t.dirty) {
-            if let Ok(i) = self.rt.tracked.binary_search_by_key(&t.id, |p| p.id) {
-                self.rt.tracked[i] = t;
+        // The new host plays only now, with its state restored: until then it would play its
+        // defaults.
+        self.audio.main(|a| {
+            for t in kept.iter().filter(|t| t.dirty) {
+                if let Ok(i) = a.rt.tracked.binary_search_by_key(&t.id, |p| p.id)
+                    && !a.rt.tracked[i].dirty
+                {
+                    a.rt.tracked[i] = *t;
+                }
             }
-        }
-        self.rt.resend = self.rt.tracked.iter().any(|t| t.dirty).then_some(0);
+            a.rt.resend = a.rt.tracked.iter().any(|t| t.dirty).then_some(0);
+            // Events carried for the old host are kept; a late cycle's outputs are gone with
+            // it.
+            a.rt.late_pending = false;
+            a.shm = Some(shm);
+        });
         if self.editor_open {
             self.editor_open = false;
             let _ = self.open_editor();
@@ -838,11 +927,15 @@ impl SandboxedInstance {
         restored
     }
 
-    fn adopt(&mut self, info: &InstanceInfo) {
+    /// Takes on a freshly loaded plugin's ports and parameters, and returns what was tracked
+    /// for the one before.
+    fn adopt(&mut self, info: &InstanceInfo) -> Vec<TrackedParam> {
         self.ports = (&info.ports).into();
         self.params = info.params.iter().map(ParamInfo::from).collect();
         self.has_editor = info.has_editor;
-        self.rt.tracked = tracked_params(&self.params, &[]);
+        let tracked = tracked_params(&self.params);
+        self.audio
+            .main(|a| std::mem::replace(&mut a.rt.tracked, tracked))
     }
 
     /// Asks the host for its parameter list, which loading state can change, and tracks that
@@ -850,8 +943,13 @@ impl SandboxedInstance {
     fn refresh_params(&mut self) {
         if let Ok((Reply::Params(params), _, _)) = self.control(Request::Params, &[]) {
             self.params = params.iter().map(ParamInfo::from).collect();
-            self.rt.tracked = tracked_params(&self.params, &self.rt.tracked);
-            self.rt.resend = self.rt.tracked.iter().any(|t| t.dirty).then_some(0);
+            let mut tracked = tracked_params(&self.params);
+            let old = self.audio.main(|a| {
+                keep_tracked(&mut tracked, &a.rt.tracked);
+                a.rt.resend = tracked.iter().any(|t| t.dirty).then_some(0);
+                std::mem::replace(&mut a.rt.tracked, tracked)
+            });
+            drop(old);
         }
     }
 
@@ -930,7 +1028,8 @@ impl SandboxedInstance {
         if let Some(link) = self.link.as_mut() {
             let shm = Arc::new(shm);
             *locked(&link.watched) = shm.clone();
-            link.shm = shm;
+            link.shm = shm.clone();
+            self.audio.main(|a| a.shm = Some(shm));
         }
     }
 
@@ -978,27 +1077,39 @@ impl SandboxedInstance {
         }
     }
 
-    fn mark_clean(&mut self) {
-        for t in &mut self.rt.tracked {
-            t.dirty = false;
-        }
-        self.rt.resend = None;
+    /// Where tracked changes stand now; see [`Rt::seq`].
+    fn tracked_seq(&self) -> u64 {
+        self.audio.main(|a| a.rt.seq)
+    }
+
+    /// After a load, what was tracked up to `before` is replaced by the loaded state.
+    fn mark_clean(&mut self, before: u64) {
+        self.audio.main(|a| {
+            for t in a.rt.tracked.iter_mut().filter(|t| t.seq <= before) {
+                t.dirty = false;
+            }
+            a.rt.resend = None;
+        });
     }
 
     /// After a save, what the saved state holds is clean. Values still waiting to be re-sent
-    /// after a reload, or carried to the next cycle, have not reached the plugin and so are not
-    /// in that state: they stay dirty, and still go out.
-    fn mark_saved(&mut self) {
-        let pending = self.rt.resend.unwrap_or(self.rt.tracked.len());
-        let carry = &self.rt.carry;
-        for (i, t) in self.rt.tracked.iter_mut().enumerate() {
-            let carried = carry
-                .iter()
-                .any(|e| matches!(e.kind, EventKind::ParamValue { param, .. } if param == t.id));
-            if i < pending && !carried {
-                t.dirty = false;
+    /// after a reload, carried to the next cycle, or tracked after `before`, may not have
+    /// reached the plugin by the time it saved and so are not in that state: they stay dirty,
+    /// and still go out.
+    fn mark_saved(&mut self, before: u64) {
+        self.audio.main(|a| {
+            let rt = &mut a.rt;
+            let pending = rt.resend.unwrap_or(rt.tracked.len());
+            let carry = &rt.carry;
+            for (i, t) in rt.tracked.iter_mut().enumerate() {
+                let carried = carry.iter().any(
+                    |e| matches!(e.kind, EventKind::ParamValue { param, .. } if param == t.id),
+                );
+                if i < pending && !carried && t.seq <= before {
+                    t.dirty = false;
+                }
             }
-        }
+        });
     }
 
     fn silence(ctx: &mut ProcessContext, from: usize) {
@@ -1028,6 +1139,9 @@ struct Rt {
     /// A cycle missed its deadline. When the host finishes it, its output events are still
     /// collected; its audio is too late to use.
     late_pending: bool,
+    /// Counts tracked changes. Cycles run while the main thread waits on the host, so a save
+    /// or load cleans only what was tracked before it was sent.
+    seq: u64,
 }
 
 impl Rt {
@@ -1038,13 +1152,19 @@ impl Rt {
             reset_pending: false,
             carry: EventList::with_capacity(EVENT_CAPACITY as usize),
             late_pending: false,
+            seq: 0,
         }
     }
 
     fn track(&mut self, param: ParamId, value: f64) {
         if let Ok(i) = self.tracked.binary_search_by_key(&param, |t| t.id) {
-            self.tracked[i].value = value;
-            self.tracked[i].dirty = true;
+            self.seq += 1;
+            self.tracked[i] = TrackedParam {
+                value,
+                dirty: true,
+                seq: self.seq,
+                ..self.tracked[i]
+            };
         }
     }
 
@@ -1181,6 +1301,75 @@ fn run_cycle(
     Cycle::Done
 }
 
+impl Audio {
+    /// Runs one engine block through the host, in cycles of at most the block's frames.
+    /// Real-time safe.
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        let total = ctx.frames as usize;
+        for e in ctx.events_in.iter() {
+            if let EventKind::ParamValue { param, value } = e.kind {
+                self.rt.track(param, value);
+            }
+        }
+        if self.shared.reset.swap(false, Ordering::AcqRel) {
+            self.rt.reset_pending = true;
+        }
+        let Some(shm) = self.shm.as_ref() else {
+            // Between hosts, during a reload. Note-offs wait for the new host, which may get
+            // notes carried from the old one; parameter values are tracked above.
+            for e in ctx.events_in.iter() {
+                if matches!(e.kind, EventKind::NoteOff { .. }) {
+                    self.rt.carry(*e);
+                }
+            }
+            SandboxedInstance::silence(ctx, 0);
+            return;
+        };
+        if self.shared.crashed.load(Ordering::Acquire) {
+            SandboxedInstance::silence(ctx, 0);
+            return;
+        }
+        let max = shm.layout().max_frames as usize;
+        let events_in = ctx.events_in;
+        let mut events = events_in.iter().copied().peekable();
+        let first_out = ctx.events_out.len();
+        let mut offset = 0;
+        while offset < total {
+            let n = (total - offset).min(max);
+            let timeout = self
+                .process_timeout
+                .unwrap_or_else(|| Duration::from_secs_f64(n as f64 / self.sample_rate.max(1.0)));
+            let last = offset + n == total;
+            match run_cycle(
+                shm,
+                ctx,
+                offset,
+                n,
+                last,
+                &mut events,
+                &mut self.rt,
+                timeout,
+            ) {
+                Cycle::Done => offset += n,
+                Cycle::Late => {
+                    self.shared.late_cycles.fetch_add(1, Ordering::Relaxed);
+                    SandboxedInstance::silence(ctx, offset);
+                    for e in events.by_ref() {
+                        self.rt.carry(e);
+                    }
+                    break;
+                }
+            }
+        }
+        // Parameter changes the plugin made (its editor, say) are restored on reload too.
+        for e in ctx.events_out.iter().skip(first_out) {
+            if let EventKind::ParamValue { param, value } = e.kind {
+                self.rt.track(param, value);
+            }
+        }
+    }
+}
+
 impl Node for SandboxedInstance {
     fn ports(&self) -> PortLayout {
         self.ports.clone()
@@ -1189,6 +1378,7 @@ impl Node for SandboxedInstance {
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
         let new_rate = sample_rate != self.sample_rate;
         self.sample_rate = sample_rate;
+        self.audio.main(|a| a.sample_rate = sample_rate);
         self.max_frames = max_frames.max(1);
         self.layout_changed = false;
         let settings = (sample_rate, self.max_frames);
@@ -1228,59 +1418,8 @@ impl Node for SandboxedInstance {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        let total = ctx.frames as usize;
-        for e in ctx.events_in.iter() {
-            if let EventKind::ParamValue { param, value } = e.kind {
-                self.rt.track(param, value);
-            }
-        }
-        let Some(link) = self.link.as_ref() else {
-            Self::silence(ctx, 0);
-            return;
-        };
-        if self.shared.crashed.load(Ordering::Acquire) {
-            Self::silence(ctx, 0);
-            return;
-        }
-        let shm = link.shm.clone();
-        let max = shm.layout().max_frames as usize;
-        let events_in = ctx.events_in;
-        let mut events = events_in.iter().copied().peekable();
-        let first_out = ctx.events_out.len();
-        let mut offset = 0;
-        while offset < total {
-            let n = (total - offset).min(max);
-            let timeout = self
-                .config
-                .process_timeout
-                .unwrap_or_else(|| Duration::from_secs_f64(n as f64 / self.sample_rate.max(1.0)));
-            let last = offset + n == total;
-            match run_cycle(
-                &shm,
-                ctx,
-                offset,
-                n,
-                last,
-                &mut events,
-                &mut self.rt,
-                timeout,
-            ) {
-                Cycle::Done => offset += n,
-                Cycle::Late => {
-                    self.shared.late_cycles.fetch_add(1, Ordering::Relaxed);
-                    Self::silence(ctx, offset);
-                    for e in events.by_ref() {
-                        self.rt.carry(e);
-                    }
-                    break;
-                }
-            }
-        }
-        // Parameter changes the plugin made (its editor, say) are restored on reload too.
-        for e in ctx.events_out.iter().skip(first_out) {
-            if let EventKind::ParamValue { param, value } = e.kind {
-                self.rt.track(param, value);
-            }
+        if self.lent || self.audio.try_audio(|a| a.process(ctx)).is_none() {
+            skip(ctx);
         }
     }
 
@@ -1289,7 +1428,9 @@ impl Node for SandboxedInstance {
     }
 
     fn reset(&mut self) {
-        self.rt.reset_pending = true;
+        if !self.lent {
+            self.shared.reset.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -1309,8 +1450,12 @@ impl PluginInstance for SandboxedInstance {
         if let Ok((Reply::Value(v), _, _)) = self.control(Request::ParamValue(id), &[]) {
             return v;
         }
-        if let Ok(i) = self.rt.tracked.binary_search_by_key(&id, |t| t.id) {
-            return self.rt.tracked[i].value;
+        let tracked = self.audio.main(|a| {
+            let i = a.rt.tracked.binary_search_by_key(&id, |t| t.id).ok()?;
+            Some(a.rt.tracked[i].value)
+        });
+        if let Some(value) = tracked {
+            return value;
         }
         self.params
             .iter()
@@ -1327,10 +1472,11 @@ impl PluginInstance for SandboxedInstance {
                 .clone()
                 .ok_or_else(|| PluginError::State(self.not_running()));
         }
+        let before = self.tracked_seq();
         match self.control_with(Request::SaveState, &[], self.config.load_timeout)? {
             (Reply::State, state, _) => {
                 self.state = Some(state.clone());
-                self.mark_saved();
+                self.mark_saved(before);
                 Ok(state)
             }
             (other, _, _) => Err(PluginError::State(format!("unexpected reply {other:?}"))),
@@ -1346,9 +1492,10 @@ impl PluginInstance for SandboxedInstance {
                 data.len()
             )));
         }
+        let before = self.tracked_seq();
         if self.running().is_none() {
             self.state = Some(data.to_vec());
-            self.mark_clean();
+            self.mark_clean(before);
             return Ok(());
         }
         let latency = match self.control_with(Request::LoadState, data, self.config.load_timeout) {
@@ -1357,13 +1504,13 @@ impl PluginInstance for SandboxedInstance {
                 // A plugin error leaves the host running and the old state in place.
                 if self.running().is_none() {
                     self.state = Some(data.to_vec());
-                    self.mark_clean();
+                    self.mark_clean(before);
                 }
                 return Err(e);
             }
         };
         self.state = Some(data.to_vec());
-        self.mark_clean();
+        self.mark_clean(before);
         self.latency = latency;
         // Loading state can change the parameter list (a different preset of a modular synth).
         self.refresh_params();
@@ -1406,10 +1553,40 @@ impl PluginInstance for SandboxedInstance {
     fn take_layout_changed(&mut self) -> bool {
         std::mem::take(&mut self.layout_changed)
     }
+
+    /// The audio half never waits on a call to the host: those use the control socket, the
+    /// half the audio block.
+    fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
+        if self.lent {
+            return None;
+        }
+        self.lent = true;
+        Some(Box::new(SandboxProcessor {
+            audio: Arc::clone(&self.audio),
+            shared: Arc::clone(&self.shared),
+        }))
+    }
+
+    fn join(&mut self, processor: Box<dyn PluginProcessor>) {
+        match processor.into_any().downcast::<SandboxProcessor>() {
+            Ok(half) if Arc::ptr_eq(&half.audio, &self.audio) => self.lent = false,
+            _ => log::warn!(
+                "sandbox {}: asked to join a processor that is not its own",
+                self.shared.descriptor.name
+            ),
+        }
+    }
 }
 
 impl Drop for SandboxedInstance {
     fn drop(&mut self) {
+        if self.lent {
+            log::warn!(
+                "sandbox {}: dropped with its processor half still out",
+                self.shared.descriptor.name
+            );
+        }
+        self.audio.main(|a| a.shm = None);
         let graceful = self.running().is_some();
         if let Some(link) = self.link.take() {
             link.close(graceful, Duration::from_millis(500));
@@ -1444,6 +1621,7 @@ mod tests {
             late_cycles: AtomicU64::new(0),
             on_crash: None,
             notified: AtomicU64::new(0),
+            reset: AtomicBool::new(false),
         })
     }
 
@@ -1539,14 +1717,17 @@ mod tests {
                 id: 1,
                 value: 0.25,
                 dirty: true,
+                seq: 1,
             },
             TrackedParam {
                 id: 2,
                 value: 0.75,
                 dirty: true,
+                seq: 2,
             },
         ];
-        let tracked = tracked_params(&[param(120, true), param(1, true), param(7, false)], &old);
+        let mut tracked = tracked_params(&[param(120, true), param(1, true), param(7, false)]);
+        keep_tracked(&mut tracked, &old);
         let got: Vec<_> = tracked.iter().map(|t| (t.id, t.value, t.dirty)).collect();
         assert_eq!(got, [(1, 0.25, true), (120, 0.5, false)]);
     }
