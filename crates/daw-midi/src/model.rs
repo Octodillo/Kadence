@@ -101,9 +101,10 @@ pub fn compile_track(track: &Track, tempo: &dyn TempoMap, sample_rate: f64) -> S
 /// Collects removals, edits and additions to one clip's notes and builds
 /// the single undoable command for them.
 ///
-/// A pure edit (no notes added or removed) becomes an [`EditNotes`], which
-/// the undo stack merges with the next edit of the same notes, so a drag
-/// undoes in one step.
+/// The command is a [`Batch`] with the given label, so it never merges
+/// with the command before it. A [`drag`](Self::drag) step instead becomes
+/// a bare [`EditNotes`], which the undo stack merges with the next step of
+/// the same drag, so the whole drag undoes in one step.
 #[derive(Debug)]
 pub struct NoteEdit {
     clip: ClipId,
@@ -111,6 +112,8 @@ pub struct NoteEdit {
     remove: Vec<NoteUid>,
     edit: Vec<Note>,
     add: Vec<Note>,
+    drag: bool,
+    any_changed: bool,
 }
 
 impl NoteEdit {
@@ -121,15 +124,30 @@ impl NoteEdit {
             remove: Vec::new(),
             edit: Vec::new(),
             add: Vec::new(),
+            drag: false,
+            any_changed: false,
         }
     }
 
+    /// Marks this as one step of a drag gesture: the command merges with
+    /// the next step, and every note passed to [`changed`](Self::changed)
+    /// is sent even if unchanged, so the set of notes stays the same when
+    /// some of them stop at a limit (velocity 1, the shortest length).
+    pub fn drag(mut self) -> Self {
+        self.drag = true;
+        self
+    }
+
     /// Records every note in `after` that differs from the note with the
-    /// same ID in `before`. Notes not in `before` are ignored.
+    /// same ID in `before` (in a drag, every note in both). Notes not in
+    /// `before` are ignored.
     pub fn changed(mut self, before: &[Note], after: &[Note]) -> Self {
         let old: HashMap<NoteUid, &Note> = before.iter().map(|n| (n.id, n)).collect();
         for n in after {
-            if old.get(&n.id).is_some_and(|o| *o != n) {
+            let Some(o) = old.get(&n.id) else { continue };
+            let differs = *o != n;
+            self.any_changed |= differs;
+            if differs || self.drag {
                 self.edit.retain(|e| e.id != n.id);
                 self.edit.push(n.clone());
             }
@@ -154,7 +172,7 @@ impl NoteEdit {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.remove.is_empty() && self.edit.is_empty() && self.add.is_empty()
+        self.remove.is_empty() && !self.any_changed && self.add.is_empty()
     }
 
     /// The command, or `None` when nothing changes.
@@ -162,6 +180,9 @@ impl NoteEdit {
         // An edited note that is also removed only needs removing.
         self.remove.sort();
         self.remove.dedup();
+        if self.is_empty() {
+            return None;
+        }
         let removed = &self.remove;
         self.edit.retain(|n| removed.binary_search(&n.id).is_err());
         let mut parts: Vec<Box<dyn Command>> = Vec::new();
@@ -183,9 +204,8 @@ impl NoteEdit {
         if parts.is_empty() {
             return None;
         }
-        if parts.len() == 1 && is_edit(&*parts[0]) {
-            // Unwrapped, so the undo stack can merge it (its label is
-            // "Edit Notes").
+        if self.drag && parts.len() == 1 && is_edit(&*parts[0]) {
+            // Unwrapped, so the undo stack can merge the drag's steps.
             return parts.pop();
         }
         Some(Box::new(Batch::new(self.label, parts)))
@@ -383,19 +403,65 @@ mod tests {
     #[test]
     fn drag_edits_merge_into_one_step() {
         let a = n(0, 100, 60);
-        let id = a.id;
         let (mut doc, cid) = doc_with_clip(vec![a]);
         for dt in [10, 10, 10] {
-            let clip = midi_clip(doc.project(), cid).unwrap().clone();
-            let cmd = edit_selection(cid, &clip, &[id], "Move", |ns| {
-                edit::nudge(ns, dt);
-            })
-            .unwrap();
+            let before = midi_clip(doc.project(), cid).unwrap().notes.clone();
+            let mut after = before.clone();
+            edit::nudge(&mut after, dt);
+            let cmd = NoteEdit::new(cid, "Move")
+                .drag()
+                .changed(&before, &after)
+                .into_command()
+                .unwrap();
             doc.execute_boxed(cmd).unwrap();
         }
         assert_eq!(notes(&doc, cid)[0].start.0, 30);
         doc.undo().unwrap();
         assert_eq!(notes(&doc, cid)[0].start.0, 0);
+    }
+
+    #[test]
+    fn separate_edits_undo_separately_with_their_label() {
+        let a = n(0, 100, 60);
+        let id = a.id;
+        let (mut doc, cid) = doc_with_clip(vec![a]);
+        let clip = midi_clip(doc.project(), cid).unwrap().clone();
+        let cmd = edit_selection(cid, &clip, &[id], "Transpose", |ns| {
+            edit::transpose(ns, 2);
+        });
+        doc.execute_boxed(cmd.unwrap()).unwrap();
+        assert_eq!(doc.history().undo_label().as_deref(), Some("Transpose"));
+        let clip = midi_clip(doc.project(), cid).unwrap().clone();
+        let cmd = edit_selection(cid, &clip, &[id], "Velocity", |ns| {
+            edit::set_velocity(ns, 0.3)
+        });
+        doc.execute_boxed(cmd.unwrap()).unwrap();
+        doc.undo().unwrap();
+        let after = &notes(&doc, cid)[0];
+        assert_eq!((after.key, after.velocity), (62, 0.8));
+    }
+
+    #[test]
+    fn a_drag_stays_one_step_when_a_note_hits_a_limit() {
+        let mut a = n(0, 100, 60);
+        a.velocity = 0.95;
+        let mut b = n(200, 100, 62);
+        b.velocity = 0.5;
+        let (mut doc, cid) = doc_with_clip(vec![a, b]);
+        let first = notes(&doc, cid);
+        for _ in 0..3 {
+            let before = midi_clip(doc.project(), cid).unwrap().notes.clone();
+            let mut after = before.clone();
+            edit::add_velocity(&mut after, 0.1);
+            let cmd = NoteEdit::new(cid, "Velocity")
+                .drag()
+                .changed(&before, &after)
+                .into_command()
+                .unwrap();
+            doc.execute_boxed(cmd).unwrap();
+        }
+        doc.undo().unwrap();
+        assert_eq!(notes(&doc, cid), first);
     }
 
     #[test]
