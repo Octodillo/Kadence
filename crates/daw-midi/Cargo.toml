@@ -12,6 +12,9 @@ publish.workspace = true
 daw-core.workspace = true
 
 [dev-dependencies]
+daw-devices = { path = "../daw-devices" }
+daw-engine = { path = "../daw-engine" }
+assert_no_alloc.workspace = true
 proptest.workspace = true
 
 [lints]

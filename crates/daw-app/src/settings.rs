@@ -12,9 +12,11 @@ pub trait SettingsStore {
     /// The stored value, or `None` when the key is missing or empty.
     fn read(&self, group: &str, key: &str) -> Option<String>;
     fn write(&mut self, group: &str, key: &str, value: &str);
+    /// Make earlier writes durable, all at once.
+    fn sync(&mut self) {}
 }
 
-/// The application's KConfig file. Writes are synced to disk immediately.
+/// The application's KConfig file. Writes reach disk on [`SettingsStore::sync`].
 #[derive(Debug, Default)]
 pub struct KConfigStore;
 
@@ -26,6 +28,10 @@ impl SettingsStore for KConfigStore {
 
     fn write(&mut self, group: &str, key: &str, value: &str) {
         ffi::config_write(group, key, value);
+    }
+
+    fn sync(&mut self) {
+        ffi::config_sync();
     }
 }
 
@@ -51,6 +57,7 @@ pub fn save_audio_config(store: &mut dyn SettingsStore, config: &AudioConfig) {
     store.write(AUDIO, "Device", config.device.as_deref().unwrap_or(""));
     store.write(AUDIO, "SampleRate", &config.sample_rate.to_string());
     store.write(AUDIO, "BufferSize", &config.buffer_size.to_string());
+    store.sync();
 }
 
 #[cfg(test)]

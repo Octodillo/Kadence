@@ -1,0 +1,14 @@
+[package]
+name = "daw-clap-test-plugin"
+description = "A tiny CLAP plugin used by the CLAP host's tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clack-plugin = "0.2"
+clack-extensions = { version = "0.2", features = ["audio-ports", "latency", "note-ports", "params", "state", "clack-plugin"] }

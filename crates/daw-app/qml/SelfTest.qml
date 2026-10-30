@@ -34,6 +34,11 @@ Item {
 
     readonly property var steps: [
         () => {
+            // What the engine started with, i.e. what was loaded from
+            // kadencerc; the integration test checks this line.
+            console.info("startup audio:", Engine.deviceIndex, Engine.sampleRate, Engine.bufferSize);
+        },
+        () => {
             check(window.visible, "window visible");
             check(window.pageStack.currentItem.title === i18nc("@title", "Arrange"), "starts on Arrange");
             shoot(window.title, "arrange");
@@ -127,8 +132,14 @@ Item {
         running: true
         onTriggered: {
             if (test.step < test.steps.length) {
-                test.steps[test.step]();
+                // Advance first so a step that throws can't repeat forever.
+                const current = test.step;
                 test.step += 1;
+                try {
+                    test.steps[current]();
+                } catch (error) {
+                    test.check(false, "step " + current + " threw: " + error);
+                }
                 return;
             }
             stop();

@@ -26,13 +26,23 @@ const QML_FILES: &[&str] = &[
     "qml/TrackHeader.qml",
 ];
 
+/// Ask qmake (`QMAKE`, else `qmake6`, else `qmake`) for a Qt install path.
 fn qmake_query(var: &str) -> PathBuf {
-    let qmake = std::env::var("QMAKE").unwrap_or_else(|_| "qmake6".to_owned());
-    let output = Command::new(&qmake)
-        .args(["-query", var])
-        .output()
-        .unwrap_or_else(|e| panic!("could not run {qmake}: {e}"));
-    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    println!("cargo:rerun-if-env-changed=QMAKE");
+    let candidates = match std::env::var("QMAKE") {
+        Ok(qmake) => vec![qmake],
+        Err(_) => vec!["qmake6".to_owned(), "qmake".to_owned()],
+    };
+    for qmake in &candidates {
+        let Ok(output) = Command::new(qmake).args(["-query", var]).output() else {
+            continue;
+        };
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && !value.is_empty() {
+            return PathBuf::from(value);
+        }
+    }
+    panic!("could not get {var} from {candidates:?}; install Qt 6 or set QMAKE");
 }
 
 /// Where KDE Frameworks lives: `KF6_PREFIX`, else the Qt prefix (distros

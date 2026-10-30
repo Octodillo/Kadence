@@ -52,7 +52,10 @@ pub enum ReadStatus {
     /// Every requested frame was real audio or legitimate silence (before the start or
     /// past the end of the file).
     Ok,
-    /// Some frames were silent because a seek is still being serviced.
+    /// Some frames were silent because a seek is still being serviced. With the
+    /// transport rolling this lasts until the fill thread catches up with the moving
+    /// position; if it persists the filler cannot keep up, which callers should treat
+    /// like starvation.
     Pending,
     /// Some frames were silent because the fill thread fell behind.
     Underrun,
@@ -108,7 +111,7 @@ impl DiskStreamer {
     /// side. Filling starts at frame 0 straight away.
     pub fn open(&self, path: impl AsRef<std::path::Path>) -> Result<ClipReader> {
         let decoder = Decoder::open(path)?;
-        let info = decoder.info().clone();
+        let info = Arc::new(decoder.info().clone());
         let ch = info.channels;
         let rate = self.config.sample_rate;
         let resampler = if info.sample_rate != rate {
@@ -130,6 +133,7 @@ impl DiskStreamer {
             (u128::from(f) * u128::from(rate) / u128::from(info.sample_rate.max(1))) as u64
         });
         let stream = WorkerStream {
+            _info: info.clone(),
             data: data_tx,
             segs: seg_tx,
             shared: shared.clone(),
@@ -140,6 +144,7 @@ impl DiskStreamer {
             dst_rate: rate,
             generation: 0,
             next_frame: 0,
+            skip_to: 0,
             pending: Vec::new(),
             pending_pos: 0,
             scratch: vec![0.0; self.config.block_frames * ch],
@@ -179,14 +184,16 @@ impl Drop for DiskStreamer {
 }
 
 /// The RT side of one streamed file. [`read`](Self::read) never allocates, locks or
-/// does I/O. Don't drop it on the RT thread if you can avoid it; when you do, it only
-/// decrements reference counts because the fill thread frees the buffers.
+/// does I/O. Dropping it on the RT thread only decrements reference counts while the
+/// [`DiskStreamer`] is alive, because the fill thread holds the last references and
+/// frees the buffers and file info. After the streamer is gone, drop readers off the RT
+/// thread.
 pub struct ClipReader {
     data: Consumer<f32>,
     segs: Consumer<Segment>,
     shared: Arc<Shared>,
     channels: usize,
-    info: AudioFileInfo,
+    info: Arc<AudioFileInfo>,
     frames: Option<u64>,
     generation: u64,
     current: Option<Segment>,
@@ -235,7 +242,9 @@ impl ClipReader {
     /// Ask the fill thread to start buffering from `position` ahead of time, e.g. on a
     /// locate before playback resumes. RT-safe.
     pub fn cue(&mut self, position: SampleTime) {
-        if position.0 == self.expected && !self.waiting {
+        // Same position as already requested (or continuing): nothing to do, even while a
+        // seek is still pending. Re-cueing would restart the seek every call.
+        if position.0 == self.expected {
             return;
         }
         self.generation += 1;
@@ -335,7 +344,11 @@ impl ClipReader {
             return Some(seg);
         }
         while let Ok(seg) = self.segs.pop() {
-            if seg.generation != self.generation {
+            // While a seek is pending, data that ends before the position the reader has
+            // moved on to doesn't serve it; dropping it keeps the read Pending rather
+            // than reporting an underrun (the transport may roll during a locate).
+            let behind = self.waiting && seg.start + i64::from(seg.frames) <= self.expected;
+            if seg.generation != self.generation || (behind && !seg.eof) {
                 self.discard(seg.frames as usize);
                 continue;
             }
@@ -405,6 +418,8 @@ fn silence(out: &mut [&mut [f32]], at: usize, frames: usize) {
 
 /// The fill-thread side of one stream.
 struct WorkerStream {
+    /// Keeps the reader's file info alive so its last drop happens on this thread.
+    _info: Arc<AudioFileInfo>,
     data: Producer<f32>,
     segs: Producer<Segment>,
     shared: Arc<Shared>,
@@ -415,6 +430,8 @@ struct WorkerStream {
     dst_rate: u32,
     generation: u64,
     next_frame: i64,
+    /// First frame to push after a seek; earlier decoded frames are dropped.
+    skip_to: i64,
     /// Decoded (and resampled) interleaved frames not yet pushed.
     pending: Vec<f32>,
     pending_pos: usize,
@@ -441,7 +458,19 @@ impl WorkerStream {
             return false;
         }
         let want = block_frames.min(room);
-        while (self.pending.len() - self.pending_pos) / ch < want && !self.src_eof {
+        loop {
+            let avail = (self.pending.len() - self.pending_pos) / ch;
+            // A grid-aligned seek starts a little before the target: drop those frames
+            // here so every pushed segment starts at or after the requested position.
+            if self.next_frame < self.skip_to && avail > 0 {
+                let k = ((self.skip_to - self.next_frame) as usize).min(avail);
+                self.pending_pos += k * ch;
+                self.next_frame += k as i64;
+                continue;
+            }
+            if avail >= want || self.src_eof {
+                break;
+            }
             if let Err(()) = self.decode_more() {
                 self.shared.failed.store(true, Ordering::Relaxed);
                 self.src_eof = true;
@@ -472,7 +501,9 @@ impl WorkerStream {
         if self.src_eof && drained && self.segs.slots() > 0 {
             let _ = self.segs.push(Segment {
                 generation: self.generation,
-                start: self.next_frame,
+                // Never before the requested position: a seek that hits the end early
+                // must not report a shorter clip.
+                start: self.next_frame.max(self.skip_to),
                 frames: 0,
                 eof: true,
             });
@@ -496,9 +527,32 @@ impl WorkerStream {
     }
 
     fn seek(&mut self, target: i64) {
-        let target = target.max(0);
-        let src =
-            (i128::from(target) * i128::from(self.src_rate) / i128::from(self.dst_rate)) as u64;
+        let requested = target.max(0);
+        // A freshly reset resampler rings for its filter length, so start decoding a
+        // little earlier and let the skip below drop the lead-in.
+        let lead = self
+            .resampler
+            .as_ref()
+            .map_or(0, |rs| rs.warmup_frames() as i64);
+        let target = u128::from((requested - lead).max(0) as u64);
+        let (src_rate, dst_rate) = (u128::from(self.src_rate), u128::from(self.dst_rate));
+        // Start on a frame where source and engine grids coincide, so the resampled
+        // output lands exactly on engine frames; the reader drops the frames before
+        // `target`. Without resampling both periods are 1. For odd rate pairs the period
+        // gets long (e.g. 44101 -> 48000 is a whole second), so past a small bound fall
+        // back to the nearest source frame and accept a sub-frame offset.
+        const MAX_ALIGN: u128 = 1024;
+        let g = u128::from(gcd(self.src_rate, self.dst_rate).max(1));
+        let (src_period, dst_period) = ((src_rate / g).max(1), (dst_rate / g).max(1));
+        let (src, start) = if dst_period <= MAX_ALIGN {
+            let periods = target / dst_period;
+            (periods * src_period, periods * dst_period)
+        } else {
+            // Nearest source frame (rounded, not floored).
+            ((target * src_rate + dst_rate / 2) / dst_rate.max(1), target)
+        };
+        let src = u64::try_from(src).unwrap_or(u64::MAX);
+        let start = i64::try_from(start).unwrap_or(i64::MAX);
         self.pending.clear();
         self.pending_pos = 0;
         self.eof_sent = false;
@@ -507,10 +561,21 @@ impl WorkerStream {
             rs.reset();
         }
         if self.decoder.seek(src).is_err() {
+            // Reported like a decode error so the engine can tell a broken file from
+            // a clip that simply ended.
+            self.shared.failed.store(true, Ordering::Relaxed);
             self.src_eof = true;
         }
-        self.next_frame = target;
+        self.next_frame = start;
+        self.skip_to = requested;
     }
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 fn worker(rx: mpsc::Receiver<WorkerStream>, stop: Arc<AtomicBool>, config: StreamerConfig) {
