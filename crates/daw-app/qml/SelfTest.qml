@@ -118,11 +118,16 @@ Item {
             if (!window.smokeTest) {
                 return;
             }
-            check(Engine.applyAudioSettings(2, 96000, 128) === "", "apply good audio settings");
-            check(Engine.deviceIndex === 2 && Engine.sampleRate === 96000 && Engine.bufferSize === 128,
+            // Pick from what the engine offers: the stub has several devices,
+            // the real engine (silent without a server) has one.
+            const device = Engine.deviceNames.length - 1;
+            const rate = Engine.sampleRates[Engine.sampleRates.length - 1];
+            const size = Engine.bufferSizes[1];
+            check(Engine.applyAudioSettings(device, rate, size) === "", "apply good audio settings");
+            check(Engine.deviceIndex === device && Engine.sampleRate === rate && Engine.bufferSize === size,
                   "settings took effect");
-            check(Engine.applyAudioSettings(0, 12345, 128) !== "", "bad sample rate refused");
-            check(Engine.sampleRate === 96000, "old settings kept after refusal");
+            check(Engine.applyAudioSettings(0, 12345, size) !== "", "bad sample rate refused");
+            check(Engine.sampleRate === rate, "old settings kept after refusal");
             check(Engine.errorText !== "", "error shown");
             // Leave a known state in the config file for the test to read.
             check(Engine.applyAudioSettings(1, 44100, 512) === "", "apply final settings");
