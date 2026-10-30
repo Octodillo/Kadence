@@ -231,6 +231,15 @@ fn track_kind(kind: i32) -> TrackKind {
     }
 }
 
+/// The name the window title shows: the project's own, else the bundle's.
+/// Empty for a new project that was never saved; QML words that one.
+fn shown_name(p: &daw_model::Project, bundle: Option<&daw_model::Bundle>) -> String {
+    if !p.name.is_empty() {
+        return p.name.clone();
+    }
+    bundle.map(|b| b.name().to_owned()).unwrap_or_default()
+}
+
 fn track_at(s: &AppState, index: i32) -> Option<&std::sync::Arc<Track>> {
     usize::try_from(index)
         .ok()
@@ -343,7 +352,7 @@ impl qobject::Project {
                 s.view_revision,
                 playhead.0,
                 p.tracks.len() as i32,
-                p.name.clone(),
+                shown_name(p, s.doc.bundle()),
                 s.doc.is_modified(),
                 s.doc.bundle().is_some(),
                 h.can_undo(),

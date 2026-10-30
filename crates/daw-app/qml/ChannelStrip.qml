@@ -75,7 +75,8 @@ Item {
         Kirigami.Heading {
             Layout.fillWidth: true
             level: 5
-            text: strip.name
+            // The master is unnamed unless the user renamed it.
+            text: strip.name || (strip.isMaster ? i18nc("@label name of the master bus", "Master") : "")
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignHCenter
             opacity: strip.silenced ? 0.6 : 1

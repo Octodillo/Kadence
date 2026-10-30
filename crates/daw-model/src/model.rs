@@ -19,6 +19,8 @@ use crate::serde_util;
 /// everything an edit didn't touch. Mutate them through `Arc::make_mut`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    /// Empty until the user names the project. The UI then shows the bundle's
+    /// name, or a localised "Untitled" before the first save.
     pub name: String,
     /// Preferred sample rate; the engine may run at another one.
     pub sample_rate: u32,
@@ -31,7 +33,7 @@ pub struct Project {
 
 impl Default for Project {
     fn default() -> Self {
-        Self::new("Untitled")
+        Self::new("")
     }
 }
 
@@ -41,7 +43,8 @@ impl Project {
             name: name.into(),
             sample_rate: 48_000,
             tempo: TempoData::default(),
-            master: Arc::new(Track::new(TrackKind::Master, "Master")),
+            // Unnamed, so the UI can word it in the user's language.
+            master: Arc::new(Track::new(TrackKind::Master, "")),
             tracks: Vec::new(),
         }
     }

@@ -51,7 +51,7 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 ```json
 {
   "format": "kadence-project",
-  "version": 1,
+  "version": 2,
   "generator": "daw-model 0.1.0",
   "project": { ... }
 }
@@ -60,7 +60,7 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 | Field       | Meaning                                                        |
 |-------------|----------------------------------------------------------------|
 | `format`    | Always `kadence-project`. Anything else is rejected.           |
-| `version`   | Schema version (`daw_model::SCHEMA_VERSION`, currently 1).     |
+| `version`   | Schema version (`daw_model::SCHEMA_VERSION`, currently 2).     |
 | `generator` | What wrote the file. Informational only.                       |
 | `project`   | The `Project` tree below.                                      |
 
@@ -82,7 +82,7 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 
 | Field         | Type                      | Notes                                   |
 |---------------|---------------------------|-----------------------------------------|
-| `name`        | string                    |                                         |
+| `name`        | string                    | empty: the UI shows the bundle name, or "Untitled" |
 | `sample_rate` | integer                   | preferred rate; the engine may differ   |
 | `tempo`       | TempoData                 |                                         |
 | `master`      | Track                     | kind `master`; not in `tracks`          |
@@ -101,7 +101,7 @@ denominator a power of two.
 |--------------|----------------------|------------------------------------------------|
 | `id`         | uuid                 |                                                |
 | `kind`       | `audio` \| `instrument` \| `bus` \| `master` |                        |
-| `name`       | string               |                                                |
+| `name`       | string               | the master's is empty unless renamed; the UI words it |
 | `color`      | `[r, g, b]` or null  |                                                |
 | `volume_db`  | number               | fader                                          |
 | `pan`        | number               |                                                |
@@ -167,3 +167,10 @@ fails is rejected rather than half-loaded.
   deserializes. Files at the current version skip the migration path.
 - A file with a newer version than the build supports is rejected with
   `FormatError::TooNew`, never silently downgraded.
+
+### History
+
+| Version | Change |
+|---------|--------|
+| 1       | First schema. |
+| 2       | Default names are no longer saved in English: a project name of `"Untitled"` and a master named `"Master"` become `""`, and the UI words them in the user's language. |
