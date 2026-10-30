@@ -15,6 +15,7 @@ pub mod mixer_bridge;
 mod paint;
 pub mod piano_roll;
 pub mod project;
+mod recording;
 pub mod settings;
 pub mod state;
 mod test_helper;
