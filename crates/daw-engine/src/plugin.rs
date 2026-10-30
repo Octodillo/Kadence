@@ -57,7 +57,8 @@ struct Inner {
     /// The node asked to play last, if it was the owner or newer, could not: it was made
     /// for an older layout.
     stale: bool,
-    /// A node caught up with ports other than the ones it was made, and wired, with.
+    /// The node that last played caught up with ports other than the ones it was made, and
+    /// wired, with.
     rewire: bool,
 }
 
@@ -109,6 +110,9 @@ struct Shared {
     main_inside: AtomicBool,
     /// Last node handed out.
     nodes: AtomicU64,
+    /// `Inner::owner` while that node lives, 0 once it is dropped: then an older node may
+    /// take over.
+    live_owner: AtomicU64,
     /// Blocks the audio thread output silence for because the main thread held the plugin.
     busy: AtomicU64,
 }
@@ -164,6 +168,7 @@ impl PluginHandle {
                 thread: thread::current().id(),
                 main_inside: AtomicBool::new(false),
                 nodes: AtomicU64::new(0),
+                live_owner: AtomicU64::new(0),
                 busy: AtomicU64::new(0),
             }),
             _not_send: PhantomData,
@@ -217,7 +222,6 @@ impl PluginHandle {
             if i.layout_changed || i.prepared != (sample_rate, max_frames) {
                 i.prepare(sample_rate, max_frames);
             }
-            i.rewire = false;
             (i.epoch, i.ports.clone(), i.latency)
         });
         PluginNode {
@@ -226,6 +230,7 @@ impl PluginHandle {
             epoch,
             ports,
             latency,
+            rewired: false,
         }
     }
 
@@ -257,21 +262,40 @@ pub struct PluginNode {
     epoch: u64,
     ports: PortLayout,
     latency: u32,
+    /// Caught up in `prepare` with other ports than it was made with.
+    rewired: bool,
+}
+
+impl Drop for PluginNode {
+    fn drop(&mut self) {
+        // Runs wherever the graph is dropped, so it must not take the plugin.
+        let _ = self.shared.live_owner.compare_exchange(
+            self.id,
+            0,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
 }
 
 impl PluginNode {
     /// Runs `f` on the plugin if this node may play it, retrying briefly while a main-thread
     /// call finishes. Real-time safe: no clock reads or system calls.
     fn on_audio<R>(&mut self, mut f: impl FnMut(&mut dyn PluginInstance) -> R) -> Option<R> {
-        let (id, epoch) = (self.id, self.epoch);
+        let (id, epoch, rewired) = (self.id, self.epoch, self.rewired);
+        let live_owner = &self.shared.live_owner;
         let mut call = |i: &mut Inner| {
-            if id < i.owner {
+            if id < i.owner && live_owner.load(Ordering::Relaxed) == i.owner {
                 // A newer node plays; it, not this one, tells the host about its state.
                 return None;
             }
             i.stale = i.epoch != epoch;
             let p = i.plugin.as_mut().filter(|_| !i.stale)?;
-            i.owner = id;
+            if i.owner != id {
+                i.owner = id;
+                live_owner.store(id, Ordering::Relaxed);
+            }
+            i.rewire = rewired;
             Some(f(p.as_mut()))
         };
         for _ in 0..AUDIO_RETRIES {
@@ -299,12 +323,10 @@ impl Node for PluginNode {
             if i.layout_changed || i.prepared != (sample_rate, max_frames) {
                 i.prepare(sample_rate, max_frames);
             }
-            if i.ports != self.ports {
-                // The graph was wired for the ports this node was made with.
-                i.rewire = true;
-            }
             (i.epoch, i.ports.clone(), i.latency)
         });
+        // The graph was wired for the ports this node was made with.
+        self.rewired |= ports != self.ports;
         self.epoch = epoch;
         self.ports = ports;
         self.latency = latency;

@@ -333,3 +333,38 @@ fn a_latency_change_from_a_state_load_keeps_the_running_graph_playing() {
     run(&mut proc, 1);
     assert_eq!(ctl.latency(), 16);
 }
+
+#[test]
+fn an_older_node_takes_over_once_the_newer_one_is_gone() {
+    let (plugin, _) = plugin(1);
+    let (mut ctl, mut proc) = engine();
+    let early = plugin.node(RATE, FRAMES);
+    send(&mut ctl, &plugin);
+    assert_eq!(run(&mut proc, 1)[0], vec![1.0]);
+    // The graph with the newer node is replaced by one holding the older node.
+    send_node(&mut ctl, early);
+    run(&mut proc, 1);
+    ctl.collect_garbage();
+    assert_eq!(run(&mut proc, 2)[0], ramp(2, 4));
+    assert!(!plugin.pump());
+}
+
+#[test]
+fn a_rewire_is_asked_for_until_a_rewired_graph_plays() {
+    let (plugin, control) = plugin(1);
+    let (mut ctl, mut proc) = engine();
+    let early = plugin.node(RATE, FRAMES);
+    ask_for(&control, 2);
+    assert!(plugin.pump());
+    drop(plugin.node(RATE, FRAMES));
+    send_node(&mut ctl, early);
+    run(&mut proc, 1);
+    assert!(plugin.pump());
+    // The rewired graph never arrives: the request stands.
+    drop(plugin.node(RATE, FRAMES));
+    run(&mut proc, 1);
+    assert!(plugin.pump());
+    send(&mut ctl, &plugin);
+    assert_eq!(run(&mut proc, 1), [vec![3.0], vec![3.0]]);
+    assert!(!plugin.pump());
+}
