@@ -1187,6 +1187,7 @@ impl Node for SandboxedInstance {
     }
 
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
+        let new_rate = sample_rate != self.sample_rate;
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
         self.layout_changed = false;
@@ -1205,7 +1206,14 @@ impl Node for SandboxedInstance {
         };
         let generation = link.generation;
         match self.prepare_host() {
-            Ok(()) => self.prepared_with = Some(settings),
+            Ok(()) => {
+                self.prepared_with = Some(settings);
+                // Some ranges scale with the rate (LV2's lv2:sampleRate), and
+                // LV2 plugins are re-instantiated for a new rate.
+                if new_rate {
+                    self.refresh_params();
+                }
+            }
             Err(e) => {
                 // `prepare` cannot fail; a host that cannot prepare is as good as crashed.
                 if self
