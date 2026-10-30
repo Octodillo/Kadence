@@ -6,8 +6,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let registry = daw_plugins::default_registry();
-    daw_plugins::run_scan_child(&registry, std::env::args_os().skip(1)).unwrap_or_else(|| {
-        eprintln!("usage: daw-plugin-scan --scan <clap|lv2|vst3> <bundle>");
-        ExitCode::from(64)
-    })
+    match daw_plugins::run_scan_child(&registry, std::env::args_os().skip(1)) {
+        // The result is written. Leave without running exit-time code, such as static
+        // destructors of plugin libraries that are still loaded, which often crash.
+        // SAFETY: `_exit` ends the process at once; nothing needs to run first.
+        Some(code) if code == ExitCode::SUCCESS => unsafe { libc::_exit(0) },
+        Some(code) => code,
+        None => {
+            eprintln!("usage: daw-plugin-scan --scan <clap|lv2|vst3> <bundle>");
+            ExitCode::from(64)
+        }
+    }
 }

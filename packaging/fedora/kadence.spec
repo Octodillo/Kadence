@@ -11,9 +11,11 @@ Name:           kadence
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Digital audio workstation for KDE Plasma
-# Kadence is GPL-3.0-or-later; the vendored crates use the permissive
-# licenses allowed in deny.toml (MIT, Apache-2.0, BSD, Zlib, Unicode-3.0...).
-License:        GPL-3.0-or-later
+# Kadence is GPL-3.0-or-later. The binary also links the vendored crates it
+# depends on, among them symphonia (MPL-2.0); regenerate this list with
+#   cargo tree -p daw-app -e normal,no-proc-macro --prefix none -f '{l}' | sort -u
+# when Cargo.lock changes.
+License:        GPL-3.0-or-later AND MPL-2.0 AND Apache-2.0 AND MIT AND Zlib AND (MIT OR Apache-2.0) AND (Unlicense OR MIT) AND (Zlib OR Apache-2.0 OR MIT) AND (0BSD OR Apache-2.0)
 URL:            https://github.com/Octodillo/Kadence
 Source0:        %{name}-%{version}.tar.gz
 
@@ -27,6 +29,8 @@ BuildRequires:  lld
 BuildRequires:  cmake
 BuildRequires:  ninja-build
 BuildRequires:  extra-cmake-modules
+# msgfmt, for the translations in po/<lang>/.
+BuildRequires:  gettext
 BuildRequires:  desktop-file-utils
 BuildRequires:  libappstream-glib
 BuildRequires:  qt6-qtbase-devel
@@ -82,6 +86,8 @@ rm -rf "$config"
 %{_metainfodir}/%{appid}.metainfo.xml
 %{_datadir}/mime/packages/%{appid}.mime.xml
 %{_datadir}/icons/hicolor/scalable/apps/%{appid}.svg
+# Once po/ holds a translation, add `%%find_lang %%{name}` to %%install and
+# make this `%%files -f %%{name}.lang`; it fails while there are none.
 
 %changelog
 * Thu Oct 29 2026 Octodillo <14184084+Octodillo@users.noreply.github.com> - 0.1.0-1

@@ -114,3 +114,6 @@ to it. Regenerate it whenever `Cargo.lock` changes.
 `kadence --smoke-test` drives the real UI through every page and dialog and
 exits 0 when it passes. Run it with `QT_QPA_PLATFORM=offscreen` on a machine
 without a display.
+It changes the audio settings to check that they are saved, so it runs
+against a throwaway config directory and leaves your `kadencerc` alone; set
+`KADENCE_SMOKE_TEST_CONFIG` to a directory to keep what it writes there.

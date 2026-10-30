@@ -105,6 +105,8 @@ Item {
             }
             window.openAbout();
             check(window.pageStack.layers.depth === 2, "open About");
+            window.openAbout();
+            check(window.pageStack.layers.depth === 2, "About opened only once");
         },
         () => {
             shoot(window.title, "about");

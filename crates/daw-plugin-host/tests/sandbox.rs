@@ -495,3 +495,118 @@ fn events_sent_while_the_host_is_busy_arrive_late_not_never() {
     assert!(keys.contains(&62), "the note-on came out: {seen:?}");
     assert_eq!(monitor.status(), SandboxStatus::Running);
 }
+
+#[test]
+fn saving_right_after_a_reload_still_restores_the_changes_made_since_the_last_save() {
+    let mut plugin = instance();
+    run(&mut plugin, 16, 0.0, &[param(GAIN, 0.25, 0)]);
+    plugin.save_state().unwrap();
+    run(&mut plugin, 16, 0.0, &[param(GAIN, 0.5, 0)]);
+
+    plugin.reload().unwrap();
+    // Before any cycle has re-sent the change, so the plugin's state does not have it yet.
+    plugin.save_state().unwrap();
+    let ([l, _], _) = run(&mut plugin, 16, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 0.5), "{:?}", &l[..4]);
+    // The change is still not in a saved state, so another reload brings it back too.
+    plugin.reload().unwrap();
+    let ([l, _], _) = run(&mut plugin, 16, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 0.5), "{:?}", &l[..4]);
+}
+
+#[test]
+fn a_state_load_the_host_dies_in_is_kept_for_the_reload() {
+    let mut a = instance();
+    run(&mut a, 16, 0.0, &[param(GAIN, 0.25, 0)]);
+    let state = a.save_state().unwrap();
+
+    let mut b = instance();
+    let monitor = b.monitor();
+    let pid = monitor.pid();
+    signal(pid, libc::SIGSTOP);
+    wait_for("the host to stop", Duration::from_secs(5), || stopped(pid));
+    // The host dies while the load is in flight.
+    let killer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        signal(pid, libc::SIGKILL);
+    });
+    let _ = b.load_state(&state);
+    killer.join().unwrap();
+    wait_for("the crash to be noticed", Duration::from_secs(5), || {
+        monitor.is_crashed()
+    });
+    assert_eq!(b.save_state().unwrap(), state);
+
+    b.reload().unwrap();
+    let ([l, _], _) = run(&mut b, 16, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 0.25), "{:?}", &l[..4]);
+}
+
+#[test]
+fn a_reload_that_fails_calls_the_crash_hook() {
+    let flag = std::env::temp_dir().join(format!("kadence-no-host-{}", std::process::id()));
+    let _ = std::fs::remove_file(&flag);
+    let crashes = Arc::new(AtomicUsize::new(0));
+    let mut config = config();
+    // A host that refuses to start once `flag` exists.
+    config.launcher = HostLauncher::new(
+        "/bin/sh",
+        [
+            "-c".into(),
+            format!(
+                "if [ -e \"$0\" ]; then exit 3; fi; exec '{}' \"$@\"",
+                env!("CARGO_BIN_EXE_daw-plugin-host")
+            ),
+            flag.to_string_lossy().into_owned(),
+        ],
+    );
+    {
+        let crashes = crashes.clone();
+        config.on_crash = Some(Arc::new(move |m| {
+            assert!(m.is_crashed());
+            assert_eq!(std::thread::current().name(), Some("plugin-watchdog"));
+            crashes.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+    let mut plugin = instance_with(config);
+    let monitor = plugin.monitor();
+
+    std::fs::write(&flag, b"").unwrap();
+    monitor.request_reload();
+    plugin.on_main_thread();
+    wait_for("the crash hook", Duration::from_secs(5), || {
+        crashes.load(Ordering::SeqCst) == 1
+    });
+    assert!(matches!(
+        monitor.status(),
+        SandboxStatus::Crashed(CrashReason::Lost(_))
+    ));
+
+    std::fs::remove_file(&flag).unwrap();
+    plugin.reload().unwrap();
+    assert_eq!(monitor.status(), SandboxStatus::Running);
+    assert_eq!(crashes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn names_taken_in_the_socket_directory_do_not_stop_plugins_loading() {
+    // What another user could do in a shared /tmp: take the names we would use, in a way we
+    // cannot remove.
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    let taken: Vec<_> = (0..64)
+        .map(|n| dir.join(format!("kadence-plugin-{}-{n}", std::process::id())))
+        .collect();
+    for path in &taken {
+        std::fs::write(path, b"").unwrap();
+    }
+    let result = SandboxedInstance::new(descriptor(), config(), SR, MAX);
+    for path in &taken {
+        let _ = std::fs::remove_file(path);
+    }
+    let mut plugin = result.expect("load despite the taken names");
+    let ([l, _], _) = run(&mut plugin, 16, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 1.0));
+}

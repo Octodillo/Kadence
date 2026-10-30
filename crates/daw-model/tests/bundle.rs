@@ -124,8 +124,6 @@ fn saves_keep_rotating_backups() {
         doc.execute(SetTrack::new(id, TrackField::Name(format!("v{i}"))))
             .unwrap();
         doc.save().unwrap();
-        // Backup names carry millisecond timestamps.
-        std::thread::sleep(std::time::Duration::from_millis(2));
     }
     let backups = doc.bundle().unwrap().backups().unwrap();
     assert_eq!(backups.len(), BACKUPS_KEPT);
