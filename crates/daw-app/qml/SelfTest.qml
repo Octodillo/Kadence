@@ -71,8 +71,7 @@ Item {
             Project.undo();
             Project.undo();
             check(Project.trackCount === 0, "undo back to empty");
-            // A failed import says why, worded in QML (checked next step,
-            // once Project's timer has picked up the status).
+            // A failed import says why, worded in QML (checked next step).
             check(!v.dropFile("file:///nonexistent/take.wav", 10, 10), "missing file refused");
             const open = Project.openProject("file:///nonexistent/song.kadence");
             check(open.context === Project.OpenContext && open.reason === Project.FileAccess,
@@ -81,6 +80,9 @@ Item {
             check(Project.save().reason === Project.NoLocation, "save without a location refused");
         },
         () => {
+            // Pick up the state now: on a slow first start the step timer can
+            // fire before Project's own timer has ticked.
+            Project.tick();
             check(Project.status.context === Project.ImportContext
                   && Project.status.reason === Project.CannotDecode
                   && Project.status.fileName === "take.wav", "import failure reported as data");
@@ -92,6 +94,7 @@ Item {
             check(TestHelper.loadDemoProject(), "load demo project");
         },
         () => {
+            Project.tick();
             check(Project.trackCount === 3, "demo has three tracks");
             // Peaks load in the background; give them a step, then shoot.
             window.pageStack.currentItem.view.refresh();
