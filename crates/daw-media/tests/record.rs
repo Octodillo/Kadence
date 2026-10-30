@@ -36,7 +36,13 @@ fn records_rt_blocks_to_wav_with_peaks() {
     }
     // The peak cache was saved next to the file and is current.
     assert!(PeakCache::path_for(&path).exists());
-    assert_eq!(PeakCache::load_or_build(&path).unwrap(), stats.peaks);
+    assert_eq!(stats.files.len(), 1);
+    assert_eq!(stats.files[0].path, path);
+    assert_eq!(
+        PeakCache::load_or_build(&path).unwrap(),
+        stats.files[0].peaks
+    );
+    assert!(stats.error.is_none());
 }
 
 #[test]
@@ -84,6 +90,45 @@ fn failed_peak_save_does_not_fail_the_take() {
     drop(input);
     let stats = rec.finish().unwrap();
     assert_eq!(stats.frames, 1000);
-    assert!(stats.peaks_error.is_some());
+    assert!(stats.files[0].peaks_error.is_some());
+    assert!(stats.error.is_none());
     assert_eq!(decode_file(&path).unwrap().frames(), 1000);
+}
+
+/// Issue #22: a writer I/O error (disk full) used to make `finish` return only the
+/// error, losing the stats, while the RT side kept "recording" into a dead ring.
+#[cfg(target_os = "linux")]
+#[test]
+fn writer_error_is_reported_at_once_and_keeps_the_stats() {
+    let (rec, mut input) =
+        Recorder::start("/dev/full", 2, 48_000, WavFormat::Float32, 1.0).unwrap();
+    let block = vec![0.1f32; 512];
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // BufWriter holds 8 KiB, so the error shows up on a later write or header flush.
+    while !input.failed() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "writer error never surfaced"
+        );
+        input.write(&[&block, &block]);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(rec.failed());
+    let dropped_before = rec.dropped_frames();
+    assert_eq!(
+        input.write(&[&block, &block]),
+        0,
+        "nothing is queued after a failure"
+    );
+    assert_eq!(rec.dropped_frames(), dropped_before);
+    drop(input);
+    let stats = rec
+        .finish()
+        .expect("a writer error still returns the stats");
+    let err = stats.error.expect("the error is reported");
+    assert!(err.to_string().contains("space"), "{err}");
+    assert_eq!(stats.files.len(), 1);
+    // No peak cache is written for a failed file (here it would be /dev/full.peaks).
+    assert!(stats.files[0].peaks_error.is_some());
+    assert!(!std::path::Path::new("/dev/full.peaks").exists());
 }
