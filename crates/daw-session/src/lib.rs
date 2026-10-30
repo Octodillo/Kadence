@@ -63,6 +63,34 @@ pub enum SessionError {
     Engine(#[from] EngineError),
 }
 
+/// Something a sync could not do fully; playback goes on without it. The
+/// variants carry data so a front end can word them in the user's
+/// language; [`Display`](std::fmt::Display) is English, for logs.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Warning {
+    /// A built-in device refused its saved state; it runs with defaults.
+    #[error("{device}: {detail}")]
+    DeviceStateRejected { device: String, detail: String },
+    /// The project names a built-in device this build does not have.
+    #[error("unknown built-in device {kind}")]
+    UnknownDevice { kind: String },
+    /// A plugin device is bypassed until its plugin is loaded.
+    #[error("plugin {plugin} is not loaded yet; it is bypassed")]
+    PluginNotLoaded { device: String, plugin: String },
+    /// An audio file could not be streamed; its clips are silent.
+    #[error("can't stream {}: {detail}", path.display())]
+    CannotStream { path: PathBuf, detail: String },
+    /// An audio file could not be read; its clips are silent.
+    #[error("can't read {}", path.display())]
+    CannotRead { path: PathBuf },
+    /// A track's notes did not reach the engine; the next sync retries.
+    #[error("note update for track {track} was dropped")]
+    NotesDropped { track: String },
+    /// A track's clips did not reach the engine; the next sync retries.
+    #[error("clip update for track {track} was dropped")]
+    ClipsDropped { track: String },
+}
+
 /// What the running graph was built from, and what was last sent to it.
 #[derive(Default)]
 pub(crate) struct Built {
@@ -90,7 +118,7 @@ pub struct Session {
     loop_points: Arc<LoopPoints>,
     loop_ticks: Option<(TickTime, TickTime)>,
     built: Option<Built>,
-    warnings: Vec<String>,
+    warnings: Vec<Warning>,
     /// The project's master track, as of the last sync.
     master: Option<TrackId>,
     /// What the transport was last told, so the UI doesn't wait a period
@@ -171,7 +199,7 @@ impl Session {
 
     /// Problems found by the last sync, such as audio files that could not
     /// be read. For the UI to show.
-    pub fn warnings(&self) -> &[String] {
+    pub fn warnings(&self) -> &[Warning] {
         &self.warnings
     }
 
@@ -293,8 +321,9 @@ impl Session {
             let seq = daw_midi::model::compile_track(track, &self.tempo, self.sample_rate());
             if handle.set_sequence(seq).is_err() {
                 // Left marked as stale, so the next sync tries again.
-                self.warnings
-                    .push(format!("note update for track {} was dropped", track.name));
+                self.warnings.push(Warning::NotesDropped {
+                    track: track.name.clone(),
+                });
                 built.midi_clips.remove(&track.id);
                 continue;
             }
@@ -309,8 +338,9 @@ impl Session {
             }
             let set = build::clip_set(self, track, handle);
             if handle.send(set).is_err() {
-                self.warnings
-                    .push(format!("clip update for track {} was dropped", track.name));
+                self.warnings.push(Warning::ClipsDropped {
+                    track: track.name.clone(),
+                });
                 built.clips.remove(&track.id);
                 continue;
             }

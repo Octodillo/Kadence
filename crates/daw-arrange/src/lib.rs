@@ -173,8 +173,17 @@ pub struct Outcome {
     pub open_clip: Option<ClipId>,
     /// The user asked for a context menu here.
     pub context_menu: Option<Hit>,
-    /// A command was refused; the message is for the status bar.
-    pub error: Option<String>,
+    /// A command was refused. The front end words it for the status bar.
+    pub error: Option<Refusal>,
+}
+
+/// Why a gesture or command did nothing, as data for the front end to word.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Refusal {
+    /// The model refused the edit (usually a bug; the detail is English).
+    Edit(ModelError),
+    /// A note was drawn past the end of its clip.
+    NoteOutsideClip,
 }
 
 impl Outcome {
@@ -198,7 +207,7 @@ impl Outcome {
             Ok(()) => Self::document(),
             Err(e) => Self {
                 view: true,
-                error: Some(e.to_string()),
+                error: Some(Refusal::Edit(e)),
                 ..Default::default()
             },
         }
@@ -246,6 +255,28 @@ enum Drag {
     },
 }
 
+/// Names the arrange view gives what it creates. The front end sets them in
+/// the user's language; the defaults are English.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefaultNames {
+    /// A MIDI clip drawn on an instrument lane.
+    pub midi_clip: String,
+    /// An audio clip, and its new track, when the file name has no stem.
+    pub audio: String,
+    /// A MIDI clip made by recording.
+    pub recording: String,
+}
+
+impl Default for DefaultNames {
+    fn default() -> Self {
+        Self {
+            midi_clip: "MIDI clip".into(),
+            audio: "Audio".into(),
+            recording: "Recording".into(),
+        }
+    }
+}
+
 /// The arrange view's state. See the crate docs.
 pub struct Arrange {
     pub view: TimelineView,
@@ -262,6 +293,7 @@ pub struct Arrange {
     pub selection: BTreeSet<ClipId>,
     pub selected_track: Option<TrackId>,
     pub peaks: PeakPool,
+    pub names: DefaultNames,
     drag: Option<Drag>,
     /// Sample rates of audio files whose peaks aren't loaded yet.
     rates: HashMap<PathBuf, f64>,
@@ -288,6 +320,7 @@ impl Arrange {
             selection: BTreeSet::new(),
             selected_track: None,
             peaks: PeakPool::new(),
+            names: DefaultNames::default(),
             drag: None,
             rates: HashMap::new(),
         }
@@ -697,7 +730,7 @@ impl Arrange {
                 let meter = self.meter(project);
                 let bar = meter.bar_at(tick);
                 let clip = Clip::new(
-                    "MIDI clip",
+                    self.names.midi_clip.clone(),
                     bar.start,
                     TickTime(bar.len),
                     ClipContent::Midi(MidiClip::default()),
@@ -1190,7 +1223,7 @@ impl Arrange {
         let name = file
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Audio".into());
+            .unwrap_or_else(|| self.names.audio.clone());
         let mut items: Vec<Box<dyn Command>> = Vec::new();
         let target = match track.and_then(|t| project.track(t)) {
             Some(t) if t.kind == TrackKind::Audio => t.id,

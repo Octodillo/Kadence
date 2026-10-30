@@ -14,7 +14,7 @@ use daw_model::commands::{
 use daw_model::{
     AudioClip, Clip, ClipContent, ClipId, Document, Project, Track, TrackId, TrackKind,
 };
-use daw_session::{Session, SessionConfig, effective_mutes};
+use daw_session::{Session, SessionConfig, Warning, effective_mutes};
 
 #[global_allocator]
 static ALLOC: AllocDisabler = AllocDisabler;
@@ -238,7 +238,7 @@ fn missing_file_is_a_warning_not_an_error() {
         rig.session
             .warnings()
             .iter()
-            .any(|w| w.contains("nope.wav")),
+            .any(|w| matches!(w, Warning::CannotRead { path } if path.ends_with("nope.wav"))),
         "{:?}",
         rig.session.warnings()
     );

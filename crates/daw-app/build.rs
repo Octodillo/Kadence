@@ -25,6 +25,8 @@ const QML_FILES: &[&str] = &[
     "qml/SettingsPage.qml",
     "qml/AudioSettings.qml",
     "qml/EngineErrorText.qml",
+    "qml/ProjectMessageText.qml",
+    "qml/EditNames.qml",
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
     "qml/TrackHeader.qml",
