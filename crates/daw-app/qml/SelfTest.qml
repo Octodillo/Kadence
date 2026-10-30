@@ -105,6 +105,13 @@ Item {
                                                    "The audio device does not support a sample rate of %1 Hz.",
                                                    (12345).toLocaleString(Qt.locale(), "f", 0))),
                   "refusal worded in QML");
+            check(!Engine.applyAudioSettings(0, 48000, 100), "bad buffer size refused");
+            check(Engine.errorKind === Engine.UnsupportedBufferSize && Engine.errorNumber === 100
+                  && engineError.reason === i18ncp("@info",
+                                                   "The audio device does not support a buffer size of %1 sample.",
+                                                   "The audio device does not support a buffer size of %1 samples.",
+                                                   100),
+                  "buffer size refusal worded with plural");
             check(!Engine.applyAudioSettings(5, 48000, 128), "unknown device index refused");
             check(Engine.errorKind === Engine.InvalidDeviceChoice && Engine.errorNumber === 5,
                   "bad device index reported");

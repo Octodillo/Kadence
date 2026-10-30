@@ -13,7 +13,12 @@ fn kadence(config_home: &Path) -> Command {
         .env("QT_FORCE_STDERR_LOGGING", "1")
         .env("XDG_CONFIG_HOME", config_home)
         .env_remove("KADENCE_SMOKE_TEST_CONFIG")
-        .env_remove("QT_SCALE_FACTOR");
+        .env_remove("QT_SCALE_FACTOR")
+        // Some checks read English messages; keep translations out of it.
+        .env("LANGUAGE", "en_US")
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_MESSAGES");
     cmd
 }
 

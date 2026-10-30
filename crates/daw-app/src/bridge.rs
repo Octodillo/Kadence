@@ -201,6 +201,31 @@ fn start_audio(
     Some((qobject::ErrorContext::StartupFailed, last))
 }
 
+/// What `sync` does to the error properties for an engine status.
+#[derive(Debug, PartialEq, Eq)]
+enum StatusError {
+    Keep,
+    Clear,
+    /// Show this as `AudioFailed`.
+    Show(EngineError),
+}
+
+/// `current` is the `ErrorContext` on show. A startup or settings error
+/// already showing wins over the status, since it says more about why
+/// audio is down (and `Failed` also covers "never started"); an
+/// `AudioFailed` goes away once audio runs again.
+fn status_error(current: i32, status: EngineStatus) -> StatusError {
+    use qobject::ErrorContext as C;
+    match status {
+        EngineStatus::Failed(e) if current == C::NoError.repr || current == C::AudioFailed.repr => {
+            StatusError::Show(e)
+        }
+        EngineStatus::Failed(_) => StatusError::Keep,
+        _ if current == C::AudioFailed.repr => StatusError::Clear,
+        _ => StatusError::Keep,
+    }
+}
+
 fn to_qlist(values: &[u32]) -> QList<i32> {
     let mut list = QList::default();
     for &v in values {
@@ -344,15 +369,15 @@ impl qobject::Engine {
             .as_ref()
             .and_then(|id| self.device_ids.iter().position(|d| d == id))
             .map_or(0, |i| i as i32 + 1);
-        if let EngineStatus::Failed(e) = status {
-            self.as_mut().set_error(
+        match status_error(self.error_context, status) {
+            StatusError::Keep => {}
+            StatusError::Clear => self
+                .as_mut()
+                .set_error(qobject::ErrorContext::NoError, None),
+            StatusError::Show(e) => self.as_mut().set_error(
                 qobject::ErrorContext::AudioFailed,
                 Some(&Problem::Engine(e)),
-            );
-        } else if self.error_context == qobject::ErrorContext::AudioFailed.repr {
-            // Audio is back; the failure no longer applies.
-            self.as_mut()
-                .set_error(qobject::ErrorContext::NoError, None);
+            ),
         }
         self.as_mut().set_running(running);
         self.as_mut().set_playing(playing);
@@ -470,6 +495,40 @@ mod tests {
                 device: None,
                 ..saved
             }
+        );
+    }
+
+    #[test]
+    fn status_failure_does_not_hide_a_more_specific_error() {
+        let failed = || EngineStatus::Failed(EngineError::Backend("gone".into()));
+        let running = EngineStatus::Running {
+            sample_rate: 48_000,
+            buffer_size: 256,
+        };
+        let shown = StatusError::Show(EngineError::Backend("gone".into()));
+        assert_eq!(status_error(ErrorContext::NoError.repr, failed()), shown);
+        assert_eq!(
+            status_error(ErrorContext::AudioFailed.repr, failed()),
+            shown
+        );
+        for context in [
+            ErrorContext::ApplyingSettings,
+            ErrorContext::StartupFallback,
+            ErrorContext::StartupFailed,
+        ] {
+            assert_eq!(status_error(context.repr, failed()), StatusError::Keep);
+            assert_eq!(
+                status_error(context.repr, running.clone()),
+                StatusError::Keep
+            );
+        }
+        assert_eq!(
+            status_error(ErrorContext::AudioFailed.repr, running.clone()),
+            StatusError::Clear
+        );
+        assert_eq!(
+            status_error(ErrorContext::NoError.repr, EngineStatus::Stopped),
+            StatusError::Keep
         );
     }
 
