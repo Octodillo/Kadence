@@ -27,12 +27,25 @@ struct Saved {
     device: String,
     version: u32,
     params: BTreeMap<String, f64>,
+    /// Device-specific data beyond parameter values, such as the sampler's
+    /// zone map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extra: Option<serde_json::Value>,
 }
 
 pub(crate) fn save(
     info: &DeviceInfo,
     specs: &[ParamSpec],
     value: impl Fn(ParamId) -> f64,
+) -> Vec<u8> {
+    save_with(info, specs, value, None)
+}
+
+pub(crate) fn save_with(
+    info: &DeviceInfo,
+    specs: &[ParamSpec],
+    value: impl Fn(ParamId) -> f64,
+    extra: Option<serde_json::Value>,
 ) -> Vec<u8> {
     let saved = Saved {
         device: info.id.to_owned(),
@@ -41,6 +54,7 @@ pub(crate) fn save(
             .iter()
             .map(|s| (s.key.to_owned(), value(s.id)))
             .collect(),
+        extra,
     };
     serde_json::to_vec(&saved).expect("serializing plain data cannot fail")
 }
@@ -51,6 +65,15 @@ pub(crate) fn load(
     specs: &[ParamSpec],
     data: &[u8],
 ) -> Result<Vec<f64>, StateError> {
+    load_with(info, specs, data).map(|(values, _)| values)
+}
+
+/// Like [`load`], and also returns the device-specific extra data, if any.
+pub(crate) fn load_with(
+    info: &DeviceInfo,
+    specs: &[ParamSpec],
+    data: &[u8],
+) -> Result<(Vec<f64>, Option<serde_json::Value>), StateError> {
     let saved: Saved = serde_json::from_slice(data)?;
     if saved.device != info.id {
         return Err(StateError::WrongDevice {
@@ -61,8 +84,9 @@ pub(crate) fn load(
     if saved.version > VERSION {
         return Err(StateError::TooNew(saved.version));
     }
-    Ok(specs
+    let values = specs
         .iter()
         .map(|s| saved.params.get(s.key).copied().unwrap_or(s.default))
-        .collect())
+        .collect();
+    Ok((values, saved.extra))
 }

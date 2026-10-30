@@ -3,7 +3,12 @@
 //! a release on note-off). Zones choose a sample by key and velocity. When
 //! every voice is busy the quietest releasing voice (else the oldest) is
 //! stolen; it fades out over a few milliseconds instead of cutting off.
+//!
+//! Saved state holds the zone map with each sample's source path; loading it
+//! decodes the files again (see [`Sampler::load_state_with`]).
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use daw_core::event::{NoteId, ParamId};
@@ -12,7 +17,9 @@ use daw_core::node::{Node, PortLayout, ProcessContext};
 use crate::dsp::{Adsr, db_to_gain};
 use crate::events::{Note, Segmented, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
+use crate::state::{self, StateError};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
+use serde::{Deserialize, Serialize};
 
 pub static INFO: DeviceInfo = DeviceInfo {
     id: "daw.sampler",
@@ -73,10 +80,14 @@ const POOL: usize = VOICES + SPARE_VOICES;
 const STEAL_FADE_MS: f64 = 3.0;
 
 /// Decoded audio held in memory. Mono or stereo; extra channels are ignored.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SampleBuffer {
     pub channels: Vec<Vec<f32>>,
     pub sample_rate: f64,
+    /// The file the audio came from. The sampler saves it with the zone map so
+    /// the sample can be loaded again; a buffer without one is saved as a
+    /// silent placeholder.
+    pub source: Option<PathBuf>,
 }
 
 impl SampleBuffer {
@@ -84,22 +95,40 @@ impl SampleBuffer {
         Self {
             channels: vec![data],
             sample_rate,
+            source: None,
+        }
+    }
+
+    /// An empty buffer standing in for a sample whose file could not be
+    /// loaded. It keeps the path so saving again doesn't lose the reference.
+    pub fn missing(source: impl Into<PathBuf>) -> Self {
+        Self {
+            source: Some(source.into()),
+            ..Self::default()
         }
     }
 
     /// Decode an audio file (WAV, AIFF, FLAC, OGG Vorbis, MP3) at its own rate. The
     /// sampler corrects for the rate difference when it plays. Not real-time safe.
-    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, daw_media::MediaError> {
-        daw_media::decode_file(path).map(Self::from)
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, daw_media::MediaError> {
+        let path = path.as_ref();
+        daw_media::decode_file(path).map(|d| Self::from(d).with_source(path))
     }
 
     /// Decode an audio file and resample it to `sample_rate` up front, which avoids
     /// the sampler's interpolation for unpitched one-shots. Not real-time safe.
     pub fn load_resampled(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         sample_rate: u32,
     ) -> Result<Self, daw_media::MediaError> {
-        daw_media::load_file(path, sample_rate).map(Self::from)
+        let path = path.as_ref();
+        daw_media::load_file(path, sample_rate).map(|d| Self::from(d).with_source(path))
+    }
+
+    /// Record the file this audio came from.
+    pub fn with_source(mut self, source: impl Into<PathBuf>) -> Self {
+        self.source = Some(source.into());
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -116,6 +145,7 @@ impl From<daw_media::AudioData> for SampleBuffer {
         Self {
             channels: data.channels,
             sample_rate: f64::from(data.sample_rate),
+            source: None,
         }
     }
 }
@@ -152,6 +182,27 @@ impl Zone {
         self.key_lo = lo;
         self.key_hi = hi;
         self.root_key = root;
+        self
+    }
+
+    /// Clamp keys to MIDI range and velocities to `0..=1`, and replace
+    /// non-finite numbers, so the zone saves and plays predictably.
+    fn sanitized(mut self) -> Self {
+        let unit = |v: f32, default: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                default
+            }
+        };
+        self.root_key = self.root_key.min(127);
+        self.key_lo = self.key_lo.min(127);
+        self.key_hi = self.key_hi.min(127);
+        self.velocity_lo = unit(self.velocity_lo, 0.0);
+        self.velocity_hi = unit(self.velocity_hi, 1.0);
+        if !self.gain_db.is_finite() {
+            self.gain_db = 0.0;
+        }
         self
     }
 
@@ -228,7 +279,7 @@ impl Sampler {
     /// Replace the zone map. Call off the real-time thread; stops all voices.
     pub fn set_zones(&mut self, zones: Vec<Zone>) {
         self.voices = [Voice::default(); POOL];
-        self.zones = zones;
+        self.zones = zones.into_iter().map(Zone::sanitized).collect();
     }
 
     pub fn zones(&self) -> &[Zone] {
@@ -347,9 +398,112 @@ impl Sampler {
             }
         }
     }
+
+    /// Restore state saved by [`Device::save_state`](crate::Device::save_state),
+    /// getting each zone's sample from `resolve`. It is called once per distinct
+    /// source path, so callers can resolve paths relative to a project and
+    /// share buffers. A sample it returns `None` for becomes
+    /// [`SampleBuffer::missing`]: the zone keeps its mapping but stays silent.
+    ///
+    /// State without a zone map (from before zones were saved) keeps the
+    /// current zones. Nothing changes if `data` is invalid. Not real-time safe.
+    pub fn load_state_with(
+        &mut self,
+        data: &[u8],
+        mut resolve: impl FnMut(&Path) -> Option<Arc<SampleBuffer>>,
+    ) -> Result<(), StateError> {
+        let (values, extra) = state::load_with(&INFO, PARAMS, data)?;
+        let saved: Option<SavedZones> = extra.map(serde_json::from_value).transpose()?;
+        let zones = saved.map(|saved| {
+            let mut cache: HashMap<PathBuf, Arc<SampleBuffer>> = HashMap::new();
+            saved
+                .zones
+                .into_iter()
+                .map(|z| {
+                    let sample = match z.sample {
+                        Some(path) => cache
+                            .entry(path)
+                            .or_insert_with_key(|path| {
+                                resolve(path)
+                                    .unwrap_or_else(|| Arc::new(SampleBuffer::missing(path)))
+                            })
+                            .clone(),
+                        None => Arc::new(SampleBuffer::default()),
+                    };
+                    Zone {
+                        sample,
+                        root_key: z.root_key,
+                        key_lo: z.key_lo,
+                        key_hi: z.key_hi,
+                        velocity_lo: z.velocity_lo,
+                        velocity_hi: z.velocity_hi,
+                        gain_db: z.gain_db,
+                    }
+                })
+                .collect()
+        });
+        for (id, value) in values.into_iter().enumerate() {
+            crate::Device::set_param(self, id as ParamId, value);
+        }
+        if let Some(zones) = zones {
+            self.set_zones(zones);
+        }
+        Ok(())
+    }
+
+    fn saved_zones(&self) -> serde_json::Value {
+        let zones = self
+            .zones
+            .iter()
+            .map(|z| SavedZone {
+                sample: z.sample.source.clone(),
+                root_key: z.root_key,
+                key_lo: z.key_lo,
+                key_hi: z.key_hi,
+                velocity_lo: z.velocity_lo,
+                velocity_hi: z.velocity_hi,
+                gain_db: z.gain_db,
+            })
+            .collect();
+        serde_json::to_value(SavedZones { zones }).expect("serializing plain data cannot fail")
+    }
 }
 
-impl_device!(Sampler, INFO, PARAMS);
+/// The zone map in saved state. Sample audio is referenced by path.
+#[derive(Serialize, Deserialize)]
+struct SavedZones {
+    zones: Vec<SavedZone>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedZone {
+    /// Absent for a zone whose buffer had no source file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sample: Option<PathBuf>,
+    root_key: u8,
+    key_lo: u8,
+    key_hi: u8,
+    velocity_lo: f32,
+    velocity_hi: f32,
+    gain_db: f32,
+}
+
+impl_device!(Sampler, INFO, PARAMS, {
+    fn save_state(&self) -> Vec<u8> {
+        state::save_with(
+            &INFO,
+            PARAMS,
+            |id| self.params.get(id),
+            Some(self.saved_zones()),
+        )
+    }
+
+    /// Decodes each zone's sample from its saved path; see
+    /// [`Sampler::load_state_with`] to resolve paths another way.
+    fn load_state(&mut self, data: &[u8]) -> Result<(), StateError> {
+        self.load_state_with(data, |path| SampleBuffer::load(path).ok().map(Arc::new))
+    }
+});
 
 impl Segmented for Sampler {
     fn param_event(&mut self, param: ParamId, value: f64) {

@@ -27,6 +27,7 @@ fn golden() {
     let high = Arc::new(SampleBuffer {
         channels: vec![tone.clone(), noise(7, 0.3, 3000)],
         sample_rate: 44100.0,
+        source: None,
     });
     sampler.set_zones(vec![
         Zone::full(low).keys(0, 63, 60),
@@ -179,4 +180,147 @@ fn loads_samples_from_files() {
     assert!((resampled.len() as i64 - 480).abs() <= 1);
 
     assert!(SampleBuffer::load(dir.path().join("missing.wav")).is_err());
+}
+
+fn write_hit(dir: &std::path::Path, name: &str, level: f32) -> std::path::PathBuf {
+    let path = dir.join(name);
+    let data = daw_media::AudioData {
+        sample_rate: 48_000,
+        channels: vec![vec![level; 4800]],
+    };
+    daw_media::write_wav(&path, &data, daw_media::WavFormat::Float32).unwrap();
+    path
+}
+
+fn kit(dir: &std::path::Path) -> Sampler {
+    let kick = Arc::new(SampleBuffer::load(write_hit(dir, "kick.wav", 0.5)).unwrap());
+    let snare = Arc::new(SampleBuffer::load(write_hit(dir, "snare.wav", 0.25)).unwrap());
+    let mut snare_zone = Zone::full(snare).keys(38, 38, 38);
+    snare_zone.gain_db = 3.0;
+    let mut soft = Zone::full(kick.clone()).keys(42, 42, 42);
+    soft.velocity_hi = 0.5;
+    let mut hard = Zone::full(kick.clone()).keys(42, 42, 42);
+    hard.velocity_lo = 0.5;
+    hard.gain_db = -6.0;
+    let mut s = Sampler::new();
+    s.set_param(MODE, MODE_ONE_SHOT);
+    s.set_zones(vec![
+        Zone::full(kick).keys(36, 36, 36),
+        snare_zone,
+        soft,
+        hard,
+    ]);
+    s
+}
+
+/// Source, root, key range, velocity range and gain of each zone.
+type Mapping = (Option<std::path::PathBuf>, u8, u8, u8, f32, f32, f32);
+
+fn mapping(s: &Sampler) -> Vec<Mapping> {
+    s.zones()
+        .iter()
+        .map(|z| {
+            (
+                z.sample.source.clone(),
+                z.root_key,
+                z.key_lo,
+                z.key_hi,
+                z.velocity_lo,
+                z.velocity_hi,
+                z.gain_db,
+            )
+        })
+        .collect()
+}
+
+/// Issue #23: saving and reopening a sampler used to drop the zone map, leaving
+/// the instrument silent.
+#[test]
+fn saved_state_keeps_zone_map() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = kit(dir.path());
+    let blob = a.save_state();
+
+    let mut b = Sampler::new();
+    b.load_state(&blob).unwrap();
+    assert_eq!(mapping(&b), mapping(&a));
+    assert_eq!(b.param_value(MODE), MODE_ONE_SHOT);
+    // The same file is decoded once and shared between zones.
+    assert!(Arc::ptr_eq(&b.zones()[0].sample, &b.zones()[2].sample));
+    assert_eq!(b.zones()[1].sample.channels, a.zones()[1].sample.channels);
+
+    let s = Setup::default();
+    let r = render(&mut b, 4800, &[], &[(0, note_on(38, 1.0))], s);
+    let expected = 0.25 * 10f32.powf(3.0 / 20.0);
+    assert!(
+        (r.channels[0][100] - expected).abs() < 1e-3,
+        "{}",
+        r.channels[0][100]
+    );
+}
+
+#[test]
+fn missing_sample_keeps_its_zone_and_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let blob = kit(dir.path()).save_state();
+    std::fs::remove_file(dir.path().join("snare.wav")).unwrap();
+
+    let mut b = Sampler::new();
+    b.load_state(&blob).unwrap();
+    assert_eq!(b.zones().len(), 4);
+    assert!(b.zones()[1].sample.is_empty());
+    // Saving again keeps the reference, so restoring the file brings it back.
+    write_hit(dir.path(), "snare.wav", 0.25);
+    let mut c = Sampler::new();
+    c.load_state(&b.save_state()).unwrap();
+    assert_eq!(mapping(&c), mapping(&kit(dir.path())));
+    assert!(!c.zones()[1].sample.is_empty());
+}
+
+#[test]
+fn load_state_with_resolves_each_path_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let blob = kit(dir.path()).save_state();
+    let mut asked = Vec::new();
+    let mut b = Sampler::new();
+    b.load_state_with(&blob, |path| {
+        asked.push(path.file_name().unwrap().to_owned());
+        Some(Arc::new(SampleBuffer::mono(vec![0.1; 10], 48_000.0)))
+    })
+    .unwrap();
+    assert_eq!(asked, ["kick.wav", "snare.wav"]);
+    assert_eq!(b.zones().len(), 4);
+}
+
+#[test]
+fn zone_without_source_is_saved_as_placeholder() {
+    let mut a = sampler_with(vec![0.5; 10], 48_000.0);
+    let mut b = Sampler::new();
+    b.load_state(&a.save_state()).unwrap();
+    assert_eq!(mapping(&b), mapping(&a));
+    assert!(b.zones()[0].sample.is_empty());
+    // Non-finite mapping values are sanitized, so the state stays loadable.
+    let mut z = a.zones()[0].clone();
+    z.gain_db = f32::NAN;
+    z.velocity_hi = f32::INFINITY;
+    a.set_zones(vec![z]);
+    b.load_state(&a.save_state()).unwrap();
+    assert_eq!(b.zones()[0].gain_db, 0.0);
+    assert_eq!(b.zones()[0].velocity_hi, 1.0);
+}
+
+#[test]
+fn invalid_zone_state_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = kit(dir.path());
+    let before = mapping(&b);
+    let bad = br#"{"device":"daw.sampler","version":1,"params":{"gain":-20.0},"extra":{"zones":[{"root_key":300}]}}"#;
+    assert!(b.load_state(bad).is_err());
+    assert_eq!(mapping(&b), before);
+    assert_eq!(b.param_value(GAIN), 0.0);
+    // State saved before zones were stored keeps the current zones.
+    let old = br#"{"device":"daw.sampler","version":1,"params":{"gain":-20.0}}"#;
+    b.load_state(old).unwrap();
+    assert_eq!(mapping(&b), before);
+    assert_eq!(b.param_value(GAIN), -20.0);
 }
