@@ -115,6 +115,7 @@ Item {
         onTriggered: {
             if (!TestHelper.loadStressProject(bench.tracks, bench.clips)) {
                 console.error("benchmark: could not build the stress project");
+                TestHelper.removeTempFiles();
                 Qt.exit(1);
                 return;
             }

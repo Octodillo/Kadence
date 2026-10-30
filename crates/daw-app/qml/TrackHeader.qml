@@ -33,6 +33,16 @@ QQC2.ItemDelegate {
 
     Accessible.name: trackName
 
+    // The list reuses headers that scroll out of view for other tracks. A
+    // hidden item keeps its focus and open menus, so close them, or the
+    // next track shown here would be renamed, moved or deleted instead.
+    ListView.onPooled: {
+        nameField.focus = false;
+        nameField.visible = false;
+        menu.dismiss();
+        instrumentButton.dismiss();
+    }
+
     contentItem: RowLayout {
         spacing: Kirigami.Units.smallSpacing
 
@@ -130,6 +140,7 @@ QQC2.ItemDelegate {
         }
 
         InstrumentButton {
+            id: instrumentButton
             Layout.alignment: Qt.AlignVCenter
             Layout.maximumWidth: Kirigami.Units.gridUnit * 6
             visible: header.kind === 1

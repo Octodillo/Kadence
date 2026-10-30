@@ -102,8 +102,9 @@ Kirigami.ApplicationWindow {
             onTriggered: openDialog.open()
         },
         Kirigami.Action {
-            // A project is a folder. File dialogs can't pick a folder whose
-            // name ends in .kadence (the filter makes it look like a file),
+            // A project is a folder. A file dialog can't pick one whose name
+            // ends in .kadence (the filter makes it look like a file), and
+            // without the project file inside it there's nothing to pick,
             // so offer the folder itself too.
             text: i18nc("@action:inmenu", "Open Project Folder…")
             icon.name: "folder-open"

@@ -280,6 +280,7 @@ Item {
             }
             stop();
             console.info("smoke test:", test.failures === 0 ? "passed" : "FAILED");
+            TestHelper.removeTempFiles();
             Qt.exit(test.failures === 0 ? 0 : 3);
         }
     }
