@@ -44,18 +44,20 @@ impl Strip {
     }
 
     fn with(channels: u16, gain: f32, pan: bool, mute: bool) -> Self {
-        Self {
+        let mut strip = Self {
             channels,
-            gain,
+            gain: 1.0,
             pan: 0.0,
             muted: false,
             has_pan: pan && channels == 2,
             has_mute: mute,
-        }
+        };
+        strip.set_gain(gain);
+        strip
     }
 
     pub fn with_gain(mut self, gain: f32) -> Self {
-        self.gain = gain;
+        self.set_gain(gain);
         self
     }
 
@@ -64,12 +66,20 @@ impl Strip {
         self
     }
 
+    /// Clamps to the range of [`GAIN`](Self::GAIN), so an infinite gain
+    /// cannot turn silence into NaN, and ignores NaN, which would poison
+    /// every bus the strip feeds.
     pub fn set_gain(&mut self, gain: f32) {
-        self.gain = gain;
+        if !gain.is_nan() {
+            self.gain = gain.clamp(0.0, 4.0);
+        }
     }
 
+    /// Ignores NaN, like [`set_gain`](Self::set_gain).
     pub fn set_pan(&mut self, pan: f32) {
-        self.pan = pan.clamp(-1.0, 1.0);
+        if !pan.is_nan() {
+            self.pan = pan.clamp(-1.0, 1.0);
+        }
     }
 
     pub fn set_muted(&mut self, muted: bool) {
@@ -109,8 +119,12 @@ impl Strip {
     }
 
     fn apply(&mut self, param: ParamId, value: f64) {
+        // `clamp` passes NaN through.
+        if value.is_nan() {
+            return;
+        }
         match param {
-            Self::GAIN => self.gain = value.clamp(0.0, 4.0) as f32,
+            Self::GAIN => self.set_gain(value as f32),
             Self::PAN if self.has_pan => self.set_pan(value as f32),
             Self::MUTE if self.has_mute => self.muted = value >= 0.5,
             _ => {}
@@ -174,5 +188,24 @@ impl Node for Strip {
             }
         }
         self.run(ctx, start, frames);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gain_stays_finite_and_in_range() {
+        assert_eq!(Strip::send(2, f32::NAN).gain, 1.0);
+        assert_eq!(Strip::send(2, 0.25).gain, 0.25);
+        assert_eq!(Strip::track(2).with_gain(f32::NAN).gain, 1.0);
+        assert_eq!(Strip::track(2).with_gain(f32::INFINITY).gain, 4.0);
+        assert_eq!(Strip::track(2).with_gain(-1.0).gain, 0.0);
+        let mut s = Strip::bus(2);
+        s.apply(Strip::GAIN, f64::INFINITY);
+        assert_eq!(s.gain, 4.0);
+        s.apply(Strip::GAIN, f64::NAN);
+        assert_eq!(s.gain, 4.0);
     }
 }

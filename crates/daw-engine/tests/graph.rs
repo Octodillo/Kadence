@@ -221,3 +221,121 @@ fn reports_running_latency() {
     run(&mut proc, 16, &EventList::with_capacity(0));
     assert_eq!(ctl.latency(), 12);
 }
+
+/// Reports `before` output channels until it is prepared, then `after`, as a
+/// plugin that renegotiates its buses on activation does.
+struct Shrinks {
+    before: u16,
+    after: u16,
+    prepared: bool,
+}
+
+impl daw_core::node::Node for Shrinks {
+    fn ports(&self) -> daw_core::node::PortLayout {
+        daw_core::node::PortLayout {
+            audio_out: if self.prepared {
+                self.after
+            } else {
+                self.before
+            },
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {
+        self.prepared = true;
+    }
+
+    fn process(&mut self, _ctx: &mut daw_core::node::ProcessContext) {}
+}
+
+#[test]
+fn checks_ports_again_after_prepare() {
+    let mut g = GraphDesc::new(0, 2);
+    let n = g.add_device(
+        "n",
+        Box::new(Shrinks {
+            before: 2,
+            after: 1,
+            prepared: false,
+        }),
+    );
+    g.connect(n, g.master());
+    assert!(CompiledGraph::validate(&g).is_ok());
+    assert!(matches!(
+        CompiledGraph::compile(g, 48_000.0, 64, 16),
+        Err(CompileError::NoSuchOutput { channel: 1, .. })
+    ));
+
+    let mut g = GraphDesc::new(0, 1);
+    g.add_device(
+        "n",
+        Box::new(Shrinks {
+            before: 1,
+            after: 65,
+            prepared: false,
+        }),
+    );
+    assert!(matches!(
+        CompiledGraph::compile(g, 48_000.0, 64, 16),
+        Err(CompileError::TooManyChannels { channels: 65, .. })
+    ));
+}
+
+#[test]
+fn send_graph_refuses_a_graph_built_for_another_config() {
+    let (mut ctl, mut proc) = EngineController::new(config(1024));
+    let small = CompiledGraph::compile(GraphDesc::new(0, 1), 48_000.0, 64, 16).unwrap();
+    assert!(matches!(
+        ctl.send_graph(Box::new(small)),
+        Err(daw_engine::SendError::Config(_))
+    ));
+    let other_rate = CompiledGraph::compile(GraphDesc::new(0, 1), 44_100.0, 1024, 16).unwrap();
+    assert!(matches!(
+        ctl.send_graph(Box::new(other_rate)),
+        Err(daw_engine::SendError::Config(_))
+    ));
+    let larger = CompiledGraph::compile(GraphDesc::new(0, 1), 48_000.0, 2048, 16).unwrap();
+    assert!(ctl.send_graph(Box::new(larger)).is_ok());
+    run(&mut proc, 512, &EventList::with_capacity(0));
+    assert_eq!(ctl.graphs_swapped(), 1);
+}
+
+#[test]
+fn zero_max_frames_does_not_hang_the_processor() {
+    let (ctl, mut proc) = EngineController::new(config(0));
+    assert!(matches!(
+        ctl.compile(GraphDesc::new(0, 1)),
+        Err(CompileError::InvalidConfig)
+    ));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = run(&mut proc, 64, &EventList::with_capacity(0));
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("process returned");
+    assert!(out.iter().all(|&v| v == 0.0));
+}
+
+#[test]
+fn strip_ignores_nan_params() {
+    let mut g = GraphDesc::new(2, 2);
+    let track = g.add_track("track", 2);
+    g.connect(g.input(), track);
+    let (mut ctl, mut proc) = EngineController::new(config(64));
+    ctl.set_graph(g).unwrap();
+    ctl.set_param(track, Strip::GAIN, f64::NAN).unwrap();
+    ctl.set_param(track, Strip::PAN, f64::NAN).unwrap();
+    let input = vec![0.5; 32];
+    let (mut l, mut r) = (vec![9.0; 32], vec![9.0; 32]);
+    proc.process(
+        32,
+        &[&input, &input],
+        &mut [&mut l, &mut r],
+        &EventList::with_capacity(0),
+    );
+    assert_eq!(l, input);
+    assert_eq!(r, input);
+}

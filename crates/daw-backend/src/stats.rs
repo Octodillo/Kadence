@@ -22,6 +22,11 @@ pub struct BackendStats {
     /// The audio server shut down or kicked us out. The backend is dead and
     /// must be closed and reopened.
     pub server_gone: bool,
+    /// The process callback panicked. The backend keeps running but no
+    /// longer calls it, and outputs silence until the next
+    /// [`start`](crate::AudioBackend::start). (JACK only; the dummy backend's
+    /// `stop` returns an error instead.)
+    pub callback_panicked: bool,
     /// Allocations caught inside cycles (debug builds with
     /// `assert_no_alloc::AllocDisabler` installed; always 0 otherwise).
     pub rt_alloc_violations: u64,
@@ -39,6 +44,7 @@ pub(crate) struct SharedStats {
     /// f32 bits; NaN = unknown.
     dsp_load: AtomicU32,
     pub server_gone: AtomicBool,
+    pub callback_panicked: AtomicBool,
     pub rt_alloc_violations: AtomicU64,
     pub sample_rate: AtomicU32,
     pub buffer_size: AtomicU32,
@@ -72,19 +78,48 @@ impl SharedStats {
             },
             dsp_load: (!load.is_nan()).then_some(load),
             server_gone: self.server_gone.load(Relaxed),
+            callback_panicked: self.callback_panicked.load(Relaxed),
             rt_alloc_violations: self.rt_alloc_violations.load(Relaxed),
         }
     }
 }
 
 /// Whether the calling thread has a real-time scheduling policy. Does not
-/// allocate, so it is safe on the process thread.
+/// allocate or lock, so it is safe on the process thread.
 pub(crate) fn current_thread_is_realtime() -> bool {
-    // SAFETY: plain libc query on the current thread with valid out-pointers.
-    unsafe {
-        let mut policy = 0;
-        let mut param: libc::sched_param = std::mem::zeroed();
-        libc::pthread_getschedparam(libc::pthread_self(), &mut policy, &mut param) == 0
-            && (policy == libc::SCHED_FIFO || policy == libc::SCHED_RR)
+    // Ask the kernel, not `pthread_getschedparam`: glibc caches the policy on
+    // its first call and never sees rtkit or the portal promoting the thread
+    // from outside. One syscall.
+    // SAFETY: plain libc query on the current thread.
+    let policy = unsafe { libc::sched_getscheduler(0) };
+    // Mask SCHED_RESET_ON_FORK, which rtkit sets alongside the policy.
+    let policy = policy & !libc::SCHED_RESET_ON_FORK;
+    policy == libc::SCHED_FIFO || policy == libc::SCHED_RR
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// rtkit and the portal promote the thread from outside, by TID, after
+    /// the first check. The check must see that, so it cannot rely on a
+    /// value glibc cached on the first call.
+    #[test]
+    fn sees_policy_changed_by_tid_after_first_check() {
+        std::thread::spawn(|| {
+            assert!(!current_thread_is_realtime());
+            // SAFETY: plain libc calls on the current thread.
+            let promoted = unsafe {
+                let param = libc::sched_param { sched_priority: 1 };
+                libc::sched_setscheduler(libc::gettid(), libc::SCHED_FIFO, &param) == 0
+            };
+            if !promoted {
+                eprintln!("skipped: no permission to set SCHED_FIFO");
+                return;
+            }
+            assert!(current_thread_is_realtime());
+        })
+        .join()
+        .unwrap();
     }
 }

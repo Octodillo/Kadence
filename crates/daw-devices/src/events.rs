@@ -32,10 +32,16 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
             velocity: velocity.min(1.0),
             id: note_id,
         }),
+        // Clamp like note-on above, so the off finds the voice it started.
         EventKind::NoteOn { key, note_id, .. } | EventKind::NoteOff { key, note_id, .. } => {
-            Some(Note::Off { key, id: note_id })
+            Some(Note::Off {
+                key: key.min(127),
+                id: note_id,
+            })
         }
         EventKind::Midi([status, d1, d2]) => match status & 0xF0 {
+            // Data bytes never have bit 7 set; such a message is corrupt.
+            0x80 | 0x90 if (d1 | d2) & 0x80 != 0 => None,
             0x90 if d2 > 0 => Some(Note::On {
                 key: d1 & 0x7F,
                 velocity: (d2 & 0x7F) as f32 / 127.0,
@@ -161,5 +167,30 @@ mod tests {
             note_id: 3,
         };
         assert_eq!(note(&off), Some(Note::Off { key: 5, id: 3 }));
+    }
+
+    #[test]
+    fn out_of_range_keys_clamp_for_on_and_off() {
+        let on = EventKind::NoteOn {
+            channel: 0,
+            key: 130,
+            velocity: 1.0,
+            note_id: -1,
+        };
+        let off = EventKind::NoteOff {
+            channel: 0,
+            key: 130,
+            velocity: 0.0,
+            note_id: -1,
+        };
+        assert!(matches!(note(&on), Some(Note::On { key: 127, .. })));
+        assert_eq!(note(&off), Some(Note::Off { key: 127, id: -1 }));
+    }
+
+    #[test]
+    fn malformed_midi_note_data_is_dropped() {
+        assert_eq!(note(&EventKind::Midi([0x90, 60, 0x80])), None);
+        assert_eq!(note(&EventKind::Midi([0x90, 0xBC, 100])), None);
+        assert_eq!(note(&EventKind::Midi([0x80, 60, 0xFF])), None);
     }
 }

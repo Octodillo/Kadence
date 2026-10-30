@@ -161,17 +161,22 @@ impl CompiledGraph {
     }
 
     /// Validates `desc`, calls `prepare` on every node, sorts the nodes,
-    /// allocates buffers and inserts latency compensation delays.
+    /// allocates buffers and inserts latency compensation delays. A node may
+    /// change its ports in `prepare`, so the graph is validated again after.
     ///
     /// Runs off the RT thread; it allocates freely.
     pub fn compile(
-        desc: GraphDesc,
+        mut desc: GraphDesc,
         sample_rate: f64,
         max_frames: u32,
         event_capacity: usize,
     ) -> Result<Self, CompileError> {
         if sample_rate.is_nan() || sample_rate <= 0.0 || max_frames == 0 {
             return Err(CompileError::InvalidConfig);
+        }
+        Self::validate(&desc)?;
+        for entry in &mut desc.nodes {
+            entry.node.prepare(sample_rate, max_frames);
         }
         Self::validate(&desc)?;
         let order = topo_order(&desc)?;
@@ -196,10 +201,9 @@ impl CompiledGraph {
         let mut steps: Vec<Step> = order
             .iter()
             .map(|&i| {
-                let mut entry = slots[i]
+                let entry = slots[i]
                     .take()
                     .expect("each node appears once in the order");
-                entry.node.prepare(sample_rate, max_frames);
                 let ports = entry.node.ports();
                 let (n_in, n_out) = (ports.audio_in as usize, ports.audio_out as usize);
                 if let Some(old) = entry.reuse {
@@ -300,6 +304,9 @@ impl CompiledGraph {
         }
         for &(from, to) in &self.transfers {
             std::mem::swap(&mut self.steps[to].node, &mut old.steps[from].node);
+            // Parameter changes queued on the old graph since its last block
+            // follow the node. Both lists have the same capacity.
+            std::mem::swap(&mut self.steps[to].params, &mut old.steps[from].params);
         }
     }
 
@@ -424,8 +431,20 @@ impl CompiledGraph {
             }
             step.params.clear();
             if transport.playing {
+                // A dense ramp must not fill the list and crowd out the notes
+                // added below (a lost note-off hangs the note), so leave room
+                // for them.
+                let mut reserve = 0;
+                if step.external_events {
+                    reserve += external.len();
+                }
+                for &src in &step.event_sources {
+                    reserve += done[src].events_out.len();
+                }
+                let limit = step.events_in.capacity().saturating_sub(reserve);
                 for (param, lane) in &step.automation {
-                    lane.emit(*param, transport.position.0, frames, &mut step.events_in);
+                    let now = transport.position.0;
+                    lane.emit(*param, now, frames, &mut step.events_in, limit);
                 }
             }
             if step.external_events {

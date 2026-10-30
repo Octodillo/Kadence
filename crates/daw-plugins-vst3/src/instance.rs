@@ -46,26 +46,62 @@ const MIDI_CONTROLLERS: usize = 130;
 const STATE_MAGIC: &[u8; 8] = b"KDNVST3\0";
 const STATE_VERSION: u32 = 1;
 
+/// Points sampled along a continuous parameter's curve. Enough for linear interpolation
+/// between them to follow log and skewed curves to well under a percent.
+const CURVE_POINTS: usize = 129;
+
+/// Most zero-sample `process` calls one state save makes to hand editor edits over.
+const FLUSH_ROUNDS: usize = 64;
+
 #[derive(Clone, Debug)]
 struct Param {
     info: ParamInfo,
-    /// Plain value range, used for real-time plain/normalized conversion.
-    min: f64,
-    max: f64,
+    /// Plain values at evenly spaced normalized values, from the plugin's
+    /// `normalizedParamToPlain`. Sampled off the real-time thread so `process` converts both
+    /// ways without calling into the controller. Always at least two points.
+    curve: Box<[f64]>,
 }
 
 impl Param {
-    fn to_normalized(&self, plain: f64) -> f64 {
-        let span = self.max - self.min;
-        if span.abs() < f64::EPSILON {
-            0.0
-        } else {
-            ((plain - self.min) / span).clamp(0.0, 1.0)
-        }
+    /// Samples `plain` (normalized to plain) at one point per step for a discrete parameter
+    /// with up to `CURVE_POINTS` steps, else at `CURVE_POINTS` points.
+    fn sampled(info: ParamInfo, step_count: i32, plain: impl Fn(f64) -> f64) -> Param {
+        let points = match usize::try_from(step_count) {
+            Ok(steps) if (1..CURVE_POINTS).contains(&steps) => steps + 1,
+            _ => CURVE_POINTS,
+        };
+        let last = (points - 1) as f64;
+        let curve = (0..points).map(|i| plain(i as f64 / last)).collect();
+        Param { info, curve }
     }
 
     fn to_plain(&self, normalized: f64) -> f64 {
-        self.min + normalized * (self.max - self.min)
+        let c = &self.curve;
+        let x = normalized.clamp(0.0, 1.0) * (c.len() - 1) as f64;
+        let i = (x as usize).min(c.len() - 2);
+        c[i] + (x - i as f64) * (c[i + 1] - c[i])
+    }
+
+    /// Inverts the sampled curve, assuming the plugin's curve is monotonic.
+    fn to_normalized(&self, plain: f64) -> f64 {
+        let c = &self.curve;
+        let last = c.len() - 1;
+        let rising = c[last] >= c[0];
+        // The first point at or past `plain`, in the curve's direction.
+        let i = c.partition_point(|&v| if rising { v < plain } else { v > plain });
+        if i == 0 {
+            return 0.0;
+        }
+        if i > last {
+            return 1.0;
+        }
+        let (a, b) = (c[i - 1], c[i]);
+        let t = if b == a {
+            0.0
+        } else {
+            ((plain - a) / (b - a)).clamp(0.0, 1.0)
+        };
+        ((i - 1) as f64 + t) / last as f64
     }
 }
 
@@ -145,6 +181,36 @@ impl Rt {
             context,
             max_frames,
         })
+    }
+
+    /// The `process` argument for `frames` samples over these buffers and queues.
+    fn process_data(&mut self, frames: i32) -> ProcessData {
+        ProcessData {
+            processMode: ProcessModes_::kRealtime as i32,
+            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
+            numSamples: frames,
+            numInputs: self.in_buses.len() as i32,
+            numOutputs: self.out_buses.len() as i32,
+            inputs: self.in_buses.as_mut_ptr(),
+            outputs: self.out_buses.as_mut_ptr(),
+            inputParameterChanges: self
+                .in_params
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            outputParameterChanges: self
+                .out_params
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            inputEvents: self
+                .in_events
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            outputEvents: self
+                .out_events
+                .as_com_ref()
+                .map_or(ptr::null_mut(), |r| r.as_ptr()),
+            processContext: &mut self.context,
+        }
     }
 }
 
@@ -424,26 +490,27 @@ impl Vst3Instance {
                 if self.controller.getParameterInfo(i, &mut info) != kResultOk {
                     continue;
                 }
-                let min = self.controller.normalizedParamToPlain(info.id, 0.0);
-                let max = self.controller.normalizedParamToPlain(info.id, 1.0);
                 let default = self
                     .controller
                     .normalizedParamToPlain(info.id, info.defaultNormalizedValue);
                 let flags = info.flags;
                 let automatable = flags & ParameterFlags_::kCanAutomate as i32 != 0
                     && flags & ParameterFlags_::kIsReadOnly as i32 == 0;
-                params.push(Param {
-                    info: ParamInfo {
+                let mut param = Param::sampled(
+                    ParamInfo {
                         id: info.id,
                         name: wstr_field(&info.title),
-                        min,
-                        max,
+                        min: 0.0,
+                        max: 0.0,
                         default,
                         automatable,
                     },
-                    min,
-                    max,
-                });
+                    info.stepCount,
+                    |n| self.controller.normalizedParamToPlain(info.id, n),
+                );
+                param.info.min = param.to_plain(0.0);
+                param.info.max = param.to_plain(1.0);
+                params.push(param);
             }
         }
         self.param_index = params
@@ -518,6 +585,45 @@ impl Vst3Instance {
             .unwrap_or_else(|e| e.into_inner());
         while let Ok(e) = rx.pop() {
             unsafe { self.controller.setParamNormalized(e.id, e.normalized) };
+        }
+    }
+
+    /// Hands editor edits still queued for the processor over with a zero-sample `process`,
+    /// the spec's parameter flush, so a state saved while the engine is not running this
+    /// instance includes them. `&mut self` means the audio thread is not using it. Edits
+    /// flushed this way are not reported to the host as `ParamValue` events.
+    fn flush_edits(&mut self) {
+        if !self.processing {
+            return;
+        }
+        let Some(rt) = self.rt.as_deref_mut() else {
+            return;
+        };
+        // Bounded, so a plugin that calls `performEdit` from its own `process` cannot keep
+        // the loop going forever. Each round empties the ring and refills it from overflow,
+        // which holds at most one edit per parameter.
+        for _ in 0..FLUSH_ROUNDS {
+            self.handler.retry_overflow();
+            if self.edits_rx.is_empty() {
+                return;
+            }
+            rt.in_params.clear();
+            rt.out_params.clear();
+            rt.in_events.clear();
+            rt.out_events.clear();
+            while let Ok(e) = self.edits_rx.pop() {
+                rt.in_params.add(e.id, 0, e.normalized);
+            }
+            let mut data = rt.process_data(0);
+            unsafe { self.processor.process(&mut data) };
+            for q in rt.out_params.queues() {
+                if let Some((_, normalized)) = q.last() {
+                    let _ = self.to_controller_tx.push(Edit {
+                        id: q.id(),
+                        normalized,
+                    });
+                }
+            }
         }
     }
 
@@ -835,32 +941,7 @@ impl Node for Vst3Instance {
         c.tempo = if t.bpm > 0.0 { t.bpm } else { 120.0 };
         c.projectTimeMusic = t.position.0 as f64 / sample_rate * c.tempo / 60.0;
 
-        let mut data = ProcessData {
-            processMode: ProcessModes_::kRealtime as i32,
-            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
-            numSamples: frames as i32,
-            numInputs: rt.in_buses.len() as i32,
-            numOutputs: rt.out_buses.len() as i32,
-            inputs: rt.in_buses.as_mut_ptr(),
-            outputs: rt.out_buses.as_mut_ptr(),
-            inputParameterChanges: rt
-                .in_params
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            outputParameterChanges: rt
-                .out_params
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            inputEvents: rt
-                .in_events
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            outputEvents: rt
-                .out_events
-                .as_com_ref()
-                .map_or(ptr::null_mut(), |r| r.as_ptr()),
-            processContext: &mut rt.context,
-        };
+        let mut data = rt.process_data(frames as i32);
         unsafe { self.processor.process(&mut data) };
         rt.context.continousTimeSamples += frames as i64;
 
@@ -948,10 +1029,15 @@ impl Node for Vst3Instance {
         self.latency
     }
 
+    /// Runs on the audio thread, so only cycles `setProcessing`, which the spec allows there
+    /// and plugins treat as a state reset. `setActive` and the latency re-read stay on the
+    /// main thread, in `prepare` and `handle_restart`.
     fn reset(&mut self) {
-        if self.active {
-            self.deactivate();
-            self.activate();
+        if self.processing {
+            unsafe {
+                self.processor.setProcessing(0);
+                self.processor.setProcessing(1);
+            }
         }
     }
 }
@@ -974,6 +1060,7 @@ impl PluginInstance for Vst3Instance {
     /// Format: magic, version, then the component and controller states as length-prefixed
     /// blobs (little endian).
     fn save_state(&mut self) -> Result<Vec<u8>, PluginError> {
+        self.flush_edits();
         let read = |get: &dyn Fn(*mut IBStream) -> i32| -> Result<Vec<u8>, PluginError> {
             let stream = ComWrapper::new(MemoryStream::default());
             let s = stream
@@ -1052,7 +1139,10 @@ impl PluginInstance for Vst3Instance {
                 log::warn!("vst3 {}: controller setState: {e}", self.descriptor.name);
             }
         }
-        // Values pushed before the load are stale now.
+        // Values pushed before the load are stale now, in both directions: editor edits still
+        // queued for the processor would otherwise overwrite the restored state.
+        self.handler.discard_overflow();
+        while self.edits_rx.pop().is_ok() {}
         let mut rx = self
             .to_controller_rx
             .lock()
@@ -1084,6 +1174,7 @@ impl PluginInstance for Vst3Instance {
 
     fn on_main_thread(&mut self) {
         host().run_loop.pump();
+        self.handler.retry_overflow();
         self.flush_to_controller();
         self.handle_restart();
         if let Some(editor) = &mut self.editor
@@ -1116,6 +1207,144 @@ impl Drop for Vst3Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daw_core::event::EventList;
+    use daw_core::node::TransportState;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+    use vst3::Steinberg::Vst::IComponentHandlerTrait;
+
+    const FRAMES: u32 = 16;
+    const GAIN: ParamID = 0;
+
+    /// The `testgain` example wrapped in a bundle, as `tests/vst3.rs` does.
+    fn testgain() -> PluginDescriptor {
+        static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
+        let bundle = BUNDLE.get_or_init(|| {
+            let profile_dir = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .and_then(Path::parent)
+                .unwrap()
+                .to_path_buf();
+            let so = profile_dir.join("examples/libtestgain.so");
+            // `cargo test --lib` does not build examples, so build it here, always (a stale
+            // copy would test an old plugin), and in this test binary's profile, or the
+            // library lands in another profile's directory.
+            let profile = match profile_dir.file_name().and_then(|n| n.to_str()) {
+                Some("debug") | None => "dev",
+                Some(name) => name,
+            };
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "-p", "daw-plugins-vst3", "--example", "testgain"])
+                .args(["--profile", profile])
+                .status()
+                .expect("run cargo to build the test plugin");
+            assert!(status.success(), "building the testgain example failed");
+            let root = std::env::temp_dir().join(format!("daw-vst3-unit-{}", std::process::id()));
+            let bin = root
+                .join("TestGain.vst3/Contents")
+                .join(format!("{}-linux", std::env::consts::ARCH));
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::copy(&so, bin.join("TestGain.so")).unwrap();
+            root.join("TestGain.vst3")
+        });
+        scan_module(bundle).pop().unwrap()
+    }
+
+    fn instance() -> Vst3Instance {
+        let mut p = Vst3Instance::new(&testgain()).unwrap();
+        p.prepare(48_000.0, FRAMES);
+        p
+    }
+
+    /// What the plugin's editor does when the user moves a control.
+    fn editor_edit(p: &Vst3Instance, id: ParamID, normalized: f64) -> i32 {
+        unsafe { p.handler.performEdit(id, normalized) }
+    }
+
+    fn main_thread(p: &mut Vst3Instance) {
+        let _pumping = crate::host::RUN_LOOP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        p.on_main_thread();
+    }
+
+    /// Runs one block of ones through the plugin and returns the left output's first sample.
+    fn gain_heard(p: &mut Vst3Instance) -> f32 {
+        let input = [1.0f32; FRAMES as usize];
+        let mut outs = [[0.0f32; FRAMES as usize]; 2];
+        let events_in = EventList::with_capacity(8);
+        let mut events_out = EventList::with_capacity(64);
+        let transport = TransportState::default();
+        let audio_in: [&[f32]; 2] = [&input, &input];
+        let [l, r] = &mut outs;
+        let mut audio_out: [&mut [f32]; 2] = [l, r];
+        let mut ctx = ProcessContext {
+            frames: FRAMES,
+            transport: &transport,
+            audio_in: &audio_in,
+            audio_out: &mut audio_out,
+            events_in: &events_in,
+            events_out: &mut events_out,
+        };
+        p.process(&mut ctx);
+        outs[0][0]
+    }
+
+    #[test]
+    fn save_state_includes_editor_edits_not_yet_processed() {
+        let mut p = instance();
+        editor_edit(&p, GAIN, 0.3);
+        let state = p.save_state().unwrap();
+
+        let mut q = instance();
+        q.load_state(&state).unwrap();
+        assert_eq!(gain_heard(&mut q), 0.3);
+        // The flushed edit is not applied a second time.
+        assert_eq!(gain_heard(&mut p), 0.3);
+    }
+
+    #[test]
+    fn the_last_of_many_editor_edits_wins() {
+        let edits = 3 * EDIT_QUEUE;
+        let last = |i: usize| i as f64 / edits as f64;
+
+        let mut p = instance();
+        for i in 1..=edits {
+            assert_eq!(editor_edit(&p, GAIN, last(i)), kResultOk);
+        }
+        let state = p.save_state().unwrap();
+        let mut q = instance();
+        q.load_state(&state).unwrap();
+        assert_eq!(gain_heard(&mut q), 1.0);
+
+        // And through the audio thread, with the main thread topping the queue up.
+        for i in 1..=edits {
+            editor_edit(&q, GAIN, last(edits - i));
+        }
+        for _ in 0..4 {
+            gain_heard(&mut q);
+            main_thread(&mut q);
+        }
+        assert_eq!(gain_heard(&mut q), 0.0);
+    }
+
+    #[test]
+    fn load_state_discards_editor_edits_made_before_it() {
+        let mut p = instance();
+        let state = p.save_state().unwrap();
+        for _ in 0..2 * EDIT_QUEUE {
+            editor_edit(&p, GAIN, 0.3);
+        }
+        p.load_state(&state).unwrap();
+        main_thread(&mut p);
+        assert_eq!(
+            gain_heard(&mut p),
+            1.0,
+            "the stale edit overrode the loaded state"
+        );
+    }
 
     #[test]
     fn midi_notes_and_pressure_convert() {
@@ -1131,22 +1360,45 @@ mod tests {
         assert!(midi_to_vst_event(0, [0xb0, 1, 2]).is_none());
     }
 
+    fn info() -> ParamInfo {
+        ParamInfo {
+            id: 0,
+            name: String::new(),
+            min: 0.0,
+            max: 0.0,
+            default: 0.0,
+            automatable: true,
+        }
+    }
+
     #[test]
     fn plain_values_map_linearly() {
-        let p = Param {
-            info: ParamInfo {
-                id: 0,
-                name: String::new(),
-                min: -12.0,
-                max: 12.0,
-                default: 0.0,
-                automatable: true,
-            },
-            min: -12.0,
-            max: 12.0,
-        };
+        let p = Param::sampled(info(), 0, |n| -12.0 + 24.0 * n);
         assert_eq!(p.to_normalized(0.0), 0.5);
         assert_eq!(p.to_plain(0.25), -6.0);
         assert_eq!(p.to_normalized(100.0), 1.0);
+        assert_eq!(p.to_normalized(-100.0), 0.0);
+    }
+
+    #[test]
+    fn plain_values_follow_the_plugins_curve() {
+        // A 20 Hz to 20 kHz cutoff on a log scale.
+        let p = Param::sampled(info(), 0, |n| 20.0 * 1000f64.powf(n));
+        let expected = 50f64.ln() / 1000f64.ln();
+        assert!((p.to_normalized(1000.0) - expected).abs() < 1e-3);
+        assert!((p.to_plain(0.5) / 1000f64.sqrt() / 20.0 - 1.0).abs() < 1e-3);
+        assert_eq!((p.to_plain(0.0), p.to_plain(1.0)), (20.0, 20_000.0));
+        for n in [0.0, 0.1, 0.37, 0.9, 1.0] {
+            assert!((p.to_normalized(p.to_plain(n)) - n).abs() < 1e-9);
+        }
+
+        // Falling curves work too.
+        let p = Param::sampled(info(), 0, |n| 1.0 - n * n);
+        assert!((p.to_normalized(0.75) - 0.5).abs() < 1e-3);
+
+        // Discrete parameters map each step onto the plugin's normalized value for it.
+        let p = Param::sampled(info(), 3, |n| (n * 4.0).floor().min(3.0));
+        assert_eq!(p.to_normalized(2.0), 2.0 / 3.0);
+        assert_eq!(p.to_plain(1.0 / 3.0), 1.0);
     }
 }
