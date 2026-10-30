@@ -22,7 +22,7 @@ use daw_core::plugin::{
     PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 
-pub use instance::Vst3Instance;
+pub use instance::{Vst3Instance, Vst3Processor};
 pub use module::shutdown;
 
 /// Entry point for the plugin registry.

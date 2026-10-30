@@ -528,6 +528,13 @@ impl ComponentHandler {
         overflow.drain(..moved);
     }
 
+    /// Whether edits wait for `process`, in the ring or for room in it. Can turn false at
+    /// once if the audio thread is reading.
+    pub fn has_edits(&self) -> bool {
+        let q = self.edits.lock().unwrap();
+        !q.overflow.is_empty() || q.ring.slots() < q.ring.buffer().capacity()
+    }
+
     /// Forgets edits waiting for room in the ring, after a state load made them stale.
     pub fn discard_overflow(&self) {
         self.edits.lock().unwrap().overflow.clear();
