@@ -331,3 +331,49 @@ fn connects_other_clients_ports_while_stopped() {
     assert!(connections_of("system:capture_1").is_empty());
     b.close().unwrap();
 }
+
+/// Saved links are kept by full port name, so a port named by its alias in
+/// one call and by its full name in the next is the same port.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn stopped_links_match_aliases_and_loopbacks() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (probe, _) =
+        jack::Client::new("wu2-alias-probe", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let mut sys = probe.port_by_name("system:playback_1").unwrap();
+    sys.set_alias("wu2-test:speaker").unwrap();
+
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 1,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-alias")
+    })
+    .unwrap();
+    b.connect("wu2-alias:audio_out_1", "wu2-test:speaker")
+        .unwrap();
+    // The same link under its full name.
+    assert!(
+        b.connect("wu2-alias:audio_out_1", "system:playback_1")
+            .is_err()
+    );
+    b.disconnect("wu2-alias:audio_out_1", "system:playback_1")
+        .unwrap();
+    // A link from our output to our own input.
+    b.connect("wu2-alias:audio_out_1", "wu2-alias:audio_in_1")
+        .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-alias:audio_out_1"),
+        ["wu2-alias:audio_in_1"]
+    );
+    b.stop().unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert_eq!(
+        connections_of("wu2-alias:audio_out_1"),
+        ["wu2-alias:audio_in_1"]
+    );
+    b.close().unwrap();
+    sys.unset_alias("wu2-test:speaker").unwrap();
+}

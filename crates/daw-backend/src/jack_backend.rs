@@ -89,14 +89,27 @@ impl JackBackend {
                 continue;
             };
             for other in port.get_connections() {
-                links.push(if is_output {
+                let link = if is_output {
                     (name.clone(), other)
                 } else {
                     (other, name.clone())
-                });
+                };
+                // A link between two of our own ports shows up on both.
+                if !links.contains(&link) {
+                    links.push(link);
+                }
             }
         }
         links
+    }
+
+    /// The full name of a port given by any of its names (an alias, say), so
+    /// saved links compare equal to what `get_connections` reports.
+    fn full_name(client: &Client, name: &str) -> String {
+        client
+            .port_by_name(name)
+            .and_then(|p| p.name().ok())
+            .unwrap_or_else(|| name.to_owned())
     }
 
     /// Checks what JACK would check on connect, for a client that cannot
@@ -274,7 +287,15 @@ impl AudioBackend for JackBackend {
             self.auto_connected = true;
         }
         for (from, to) in std::mem::take(&mut self.links) {
-            if let Err(e) = active.as_client().connect_ports_by_name(&from, &to) {
+            let client = active.as_client();
+            // Auto-connect or the session manager may have made it already.
+            let made = client
+                .port_by_name(&from)
+                .is_some_and(|p| p.is_connected_to(&to).unwrap_or(false));
+            if made {
+                continue;
+            }
+            if let Err(e) = client.connect_ports_by_name(&from, &to) {
                 log::warn!("could not restore connection {from} -> {to}: {e}");
             }
         }
@@ -285,7 +306,10 @@ impl AudioBackend for JackBackend {
     fn stop(&mut self) -> Result<(), BackendError> {
         match std::mem::take(&mut self.state) {
             State::Running(active) => {
-                if let Some(cfg) = &self.cfg {
+                // After a server shutdown there is nothing left to ask.
+                if let Some(cfg) = &self.cfg
+                    && !self.shared.server_gone.load(Relaxed)
+                {
                     self.links = Self::live_links(active.as_client(), cfg);
                 }
                 let (client, _, processor) = active
@@ -374,7 +398,7 @@ impl AudioBackend for JackBackend {
                         .connect_ports_by_name(from, to)
                         .map_err(|e| err(e.to_string()));
                 }
-                let link = (from.to_owned(), to.to_owned());
+                let link = (Self::full_name(client, from), Self::full_name(client, to));
                 if self.links.contains(&link) {
                     return Err(err("already connected".into()));
                 }
@@ -397,9 +421,9 @@ impl AudioBackend for JackBackend {
         match &self.state {
             State::Closed => Err(BackendError::NotOpen),
             State::Open(client, _) => {
+                let link = (Self::full_name(client, from), Self::full_name(client, to));
                 let before = self.links.len();
-                self.links
-                    .retain(|(a, b)| (a.as_str(), b.as_str()) != (from, to));
+                self.links.retain(|l| *l != link);
                 if self.links.len() < before {
                     return Ok(());
                 }
