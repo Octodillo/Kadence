@@ -73,8 +73,8 @@ sudo cmake --install build
 
 The build also writes `THIRD-PARTY-LICENSES`, the license and notice files
 of every crate linked into `kadence`, collected by
-`packaging/third-party-licenses.py` from `cargo metadata` (offline, so it
-works from vendored sources). CMake installs it with `LICENSE` to
+`packaging/third-party-licenses.py` from `cargo metadata` after the build
+(offline when the build is, so it works from vendored sources). CMake installs it with `LICENSE` to
 `share/licenses/kadence`; set `-DKADENCE_LICENSE_DIR=` to move both, or
 `-DKADENCE_INSTALL_LICENSES=OFF` when the packaging installs them itself
 (Fedora's `%license`). It needs Python 3.

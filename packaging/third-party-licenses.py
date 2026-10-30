@@ -8,9 +8,9 @@ Walks `cargo metadata` from the daw-app crate along normal (not dev or
 build) dependencies for the host platform, skips proc-macros (they run in
 the compiler, not in kadence) and workspace crates (they are Kadence's own
 GPL code), and writes each remaining crate's name, version, SPDX license
-and license, copyright and notice files to OUTPUT. Runs offline, so it
-works from vendored sources (Fedora, Flatpak) and from a fetched cache
-(Arch). Standard library only.
+and license, copyright and notice files to OUTPUT. Cargo goes offline when
+the build is (CARGO_NET_OFFLINE, vendored sources), and only needs the
+host's crates. Standard library only.
 """
 
 import argparse
@@ -56,7 +56,7 @@ def host_triple(cargo):
 
 def metadata(cargo, manifest, host):
     return json.loads(run(
-        [cargo, "metadata", "--format-version", "1", "--locked", "--offline",
+        [cargo, "metadata", "--format-version", "1", "--locked",
          "--filter-platform", host, "--manifest-path", manifest]))
 
 

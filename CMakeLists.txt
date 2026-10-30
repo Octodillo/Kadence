@@ -65,6 +65,9 @@ if(EXISTS ${APP_CRATE}/Cargo.toml)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Collecting third-party license notices")
     add_custom_target(third_party_licenses ALL DEPENDS ${THIRD_PARTY_LICENSES})
+    # After the build: Cargo has fetched the crates by then, and two rustup
+    # proxies starting at once race to install the toolchain's components.
+    add_dependencies(third_party_licenses cargo_build)
     if(KADENCE_INSTALL_LICENSES)
         install(FILES ${THIRD_PARTY_LICENSES} DESTINATION ${KADENCE_LICENSE_DIR})
     endif()
