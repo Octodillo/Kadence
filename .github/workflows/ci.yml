@@ -20,7 +20,12 @@ jobs:
           components: rustfmt, clippy
       - name: system packages
         # jack-sys needs jack.pc to build; jackd2 runs the JACK integration tests.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjack-jackd2-dev jackd2
+        # lilv links daw-plugins-lv2; mda-lv2 and x42-plugins are its test
+        # plugins; Xvfb lets its tests open plugin UIs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -30,7 +35,11 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --exclude daw-app --all-targets -- -D warnings
       - name: tests
-        run: cargo nextest run --workspace --exclude daw-app --no-tests=warn
+        # -noreset: otherwise Xvfb resets when one test process disconnects
+        # and drops the connection of a test opening a plugin UI in parallel.
+        run: xvfb-run -a -s "-noreset" cargo nextest run --workspace --exclude daw-app --no-tests=warn
+        env:
+          DAW_REQUIRE_LV2_PLUGINS: 1
       - name: JACK integration tests
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &

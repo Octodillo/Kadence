@@ -35,6 +35,15 @@ fn test_plugin_lib() -> &'static Path {
     })
 }
 
+/// The default registry with only CLAP searched, so plugins installed on the
+/// machine (LV2 and VST3 search their system paths) cannot change the results.
+fn clap_only_registry() -> PluginRegistry {
+    let mut registry = default_registry();
+    registry.set_search_paths(PluginFormatKind::Lv2, Vec::new());
+    registry.set_search_paths(PluginFormatKind::Vst3, Vec::new());
+    registry
+}
+
 fn scanner() -> Scanner {
     Scanner::new(env!("CARGO_BIN_EXE_daw-plugin-scan"), Vec::<String>::new())
 }
@@ -126,7 +135,7 @@ fn garbage_output_and_missing_programs_are_errors() {
 #[test]
 fn registry_scans_caches_and_instantiates() {
     let dir = plugin_dir();
-    let mut registry = default_registry();
+    let mut registry = clap_only_registry();
     registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
     let cache_file = dir.path().join("cache/plugins.json");
 
@@ -156,7 +165,7 @@ fn registry_scans_caches_and_instantiates() {
 #[test]
 fn failures_are_cached_until_the_bundle_changes() {
     let dir = plugin_dir();
-    let mut registry = default_registry();
+    let mut registry = clap_only_registry();
     registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
     let mut cache = ScanCache::new();
 
@@ -249,7 +258,7 @@ fn a_scanner_without_the_format_is_not_a_crash() {
 #[test]
 fn forgotten_failures_are_scanned_again() {
     let dir = plugin_dir();
-    let mut registry = default_registry();
+    let mut registry = clap_only_registry();
     registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
     let mut cache = ScanCache::new();
     registry.scan(&sh("kill -SEGV $$"), &mut cache);
@@ -263,7 +272,7 @@ fn forgotten_failures_are_scanned_again() {
 #[test]
 fn scanner_problems_are_not_cached_as_plugin_failures() {
     let dir = plugin_dir();
-    let mut registry = default_registry();
+    let mut registry = clap_only_registry();
     registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
     let mut cache = ScanCache::new();
 
@@ -281,7 +290,7 @@ fn scanner_problems_are_not_cached_as_plugin_failures() {
 fn earlier_search_paths_win_for_duplicate_plugins() {
     let first = plugin_dir();
     let second = plugin_dir();
-    let mut registry = default_registry();
+    let mut registry = clap_only_registry();
     // Listed so that the second directory would sort first by path.
     let (a, b) = if first.path() < second.path() {
         (second.path(), first.path())
@@ -293,4 +302,41 @@ fn earlier_search_paths_win_for_duplicate_plugins() {
     assert_eq!(report.scanned, 2);
     assert_eq!(registry.plugins().len(), 1);
     assert!(registry.plugins()[0].path.starts_with(a));
+}
+
+/// LV2 goes through the same out-of-process scan, when mda-lv2 is installed.
+#[test]
+fn registry_scans_and_instantiates_lv2() {
+    let Some(mda) = daw_plugins_lv2::format()
+        .default_search_paths()
+        .into_iter()
+        .map(|d| d.join("mda.lv2"))
+        .find(|b| b.is_dir())
+    else {
+        assert!(
+            std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
+            "mda-lv2 must be installed"
+        );
+        eprintln!("skipped: mda-lv2 not installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = default_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, Vec::new());
+    registry.set_search_paths(PluginFormatKind::Vst3, Vec::new());
+    registry.set_search_paths(PluginFormatKind::Lv2, vec![mda]);
+    let mut cache = ScanCache::load(&dir.path().join("plugins.json"));
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!(report.scanned, 1);
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let d = registry
+        .find(
+            &PluginFormatKind::Lv2,
+            "http://drobilla.net/plugins/mda/EPiano",
+        )
+        .expect("mda ePiano not found")
+        .clone();
+    assert!(d.is_instrument);
+    let plugin = registry.instantiate(&d, 48_000.0, 256).unwrap();
+    assert_eq!(plugin.ports().audio_out, 2);
 }
