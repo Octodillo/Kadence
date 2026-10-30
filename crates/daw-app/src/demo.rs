@@ -100,3 +100,47 @@ pub fn build() -> Result<Document, String> {
     doc.save_as(&dir).map_err(|e| e.to_string())?;
     Ok(doc)
 }
+
+/// A large project for `--benchmark`: `tracks` audio tracks of `clips`
+/// one-beat clips each, all playing one short tone.
+pub fn stress(tracks: usize, clips: usize) -> Result<Document, String> {
+    let dir = std::env::temp_dir()
+        .join(format!("kadence-benchmark-{}", std::process::id()))
+        .join("Stress");
+    let _ = std::fs::remove_dir_all(&dir);
+    let audio = dir.join("audio");
+    std::fs::create_dir_all(&audio).map_err(|e| e.to_string())?;
+    write_wav(audio.join("tone.wav"), &pluck(220.0, 1), WavFormat::Float32)
+        .map_err(|e| e.to_string())?;
+    let mut project = Project::new("Stress");
+    project.tracks = (0..tracks)
+        .map(|t| {
+            let mut track = Track::new(TrackKind::Audio, format!("Track {}", t + 1));
+            track.clips = (0..clips)
+                .map(|c| {
+                    Arc::new(Clip::new(
+                        format!("Clip {}", c + 1),
+                        TickTime((2 * c as i64 + (t % 2) as i64) * PPQ),
+                        TickTime(PPQ),
+                        ClipContent::Audio(AudioClip::new("audio/tone.wav", SampleTime(0))),
+                    ))
+                })
+                .collect();
+            Arc::new(track)
+        })
+        .collect();
+    let mut doc = Document::new(project);
+    doc.save_as(&dir).map_err(|e| e.to_string())?;
+    Ok(doc)
+}
+
+/// Removes what [`build`] and [`stress`] wrote.
+pub fn remove_temp_files() {
+    let pid = std::process::id();
+    for name in [
+        format!("kadence-demo-{pid}"),
+        format!("kadence-benchmark-{pid}"),
+    ] {
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(name));
+    }
+}

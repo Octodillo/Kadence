@@ -270,6 +270,9 @@ Kirigami.Page {
                     interactive: false
                     model: Project.trackCount
                     contentY: view.scrollY
+                    // Scrolling must not build and destroy a header per
+                    // row: reuse the ones that leave the view.
+                    reuseItems: true
                     // The track whose handle is being dragged, and the row
                     // it would land on (see TrackHeader).
                     property int dragFrom: -1

@@ -13,6 +13,7 @@ Kirigami.ApplicationWindow {
     // Set from C++ (see kadence.cpp).
     required property var aboutData
     required property bool smokeTest
+    required property bool benchmark
     required property string screenshotDir
 
     // A project that was never named or saved has an empty name. This is %1
@@ -101,6 +102,14 @@ Kirigami.ApplicationWindow {
             onTriggered: openDialog.open()
         },
         Kirigami.Action {
+            // A project is a folder. File dialogs can't pick a folder whose
+            // name ends in .kadence (the filter makes it look like a file),
+            // so offer the folder itself too.
+            text: i18nc("@action:inmenu", "Open Project Folder…")
+            icon.name: "folder-open"
+            onTriggered: openFolderDialog.open()
+        },
+        Kirigami.Action {
             text: i18nc("@action:inmenu", "Save")
             icon.name: "document-save"
             shortcut: StandardKey.Save
@@ -147,6 +156,14 @@ Kirigami.ApplicationWindow {
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         onAccepted: {
             root.notify(Project.openProject(selectedFile));
+        }
+    }
+
+    FolderDialog {
+        id: openFolderDialog
+        title: i18nc("@title:window", "Open Project Folder")
+        onAccepted: {
+            root.notify(Project.openProject(selectedFolder));
         }
     }
 
@@ -204,6 +221,7 @@ Kirigami.ApplicationWindow {
             root.fileActions[1],
             root.fileActions[2],
             root.fileActions[3],
+            root.fileActions[4],
             separatorAction,
             root.historyActions[0],
             root.historyActions[1],
@@ -340,6 +358,14 @@ Kirigami.ApplicationWindow {
     Loader {
         active: root.smokeTest || root.screenshotDir !== ""
         sourceComponent: SelfTest {
+            window: root
+        }
+    }
+
+    // `--benchmark`: frame times while scrolling a large project.
+    Loader {
+        active: root.benchmark
+        sourceComponent: Benchmark {
             window: root
         }
     }

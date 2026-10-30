@@ -29,6 +29,7 @@ const QML_FILES: &[&str] = &[
     "qml/EditNames.qml",
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
+    "qml/Benchmark.qml",
     "qml/TrackHeader.qml",
 ];
 
