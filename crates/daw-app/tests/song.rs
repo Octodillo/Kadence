@@ -57,6 +57,8 @@ const BLOCK: usize = 256;
 const BPM: f64 = 100.0;
 /// Samples per beat at [`BPM`].
 const BEAT: usize = (RATE * 60.0 / BPM) as usize;
+/// Undo steps [`make_song`] makes.
+const EDITS: usize = 14;
 /// The song is four bars of 4/4.
 const SONG_BEATS: usize = 16;
 
@@ -114,7 +116,8 @@ fn strip(track: TrackId) -> StripId {
 }
 
 /// Makes the song in a new bundle at `bundle`, one edit at a time, through
-/// the same code the app's track menu, instrument menu and mixer run.
+/// the same code the app's track menu, instrument menu and mixer run. Each
+/// edit is sealed as its own undo step, as the app does after a gesture.
 ///
 /// Bar 1: the audio track's pluck. Bars 2 and 3: the same chord twice on
 /// the instrument track, the second 12 dB quieter through volume
@@ -134,6 +137,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
             instruments.default_choice(),
         ))
         .unwrap();
+        doc.seal();
         id
     };
 
@@ -152,6 +156,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         },
     })
     .unwrap();
+    doc.seal();
 
     // An audio track with an imported clip, an EQ insert, a little pan and
     // a fade out.
@@ -166,11 +171,13 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     );
     let clip_id = clip.id;
     doc.execute(AddClip::new(pluck, clip)).unwrap();
+    doc.seal();
     doc.execute(SetClip::new(
         clip_id,
         ClipField::FadeOut(Fade::new(beats(1.0), FadeShape::EqualPower)),
     ))
     .unwrap();
+    doc.seal();
     assert!(mixer.add_insert(&mut doc, strip(pluck), "daw.eq"));
     mixer
         .set(&mut doc, None, strip(pluck), Control::Pan, -0.2)
@@ -178,6 +185,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
 
     // An instrument track, which starts with the synth, playing a MIDI clip.
     let keys = add_track(&mut doc, 1, TrackKind::Instrument, "Keys");
+    doc.seal();
     let t = doc.project().track(keys).unwrap();
     assert_eq!(
         instrument::instrument_of(t).map(|d| &d.source),
@@ -192,6 +200,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     );
     let midi_id = midi.id;
     doc.execute(AddClip::new(keys, midi)).unwrap();
+    doc.seal();
     // The same C major chord in each bar, so the two can be compared.
     let notes = [0.0, 4.0]
         .into_iter()
@@ -202,6 +211,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         notes,
     })
     .unwrap();
+    doc.seal();
 
     // A bus with a fully wet reverb, fed by a send from the keys.
     let bus = add_track(&mut doc, 2, TrackKind::Bus, "Reverb");
@@ -214,10 +224,12 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         value: Some(1.0),
     })
     .unwrap();
+    doc.seal();
     // TODO(#95): add the send from the mixer.
     let send = Send::new(bus);
     let keys_send = send.id;
     doc.execute(AddSend { track: keys, send }).unwrap();
+    doc.seal();
 
     // Volume automation: full level for the first chord, -12 dB from the
     // second on.
@@ -226,6 +238,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     let mut lane = AutomationLane::new(AutomationTarget::Volume);
     lane.points = vec![point(0.0, 0.0), point(8.0, -12.0)];
     doc.execute(AddLane { track: keys, lane }).unwrap();
+    doc.seal();
 
     // TODO(#91): add the CLAP test plugin as an insert.
     Song {
@@ -315,7 +328,7 @@ fn make_save_reload_and_render_a_song() {
     while doc.undo().unwrap().is_some() {
         undone += 1;
     }
-    assert!(undone >= 10, "every step was undoable ({undone} undone)");
+    assert_eq!(undone, EDITS, "every edit is its own undo step");
     assert_eq!(
         to_json(doc.project()).unwrap(),
         empty,
@@ -327,6 +340,14 @@ fn make_save_reload_and_render_a_song() {
     // Render and check each part of the song is where it should be.
     doc.save().unwrap();
     let song = render(&mut doc);
+    // Written before checking it, so a failing run leaves it to listen to.
+    // TODO(#96): export through the app's export (WAV and FLAC).
+    let wav = bundle.join("Smoke Song.wav");
+    write_wav(&wav, &song, WavFormat::Float32).unwrap();
+    if let Some(out) = std::env::var_os("KADENCE_SMOKE_OUT") {
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::copy(&wav, Path::new(&out).join("smoke-song.wav")).unwrap();
+    }
     let all = song.channels.iter().flatten();
     assert!(all.clone().all(|x| x.is_finite()), "no NaN or infinity");
     let peak = all.fold(0f32, |m, x| m.max(x.abs()));
@@ -335,13 +356,32 @@ fn make_save_reload_and_render_a_song() {
 
     let pluck = rms(&song, 0.1, 3.0);
     assert!(pluck > 0.01, "the audio clip plays in bar 1 ({pluck})");
+    assert!(
+        song.channels[0][1..64].iter().any(|&x| x != 0.0),
+        "the render starts at the top of the song"
+    );
+    // The source repeats every beat, so the end of its last beat would
+    // match the end of its first without the fade out.
+    let (first, last) = (rms(&song, 0.5, 1.0), rms(&song, 3.5, 4.0));
+    assert!(last < 0.6 * first, "the clip fades out ({last} vs {first})");
+    // The source's right channel is 0.9 of its left; panning left lowers
+    // it further.
+    let side = |c: usize| {
+        let ch = &song.channels[c][..3 * BEAT];
+        ch.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt()
+    };
+    let balance = side(1) / side(0);
+    assert!(
+        balance < 0.85,
+        "the pan moves the pluck left (R/L {balance})"
+    );
     let loud = rms(&song, 4.5, 7.0);
     let quiet = rms(&song, 8.5, 11.0);
     assert!(loud > 0.01, "the MIDI clip plays the synth ({loud})");
     let ratio = quiet / loud;
     // -12 dB is 0.25; the reverb tail of the first chord adds a little.
     assert!(
-        (0.15..0.5).contains(&ratio),
+        (0.2..0.32).contains(&ratio),
         "volume automation turns the second chord down ({quiet} / {loud} = {ratio})"
     );
     let tail = rms(&song, 12.5, 15.5);
@@ -354,14 +394,17 @@ fn make_save_reload_and_render_a_song() {
     doc.undo().unwrap();
     let dry_tail = rms(&dry, 12.5, 15.5);
     assert!(
-        tail > 1e-4 && tail > 4.0 * dry_tail,
+        // The reverb's default 30% mix leaves about a third of this.
+        tail > 5e-4 && tail > 4.0 * dry_tail,
         "the send feeds the reverb bus (tail {tail}, without the send {dry_tail})"
     );
     assert!(!doc.is_modified(), "undo returns to the saved state");
 
     // Swap the synth for the sampler from the mixer. With no samples
     // loaded the keys go quiet, nothing else changes, and undo brings the
-    // synth back.
+    // synth back. Silence alone can't tell an empty sampler from a dropped
+    // instrument; the model check and the no-warnings check in `render`
+    // cover that until the sampler can be given a sample here.
     let sampler = instruments
         .position(&builtin_source("daw.sampler"))
         .and_then(|i| instruments.get(i))
@@ -375,26 +418,29 @@ fn make_save_reload_and_render_a_song() {
     let swapped = render(&mut doc);
     let keys_part = rms(&swapped, 4.5, 15.5);
     assert!(keys_part < 1e-4, "an empty sampler is silent ({keys_part})");
-    let pluck_again = rms(&swapped, 0.1, 3.0);
-    assert!(
-        (pluck_again - pluck).abs() < 1e-6,
-        "the other tracks play on ({pluck_again} vs {pluck})"
-    );
+    // Up to the MIDI clip at beat 4 nothing changes; the synth sounds
+    // right from there.
+    let at = |beat: f64| (beat * BEAT as f64) as usize;
+    for c in 0..2 {
+        assert_eq!(
+            swapped.channels[c][..at(4.0)],
+            song.channels[c][..at(4.0)],
+            "the other tracks play on"
+        );
+        assert_ne!(
+            swapped.channels[c][at(4.0)..at(4.05)],
+            song.channels[c][at(4.0)..at(4.05)],
+            "the keys start at beat 4"
+        );
+    }
     doc.undo().unwrap();
     assert!(!doc.is_modified(), "one undo puts the synth back");
     assert_eq!(render(&mut doc).channels, song.channels);
 
-    // Export to a file and read it back.
-    // TODO(#96): export through the app's export (WAV and FLAC).
-    let wav = bundle.join("Smoke Song.wav");
-    write_wav(&wav, &song, WavFormat::Float32).unwrap();
+    // The exported file holds the render.
     let read = decode_file(&wav).unwrap();
     assert_eq!(read.sample_rate, RATE as u32);
     assert_eq!(read.channels, song.channels, "the WAV holds the render");
-    if let Some(out) = std::env::var_os("KADENCE_SMOKE_OUT") {
-        std::fs::create_dir_all(&out).unwrap();
-        std::fs::copy(&wav, Path::new(&out).join("smoke-song.wav")).unwrap();
-    }
 
     // Reopen from disk, from a copy of the bundle somewhere else, so
     // nothing depends on absolute paths.
