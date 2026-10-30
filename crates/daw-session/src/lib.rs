@@ -20,6 +20,7 @@
 //! second on the session's thread.
 
 mod build;
+pub mod catalog;
 pub mod host;
 mod media;
 pub mod player;
@@ -333,6 +334,14 @@ impl Session {
     /// want of a loader are tried again on the next sync.
     pub fn set_plugin_loader(&mut self, loader: Option<Box<dyn PluginLoader>>) {
         self.plugins.set_loader(loader);
+        self.force_rebuild = true;
+    }
+
+    /// Tells the plugin loader which plugins are installed, from a scan the
+    /// app ran (see [`catalog`]). Devices whose plugin was missing are tried
+    /// again on the next sync.
+    pub fn set_known_plugins(&mut self, plugins: &[daw_core::plugin::PluginDescriptor]) {
+        self.plugins.set_known(plugins);
         self.force_rebuild = true;
     }
 

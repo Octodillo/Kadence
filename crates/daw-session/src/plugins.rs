@@ -51,6 +51,10 @@ pub trait PluginLoader {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<LoadedPlugin, LoadError>;
+
+    /// The plugins a scan elsewhere found (the app's plugin browser), so the loader can find
+    /// them without scanning itself.
+    fn set_known(&mut self, _plugins: &[PluginDescriptor]) {}
 }
 
 /// Loads every plugin in its own sandbox host process.
@@ -131,6 +135,11 @@ impl PluginLoader for SandboxLoader {
             monitor: Some(instance.monitor()),
             instance: Box::new(instance),
         })
+    }
+
+    fn set_known(&mut self, plugins: &[PluginDescriptor]) {
+        self.registry.set_plugins(plugins.to_vec());
+        self.scanned = true;
     }
 }
 
@@ -292,6 +301,23 @@ impl Plugins {
             fresh: true,
             params,
         }))
+    }
+
+    /// Hands the loader the plugins a scan found. Devices whose plugin was missing are tried
+    /// again on the next build, in case the scan found it.
+    pub(crate) fn set_known(&mut self, plugins: &[PluginDescriptor]) {
+        if let Some(loader) = &mut self.loader {
+            loader.set_known(plugins);
+        }
+        self.slots.retain(|_, s| {
+            !matches!(
+                s,
+                Slot::Failed {
+                    status: PluginStatus::Missing,
+                    ..
+                }
+            )
+        });
     }
 
     pub(crate) fn live(&self, device: DeviceId) -> Option<&Live> {

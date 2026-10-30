@@ -151,6 +151,17 @@ pub trait MixerHandle {
     fn set_send_level(&mut self, id: StripId, target: StripId, db: f64);
     /// Appends a built-in effect to the strip's insert chain.
     fn add_insert(&mut self, id: StripId, device_id: &str) -> bool;
+    /// Appends a plugin to the strip's insert chain, as a device called
+    /// `name`.
+    fn add_plugin_insert(
+        &mut self,
+        _id: StripId,
+        _format: daw_core::plugin::PluginFormatKind,
+        _plugin: &str,
+        _name: &str,
+    ) -> bool {
+        false
+    }
     fn remove_insert(&mut self, id: StripId, index: usize);
     fn effects(&self) -> Vec<EffectChoice>;
     /// Meter readings, parallel to [`strips`](Self::strips). Resets them.

@@ -129,17 +129,20 @@ pub trait EngineHandle {
 fn plugin_loader() -> Option<Box<dyn PluginLoader>> {
     let launcher = HostLauncher::current_exe().ok()?;
     let mut loader = SandboxLoader::new(SandboxConfig::new(launcher));
-    if let Some(dir) = cache_dir() {
-        loader = loader.with_cache_file(dir.join("kadence").join("plugins.json"));
+    if let Some(file) = plugin_cache_file() {
+        loader = loader.with_cache_file(file);
     }
     Some(Box::new(loader))
 }
 
-fn cache_dir() -> Option<PathBuf> {
+/// Where plugin scan results are kept, shared by the session's loader and
+/// the plugin browser's scan.
+pub(crate) fn plugin_cache_file() -> Option<PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .map(|dir| dir.join("kadence").join("plugins.json"))
 }
 
 /// Starts audio with plugins loading through [`plugin_loader`].

@@ -15,6 +15,10 @@ Item {
     property int step: 0
     property Item settingsPage
     property int failures: 0
+    property var browser
+    property var picked: null
+    // Steps spent waiting for the plugin scan.
+    property int waits: 0
 
     EngineErrorText {
         id: engineError
@@ -151,6 +155,47 @@ Item {
         () => {
             check(Project.undoText === "Add Automation Lane", "fader move written as automation");
             check(!Mixer.writeAutomation, "writing off");
+        },
+        () => {
+            // The plugin browser, as Add Effect opens it.
+            test.browser = window.browsePlugins(2, (format, pluginId, name) => {
+                test.picked = [format, pluginId, name];
+                check(Mixer.addPluginInsert(0, format, pluginId, name), "insert the chosen plugin");
+            });
+            check(test.browser.visible, "plugin browser opens");
+            check(Plugins.scanning || Plugins.hasScanned, "plugin scan started");
+        },
+        () => {
+            // Give the background scan a while (smoke.rs points it at the
+            // test plugin only).
+            if (Plugins.scanning && test.waits < 50) {
+                test.waits += 1;
+                test.step -= 1;
+                return;
+            }
+            check(Plugins.hasScanned, "plugin scan finished");
+            shoot(window.title, "plugin-browser");
+            if (!window.smokeTest) {
+                return;
+            }
+            check(Plugins.installedCount >= 1, "the test plugin is found");
+            Plugins.setFilter("test gain", 1, 2);
+            check(Plugins.count === 1, "search finds it");
+            Plugins.setFilter("test gain", 0, 1);
+            check(Plugins.count === 0, "it is not an instrument");
+            Plugins.setFilter("test gain", 1, 2);
+            test.browser.pick(0);
+            check(test.picked !== null && test.picked[0] === "clap" && test.picked[2] === "DAW Test Gain",
+                  "picking a plugin reports it");
+            check(!test.browser.opened, "the browser closes on a pick");
+        },
+        () => {
+            test.browser.close();
+            if (window.smokeTest) {
+                Project.tick();
+                check(Project.undoText === "Add Device", "the plugin was inserted");
+                Project.undo();
+            }
         },
         () => {
             window.pageActions[2].trigger();

@@ -30,6 +30,8 @@ const QML_FILES: &[&str] = &[
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
     "qml/TrackHeader.qml",
+    "qml/PluginBrowser.qml",
+    "qml/PluginSettings.qml",
 ];
 
 /// Ask qmake (`QMAKE`, else `qmake6`, else `qmake`) for a Qt install path.
@@ -75,6 +77,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/mixer_bridge.rs",
+        "src/plugins_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",

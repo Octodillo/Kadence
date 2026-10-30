@@ -15,6 +15,8 @@ use daw_media::Decoder;
 use daw_model::commands::{Batch, DeviceField, SetDevice};
 use daw_model::{Command, Document, FormatError, Project};
 use daw_pianoroll::PianoRoll;
+use daw_plugins::Scanner;
+use daw_session::catalog::PluginCatalog;
 
 use crate::engine::{EngineHandle, default_engine};
 use crate::message::{Context, Fields, Message};
@@ -44,6 +46,22 @@ pub struct AppState {
     /// Counts documents opened, so views can tell a new document from an
     /// edit (document revisions start over).
     pub doc_serial: u64,
+    /// The installed plugins, for the plugin browser. Scanned in the
+    /// background once the browser's model starts it.
+    pub plugins: PluginCatalog,
+}
+
+/// The app's plugin catalog: scanned by this executable (which answers
+/// `--scan`; see [`run_plugin_child`](crate::run_plugin_child)), sharing the
+/// session's scan cache.
+fn plugin_catalog() -> PluginCatalog {
+    let scanner = Scanner::current_exe()
+        .unwrap_or_else(|_| Scanner::new("kadence", Vec::<std::ffi::OsString>::new()));
+    let catalog = PluginCatalog::new(scanner);
+    match crate::engine::plugin_cache_file() {
+        Some(file) => catalog.with_cache_file(file),
+        None => catalog,
+    }
 }
 
 thread_local! {
@@ -75,6 +93,7 @@ impl AppState {
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
+            plugins: plugin_catalog(),
         };
         s.sync();
         s
@@ -146,6 +165,21 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Picks up a finished plugin scan and tells the session's loader what
+    /// it found, so devices whose plugin was missing load now. Returns true
+    /// when the catalog changed.
+    pub fn tick_plugins(&mut self) -> bool {
+        if !self.plugins.poll() {
+            return false;
+        }
+        // A finished scan: the list is new.
+        if let Some(session) = self.engine.session_mut() {
+            session.set_known_plugins(self.plugins.plugins());
+            self.resync();
+        }
+        true
     }
 
     /// Stores each plugin's current state in the document, as one undo
