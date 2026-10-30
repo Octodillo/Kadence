@@ -320,3 +320,21 @@ fn relink_refuses_an_empty_path() {
     assert!(doc.execute(cmd).is_err());
     assert_eq!(sources(doc.project()), vec![PathBuf::from("audio/a.wav")]);
 }
+
+#[test]
+fn recovered_document_rewrites_its_own_autosave() {
+    let fx = fixture();
+    let doc = saved(&fx, project_with(&[]));
+    let bundle = doc.bundle().unwrap().clone();
+    bundle.write_autosave(&Project::new("Unsaved")).unwrap();
+    let mut back = Document::recover(&fx.root).unwrap();
+    // Someone removes the autosave it came from: the next tick puts it back.
+    bundle.discard_autosave().unwrap();
+    assert!(back.autosave().unwrap());
+    assert_eq!(bundle.load_autosave().unwrap().name, "Unsaved");
+
+    let mut untitled = Document::recovered(Project::new("Scratch"));
+    assert!(untitled.is_modified());
+    // No bundle to autosave into; the app keeps that one itself.
+    assert!(!untitled.autosave().unwrap());
+}

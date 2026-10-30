@@ -38,7 +38,7 @@ Kirigami.Dialog {
             wrapMode: Text.Wrap
             text: i18ncp("@info",
                          "Kadence did not close properly last time. This project has changes that were never saved:",
-                         "Kadence did not close properly last time. These projects have changes that were never saved:",
+                         "Kadence did not close properly last time. These %1 projects have changes that were never saved:",
                          Project.recoveryCount)
         }
 

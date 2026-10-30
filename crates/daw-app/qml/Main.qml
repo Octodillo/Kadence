@@ -282,7 +282,7 @@ Kirigami.ApplicationWindow {
 
     function openRecent(index: int): void {
         const url = Project.recentUrl(index);
-        root.whenChangesHandled(() => root.opened(Project.openRecent(index), url));
+        root.whenChangesHandled(() => root.opened(Project.openRecent(url), url));
     }
 
     Kirigami.PromptDialog {

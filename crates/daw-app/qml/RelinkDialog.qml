@@ -62,12 +62,13 @@ Kirigami.Dialog {
         }
 
         Repeater {
-            model: Project.missingCount
+            model: Project.missingFiles
 
             delegate: RowLayout {
                 id: row
                 required property int index
-                readonly property string file: Project.missingFile(index)
+                required property string modelData
+                readonly property string file: modelData
 
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing

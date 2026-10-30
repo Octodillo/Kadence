@@ -198,7 +198,7 @@ Item {
             check(result.context === undefined, "open the files test project");
             check(Project.recentProjects.length === 1 && Project.recentProjects[0] === filesDir + "/Files",
                   "an opened project is recent");
-            check(Project.missingCount === 1 && Project.missingFile(0) === filesDir + "/moved/snare.wav",
+            check(Project.missingCount === 1 && Project.missingFiles[0] === filesDir + "/moved/snare.wav",
                   "missing file found");
             check(Project.missingClipCount(0) === 1, "missing file's clips counted");
             check(Project.externalCount === 1, "file outside the project found");

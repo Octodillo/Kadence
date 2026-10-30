@@ -87,12 +87,26 @@ impl Scratch {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let dir = base.join(format!("{stamp}-{}", &id[..8]));
-        fs::create_dir(&dir)?;
-        match DirLock::try_lock(&dir)? {
-            Some(lock) => Ok(Self { lock }),
-            None => Err(io::ErrorKind::WouldBlock.into()),
-        }
+        let name = format!("{stamp}-{}", &id[..8]);
+        // Made under a hidden name and renamed once locked, so a Kadence
+        // starting at the same time never sees it unlocked and cleans it up.
+        let tmp = base.join(format!(".{name}"));
+        fs::create_dir(&tmp)?;
+        let Some(lock) = DirLock::try_lock(&tmp)? else {
+            return Err(io::ErrorKind::WouldBlock.into());
+        };
+        let dir = base.join(name);
+        fs::rename(&tmp, &dir)?;
+        Ok(Self {
+            lock: DirLock { dir, ..lock },
+        })
+    }
+
+    /// Takes over the folder of a crashed Kadence's scratch autosave, to
+    /// keep autosaving recovered work there. `Ok(None)` when someone else
+    /// holds it.
+    pub fn adopt(dir: &Path) -> io::Result<Option<Self>> {
+        Ok(DirLock::try_lock(dir)?.map(|lock| Self { lock }))
     }
 
     pub fn dir(&self) -> &Path {
@@ -167,7 +181,10 @@ pub fn find(base: Option<&Path>, recent: &[PathBuf]) -> Vec<Candidate> {
     let mut found = Vec::new();
     if let Some(entries) = base.and_then(|b| fs::read_dir(b).ok()) {
         for dir in entries.flatten().map(|e| e.path()) {
-            if !dir.is_dir() {
+            let hidden = dir
+                .file_name()
+                .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."));
+            if hidden || !dir.is_dir() {
                 continue;
             }
             // Held while we look, so a Kadence starting now can't take it.
@@ -243,6 +260,21 @@ mod tests {
         found[0].discard().unwrap();
         assert!(find(Some(tmp.path()), &[]).is_empty());
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn adopting_a_crashed_folder_keeps_autosaving_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crashed = Scratch::create(tmp.path()).unwrap();
+        crashed.write(&project()).unwrap();
+        let dir = crashed.dir().to_path_buf();
+        assert!(Scratch::adopt(&dir).unwrap().is_none(), "still held");
+        drop(crashed);
+        let adopted = Scratch::adopt(&dir).unwrap().unwrap();
+        assert_eq!(adopted.file(), dir.join(SCRATCH_FILE));
+        assert!(find(Some(tmp.path()), &[]).is_empty(), "held again");
+        adopted.remove();
+        assert!(!dir.exists());
     }
 
     #[test]

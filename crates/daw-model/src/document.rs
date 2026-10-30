@@ -90,6 +90,9 @@ impl Document {
         Ok(Self {
             bundle: Some(bundle),
             saved_at: None,
+            // Not autosaved by this document yet: the next autosave writes,
+            // so the work survives even if the file it came from is removed.
+            autosaved_revision: u64::MAX,
             ..Self::new(project)
         })
     }
@@ -100,6 +103,7 @@ impl Document {
     pub fn recovered(project: Project) -> Self {
         Self {
             saved_at: None,
+            autosaved_revision: u64::MAX,
             ..Self::new(project)
         }
     }

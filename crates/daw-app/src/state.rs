@@ -64,6 +64,12 @@ pub struct AppState {
     shut_down: bool,
 }
 
+/// `path` with symlinks resolved, so two spellings of one folder compare
+/// equal; as it is if that fails.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 thread_local! {
     static STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
@@ -260,7 +266,7 @@ impl AppState {
 
     /// Locks the open bundle, letting go of the one before.
     fn relock(&mut self) {
-        let root = self.root();
+        let root = self.root().map(|r| canonical(&r));
         if self.bundle_lock.as_ref().map(|l| l.dir()) == root.as_deref() {
             return;
         }
@@ -272,7 +278,10 @@ impl AppState {
     /// has it open.
     fn open_elsewhere(&self, path: &Path) -> Option<PathBuf> {
         let root = daw_model::Bundle::open(path).ok()?.root().to_path_buf();
-        let ours = self.bundle_lock.as_ref().is_some_and(|l| l.dir() == root);
+        let ours = self
+            .bundle_lock
+            .as_ref()
+            .is_some_and(|l| l.dir() == canonical(&root));
         (!ours && recovery::is_locked(&root)).then_some(root)
     }
 
@@ -416,11 +425,18 @@ impl AppState {
         if let Some(root) = self.open_elsewhere(path) {
             return Err(Message::AlreadyOpen(root));
         }
-        let same = daw_model::Bundle::open(path)
-            .is_ok_and(|b| Some(b.root()) == self.doc.bundle().map(|o| o.root()));
-        if same && reopen_drops_changes {
-            self.discard_autosave();
-        }
+        let same = daw_model::Bundle::open(path).is_ok_and(|b| {
+            self.doc
+                .bundle()
+                .is_some_and(|o| canonical(o.root()) == canonical(b.root()))
+        });
+        // Loads the saved version first, so a failed open keeps the autosave.
+        let open: fn(&Path) -> Result<Document, FormatError> =
+            if same && reopen_drops_changes && self.doc.is_modified() {
+                |p: &Path| Document::open_discarding_autosave(p)
+            } else {
+                open
+            };
         let doc = open(path).map_err(|e| Message::File(Context::Open, e))?;
         self.replace_document(doc);
         self.remember();
@@ -433,11 +449,18 @@ impl AppState {
         let project = daw_model::bundle::read_project(&candidate.autosave)
             .map_err(|e| Message::File(Context::Recover, e))?;
         self.replace_document(Document::recovered(project));
-        // Our own copy first, so a crash now still leaves one.
-        self.autosave_scratch();
-        if self.scratch_saved.is_some() {
-            let _ = candidate.discard();
+        // Take over its folder, so the work stays in one place and goes
+        // away when it is saved or discarded.
+        if let Some(adopted) = candidate
+            .autosave
+            .parent()
+            .and_then(|d| Scratch::adopt(d).ok().flatten())
+            && let Some(own) = self.scratch.replace(adopted)
+        {
+            own.remove();
         }
+        self.scratch_saved = None;
+        self.autosave_scratch();
         Ok(())
     }
 

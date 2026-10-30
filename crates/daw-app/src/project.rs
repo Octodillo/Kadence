@@ -110,8 +110,11 @@ pub mod qobject {
         /// Folders of recently used projects, newest first.
         #[qproperty(QStringList, recent_projects)]
         /// How many audio files clips play that are not on disk; see
-        /// `missing_file` and `relink`.
+        /// `missing_files`, `missing_clip_count` and `relink`.
         #[qproperty(i32, missing_count)]
+        /// The missing files, as the clips name them; index them for
+        /// `missing_clip_count` and `relink`.
+        #[qproperty(QStringList, missing_files)]
         /// How many audio files clips play from outside the bundle, which
         /// `collect_files` copies in.
         #[qproperty(i32, external_count)]
@@ -157,10 +160,11 @@ pub mod qobject {
         /// Opens the bundle at `url`, deleting its autosave.
         #[qinvokable]
         fn open_discarding_autosave(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
-        /// Opens recent project `index`. A project that is gone is dropped
-        /// from the list.
+        /// Opens the recent project at `url` (from `recent_url`). A project
+        /// that is gone is dropped from the list. By URL, not index, since
+        /// a save in between can reorder the list.
         #[qinvokable]
-        fn open_recent(self: Pin<&mut Project>, index: i32) -> QMap_QString_QVariant;
+        fn open_recent(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
         /// The URL of recent project `index`, for open_discarding_autosave
         /// and recover_project.
         #[qinvokable]
@@ -168,9 +172,6 @@ pub mod qobject {
         #[qinvokable]
         fn forget_recent(self: Pin<&mut Project>, index: i32);
 
-        /// Missing audio file `index`, as the clips name it.
-        #[qinvokable]
-        fn missing_file(self: &Project, index: i32) -> QString;
         /// How many clips play missing file `index`.
         #[qinvokable]
         fn missing_clip_count(self: &Project, index: i32) -> i32;
@@ -294,6 +295,7 @@ pub struct ProjectRust {
     status: QMap<QMapPair_QString_QVariant>,
     recent_projects: QStringList,
     missing_count: i32,
+    missing_files: QStringList,
     external_count: i32,
     recovery_count: i32,
     /// Missing files, as of the document state in `files_seen`.
@@ -544,6 +546,11 @@ impl qobject::Project {
                 r.files_seen = Some(at);
                 r.missing = missing;
             }
+            let mut names = QList::<QString>::default();
+            for f in &self.missing {
+                names.append(QString::from(f.source.display().to_string().as_str()));
+            }
+            self.as_mut().set_missing_files(QStringList::from(&names));
             self.as_mut().set_missing_count(count);
             self.as_mut()
                 .set_external_count(i32::try_from(external).unwrap_or(i32::MAX));
@@ -655,13 +662,14 @@ impl qobject::Project {
         })
     }
 
-    fn open_recent(mut self: Pin<&mut Self>, index: i32) -> QMap<QMapPair_QString_QVariant> {
-        let Some(path) = Self::recent_path(index) else {
-            return QMap::default();
+    fn open_recent(mut self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
+        let path = match Self::local_path(url, Context::Open) {
+            Ok(p) => p,
+            Err(f) => return message_map(&f),
         };
         let result = self.as_mut().open_with(&path, AppState::open);
         if !path.exists() {
-            self.forget_recent(index);
+            self.edit(|s| s.forget_recent(&path));
         }
         result
     }
@@ -746,9 +754,16 @@ impl qobject::Project {
     }
 
     fn discard_session(mut self: Pin<&mut Self>, index: i32) {
-        if let Some(c) = self.as_mut().take_candidate(index)
-            && let Err(e) = c.discard()
-        {
+        let Some(c) = self.as_mut().take_candidate(index) else {
+            return;
+        };
+        // Another Kadence may have recovered it since it was offered.
+        if let Some(root) = c.bundle.as_ref().filter(|r| crate::recovery::is_locked(r)) {
+            let root = root.clone();
+            self.edit(|s| s.report(Message::AlreadyOpen(root)));
+            return;
+        }
+        if let Err(e) = c.discard() {
             let path = c.autosave.clone();
             self.edit(|s| {
                 s.report(Message::File(
@@ -763,13 +778,6 @@ impl qobject::Project {
         usize::try_from(index)
             .ok()
             .and_then(|i| self.missing.get(i))
-    }
-
-    fn missing_file(&self, index: i32) -> QString {
-        self.missing_entry(index)
-            .map_or_else(QString::default, |f| {
-                QString::from(f.source.display().to_string().as_str())
-            })
     }
 
     fn missing_clip_count(&self, index: i32) -> i32 {
@@ -815,7 +823,7 @@ impl qobject::Project {
         message_or_empty(result.as_ref())
     }
 
-    fn save_as(self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
+    fn save_as(mut self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
         let Some(path) = url.to_local_file() else {
             return message_map(&Message::NotLocalFile(Context::Save).fields());
         };
@@ -826,12 +834,15 @@ impl qobject::Project {
             dir.set_extension("");
         }
         let mut result = None;
-        self.edit(|s| {
+        self.as_mut().edit(|s| {
             if let Err(e) = s.save_as(&dir) {
                 result = Some(Message::File(Context::Save, e).fields());
             }
             s.resync();
         });
+        // Files now resolve against the bundle, and may be outside it.
+        self.as_mut().rust_mut().files_seen = None;
+        self.as_mut().refresh_files();
         message_or_empty(result.as_ref())
     }
 
