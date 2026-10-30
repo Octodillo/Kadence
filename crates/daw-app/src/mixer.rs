@@ -57,6 +57,13 @@ pub struct StripInfo {
     pub soloed: bool,
     /// Silent because of mute or someone else's solo.
     pub silenced: bool,
+    /// Whether the strip is an instrument track's, with an instrument slot.
+    pub has_instrument: bool,
+    /// The instrument in that slot; it is not among `inserts`.
+    pub instrument: Option<InsertInfo>,
+    /// The instrument's index among the app's instrument choices.
+    pub instrument_choice: Option<usize>,
+    /// The effects, after the instrument.
     pub inserts: Vec<InsertInfo>,
     pub sends: Vec<SendInfo>,
     /// Where the strip's output goes; `None` on the master.
@@ -175,7 +182,10 @@ pub trait MixerHandle {
     fn set_output(&mut self, id: StripId, target: StripId);
     /// Appends a built-in effect to the strip's insert chain.
     fn add_insert(&mut self, id: StripId, device_id: &str) -> bool;
+    /// Removes the effect at `index` in [`StripInfo::inserts`].
     fn remove_insert(&mut self, id: StripId, index: usize);
+    /// Puts `choice` in an instrument track's instrument slot.
+    fn set_instrument(&mut self, _id: StripId, _choice: &crate::instrument::InstrumentChoice) {}
     fn effects(&self) -> Vec<EffectChoice>;
     /// Meter readings, parallel to [`strips`](Self::strips). Resets them.
     fn levels(&mut self) -> Vec<StripLevels>;
