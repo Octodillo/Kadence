@@ -6,7 +6,6 @@ use daw_arrange::{Env, Prim, Rect, Scene};
 use daw_core::time::TickTime;
 use daw_midi::EditNote;
 use daw_midi::grid::LineKind;
-use daw_midi::view::VelocityLane;
 use daw_model::Project;
 
 use crate::{PianoRoll, is_black, note_name};
@@ -136,9 +135,7 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
     s.rect(vel, pal.alternate_background);
     s.hline(vel.y + 0.5, 0.0, w, line, 1.0);
     if let Some((_, m)) = clip {
-        let lane = VelocityLane {
-            height: vel.h - 4.0,
-        };
+        let (top, lane) = pr.velocity_lane();
         s.push(Prim::PushClip(vel));
         for note in &m.notes {
             let d = note.data();
@@ -146,7 +143,7 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
             if x < n.x - 4.0 || x > n.right() + 4.0 {
                 continue;
             }
-            let top = vel.y + 4.0 + lane.velocity_to_y(d.velocity);
+            let top = top + lane.velocity_to_y(d.velocity);
             let selected = pr.selection.contains(&note.id);
             let c = if selected {
                 pal.highlight
@@ -174,13 +171,27 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
     for key in rows {
         let y = n.y + v.key_to_y(key);
         if is_black(key) {
-            s.rect(Rect::new(0.0, y, pr.keyboard_width * 0.62, pr.key_height), black_key);
+            s.rect(
+                Rect::new(0.0, y, pr.keyboard_width * 0.62, pr.key_height),
+                black_key,
+            );
         } else {
-            s.hline(y + pr.key_height - 0.5, 0.0, pr.keyboard_width, white_key.mix(dark, 0.25), 1.0);
+            s.hline(
+                y + pr.key_height - 0.5,
+                0.0,
+                pr.keyboard_width,
+                white_key.mix(dark, 0.25),
+                1.0,
+            );
         }
         if key % 12 == 0 && pr.key_height >= 9.0 {
             s.push(Prim::Text {
-                r: Rect::new(pr.keyboard_width * 0.62, y, pr.keyboard_width * 0.38 - 2.0, pr.key_height),
+                r: Rect::new(
+                    pr.keyboard_width * 0.62,
+                    y,
+                    pr.keyboard_width * 0.38 - 2.0,
+                    pr.key_height,
+                ),
                 text: note_name(key),
                 color: dark.mix(light, 0.35),
                 bold: false,

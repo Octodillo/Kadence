@@ -239,6 +239,7 @@ impl qobject::PianoRoll {
             s.piano.keyboard_width = kw;
             s.piano.velocity_height = vh;
             s.piano.resize(w, h);
+            s.piano.sync(s.doc.project());
             let scene = s.with_piano(|p, doc, env| p.scene(doc.project(), env));
             let p = &s.piano;
             let project = s.doc.project();

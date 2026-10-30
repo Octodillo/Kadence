@@ -46,6 +46,8 @@ const DRAG_THRESHOLD: f64 = 3.0;
 const EDGE_PX: f64 = 6.0;
 /// How close to a stem a velocity click must be.
 const STEM_TOLERANCE: f64 = 5.0;
+/// Space above the tallest velocity stem.
+const VELOCITY_INSET: f64 = 4.0;
 
 /// Which part of the item a point is in.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -376,20 +378,18 @@ impl PianoRoll {
                 let Some((c, m)) = self.clip(project) else {
                     return Outcome::default();
                 };
-                let ids: Vec<NoteUid> = if self.selection.is_empty() {
-                    m.notes.iter().map(|n| n.id).collect()
-                } else {
-                    m.notes
-                        .iter()
-                        .filter(|n| self.selection.contains(&n.id))
-                        .map(|n| n.id)
-                        .collect()
-                };
+                let mut ids: Vec<NoteUid> = m
+                    .notes
+                    .iter()
+                    .filter(|n| self.selection.contains(&n.id))
+                    .map(|n| n.id)
+                    .collect();
+                if ids.is_empty() {
+                    ids = m.notes.iter().map(|n| n.id).collect();
+                }
                 let (lx, _) = self.local(p.x, p.y);
-                let ly = p.y - self.velocity_rect().y;
-                let lane = VelocityLane {
-                    height: self.velocity_rect().h,
-                };
+                let (top, lane) = self.velocity_lane();
+                let ly = p.y - top;
                 let v = self.grid_view(c.start);
                 let targets: Vec<Note> = m
                     .notes
@@ -523,10 +523,8 @@ impl PianoRoll {
                     return Outcome::default();
                 };
                 let (lx, _) = self.local(p.x, p.y);
-                let ly = p.y - self.velocity_rect().y;
-                let lane = VelocityLane {
-                    height: self.velocity_rect().h,
-                };
+                let (top, lane) = self.velocity_lane();
+                let ly = p.y - top;
                 let v = self.grid_view(c.start);
                 let mut targets: Vec<Note> = m
                     .notes
@@ -644,11 +642,39 @@ impl PianoRoll {
     fn execute(&mut self, doc: &mut Document, cmd: Option<Box<dyn Command>>) -> Outcome {
         match cmd {
             None => outcome_view(),
-            Some(c) => match doc.execute_boxed(c) {
-                Ok(_) => outcome_document(),
-                Err(e) => outcome_error(e),
-            },
+            Some(c) => {
+                let out = match doc.execute_boxed(c) {
+                    Ok(_) => outcome_document(),
+                    Err(e) => outcome_error(e),
+                };
+                self.sync(doc.project());
+                out
+            }
         }
+    }
+
+    /// Drops selected IDs whose notes are gone (after an undo, a glue or a
+    /// deleted clip). The front end calls it before reading the selection.
+    pub fn sync(&mut self, project: &Project) {
+        match self.clip(project) {
+            Some((_, m)) => self
+                .selection
+                .retain(|s| m.notes.iter().any(|n| n.id == *s)),
+            None => self.selection.clear(),
+        }
+    }
+
+    /// The top of the velocity lane's drawing area and its geometry, shared
+    /// by drawing and input so a click lands where the stem is drawn.
+    pub(crate) fn velocity_lane(&self) -> (f64, VelocityLane) {
+        let vel = self.velocity_rect();
+        let inset = VELOCITY_INSET.min(vel.h);
+        (
+            vel.y + inset,
+            VelocityLane {
+                height: vel.h - inset,
+            },
+        )
     }
 
     /// Applies new values for existing notes as an [`EditNotes`] with a
@@ -669,7 +695,12 @@ impl PianoRoll {
 
     fn selected(&self, project: &Project) -> Option<(ClipId, MidiClip, Vec<NoteUid>, Clip)> {
         let (c, m) = self.clip(project)?;
-        let ids: Vec<NoteUid> = self.selection.iter().copied().collect();
+        let ids: Vec<NoteUid> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|s| m.notes.iter().any(|n| n.id == *s))
+            .collect();
         Some((c.id, m.clone(), ids, (*c).clone()))
     }
 
@@ -770,10 +801,7 @@ impl PianoRoll {
         let Some((id, m, sel, _)) = self.selected(doc.project()) else {
             return Outcome::default();
         };
-        let out = self.execute(doc, glue::glue_selection(id, &m, &sel, 0));
-        self.selection
-            .retain(|s| m.notes.iter().any(|n| n.id == *s));
-        out
+        self.execute(doc, glue::glue_selection(id, &m, &sel, 0))
     }
 
     pub fn fix_overlaps(&mut self, doc: &mut Document) -> Outcome {

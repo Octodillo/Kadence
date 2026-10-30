@@ -369,3 +369,41 @@ fn deleted_clip_closes_the_editor() {
     assert!(r.pr.notes(r.doc.project()).is_empty());
     let _ = r.pr.scene(r.doc.project(), &r.env());
 }
+
+#[test]
+fn glue_then_delete_removes_the_glued_notes() {
+    let mut r = Rig::new(vec![n(0, Q, 60), n(Q, Q, 60), n(0, Q, 64)]);
+    r.pr.select_all(r.doc.project());
+    r.pr.glue(&mut r.doc);
+    assert_eq!(r.notes().len(), 2);
+    assert_eq!(r.pr.selection.len(), 2);
+    let out = r.pr.delete_selection(&mut r.doc);
+    assert!(out.error.is_none(), "{:?}", out.error);
+    assert!(r.notes().is_empty());
+}
+
+#[test]
+fn undo_then_delete_ignores_notes_that_are_gone() {
+    let mut r = Rig::new(vec![n(0, Q, 60)]);
+    r.pr.select_all(r.doc.project());
+    r.pr.duplicate(&mut r.doc);
+    r.doc.undo().unwrap();
+    // Only the copies were selected, and they are gone.
+    let out = r.pr.delete_selection(&mut r.doc);
+    assert!(out.error.is_none(), "{:?}", out.error);
+    assert_eq!(r.notes().len(), 1);
+    r.pr.sync(r.doc.project());
+    assert!(r.pr.selection.is_empty());
+}
+
+#[test]
+fn clicking_the_drawn_stem_top_keeps_the_velocity() {
+    let mut r = Rig::new(vec![n(0, Q, 60)]);
+    let vel = r.pr.velocity_rect();
+    // Where draw.rs paints the top of a 0.8 stem.
+    let top = vel.y + 4.0 + (1.0 - 0.8) * (vel.h - 4.0);
+    let x = r.x(0);
+    r.press(x, top);
+    r.pr.release(&mut r.doc, Pointer::left(x, top));
+    assert!((r.notes()[0].velocity - 0.8).abs() < 1e-6);
+}
