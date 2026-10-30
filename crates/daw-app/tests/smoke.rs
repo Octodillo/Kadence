@@ -74,6 +74,10 @@ fn smoke_test_passes_and_saves_settings() {
         log.contains("startup audio: 0 48000 256"),
         "fresh config should start on defaults:\n{log}"
     );
+    assert!(
+        log.contains("startup message: none"),
+        "fresh config should start without an error:\n{log}"
+    );
 
     // SelfTest.qml leaves these audio settings behind, through KConfig.
     let rc = std::fs::read_to_string(config.join("kadencerc")).expect("read kadencerc");
@@ -97,6 +101,35 @@ fn smoke_test_passes_and_saves_settings() {
     assert!(
         log.contains("startup audio: 1 44100 512"),
         "saved settings not loaded at startup:\n{log}"
+    );
+}
+
+#[test]
+fn unplugged_saved_device_is_explained_at_startup() {
+    // The saved device is gone: the app keeps the saved rate and buffer on
+    // the default device and says why, in its own words (issue #54).
+    let config = tempdir("unplugged");
+    std::fs::write(
+        config.join("kadencerc"),
+        "[Audio]\nBufferSize=128\nDevice=stub:gone\nSampleRate=96000\n",
+    )
+    .expect("write kadencerc");
+    let mut cmd = kadence(&config);
+    cmd.arg("--smoke-test")
+        .env("KADENCE_SMOKE_TEST_CONFIG", &config);
+    let output = run(cmd);
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "smoke test failed:\n{log}");
+    assert!(
+        log.contains("startup audio: 0 96000 128"),
+        "should fall back to the default device only:\n{log}"
+    );
+    assert!(
+        log.contains(
+            "startup message: Your saved audio settings could not be used, so Kadence \
+             started with other ones. The audio device “stub:gone” is not available."
+        ),
+        "startup fallback not explained:\n{log}"
     );
 }
 

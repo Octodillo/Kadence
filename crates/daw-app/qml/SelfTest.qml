@@ -16,6 +16,10 @@ Item {
     property Item settingsPage
     property int failures: 0
 
+    EngineErrorText {
+        id: engineError
+    }
+
     function check(ok: bool, what: string): void {
         if (!ok) {
             console.error("smoke test: FAILED:", what);
@@ -37,6 +41,7 @@ Item {
             // What the engine started with, i.e. what was loaded from
             // kadencerc; the integration test checks this line.
             console.info("startup audio:", Engine.deviceIndex, Engine.sampleRate, Engine.bufferSize);
+            console.info("startup message:", engineError.active ? engineError.text : "none");
         },
         () => {
             check(window.visible, "window visible");
@@ -85,14 +90,27 @@ Item {
             if (!window.smokeTest) {
                 return;
             }
-            check(Engine.applyAudioSettings(2, 96000, 128) === "", "apply good audio settings");
+            check(Engine.applyAudioSettings(2, 96000, 128), "apply good audio settings");
             check(Engine.deviceIndex === 2 && Engine.sampleRate === 96000 && Engine.bufferSize === 128,
                   "settings took effect");
-            check(Engine.applyAudioSettings(0, 12345, 128) !== "", "bad sample rate refused");
+            check(!engineError.active, "no error after good settings");
+            check(!Engine.applyAudioSettings(0, 12345, 128), "bad sample rate refused");
             check(Engine.sampleRate === 96000, "old settings kept after refusal");
-            check(Engine.errorText !== "", "error shown");
+            check(Engine.errorContext === Engine.ApplyingSettings
+                  && Engine.errorKind === Engine.UnsupportedSampleRate
+                  && Engine.errorNumber === 12345, "refusal reported as data");
+            check(engineError.text === i18nc("@info %1 is the reason, a full sentence",
+                                             "Could not change the audio settings. %1",
+                                             i18nc("@info %1 is a number",
+                                                   "The audio device does not support a sample rate of %1 Hz.",
+                                                   (12345).toLocaleString(Qt.locale(), "f", 0))),
+                  "refusal worded in QML");
+            check(!Engine.applyAudioSettings(5, 48000, 128), "unknown device index refused");
+            check(Engine.errorKind === Engine.InvalidDeviceChoice && Engine.errorNumber === 5,
+                  "bad device index reported");
             // Leave a known state in the config file for the test to read.
-            check(Engine.applyAudioSettings(1, 44100, 512) === "", "apply final settings");
+            check(Engine.applyAudioSettings(1, 44100, 512), "apply final settings");
+            check(Engine.errorContext === Engine.NoError, "error cleared by good settings");
         },
         () => {
             // Older Kirigami (KF 6.13 in Debian 13) has no PageStack.closeDialog();
