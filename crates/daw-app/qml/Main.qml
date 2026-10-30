@@ -1,0 +1,158 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import QtQuick
+import QtQuick.Controls as QQC2
+import org.kde.kirigami as Kirigami
+
+import io.github.octodillo.daw
+
+Kirigami.ApplicationWindow {
+    id: root
+
+    // Set from C++ (see kadence.cpp).
+    required property var aboutData
+    required property bool smokeTest
+    required property string screenshotDir
+
+    title: i18nc("@title:window", "Kadence")
+    width: Kirigami.Units.gridUnit * 55
+    height: Kirigami.Units.gridUnit * 35
+    minimumWidth: Kirigami.Units.gridUnit * 22
+    minimumHeight: Kirigami.Units.gridUnit * 18
+
+    readonly property list<Kirigami.Action> pageActions: [
+        Kirigami.Action {
+            id: arrangeAction
+            text: i18nc("@action:inmenu", "Arrange")
+            icon.name: "view-media-track"
+            shortcut: "Ctrl+1"
+            checkable: true
+            checked: true
+            onTriggered: root.showPage(arrangePage, arrangeAction)
+        },
+        Kirigami.Action {
+            id: mixAction
+            text: i18nc("@action:inmenu", "Mix")
+            icon.name: "view-media-equalizer"
+            shortcut: "Ctrl+2"
+            checkable: true
+            onTriggered: root.showPage(mixPage, mixAction)
+        },
+        Kirigami.Action {
+            id: editAction
+            text: i18nc("@action:inmenu", "Edit")
+            icon.name: "editor"
+            shortcut: "Ctrl+3"
+            checkable: true
+            onTriggered: root.showPage(editPage, editAction)
+        }
+    ]
+
+    // Shared by every page's toolbar.
+    readonly property Kirigami.Action playAction: Kirigami.Action {
+        text: Engine.playing ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Play")
+        icon.name: Engine.playing ? "media-playback-stop" : "media-playback-start"
+        shortcut: "Space"
+        displayHint: Kirigami.DisplayHint.KeepVisible
+        onTriggered: Engine.togglePlayback()
+    }
+
+    Kirigami.Action {
+        id: separatorAction
+        separator: true
+    }
+
+    readonly property Kirigami.Action settingsAction: Kirigami.Action {
+        text: i18nc("@action:inmenu", "Configure Kadence…")
+        icon.name: "configure"
+        shortcut: StandardKey.Preferences
+        onTriggered: root.openSettings()
+    }
+
+    readonly property Kirigami.Action aboutAction: Kirigami.Action {
+        text: i18nc("@action:inmenu", "About Kadence")
+        icon.name: "help-about"
+        onTriggered: root.openAbout()
+    }
+
+    readonly property Kirigami.Action quitAction: Kirigami.Action {
+        text: i18nc("@action:inmenu", "Quit")
+        icon.name: "application-exit"
+        shortcut: StandardKey.Quit
+        onTriggered: Qt.quit()
+    }
+
+    globalDrawer: Kirigami.GlobalDrawer {
+        title: i18nc("@title", "Kadence")
+        titleIcon: "io.github.octodillo.daw"
+        modal: !root.wideScreen
+        collapsible: true
+        showHeaderWhenCollapsed: true
+        actions: [
+            arrangeAction,
+            mixAction,
+            editAction,
+            separatorAction,
+            root.settingsAction,
+            root.aboutAction,
+            root.quitAction
+        ]
+    }
+
+    pageStack.initialPage: arrangePage
+    pageStack.globalToolBar.style: Kirigami.ApplicationHeaderStyle.ToolBar
+    pageStack.columnView.columnResizeMode: Kirigami.ColumnView.SingleColumn
+
+    ArrangePage {
+        id: arrangePage
+        visible: false
+        transportActions: [root.playAction]
+    }
+    MixPage {
+        id: mixPage
+        visible: false
+        transportActions: [root.playAction]
+    }
+    EditPage {
+        id: editPage
+        visible: false
+        transportActions: [root.playAction]
+    }
+
+    Component {
+        id: aboutComponent
+        Kirigami.AboutPage {
+            aboutData: root.aboutData
+        }
+    }
+
+    function showPage(page: Kirigami.Page, action: Kirigami.Action): void {
+        for (const a of pageActions) {
+            a.checked = a === action;
+        }
+        if (pageStack.currentItem !== page) {
+            pageStack.replace(page);
+        }
+    }
+
+    function openSettings(): Item {
+        return pageStack.pushDialogLayer(Qt.resolvedUrl("SettingsPage.qml"), {}, {
+            title: i18nc("@title:window", "Configure — Kadence"),
+            width: Kirigami.Units.gridUnit * 30,
+            height: Kirigami.Units.gridUnit * 22
+        });
+    }
+
+    function openAbout(): Item {
+        return pageStack.layers.push(aboutComponent);
+    }
+
+    // `--smoke-test` and `--screenshot-dir`: walk through the app, check the
+    // Rust bridge, optionally save screenshots, then quit. Used by CI.
+    Loader {
+        active: root.smokeTest || root.screenshotDir !== ""
+        sourceComponent: SelfTest {
+            window: root
+        }
+    }
+}

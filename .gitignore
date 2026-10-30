@@ -2,3 +2,4 @@
 /build
 *.clap
 build-ci
+.qmlls.ini

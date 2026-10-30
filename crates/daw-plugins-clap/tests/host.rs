@@ -309,3 +309,13 @@ fn a_flood_of_output_events_is_dropped_without_allocating() {
     assert_no_alloc(|| plugin.process(&mut ctx));
     assert_eq!(ctx.events_out.len(), 8);
 }
+
+#[test]
+fn only_the_main_ports_reach_the_graph() {
+    // The test plugin also has a sidechain input and a constant-1.0 aux output.
+    let mut plugin = instance();
+    let ports = plugin.ports();
+    assert_eq!((ports.audio_in, ports.audio_out), (2, 2));
+    let ([l, r], _) = run(plugin.as_mut(), 100, 0.5, &[]);
+    assert!(l.iter().chain(&r).all(|&s| s == 0.5));
+}
