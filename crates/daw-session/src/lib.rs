@@ -162,6 +162,24 @@ pub struct Session {
     /// Rebuild the graph on the next sync even if the project's shape is
     /// unchanged.
     force_rebuild: bool,
+    /// After the engine refused a graph: how long [`tick`](Self::tick)
+    /// waits before it tries again, and when.
+    retry: Option<(std::time::Duration, std::time::Instant)>,
+}
+
+/// How long [`Session::tick`] waits before resending a refused graph, at
+/// first and at most.
+const RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(15);
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What a [`Session::tick`] has for the user.
+#[derive(Debug, Default)]
+pub struct TickReport {
+    /// Plugins that crashed, and problems a rebuild found (a plugin that
+    /// would not load).
+    pub warnings: Vec<Warning>,
+    /// The rebuild failed; it is retried on later ticks.
+    pub error: Option<SessionError>,
 }
 
 impl Session {
@@ -187,6 +205,7 @@ impl Session {
             plugins: Plugins::default(),
             last: None,
             force_rebuild: false,
+            retry: None,
         };
         (session, processor)
     }
@@ -272,14 +291,22 @@ impl Session {
             let (desc, built) = build::graph(self, snapshot, structure, old);
             // Kept only once the engine has the graph: a refused graph's players never
             // ran, so the next build must not take their handles for the running ones.
-            self.controller.set_graph(desc)?;
+            if let Err(e) = self.controller.set_graph(desc) {
+                let backoff = self
+                    .retry
+                    .map_or(RETRY_MIN, |(b, _)| (b * 2).min(RETRY_MAX));
+                self.retry = Some((backoff, std::time::Instant::now() + backoff));
+                return Err(e.into());
+            }
+            self.retry = None;
             self.built = Some(built);
             let ids: HashSet<DeviceId> = snapshot
                 .all_tracks()
                 .flat_map(|t| t.devices.iter().map(|d| d.id))
                 .collect();
-            // After the swap, so the running graph's nodes of removed plugins aren't
-            // silenced while it still plays.
+            // After the new graph is queued, so the nodes of removed plugins aren't
+            // silenced while it is being built. Until the audio thread swaps it in (a
+            // block at most), the old graph plays them as silence.
             self.plugins.retain(|id| ids.contains(&id));
         }
         self.sync_plugin_states(snapshot);
@@ -294,12 +321,16 @@ impl Session {
     ///
     /// Rebuilds the graph when a plugin asks for a new layout or latency,
     /// when a sandboxed plugin crashed (it is bypassed) or came back, and
-    /// when the last graph could not be sent. Returns what the user should
-    /// hear about: plugins that crashed since the last tick.
-    pub fn tick(&mut self) -> Result<Vec<Warning>, SessionError> {
+    /// when the last graph could not be sent (retried less and less often
+    /// while the engine keeps refusing). Returns what the user should hear
+    /// about.
+    pub fn tick(&mut self) -> TickReport {
         self.collect_garbage();
         let mut news = Vec::new();
-        let mut rebuild = self.built.is_none();
+        let mut rebuild = self.built.is_none()
+            && self
+                .retry
+                .is_none_or(|(_, at)| std::time::Instant::now() >= at);
         for slot in self.plugins.slots.values_mut() {
             let plugins::Slot::Live(l) = slot else {
                 continue;
@@ -322,11 +353,19 @@ impl Session {
                 }
             }
         }
+        let mut error = None;
         if rebuild && let Some(snapshot) = self.last.clone() {
             self.force_rebuild = true;
-            self.sync(&snapshot)?;
+            match self.sync(&snapshot) {
+                // What loading or rebuilding found, which no app sync will show.
+                Ok(()) => news.extend(self.warnings.iter().cloned()),
+                Err(e) => error = Some(e),
+            }
         }
-        Ok(news)
+        TickReport {
+            warnings: news,
+            error,
+        }
     }
 
     /// Sets how plugin devices are loaded. Devices that could not load for
@@ -408,16 +447,29 @@ impl Session {
 
     /// Saves every running plugin's state and returns those that differ
     /// from the document's, for the app to store (`DeviceField::State`)
-    /// before saving the document. Once stored and synced, they count as
-    /// the document's.
-    pub fn plugin_states(&self) -> Vec<PluginState> {
+    /// before saving the document (`Document::store_plugin_state`). Once
+    /// stored and synced, they count as the document's, and are not loaded
+    /// back into the plugin. Only devices of the last synced snapshot.
+    pub fn plugin_states(&mut self) -> Vec<PluginState> {
+        let Some(snapshot) = &self.last else {
+            return Vec::new();
+        };
+        let ids: HashSet<DeviceId> = snapshot
+            .all_tracks()
+            .flat_map(|t| t.devices.iter().map(|d| d.id))
+            .collect();
         let mut out: Vec<PluginState> = self
             .plugins
             .slots
-            .iter()
+            .iter_mut()
+            .filter(|(id, _)| ids.contains(id))
             .filter_map(|(&device, slot)| match slot {
                 plugins::Slot::Live(l) => {
-                    l.changed_state().map(|state| PluginState { device, state })
+                    let state = l.changed_state()?;
+                    if let Ok(s) = &state {
+                        l.saved = Some(s.clone());
+                    }
+                    Some(PluginState { device, state })
                 }
                 plugins::Slot::Failed { .. } => None,
             })
@@ -433,25 +485,39 @@ impl Session {
             let Some(l) = self.plugins.live_mut(d.id) else {
                 continue;
             };
-            let same = match (&l.state, &d.state) {
+            let same = |a: &Option<daw_model::StateBlob>| match (a, &d.state) {
                 (Some(a), Some(b)) => Arc::ptr_eq(&a.0, &b.0) || a.0 == b.0,
                 (None, None) => true,
                 _ => false,
             };
-            if same {
+            if same(&l.state) {
                 continue;
             }
+            // The state the plugin itself handed over for saving: it has it already.
+            let own = l.saved.is_some() && same(&l.saved);
+            l.saved = None;
             l.state = d.state.clone();
             // A state taken away (undone back to none) leaves the plugin as it is: there is
             // nothing to go back to.
-            if let Some(state) = &d.state
-                && !l.crashed
-                && let Err(e) = l.handle.with(|p| p.load_state(&state.0))
-            {
-                self.warnings.push(Warning::DeviceStateRejected {
+            let Some(state) = d.state.as_ref().filter(|_| !own) else {
+                continue;
+            };
+            // A crashed sandbox keeps the state for its reload.
+            match l.handle.with(|p| p.load_state(&state.0)) {
+                Ok(()) => {
+                    // The state set the plugin's parameters; the document's go on top
+                    // again, as when it loads, and again after a rebuild in case the
+                    // load changed its ports and the values went to a retired node.
+                    l.fresh = true;
+                    let key = build::device_key(d.id);
+                    if let Some(b) = &mut self.built {
+                        b.params.retain(|(k, _), _| *k != key);
+                    }
+                }
+                Err(e) => self.warnings.push(Warning::DeviceStateRejected {
                     device: d.name.clone(),
                     detail: e.to_string(),
-                });
+                }),
             }
         }
     }

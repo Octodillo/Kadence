@@ -181,6 +181,9 @@ pub(crate) struct Live {
     pub crashed: bool,
     /// The document state last loaded into the plugin, or saved from it.
     pub state: Option<StateBlob>,
+    /// The state last handed out for the document to store; when the
+    /// document comes back with it, the plugin needn't load it.
+    pub saved: Option<StateBlob>,
     /// Created since the last build: its parameters have not been sent yet.
     pub fresh: bool,
     pub params: Vec<ParamInfo>,
@@ -289,6 +292,7 @@ impl Plugins {
             monitor,
             crashed: false,
             state: d.state.clone(),
+            saved: None,
             fresh: true,
             params,
         }))
@@ -316,9 +320,18 @@ impl Plugins {
         })
     }
 
-    /// Frees the plugins of devices that are gone.
+    /// Frees the plugins of devices that are gone, keeping their states in
+    /// case an undo brings the device back.
     pub(crate) fn retain(&mut self, keep: impl Fn(DeviceId) -> bool) {
-        self.slots.retain(|&id, _| keep(id));
+        let gone: Vec<DeviceId> = self.slots.keys().copied().filter(|&id| !keep(id)).collect();
+        for id in gone {
+            if let Some(Slot::Live(l)) = self.slots.remove(&id)
+                && !l.crashed
+                && let Ok(state) = l.handle.with(|p| p.save_state())
+            {
+                self.carried.insert(id, (l.source.clone(), state));
+            }
+        }
     }
 
     /// Frees every plugin, keeping the loader.

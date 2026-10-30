@@ -12,7 +12,9 @@ use daw_core::plugin::PluginFormatKind;
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
 use daw_media::{AudioData, WavFormat, write_wav};
-use daw_model::commands::{AddClip, AddDevice, AddLane, Batch, DeviceField, SetDevice, SetParam};
+use daw_model::commands::{
+    AddClip, AddDevice, AddLane, DeviceField, RemoveDevice, SetDevice, SetParam,
+};
 use daw_model::{
     AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Device,
     DeviceId, DeviceSource, Document, Project, Track, TrackId, TrackKind,
@@ -193,8 +195,9 @@ impl Rig {
             assert_no_alloc(|| self.proc.process(n, &[], &mut outs, &events));
             assert_eq!(violation_count(), before, "process allocated");
             out.extend_from_slice(&l[..n]);
-            let news = self.session.tick().unwrap();
-            self.news.extend(news);
+            let report = self.session.tick();
+            assert!(report.error.is_none(), "{:?}", report.error);
+            self.news.extend(report.warnings);
         }
         out
     }
@@ -225,19 +228,12 @@ impl Rig {
     fn store_states(&mut self) -> usize {
         let states = self.session.plugin_states();
         let n = states.len();
-        let commands = states
-            .into_iter()
-            .map(|s| {
-                Box::new(SetDevice {
-                    id: s.device,
-                    field: DeviceField::State(Some(s.state.unwrap())),
-                }) as Box<dyn daw_model::Command>
-            })
-            .collect();
-        if n > 0 {
+        for s in states {
             self.doc
-                .execute(Batch::new("Change Plugin State", commands))
+                .store_plugin_state(s.device, Some(s.state.unwrap()))
                 .unwrap();
+        }
+        if n > 0 {
             self.sync();
         }
         n
@@ -308,7 +304,14 @@ fn plugin_state_saves_and_reloads_identically() {
         .with_plugin(rig.device, |p| p.load_state(&gain_state(0.75)));
     set.unwrap().unwrap();
     rig.settles_at(LEVEL * 0.75);
+    let undo_steps = rig.doc.history().undo_len();
     assert_eq!(rig.store_states(), 1);
+    assert_eq!(
+        rig.doc.history().undo_len(),
+        undo_steps,
+        "the plugin's own change is no undo step"
+    );
+
     assert_eq!(
         rig.store_states(),
         0,
@@ -476,4 +479,54 @@ fn without_a_loader_plugins_are_bypassed() {
         [Warning::PluginNotLoaded { .. }]
     ));
     rig.settles_at(LEVEL);
+}
+
+#[test]
+fn document_params_apply_on_top_of_a_loaded_state() {
+    let mut rig = Rig::new();
+    rig.doc
+        .execute(SetParam {
+            device: rig.device,
+            param: GAIN,
+            value: Some(1.5),
+        })
+        .unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 1.5);
+    // A state edit sets the plugin's gain, then the document's param goes on top again,
+    // as when the project loads.
+    rig.doc
+        .execute(SetDevice {
+            id: rig.device,
+            field: DeviceField::State(Some(gain_state(0.25).into())),
+        })
+        .unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 1.5);
+    rig.doc
+        .execute(SetParam {
+            device: rig.device,
+            param: GAIN,
+            value: Some(0.5),
+        })
+        .unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 0.5);
+}
+
+#[test]
+fn undoing_a_device_removal_brings_its_plugin_back_as_it_was() {
+    let mut rig = Rig::new();
+    let set = rig
+        .session
+        .with_plugin(rig.device, |p| p.load_state(&gain_state(0.75)));
+    set.unwrap().unwrap();
+    rig.settles_at(LEVEL * 0.75);
+    rig.doc.execute(RemoveDevice::new(rig.device)).unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL);
+    assert_eq!(rig.status(), None);
+    rig.doc.undo().unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 0.75);
 }

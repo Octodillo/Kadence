@@ -130,6 +130,22 @@ impl Document {
         self.after_step(result)
     }
 
+    /// Stores a plugin's own state in its device without an undo step: the
+    /// plugin changed it, not an edit, so undo neither reverts it nor loses
+    /// its redo history to it. Does not mark the document modified.
+    pub fn store_plugin_state(
+        &mut self,
+        device: crate::DeviceId,
+        state: Option<crate::StateBlob>,
+    ) -> Result<(), ModelError> {
+        let d = self.project.device_mut(device)?;
+        if d.state != state {
+            d.state = state;
+            self.touch();
+        }
+        Ok(())
+    }
+
     /// Ends the current gesture so the next edit gets its own undo step.
     pub fn seal(&mut self) {
         self.history.seal();
