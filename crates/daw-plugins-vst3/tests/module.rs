@@ -89,7 +89,8 @@ fn a_module_is_entered_once_however_many_threads_load_it() {
     daw_plugins_vst3::shutdown();
     assert_eq!(counts(), [1, 0, 0], "exited a module in use");
     drop(p);
-    daw_plugins_vst3::shutdown();
+    // Through the format, as the sandbox host and the scanner do it.
+    Vst3Format.shutdown();
     assert_eq!(counts(), [1, 1, 0]);
     let p = Vst3Format.instantiate(&d, 48_000.0, 64).unwrap();
     drop(p);

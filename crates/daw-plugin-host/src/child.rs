@@ -11,9 +11,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use daw_core::event::{Event, EventList, ParamId};
-use daw_core::node::{ProcessContext, TransportState};
+use daw_core::node::ProcessContext;
 use daw_core::plugin::{PluginError, PluginInstance};
-use daw_core::time::SampleTime;
 use daw_plugins::PluginRegistry;
 
 use crate::protocol::{
@@ -71,8 +70,9 @@ pub fn run_host_child(
     };
     let result = host.run();
     host.stop_audio();
-    // Destroy the plugin here, on the thread that created it.
+    // Destroy the plugin here, on the thread that created it, then let its format clean up.
     drop(lock(&host.plugin).take());
+    registry.shutdown();
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -410,12 +410,7 @@ fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: 
         }
 
         let frames = h.frames.load(Ordering::Relaxed).min(layout.max_frames) as usize;
-        let transport = TransportState {
-            playing: h.playing.load(Ordering::Relaxed) != 0,
-            position: SampleTime(h.position.load(Ordering::Relaxed) as i64),
-            bpm: f64::from_bits(h.bpm.load(Ordering::Relaxed)),
-            sample_rate: f64::from_bits(h.sample_rate.load(Ordering::Relaxed)),
-        };
+        let transport = h.read_transport();
         let flags = h.flags.swap(0, Ordering::Relaxed);
 
         // SAFETY: the state word is REQUEST, so the buffers are ours until we store DONE.

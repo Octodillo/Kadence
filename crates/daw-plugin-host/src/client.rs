@@ -1041,14 +1041,8 @@ fn run_cycle(
     }
     h.events_in.store(count as u32, Ordering::Relaxed);
 
-    let t = ctx.transport;
     h.frames.store(n as u32, Ordering::Relaxed);
-    h.playing.store(u32::from(t.playing), Ordering::Relaxed);
-    h.position
-        .store((t.position.0 + offset as i64) as u64, Ordering::Relaxed);
-    h.bpm.store(t.bpm.to_bits(), Ordering::Relaxed);
-    h.sample_rate
-        .store(t.sample_rate.to_bits(), Ordering::Relaxed);
+    h.write_transport(&ctx.transport.advanced(offset as u32));
     if std::mem::take(&mut rt.reset_pending) {
         h.flags.fetch_or(FLAG_RESET, Ordering::Relaxed);
     }

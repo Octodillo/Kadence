@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
 use daw_core::event::{Event, EventList, ParamId};
 use daw_core::queue::{Consumer, Producer, spsc};
-use daw_core::time::SampleTime;
+use daw_core::time::{SampleTime, SegmentTempoMap, Timeline};
 
 use crate::compile::{CompileError, CompiledGraph};
 use crate::graph::{GraphDesc, LiveNodes, NodeId, NodeKey};
@@ -69,6 +69,7 @@ impl std::fmt::Debug for SendError {
 enum Command {
     Graph(Box<CompiledGraph>),
     Transport(TransportCommand),
+    Timeline(Arc<Timeline>),
     Param {
         node: NodeId,
         param: ParamId,
@@ -84,6 +85,9 @@ struct Shared {
     latency: AtomicU32,
     swaps: AtomicU64,
     dropped: AtomicU64,
+    /// Timelines a dropped controller still held. The audio thread may
+    /// still swap them in, so they live until the processor is dropped.
+    orphans: Mutex<Vec<Arc<Timeline>>>,
 }
 
 impl EngineController {
@@ -93,13 +97,14 @@ impl EngineController {
         let (commands_tx, commands_rx) = spsc(config.command_capacity);
         let (garbage_tx, garbage_rx) = deferred_drop(config.command_capacity);
         let shared = Arc::new(Shared::default());
+        let timeline = Arc::new(Timeline::default());
         let processor = EngineProcessor {
             graph: None,
             pending: None,
             retired: None,
             commands: commands_rx,
             garbage: garbage_tx,
-            transport: Transport::new(config.sample_rate),
+            transport: Transport::with_timeline(config.sample_rate, timeline.clone()),
             external: EventList::with_capacity(config.event_capacity),
             // Zero would never advance through a cycle. No graph compiles
             // with it, so the processor outputs silence.
@@ -112,6 +117,7 @@ impl EngineController {
             garbage: garbage_rx,
             shared,
             live: Arc::default(),
+            timelines: vec![timeline],
         };
         (controller, processor)
     }
@@ -126,6 +132,10 @@ pub struct EngineController {
     shared: Arc<Shared>,
     /// Keyed nodes of the latest graph sent.
     live: Arc<LiveNodes>,
+    /// Every timeline sent that the audio thread may still hold, latest
+    /// last. Holding a reference here means the audio thread never frees
+    /// one when it swaps in the next; `collect_garbage` drops the rest.
+    timelines: Vec<Arc<Timeline>>,
 }
 
 impl EngineController {
@@ -228,8 +238,30 @@ impl EngineController {
         self.transport(TransportCommand::SetLoop(range))
     }
 
+    /// Sets one constant tempo, keeping the time signatures. A bpm that is
+    /// not positive and finite is ignored.
     pub fn set_bpm(&mut self, bpm: f64) -> Result<(), EngineError> {
-        self.transport(TransportCommand::SetBpm(bpm))
+        if !(bpm.is_finite() && bpm > 0.0) {
+            return Ok(());
+        }
+        let meter = self.timeline().meter.clone();
+        self.set_timeline(Timeline::new(SegmentTempoMap::new(bpm), meter))
+    }
+
+    /// Hands the audio thread a new tempo map and time signatures. From its
+    /// next cycle every node sees bars and beats from it; the play position
+    /// stays at the same sample.
+    pub fn set_timeline(&mut self, timeline: Timeline) -> Result<(), EngineError> {
+        self.collect_garbage();
+        let timeline = Arc::new(timeline);
+        self.send(Command::Timeline(timeline.clone()))?;
+        self.timelines.push(timeline);
+        Ok(())
+    }
+
+    /// The latest timeline sent.
+    pub fn timeline(&self) -> &Timeline {
+        self.timelines.last().expect("there is always a timeline")
     }
 
     /// Sends a `ParamValue` event to `node` in the current graph, delivered
@@ -254,8 +286,17 @@ impl EngineController {
         self.set_param(node, param, value)
     }
 
-    /// Drops graphs the audio thread has retired. Returns how many.
+    /// Drops graphs and timelines the audio thread has retired. Returns how
+    /// many graphs.
     pub fn collect_garbage(&mut self) -> usize {
+        // A timeline only this side still references is no longer queued or
+        // running, so it is freed here rather than on the audio thread.
+        let last = self.timelines.len() - 1;
+        let mut i = 0;
+        self.timelines.retain(|t| {
+            i += 1;
+            i - 1 == last || Arc::strong_count(t) > 1
+        });
         self.garbage.collect()
     }
 
@@ -285,6 +326,19 @@ impl EngineController {
 
     fn send(&mut self, cmd: Command) -> Result<(), EngineError> {
         self.commands.push(cmd).map_err(|_| EngineError::QueueFull)
+    }
+}
+
+impl Drop for EngineController {
+    fn drop(&mut self) {
+        // Timelines still queued for the audio thread must not be freed when
+        // it replaces them; the processor's `shared` keeps them alive.
+        let timelines = std::mem::take(&mut self.timelines);
+        self.shared
+            .orphans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(timelines);
     }
 }
 
@@ -393,6 +447,9 @@ impl EngineProcessor {
                 }
                 Command::Graph(g) => self.install(g),
                 Command::Transport(t) => self.transport.apply(t),
+                // The controller still holds the old timeline, so this
+                // doesn't free it.
+                Command::Timeline(t) => drop(self.transport.set_timeline(t)),
                 Command::Param { node, param, value } => {
                     let queued = self
                         .graph
@@ -505,5 +562,45 @@ mod tests {
         // Every replaced graph comes back to be freed here.
         assert_eq!(ctl.collect_garbage(), 3);
         drop(proc);
+    }
+
+    #[test]
+    fn timelines_outlive_a_dropped_controller() {
+        let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+            max_frames: 32,
+            ..Default::default()
+        });
+        ctl.set_timeline(Timeline::constant(90.0, 3, 4)).unwrap();
+        ctl.set_timeline(Timeline::constant(100.0, 5, 4)).unwrap();
+        drop(ctl);
+        let mut out = [0.0f32; 32];
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(proc.transport().state().bpm, 100.0);
+    }
+
+    #[test]
+    fn timeline_swaps_free_nothing_on_the_audio_thread() {
+        let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+            max_frames: 32,
+            ..Default::default()
+        });
+        let mut out = [0.0f32; 32];
+        assert_eq!(process(&mut proc, &mut out), 0);
+        // The first replaces the timeline the engine started with, which
+        // only the controller and processor ever held.
+        ctl.set_timeline(Timeline::constant(90.0, 3, 4)).unwrap();
+        ctl.set_bpm(150.0).unwrap();
+        ctl.set_bpm(f64::NAN).unwrap();
+        assert_eq!(ctl.timelines.len(), 3);
+        assert_eq!(process(&mut proc, &mut out), 0);
+        let state = proc.transport().state();
+        assert_eq!(state.bpm, 150.0);
+        assert_eq!(state.music.numerator, 3, "set_bpm keeps the meter");
+        assert_eq!(ctl.timeline(), proc.transport().timeline());
+
+        // Only the running timeline is left to keep.
+        ctl.collect_garbage();
+        assert_eq!(ctl.timelines.len(), 1);
+        assert_eq!(std::sync::Arc::strong_count(&ctl.timelines[0]), 2);
     }
 }

@@ -66,6 +66,11 @@ impl PluginFormat for Vst3Format {
         out
     }
 
+    /// Runs ModuleExit for the modules no instance uses any more; see [`shutdown`].
+    fn shutdown(&self) {
+        shutdown();
+    }
+
     fn instantiate(
         &self,
         d: &PluginDescriptor,
