@@ -11,6 +11,9 @@ fn main() -> ExitCode {
         // destructors of plugin libraries that are still loaded, which often crash.
         // SAFETY: `_exit` ends the process at once; nothing needs to run first.
         Some(code) if code == ExitCode::SUCCESS => unsafe { libc::_exit(0) },
+        // Likewise when the bundle did not load (65): the reason is written.
+        // SAFETY: as above.
+        Some(code) if code == ExitCode::from(65) => unsafe { libc::_exit(65) },
         Some(code) => code,
         None => {
             eprintln!("usage: daw-plugin-scan --scan <clap|lv2|vst3> <bundle>");

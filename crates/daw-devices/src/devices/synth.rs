@@ -374,11 +374,9 @@ impl Synth {
         self.voices[slot] = v;
     }
 
-    fn note_off(&mut self, key: u8, id: NoteId) {
+    fn note_off(&mut self, key: Option<u8>, id: NoteId) {
         for v in self.voices.iter_mut().filter(|v| v.active && !v.stolen) {
-            // Match by id when both sides have one, otherwise by key, so an
-            // id-less (raw MIDI) note still ends on an off that has an id.
-            if (id >= 0 && v.id == id) || ((id < 0 || v.id < 0) && v.key == key) {
+            if crate::events::releases(key, id, v.key, v.id) {
                 v.amp_env.gate_off();
                 v.filter_env.gate_off();
             }
@@ -538,7 +536,7 @@ mod tests {
         }
         assert_eq!(s.active_voices(), 4);
         // Release key 62; it should be stolen before older held keys.
-        s.note_off(62, -1);
+        s.note_off(Some(62), -1);
         s.note_on(70, 1.0, -1);
         let held: Vec<u8> = s
             .voices

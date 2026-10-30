@@ -55,11 +55,14 @@ Kirigami.Page {
         }
     }
 
+    // Gated on page.visible: the Edit page uses the same shortcuts, and two
+    // enabled actions on one key make Qt treat it as ambiguous.
     readonly property list<Kirigami.Action> editActions: [
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Split at Playhead")
             icon.name: "edit-cut"
             shortcut: "Ctrl+E"
+            enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Project.splitAtPlayhead()
         },
@@ -67,7 +70,7 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Duplicate")
             icon.name: "edit-duplicate"
             shortcut: "Ctrl+D"
-            enabled: Project.hasSelection
+            enabled: page.visible && Project.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Project.duplicateSelection()
         },
@@ -75,7 +78,7 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Delete")
             icon.name: "edit-delete"
             shortcut: StandardKey.Delete
-            enabled: Project.hasSelection
+            enabled: page.visible && Project.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Project.deleteSelection()
         },
@@ -83,6 +86,7 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Select All")
             icon.name: "edit-select-all"
             shortcut: StandardKey.SelectAll
+            enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Project.selectAll()
         },
@@ -94,6 +98,7 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Zoom In")
             icon.name: "zoom-in"
             shortcut: StandardKey.ZoomIn
+            enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Project.zoom(1.5)
         },
@@ -101,6 +106,7 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Zoom Out")
             icon.name: "zoom-out"
             shortcut: StandardKey.ZoomOut
+            enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Project.zoom(1 / 1.5)
         },
@@ -108,6 +114,7 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Zoom to Fit")
             icon.name: "zoom-fit-width"
             shortcut: "Ctrl+0"
+            enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Project.zoomToFit()
         }

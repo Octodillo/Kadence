@@ -12,6 +12,7 @@ use daw_arrange::{Arrange, Env};
 use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
 use daw_model::{Document, FormatError, Project};
+use daw_pianoroll::PianoRoll;
 
 use crate::engine::{EngineHandle, default_engine};
 
@@ -19,6 +20,8 @@ pub struct AppState {
     pub doc: Document,
     pub engine: Box<dyn EngineHandle>,
     pub arrange: Arrange,
+    /// The piano roll on the Edit page.
+    pub piano: PianoRoll,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -55,6 +58,7 @@ impl AppState {
             doc: Document::new(Project::new("Untitled")),
             engine: default_engine(),
             arrange: Arrange::new(),
+            piano: PianoRoll::new(),
             synced: None,
             view_revision: 0,
             status: String::new(),
@@ -139,8 +143,31 @@ impl AppState {
         f(&mut self.arrange, &mut self.doc, &env)
     }
 
+    /// Calls `f` with the piano roll, the document and an [`Env`].
+    pub fn with_piano<R>(&mut self, f: impl FnOnce(&mut PianoRoll, &mut Document, &Env) -> R) -> R {
+        let root = self.root();
+        let playhead = self.playhead();
+        let loop_range = self.loop_range();
+        let sample_rate = self.sample_rate();
+        let tempo = self
+            .engine
+            .session()
+            .map_or(&self.fallback_tempo, |s| s.tempo());
+        let env = Env {
+            tempo,
+            sample_rate,
+            root: root.as_deref(),
+            playhead,
+            loop_range,
+        };
+        f(&mut self.piano, &mut self.doc, &env)
+    }
+
     /// Applies what an arrange view gesture asked for.
     pub fn apply(&mut self, out: daw_arrange::Outcome) {
+        if let Some(clip) = out.open_clip {
+            self.piano.open(self.doc.project(), clip);
+        }
         if let Some(t) = out.locate
             && let Some(s) = self.engine.session_mut()
         {

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use daw_core::plugin::{
     PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
-use daw_plugins::PluginRegistry;
+use daw_plugins::{PluginRegistry, ScanError};
 
 use crate::client::{SandboxConfig, SandboxedInstance};
 
@@ -58,12 +58,17 @@ impl PluginFormat for SandboxFormat {
         self.search_paths.clone()
     }
 
-    fn scan(&self, path: &Path) -> Vec<PluginDescriptor> {
+    /// Scans in a host process, so a plugin that crashes while loading fails the scan instead
+    /// of taking the caller down.
+    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
         self.config
             .launcher
             .scanner()
             .scan(&self.kind, path)
-            .unwrap_or_default()
+            .map_err(|e| match e {
+                ScanError::LoadFailed(why) => PluginError::Load(why),
+                e => PluginError::Load(e.to_string()),
+            })
     }
 
     fn instantiate(

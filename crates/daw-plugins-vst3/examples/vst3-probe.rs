@@ -69,7 +69,7 @@ fn note(on: bool) -> Event {
     } else {
         EventKind::NoteOff {
             channel: 0,
-            key: 60,
+            key: Some(60),
             velocity: 0.0,
             note_id: -1,
         }
@@ -99,7 +99,10 @@ fn main() {
         _ => 0,
     };
 
-    let found = Vst3Format.scan(&path);
+    let found = Vst3Format.scan(&path).unwrap_or_else(|e| {
+        println!("scan failed: {e}");
+        std::process::exit(1)
+    });
     println!("scan: {} plugin(s) in {}", found.len(), path.display());
     let mut failures = 0;
     for d in &found {
