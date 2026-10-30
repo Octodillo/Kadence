@@ -39,6 +39,8 @@ use daw_model::{Clip, ClipContent, ClipId, Command, Document, MidiClip, Note, No
 /// Smallest and largest key row height in logical pixels.
 pub const MIN_KEY_HEIGHT: f64 = 6.0;
 pub const MAX_KEY_HEIGHT: f64 = 48.0;
+/// Row height a clip opens at when its notes fit.
+pub const DEFAULT_KEY_HEIGHT: f64 = 14.0;
 
 /// A pointer must move this far before a press becomes a drag.
 const DRAG_THRESHOLD: f64 = 3.0;
@@ -109,6 +111,8 @@ pub struct PianoRoll {
     menu_requested: bool,
     /// Fit the view to the clip's notes once the item has a size.
     fit_pending: bool,
+    /// Whether `resize` has given the real item size yet.
+    sized: bool,
 }
 
 impl Default for PianoRoll {
@@ -149,7 +153,7 @@ impl PianoRoll {
                 scroll_x: 0.0,
             },
             scroll_y: 0.0,
-            key_height: 14.0,
+            key_height: DEFAULT_KEY_HEIGHT,
             width: 800.0,
             height: 600.0,
             keyboard_width: 56.0,
@@ -162,6 +166,7 @@ impl PianoRoll {
             new_length: None,
             gesture: None,
             fit_pending: false,
+            sized: false,
             live: Vec::new(),
             menu_requested: false,
         }
@@ -264,6 +269,7 @@ impl PianoRoll {
         self.clip = Some(clip);
         self.selection.clear();
         self.gesture = None;
+        self.live.clear();
         self.fit_pending = true;
         self.fit(project);
     }
@@ -276,7 +282,7 @@ impl PianoRoll {
             return;
         };
         let h = self.notes_rect().h;
-        if h <= 0.0 || self.width <= self.keyboard_width {
+        if !self.sized || h <= 0.0 || self.width <= self.keyboard_width {
             return;
         }
         self.fit_pending = false;
@@ -287,9 +293,9 @@ impl PianoRoll {
         };
         // A row of room above and below.
         let needed = hi - lo + 3.0;
-        if needed * self.key_height > h {
-            self.key_height = (h / needed).clamp(MIN_KEY_HEIGHT, MAX_KEY_HEIGHT);
-        }
+        self.key_height = DEFAULT_KEY_HEIGHT
+            .min(h / needed)
+            .clamp(MIN_KEY_HEIGHT, MAX_KEY_HEIGHT);
         // A little room before the clip start.
         self.view.scroll_x = (c.start.0 as f64 * self.view.px_per_tick() - 16.0).max(0.0);
         let center = (lo + hi) / 2.0;
@@ -302,6 +308,7 @@ impl PianoRoll {
     pub fn resize(&mut self, width: f64, height: f64) {
         self.width = width.max(0.0);
         self.height = height.max(0.0);
+        self.sized = true;
         self.clamp_scroll();
     }
 

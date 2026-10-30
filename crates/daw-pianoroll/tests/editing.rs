@@ -412,15 +412,16 @@ fn clicking_the_drawn_stem_top_keeps_the_velocity() {
 
 #[test]
 fn opening_a_clip_shows_all_its_notes() {
-    let notes = vec![n(0, Q, 36), n(Q, Q, 60), n(2 * Q, Q, 96)];
+    let notes = vec![n(0, Q, 48), n(Q, Q, 60), n(2 * Q, Q, 84)];
     let r = Rig::new(notes.clone());
     let mut pr = PianoRoll::new();
     // Opened before the item has a size, as the Edit page does.
     pr.open(r.doc.project(), r.clip);
-    pr.resize(800.0, 600.0);
+    pr.fit_if_pending(r.doc.project());
+    pr.resize(800.0, 400.0);
     pr.fit_if_pending(r.doc.project());
     let visible = pr.visible_keys();
-    for key in [36, 60, 96] {
+    for key in [48, 60, 84] {
         assert!(visible.contains(&key), "{key} not in {visible:?}");
     }
 }

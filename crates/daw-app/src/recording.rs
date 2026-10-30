@@ -160,6 +160,10 @@ impl AppState {
             })
             .and_then(|c| project.clip(c))
         else {
+            if !self.piano.live.is_empty() {
+                self.piano.live.clear();
+                self.touch();
+            }
             return;
         };
         let now = rec.tempo.ticks_to_samples(self.playhead(), rec.sample_rate);
