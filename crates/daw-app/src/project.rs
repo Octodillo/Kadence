@@ -60,6 +60,10 @@ pub mod qobject {
         DeviceStateRejected,
         UnknownDevice,
         PluginNotLoaded,
+        PluginMissing,
+        PluginLoadFailed,
+        PluginCrashed,
+        PluginStateNotSaved,
         CannotStream,
         CannotRead,
         NotesDropped,
@@ -342,6 +346,10 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::DeviceStateRejected => QR::DeviceStateRejected,
         Reason::UnknownDevice => QR::UnknownDevice,
         Reason::PluginNotLoaded => QR::PluginNotLoaded,
+        Reason::PluginMissing => QR::PluginMissing,
+        Reason::PluginLoadFailed => QR::PluginLoadFailed,
+        Reason::PluginCrashed => QR::PluginCrashed,
+        Reason::PluginStateNotSaved => QR::PluginStateNotSaved,
         Reason::CannotStream => QR::CannotStream,
         Reason::CannotRead => QR::CannotRead,
         Reason::NotesDropped => QR::NotesDropped,
@@ -509,9 +517,7 @@ impl qobject::Project {
 
     fn tick(self: Pin<&mut Self>) {
         state::with(|s| {
-            if let Some(session) = s.engine.session_mut() {
-                session.collect_garbage();
-            }
+            s.tick_engine();
             // An update a full player queue refused; the queue has drained.
             if s.engine
                 .session()
@@ -561,6 +567,7 @@ impl qobject::Project {
     fn save(self: Pin<&mut Self>) -> QMap<QMapPair_QString_QVariant> {
         let mut result = None;
         self.edit(|s| {
+            s.store_plugin_states();
             if let Err(e) = s.doc.save() {
                 result = Some(Message::File(Context::Save, e).fields());
             }
@@ -580,6 +587,7 @@ impl qobject::Project {
         }
         let mut result = None;
         self.edit(|s| {
+            s.store_plugin_states();
             if let Err(e) = s.doc.save_as(&dir) {
                 result = Some(Message::File(Context::Save, e).fields());
             }
