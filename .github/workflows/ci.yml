@@ -36,7 +36,8 @@ jobs:
         run: cargo clippy --workspace --exclude daw-app --all-targets -- -D warnings
       - name: clippy (release)
         # cfg(debug_assertions) code can leave items unused in release builds,
-        # which the packaging jobs build with warnings as errors.
+        # which the CMake install checks (Arch and neon jobs) build with
+        # RUSTFLAGS=-D warnings; this catches it in the fast job.
         run: cargo clippy --release --workspace --exclude daw-app -- -D warnings
       - name: tests
         # -noreset: otherwise Xvfb resets when one test process disconnects
