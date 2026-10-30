@@ -178,11 +178,11 @@ fn steady_state_processing_never_allocates() {
 fn plugins_never_allocate_while_the_main_thread_uses_and_restarts_them() {
     let fake = FakePlugin::new(1);
     let control = fake.control.clone();
-    let plugin = PluginHandle::new(Box::new(fake));
     let (mut ctl, mut proc) = EngineController::new(EngineConfig {
         max_frames: 64,
         ..Default::default()
     });
+    let plugin = PluginHandle::new(Box::new(fake), ctl.config().sample_rate, 64);
     let send = |ctl: &mut EngineController| {
         let c = ctl.config().clone();
         let mut g = ctl.graph(0, 2);

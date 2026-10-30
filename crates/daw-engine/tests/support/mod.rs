@@ -231,6 +231,8 @@ pub struct FakeControl {
     /// Set to make the next `on_main_thread` report a layout change.
     pub request: std::sync::atomic::AtomicBool,
     pub prepares: std::sync::atomic::AtomicU32,
+    /// The thread the plugin was dropped on.
+    pub dropped_on: std::sync::Mutex<Option<std::thread::ThreadId>>,
 }
 
 /// A plugin that outputs a sample counter on every channel. The counter is its state: it
@@ -298,6 +300,12 @@ impl Node for FakePlugin {
 
     fn latency(&self) -> u32 {
         self.latency
+    }
+}
+
+impl Drop for FakePlugin {
+    fn drop(&mut self) {
+        *self.control.dropped_on.lock().unwrap() = Some(std::thread::current().id());
     }
 }
 
