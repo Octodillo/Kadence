@@ -261,6 +261,44 @@ fn migrations_run_in_order() {
     ));
 }
 
+/// `project` as an older build wrote it in version 1, with the given names.
+fn v1_file(project: &Project, name: &str, master: &str) -> String {
+    let mut v: Value = serde_json::from_str(&bundle::to_json(project).unwrap()).unwrap();
+    v["version"] = 1.into();
+    v["project"]["name"] = name.into();
+    v["project"]["master"]["name"] = master.into();
+    v.to_string()
+}
+
+#[test]
+fn version_1_default_names_become_empty() {
+    // New projects leave both names empty for the UI to translate.
+    let p = Project::default();
+    assert_eq!(p.name, "");
+    assert_eq!(p.master.name, "");
+
+    let song = sample_project();
+    let p = bundle::from_json(&v1_file(&song, "Untitled", "Master")).unwrap();
+    assert_eq!(p.name, "");
+    assert_eq!(p.master.name, "");
+    // Everything else survives the migration.
+    assert_eq!(p.tracks, song.tracks);
+    assert_eq!(p.master.id, song.master.id);
+
+    // Names the user chose are kept, even ones close to the defaults.
+    let p = bundle::from_json(&v1_file(&song, "Untitled 2", "master")).unwrap();
+    assert_eq!(p.name, "Untitled 2");
+    assert_eq!(p.master.name, "master");
+    // Only the master's default name was English; a track called "Master" is
+    // the user's.
+    let mut v: Value = serde_json::from_str(&v1_file(&song, "Song", "Main")).unwrap();
+    v["project"]["tracks"][0]["name"] = "Master".into();
+    let p = bundle::from_json(&v.to_string()).unwrap();
+    assert_eq!(p.name, "Song");
+    assert_eq!(p.master.name, "Main");
+    assert_eq!(p.tracks[0].name, "Master");
+}
+
 #[test]
 fn snapshots_share_untouched_tracks() {
     let mut doc = Document::new(sample_project());

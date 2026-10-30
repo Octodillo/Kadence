@@ -24,7 +24,7 @@ use crate::model::Project;
 pub const FORMAT_NAME: &str = "kadence-project";
 /// The schema version this build writes. Older files are migrated on load.
 /// Bump it for every added field too, or older builds drop it when they save.
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
 /// File extension of the project file (matches the MIME glob `*.kadence`).
 pub const EXTENSION: &str = "kadence";
 /// How many previous saves `backups/` keeps.
@@ -38,7 +38,22 @@ pub type Migration = fn(Value) -> Result<Value, FormatError>;
 
 /// `MIGRATIONS[i]` turns schema `i + 1` into `i + 2`. Append one each time
 /// `SCHEMA_VERSION` goes up.
-pub const MIGRATIONS: &[Migration] = &[];
+pub const MIGRATIONS: &[Migration] = &[v1_unname_defaults];
+
+/// Version 1 saved the English defaults "Untitled" and "Master" as names.
+/// Version 2 leaves them empty and the UI words them in the user's language.
+fn v1_unname_defaults(mut v: Value) -> Result<Value, FormatError> {
+    fn clear(object: Option<&mut Value>, default: &str) {
+        if let Some(name) = object.and_then(|o| o.get_mut("name"))
+            && name == default
+        {
+            *name = Value::from("");
+        }
+    }
+    clear(v.get_mut("master"), "Master");
+    clear(Some(&mut v), "Untitled");
+    Ok(v)
+}
 
 #[derive(Serialize)]
 struct EnvelopeOut<'a> {
@@ -201,6 +216,11 @@ impl Bundle {
             stem: stem.to_owned(),
             file_name: file_name.to_owned(),
         })
+    }
+
+    /// The project file's name without its extension.
+    pub fn name(&self) -> &str {
+        &self.stem
     }
 
     pub fn root(&self) -> &Path {

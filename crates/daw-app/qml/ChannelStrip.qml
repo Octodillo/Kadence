@@ -31,6 +31,7 @@ Item {
     required property double gainReduction
 
     readonly property bool isMaster: kind === "master"
+    readonly property string masterName: i18nc("@title name of the master bus", "Master")
 
     implicitWidth: Kirigami.Units.gridUnit * 7
     width: implicitWidth
@@ -75,7 +76,8 @@ Item {
         Kirigami.Heading {
             Layout.fillWidth: true
             level: 5
-            text: strip.name
+            // The master is unnamed unless the user renamed it.
+            text: strip.name || (strip.isMaster ? strip.masterName : "")
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignHCenter
             opacity: strip.silenced ? 0.6 : 1
@@ -181,11 +183,14 @@ Item {
                         id: sendRow
                         required property int index
                         required property string modelData
+                        // Sends go to buses or the master; only the master is
+                        // unnamed by default.
+                        readonly property string target: modelData || strip.masterName
                         Layout.fillWidth: true
                         spacing: 0
                         QQC2.Label {
                             Layout.fillWidth: true
-                            text: sendRow.modelData
+                            text: sendRow.target
                             elide: Text.ElideRight
                             font: Kirigami.Theme.smallFont
                         }
@@ -196,9 +201,9 @@ Item {
                             value: strip.sendLevels[sendRow.index] ?? -60
                             onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
                             onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
-                            QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.modelData, strip.dbText(value))
+                            QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.target, strip.dbText(value))
                             QQC2.ToolTip.visible: hovered || pressed
-                            Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.modelData)
+                            Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.target)
                         }
                     }
                 }
