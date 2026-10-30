@@ -280,10 +280,11 @@ pub(crate) fn graph(
         // passes it on) for now; record arming will narrow it down.
         if let Some(player) = midi {
             g.route_external_events(player);
-            if let Some(first) = track.devices.iter().find(|d| d.enabled)
-                && let Some(&id) = chain
-                    .iter()
-                    .find(|&&n| g.key(n) == Some(device_key(first.id)))
+            // The first device even when it is switched off: switching the
+            // instrument off silences it, and it still gets the note-offs
+            // of notes that were sounding.
+            if let Some(first) = track.devices.first()
+                && let Some(id) = find(&g, device_key(first.id))
             {
                 g.connect_events(player, id);
             }

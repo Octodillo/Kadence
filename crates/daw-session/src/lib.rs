@@ -131,6 +131,15 @@ impl Session {
         &self.controller
     }
 
+    /// Whether the last sync couldn't send everything (a player's queue was
+    /// full) and should run again even if the document hasn't changed.
+    pub fn wants_sync(&self) -> bool {
+        self.built.as_ref().is_some_and(|b| {
+            b.midi.keys().any(|t| !b.midi_clips.contains_key(t))
+                || b.players.keys().any(|t| !b.clips.contains_key(t))
+        })
+    }
+
     /// The MIDI player of an instrument track, for record arming and
     /// collecting what was played.
     pub fn midi_player(&mut self, track: TrackId) -> Option<&mut daw_midi::player::PlayerHandle> {
@@ -236,6 +245,7 @@ impl Session {
             if handle.send(set).is_err() {
                 self.warnings
                     .push(format!("clip update for track {} was dropped", track.name));
+                built.clips.remove(&track.id);
                 continue;
             }
             built.clips.insert(track.id, track.clips.clone());

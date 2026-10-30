@@ -544,3 +544,30 @@ fn note_edits_reach_the_player_without_a_rebuild() {
     assert!(peak(&out[..70_000]) < 1e-4, "the note moved later");
     assert!(peak(&out[74_000..]) > 1e-3, "and plays there");
 }
+
+#[test]
+fn switching_the_instrument_off_and_on_leaves_no_hanging_note() {
+    let (mut rig, track, _) = synth_rig();
+    rig.session.play().unwrap();
+    rig.run(2 * BEAT as usize); // Inside the held note.
+    let device = rig.doc.project().track(track).unwrap().devices[0].id;
+    let set_enabled = |rig: &mut Rig, on: bool| {
+        rig.doc
+            .execute(daw_model::commands::SetDevice {
+                id: device,
+                field: daw_model::commands::DeviceField::Enabled(on),
+            })
+            .unwrap();
+        rig.sync();
+    };
+    set_enabled(&mut rig, false);
+    // The note ends at beat 3 while the synth is off.
+    rig.run(2 * BEAT as usize);
+    rig.session.stop().unwrap();
+    set_enabled(&mut rig, true);
+    let out = rig.run(BEAT as usize);
+    assert!(
+        peak(&out[BEAT as usize / 2..]) < 1e-4,
+        "no voice left sounding"
+    );
+}
