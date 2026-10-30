@@ -6,6 +6,7 @@ use loom::sync::Arc;
 use loom::thread;
 
 use daw_core::dispose::deferred_drop;
+use daw_core::exclusive::Exclusive;
 use daw_core::meter::PeakMeter;
 use daw_core::queue::spsc;
 use daw_core::rt_log;
@@ -112,5 +113,35 @@ fn peak_meter_never_loses_the_max() {
         rt.join().unwrap();
         let second = meter.take();
         assert_eq!(first.max(second), 0.5);
+    });
+}
+
+#[test]
+fn exclusive_never_lets_both_threads_in() {
+    loom::model(|| {
+        // Each side checks that nobody else is inside, then leaves a mark.
+        let x = Arc::new(Exclusive::new((false, 0u32)));
+        let audio = x.clone();
+        let rt = thread::spawn(move || {
+            let mut ran = 0;
+            for _ in 0..2 {
+                let got = audio.try_audio(|(inside, n)| {
+                    assert!(!*inside);
+                    *inside = true;
+                    *n += 1;
+                    *inside = false;
+                });
+                ran += got.is_some() as u32;
+            }
+            ran
+        });
+        x.main(|(inside, n)| {
+            assert!(!*inside);
+            *inside = true;
+            *n += 10;
+            *inside = false;
+        });
+        let ran = rt.join().unwrap();
+        x.main(|(_, n)| assert_eq!(*n, 10 + ran));
     });
 }

@@ -17,9 +17,9 @@ use daw_core::time::SampleTime;
 use daw_engine::nodes::Strip;
 use daw_engine::{
     AutomationLane, AutomationPoint, Curve, EngineConfig, EngineController, GraphDesc, LoopRange,
-    NodeId, NodeKey, NodeMeter,
+    NodeId, NodeKey, NodeMeter, PluginHandle,
 };
-use support::{Delay, EventProbe, NoteSource, Sine};
+use support::{Delay, EventProbe, FakePlugin, NoteSource, Sine};
 
 #[global_allocator]
 static ALLOC: AllocDisabler = AllocDisabler;
@@ -172,4 +172,56 @@ fn steady_state_processing_never_allocates() {
     });
     assert_eq!(bad, 0, "the process path allocated or freed");
     assert!(out.iter().any(|&v| v != 0.0));
+}
+
+#[test]
+fn plugins_never_allocate_while_the_main_thread_uses_and_restarts_them() {
+    let fake = FakePlugin::new(1);
+    let control = fake.control.clone();
+    let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+        max_frames: 64,
+        ..Default::default()
+    });
+    let plugin = PluginHandle::new(Box::new(fake), ctl.config().sample_rate, 64);
+    let send = |ctl: &mut EngineController| {
+        let c = ctl.config().clone();
+        let mut g = ctl.graph(0, 2);
+        let p = g.add_device("plugin", Box::new(plugin.node(c.sample_rate, c.max_frames)));
+        g.connect(p, g.master());
+        let mut compiled = Box::new(ctl.compile(g).unwrap());
+        while let Err(daw_engine::SendError::Full(back)) = ctl.send_graph(compiled) {
+            compiled = back;
+            std::thread::yield_now();
+        }
+    };
+    send(&mut ctl);
+
+    let done = Arc::new(AtomicBool::new(false));
+    let rt_done = done.clone();
+    let rt = std::thread::spawn(move || {
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        let events = EventList::with_capacity(0);
+        violations(|| {
+            while !rt_done.load(Ordering::Acquire) {
+                proc.process(64, &[], &mut [&mut l, &mut r], &events);
+            }
+        })
+    });
+
+    // Pump, touch and restart the plugin with alternating channel counts while the audio
+    // thread runs; a node that called it with the wrong count would panic there.
+    for i in 0..300u32 {
+        plugin.with(|p| p.save_state().unwrap());
+        if i % 3 == 0 {
+            control.next_outputs.store(1 + i % 2, Ordering::Relaxed);
+            control.request.store(true, Ordering::Relaxed);
+        }
+        if plugin.pump() || i % 7 == 0 {
+            send(&mut ctl);
+        }
+        ctl.collect_garbage();
+        std::thread::yield_now();
+    }
+    done.store(true, Ordering::Release);
+    assert_eq!(rt.join().expect("the audio thread panicked"), 0);
 }
