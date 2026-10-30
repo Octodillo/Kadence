@@ -7,10 +7,11 @@ import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
 
-// One row of the track list beside the timeline: colour, name, instrument
-// (on instrument tracks), mute, solo.
-// Everything is read from Project by index; `revision` re-reads it after
-// any change.
+// One row of the track list beside the timeline: colour, drag handle,
+// name, instrument (on instrument tracks), mute, solo. Everything is read
+// from Project by index; `revision` re-reads it after any change. Dragging
+// the handle reorders tracks; the list view shows where the track will land
+// (`dragFrom`, `dragTo`).
 QQC2.ItemDelegate {
     id: header
 
@@ -25,6 +26,7 @@ QQC2.ItemDelegate {
     readonly property string instrument: { revision; return kind === 1 ? Project.trackInstrument(index) : ""; }
 
     highlighted: Project.selectedTrack === index
+    opacity: ListView.view && ListView.view.dragFrom === index ? 0.5 : 1
     padding: 0
     leftPadding: 0
     onClicked: Project.selectTrack(index)
@@ -39,6 +41,52 @@ QQC2.ItemDelegate {
             Layout.fillHeight: true
             Layout.preferredWidth: Kirigami.Units.smallSpacing
             color: header.trackColor
+        }
+
+        // Drag to reorder.
+        Kirigami.Icon {
+            id: handle
+            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+            Layout.alignment: Qt.AlignVCenter
+            source: "handle-sort"
+            isMask: true
+            color: Kirigami.Theme.textColor
+            opacity: handleHover.hovered || drag.active ? 1 : 0.5
+            Accessible.name: i18nc("@info:accessible", "Drag to move the track")
+
+            HoverHandler {
+                id: handleHover
+                cursorShape: drag.active ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+            }
+
+            DragHandler {
+                id: drag
+                target: null
+                xAxis.enabled: false
+                // The row the dragged track's middle is over.
+                readonly property int to: {
+                    const mid = header.y + header.height / 2 + activeTranslation.y;
+                    return Math.max(0, Math.min(Project.trackCount - 1, Math.floor(mid / header.height)));
+                }
+                onActiveChanged: {
+                    const list = header.ListView.view;
+                    if (active) {
+                        Project.selectTrack(header.index);
+                        list.dragFrom = header.index;
+                        list.dragTo = header.index;
+                    } else {
+                        const from = list.dragFrom;
+                        const to = list.dragTo;
+                        list.dragFrom = -1;
+                        list.dragTo = -1;
+                        if (from >= 0 && to >= 0 && from !== to) {
+                            Project.moveTrack(from, to);
+                        }
+                    }
+                }
+                onToChanged: if (active) header.ListView.view.dragTo = to
+            }
         }
 
         Kirigami.Icon {
@@ -137,6 +185,19 @@ QQC2.ItemDelegate {
                 nameField.selectAll();
             }
         }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Move Up")
+            icon.name: "go-up"
+            enabled: header.index > 0
+            onTriggered: Project.moveTrack(header.index, header.index - 1)
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Move Down")
+            icon.name: "go-down"
+            enabled: header.index < Project.trackCount - 1
+            onTriggered: Project.moveTrack(header.index, header.index + 1)
+        }
+        QQC2.MenuSeparator {}
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Delete Track")
             icon.name: "edit-delete"
