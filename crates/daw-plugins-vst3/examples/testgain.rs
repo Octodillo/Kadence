@@ -1,6 +1,9 @@
 //! A tiny split processor/controller VST3 used by this crate's tests.
 //!
-//! - Stereo in and out, multiplied by parameter 0 ("Gain", plain = normalized, 0..1).
+//! - Stereo in and out, multiplied by parameter 0 ("Gain", plain = normalized, 0..1). A
+//!   `set_outputs` message with an int attribute `channels` (1 or 2) switches the output to
+//!   mono or back; the host is expected to call `restartComponent(kIoChanged)` after it. With
+//!   a nonzero int attribute `locked`, the plugin then refuses any other output arrangement.
 //! - Parameter 1 ("Peak") is read only; the processor reports the output peak through it.
 //! - Parameter 2 ("Activations") is read only; the processor reports how many times it has
 //!   been activated through it, as the count / 100.
@@ -9,6 +12,9 @@
 //! - Component state is the gain as a little-endian f64. The controller saves 8 bytes but
 //!   answers kNotImplemented when asked to load them.
 //! - MIDI CC 7 is mapped to the gain.
+//! - After a `meter_on` message the processor sends its controller a `meter` message from
+//!   every `process` call. The controller counts the messages it gets in (hidden) parameter
+//!   4, and those that arrive on a thread other than the one that created it in parameter 3.
 //! - `testgain_module_counts` reports how often ModuleEntry and ModuleExit ran and whether
 //!   two of those calls ever overlapped.
 
@@ -17,12 +23,12 @@
 use std::ffi::{c_char, c_void};
 use std::slice;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use vst3::Steinberg::Vst::*;
 use vst3::Steinberg::*;
-use vst3::{Class, ComPtr, ComRef, ComWrapper, uid};
+use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, uid};
 
 const NAME: &str = "Test Gain";
 const LATENCY: u32 = 32;
@@ -66,7 +72,14 @@ unsafe fn write_f64(stream: *mut IBStream, v: f64) -> tresult {
 struct Processor {
     gain: AtomicU64,
     activations: AtomicU32,
+    /// Output channels, 1 or 2.
+    outputs: AtomicI32,
+    /// Refuse output arrangements other than `outputs`.
+    locked: AtomicBool,
     peer: Mutex<Option<ComPtr<IConnectionPoint>>>,
+    host: Mutex<Option<ComPtr<IHostApplication>>>,
+    /// Send `meter` messages from `process`.
+    meter: AtomicBool,
 }
 
 impl Class for Processor {
@@ -79,10 +92,44 @@ impl Processor {
     fn gain(&self) -> f64 {
         f64::from_bits(self.gain.load(Ordering::Relaxed))
     }
+
+    /// Sends the controller a `meter` message, the way plugins report levels.
+    fn send_meter(&self) {
+        let host = self.host.lock().unwrap();
+        let peer = self.peer.lock().unwrap();
+        let (Some(host), Some(peer)) = (host.as_ref(), peer.as_ref()) else {
+            return;
+        };
+        let mut cid: TUID = IMessage::IID.map(|b| b as c_char);
+        let mut iid = cid;
+        let mut obj: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            if host.createInstance(&mut cid, &mut iid, &mut obj) != kResultOk {
+                return;
+            }
+            let Some(message) = ComPtr::from_raw(obj as *mut IMessage) else {
+                return;
+            };
+            message.setMessageID(c"meter".as_ptr());
+            peer.notify(message.as_ptr());
+        }
+    }
+
+    fn arrangement(&self, dir: BusDirection) -> SpeakerArrangement {
+        if dir == BusDirections_::kOutput as BusDirection
+            && self.outputs.load(Ordering::Relaxed) == 1
+        {
+            SpeakerArr::kMono
+        } else {
+            SpeakerArr::kStereo
+        }
+    }
 }
 
 impl IPluginBaseTrait for Processor {
-    unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+    unsafe fn initialize(&self, context: *mut FUnknown) -> tresult {
+        *self.host.lock().unwrap() =
+            unsafe { ComRef::from_raw(context) }.and_then(|c| c.cast::<IHostApplication>());
         kResultOk
     }
 
@@ -102,7 +149,31 @@ impl IConnectionPointTrait for Processor {
         kResultOk
     }
 
-    unsafe fn notify(&self, _message: *mut IMessage) -> tresult {
+    unsafe fn notify(&self, message: *mut IMessage) -> tresult {
+        let Some(message) = (unsafe { ComRef::from_raw(message) }) else {
+            return kInvalidArgument;
+        };
+        let id = unsafe { std::ffi::CStr::from_ptr(message.getMessageID()) };
+        if id == c"meter_on" {
+            self.meter.store(true, Ordering::Relaxed);
+            return kResultOk;
+        }
+        if id != c"set_outputs" {
+            return kResultFalse;
+        }
+        let Some(attrs) = (unsafe { ComRef::from_raw(message.getAttributes()) }) else {
+            return kInvalidArgument;
+        };
+        let mut channels = 0i64;
+        if unsafe { attrs.getInt(c"channels".as_ptr(), &mut channels) } != kResultOk
+            || !(1..=2).contains(&channels)
+        {
+            return kInvalidArgument;
+        }
+        let mut locked = 0i64;
+        unsafe { attrs.getInt(c"locked".as_ptr(), &mut locked) };
+        self.outputs.store(channels as i32, Ordering::Relaxed);
+        self.locked.store(locked != 0, Ordering::Relaxed);
         kResultOk
     }
 }
@@ -137,7 +208,11 @@ impl IComponentTrait for Processor {
         bus.busType = BusTypes_::kMain as BusType;
         bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
         if media == MediaTypes_::kAudio as MediaType {
-            bus.channelCount = 2;
+            bus.channelCount = if dir == BusDirections_::kOutput as BusDirection {
+                self.outputs.load(Ordering::Relaxed)
+            } else {
+                2
+            };
             copy_wstr("Main", &mut bus.name);
         } else {
             bus.channelCount = 16;
@@ -184,22 +259,31 @@ impl IAudioProcessorTrait for Processor {
         outputs: *mut SpeakerArrangement,
         num_outs: i32,
     ) -> tresult {
-        let ok = num_ins == 1
-            && num_outs == 1
-            && unsafe { *inputs == SpeakerArr::kStereo && *outputs == SpeakerArr::kStereo };
-        if ok { kResultTrue } else { kResultFalse }
+        if num_ins != 1 || num_outs != 1 || unsafe { *inputs } != SpeakerArr::kStereo {
+            return kResultFalse;
+        }
+        let channels = match unsafe { *outputs } {
+            SpeakerArr::kMono => 1,
+            SpeakerArr::kStereo => 2,
+            _ => return kResultFalse,
+        };
+        if self.locked.load(Ordering::Relaxed) && channels != self.outputs.load(Ordering::Relaxed) {
+            return kResultFalse;
+        }
+        self.outputs.store(channels, Ordering::Relaxed);
+        kResultTrue
     }
 
     unsafe fn getBusArrangement(
         &self,
-        _d: BusDirection,
+        dir: BusDirection,
         index: i32,
         arr: *mut SpeakerArrangement,
     ) -> tresult {
         if index != 0 {
             return kInvalidArgument;
         }
-        unsafe { *arr = SpeakerArr::kStereo };
+        unsafe { *arr = self.arrangement(dir) };
         kResultOk
     }
 
@@ -256,6 +340,10 @@ impl IAudioProcessorTrait for Processor {
             }
         }
 
+        if self.meter.load(Ordering::Relaxed) {
+            self.send_meter();
+        }
+
         let gain = self.gain() as f32;
         let n = data.numSamples as usize;
         let mut peak = 0.0f32;
@@ -300,8 +388,13 @@ impl IAudioProcessorTrait for Processor {
     }
 }
 
+/// Parameters 3 and 4 are not listed; they count `meter` messages (see the top).
+const METER_OFF_THREAD: usize = 3;
+const METER_TOTAL: usize = 4;
+
 struct Controller {
-    values: Mutex<[f64; 3]>,
+    values: Mutex<[f64; 5]>,
+    thread: std::thread::ThreadId,
     handler: Mutex<Option<ComPtr<IComponentHandler>>>,
 }
 
@@ -332,7 +425,18 @@ impl IConnectionPointTrait for Controller {
         kResultOk
     }
 
-    unsafe fn notify(&self, _message: *mut IMessage) -> tresult {
+    unsafe fn notify(&self, message: *mut IMessage) -> tresult {
+        let Some(message) = (unsafe { ComRef::from_raw(message) }) else {
+            return kInvalidArgument;
+        };
+        if unsafe { std::ffi::CStr::from_ptr(message.getMessageID()) } != c"meter" {
+            return kResultFalse;
+        }
+        let mut values = self.values.lock().unwrap();
+        values[METER_TOTAL] += 1.0;
+        if std::thread::current().id() != self.thread {
+            values[METER_OFF_THREAD] += 1.0;
+        }
         kResultOk
     }
 }
@@ -498,11 +602,16 @@ impl IPluginFactoryTrait for Factory {
             Processor::CID => ComWrapper::new(Processor {
                 gain: AtomicU64::new(1.0f64.to_bits()),
                 activations: AtomicU32::new(0),
+                outputs: AtomicI32::new(2),
+                locked: AtomicBool::new(false),
                 peer: Mutex::new(None),
+                host: Mutex::new(None),
+                meter: AtomicBool::new(false),
             })
             .to_com_ptr::<FUnknown>(),
             Controller::CID => ComWrapper::new(Controller {
-                values: Mutex::new([1.0, 0.0, 0.0]),
+                values: Mutex::new([1.0, 0.0, 0.0, 0.0, 0.0]),
+                thread: std::thread::current().id(),
                 handler: Mutex::new(None),
             })
             .to_com_ptr::<FUnknown>(),

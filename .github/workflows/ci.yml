@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -21,12 +24,19 @@ jobs:
       - name: system packages
         # jack-sys needs jack.pc to build; jackd2 runs the JACK integration tests.
         # lilv links daw-plugins-lv2; mda-lv2 and x42-plugins are its test
-        # plugins; Xvfb lets its tests open plugin UIs.
+        # plugins; Xvfb lets its tests open plugin UIs. lv2-dev and
+        # lv2-examples are for the vendored livi's tests.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb
+            libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb \
+            lv2-dev lv2-examples
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The vendored livi is its own workspace with its own target dir.
+          workspaces: |
+            . -> target
+            third_party/livi -> target
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -34,12 +44,21 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --exclude daw-app --all-targets -- -D warnings
+      - name: clippy (release)
+        # cfg(debug_assertions) code can leave items unused in release builds,
+        # which the CMake install checks (Arch and neon jobs) build with
+        # RUSTFLAGS=-D warnings; this catches it in the fast job.
+        run: cargo clippy --release --workspace --exclude daw-app -- -D warnings
       - name: tests
         # -noreset: otherwise Xvfb resets when one test process disconnects
         # and drops the connection of a test opening a plugin UI in parallel.
         run: xvfb-run -a -s "-noreset" cargo nextest run --workspace --exclude daw-app --no-tests=warn
         env:
           DAW_REQUIRE_LV2_PLUGINS: 1
+      - name: vendored livi tests
+        # Its own workspace (see third_party/livi/KADENCE.md); its tests
+        # build small C plugins and use the LV2 example plugins.
+        run: cargo test --manifest-path third_party/livi/Cargo.toml
       - name: JACK integration tests
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &
@@ -90,13 +109,14 @@ jobs:
         run: cargo nextest run --workspace --no-tests=warn
       - name: CMake install layout
         run: ci/check-install.sh
+      # Built in its own step: building daw-app alone unifies features
+      # differently from the workspace test build, so it recompiles most of
+      # the tree, which can take longer than the screenshot timeout allows.
+      - name: Build kadence (debug)
+        run: cargo build -p daw-app
       - name: Screenshots (Breeze light and dark, 100% and 200%)
-        # Building one package resolves features differently from the
-        # workspace test build, so this rebuilds the app and much of its
-        # dependency tree (about 5 minutes on a runner).
-        timeout-minutes: 20
+        timeout-minutes: 10
         run: |
-          cargo build -p daw-app
           for scheme in BreezeLight BreezeDark; do
             for scale in 1 2; do
               XDG_CONFIG_HOME=$(mktemp -d) QT_QPA_PLATFORM=offscreen QT_SCALE_FACTOR=$scale \
@@ -114,16 +134,41 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:24.04
     steps:
-      - name: Install system packages
+      - name: Add the KDE neon archive
+        # archive.neon.kde.org has had outages (502s for hours). When it is
+        # unreachable on a pull request, skip this job with a warning instead
+        # of failing it; once it answers, build and test failures still fail.
+        id: neon
+        shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl gnupg
-          curl -fsSL --retry 5 --retry-delay 15 --retry-all-errors https://archive.neon.kde.org/public.key \
-            | gpg --dearmor -o /usr/share/keyrings/neon.gpg
-          echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
-            > /etc/apt/sources.list.d/neon.list
+          neon=https://archive.neon.kde.org
+          # Probe only neon, so an Ubuntu mirror hiccup still fails below.
+          if curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /tmp/neon.key "$neon/public.key" \
+              && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /dev/null "$neon/user/dists/noble/InRelease"; then
+            gpg --batch --yes --dearmor -o /usr/share/keyrings/neon.gpg /tmp/neon.key
+            echo "deb [signed-by=/usr/share/keyrings/neon.gpg] $neon/user noble main" \
+              > /etc/apt/sources.list.d/neon.list
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "::warning title=KDE neon archive unreachable::Skipping this job: $neon did not answer. This is not a failure of the code under test."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            # On main and scheduled runs, stay red so the gap gets noticed.
+            echo "::error title=KDE neon archive unreachable::$neon did not answer."
+            exit 1
+          fi
+      - name: Install system packages
+        if: steps.neon.outputs.available == 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential git cmake ninja-build clang pkg-config \
@@ -137,16 +182,22 @@ jobs:
             desktop-file-utils appstream xvfb
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - if: steps.neon.outputs.available == 'true'
+        uses: actions/checkout@v4
+      - if: steps.neon.outputs.available == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           key: neon
-      - uses: taiki-e/install-action@v2
+      - if: steps.neon.outputs.available == 'true'
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
       - name: clippy
+        if: steps.neon.outputs.available == 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
+        if: steps.neon.outputs.available == 'true'
         run: cargo nextest run --workspace --no-tests=warn
       - name: CMake install layout
+        if: steps.neon.outputs.available == 'true'
         run: ci/check-install.sh

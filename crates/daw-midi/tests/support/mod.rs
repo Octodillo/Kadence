@@ -4,7 +4,7 @@
 
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{Node, ProcessContext, TransportState};
-use daw_core::time::SampleTime;
+use daw_core::time::{SampleTime, Timeline};
 use daw_midi::player::{MidiPlayer, PlayerHandle, midi_player};
 use daw_midi::sequence::{SeqNote, Sequence};
 
@@ -13,6 +13,7 @@ pub struct Rig {
     pub handle: PlayerHandle,
     events_in: EventList,
     events_out: EventList,
+    timeline: Timeline,
 }
 
 impl Rig {
@@ -24,6 +25,7 @@ impl Rig {
             handle,
             events_in: EventList::with_capacity(1024),
             events_out: EventList::with_capacity(1024),
+            timeline: Timeline::default(),
         }
     }
 
@@ -55,12 +57,7 @@ impl Rig {
             let _ = self.events_in.push(*e);
         }
         self.events_out.clear();
-        let transport = TransportState {
-            playing,
-            position: SampleTime(pos),
-            bpm: 120.0,
-            sample_rate: 48_000.0,
-        };
+        let transport = TransportState::at(&self.timeline, playing, SampleTime(pos), 48_000.0);
         let mut audio_out: [&mut [f32]; 0] = [];
         self.player.process(&mut ProcessContext {
             frames,

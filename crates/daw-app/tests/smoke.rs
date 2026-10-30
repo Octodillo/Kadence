@@ -13,6 +13,7 @@ fn kadence(config_home: &Path) -> Command {
         .env("QT_FORCE_STDERR_LOGGING", "1")
         .env("XDG_CONFIG_HOME", config_home)
         .env("KADENCE_AUDIO", "stub")
+        .env_remove("KADENCE_SMOKE_TEST_CONFIG")
         .env_remove("QT_SCALE_FACTOR");
     cmd
 }
@@ -63,7 +64,9 @@ fn run(mut cmd: Command) -> std::process::Output {
 fn smoke_test_passes_and_saves_settings() {
     let config = tempdir("smoke");
     let mut cmd = kadence(&config);
-    cmd.arg("--smoke-test");
+    // `--smoke-test` only keeps its config where asked to (see kadence.cpp).
+    cmd.arg("--smoke-test")
+        .env("KADENCE_SMOKE_TEST_CONFIG", &config);
     let output = run(cmd);
     let log = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "smoke test failed:\n{log}");
@@ -87,7 +90,8 @@ fn smoke_test_passes_and_saves_settings() {
     // A second launch starts with the saved settings: device 1, 44.1 kHz,
     // 512 samples.
     let mut cmd = kadence(&config);
-    cmd.arg("--smoke-test");
+    cmd.arg("--smoke-test")
+        .env("KADENCE_SMOKE_TEST_CONFIG", &config);
     let output = run(cmd);
     let log = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "second run failed:\n{log}");
@@ -95,6 +99,26 @@ fn smoke_test_passes_and_saves_settings() {
         log.contains("startup audio: 1 44100 512"),
         "saved settings not loaded at startup:\n{log}"
     );
+}
+
+#[test]
+fn smoke_test_leaves_the_users_config_alone() {
+    // A user checking an install runs plain `kadence --smoke-test`; the
+    // audio settings it tries out must not replace the ones they saved.
+    let config = tempdir("user-config");
+    let saved = "[Audio]\nBufferSize=64\nDevice=stub:default\nSampleRate=96000\n";
+    std::fs::write(config.join("kadencerc"), saved).expect("write kadencerc");
+    let mut cmd = kadence(&config);
+    cmd.arg("--smoke-test");
+    let output = run(cmd);
+    let log = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "smoke test failed:\n{log}");
+    assert!(
+        log.contains("startup audio: 0 48000 256"),
+        "smoke test should start from a fresh config:\n{log}"
+    );
+    let rc = std::fs::read_to_string(config.join("kadencerc")).expect("read kadencerc");
+    assert_eq!(rc, saved, "smoke test changed the user's kadencerc");
 }
 
 #[test]

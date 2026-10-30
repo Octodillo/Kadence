@@ -26,7 +26,6 @@
   </categories>
   <provides>
     <binary>kadence</binary>
-    <mediatype>application/x-kadence-project</mediatype>
   </provides>
   <releases>
     <release version="0.1.0" date="2026-10-29" type="development"/>

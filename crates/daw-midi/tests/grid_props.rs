@@ -1,7 +1,7 @@
 //! Properties every grid must keep, for random meters and grids.
 
 use daw_core::time::TickTime;
-use daw_midi::grid::{Division, Feel, Grid, Meter, MeterPoint};
+use daw_midi::grid::{Division, Feel, Grid, LineKind, MAX_TICK, Meter, MeterPoint};
 use proptest::prelude::*;
 
 fn meter() -> impl Strategy<Value = Meter> {
@@ -9,7 +9,7 @@ fn meter() -> impl Strategy<Value = Meter> {
         (
             0i64..200_000,
             1u8..16,
-            prop::sample::select(vec![2u8, 4, 8, 16]),
+            prop::sample::select(vec![1u8, 2, 4, 8, 16, 32, 64]),
         ),
         0..5,
     )
@@ -30,6 +30,9 @@ fn grid() -> impl Strategy<Value = Grid> {
         prop_oneof![
             Just(Division::Bar),
             Just(Division::Beat),
+            // Most of these do not divide the bar, which is where steps
+            // become fractional and swing is rounded.
+            (1u16..=4096).prop_map(Division::Note),
             prop::sample::select(vec![1u16, 2, 4, 8, 16, 32, 64]).prop_map(Division::Note),
         ],
         prop::sample::select(vec![Feel::Straight, Feel::Triplet, Feel::Dotted]),
@@ -62,9 +65,10 @@ proptest! {
         if 2 * (t.0 - f.0) == n.0 - f.0 {
             prop_assert_eq!(s, n);
         }
-        // Every downbeat is a line.
+        // The last line of a bar is followed by the next downbeat.
         let bar = m.bar_at(t);
-        prop_assert_eq!(g.floor(bar.start, &m), bar.start);
+        prop_assert_eq!(g.next(g.prev(bar.end(), &m), &m), bar.end());
+        prop_assert_eq!(g.floor(bar.end(), &m), bar.end());
     }
 
     #[test]
@@ -73,13 +77,50 @@ proptest! {
     ) {
         let r = TickTime(start)..TickTime(start + len);
         let lines: Vec<_> = g.lines(r.clone(), &m).collect();
+        prop_assert_eq!(lines.is_empty(), g.ceil(r.start, &m) >= r.end);
         for w in lines.windows(2) {
+            prop_assert!(w[0].tick < w[1].tick);
             prop_assert_eq!(g.next(w[0].tick, &m), w[1].tick);
         }
         if let Some(first) = lines.first() {
             prop_assert_eq!(first.tick, g.ceil(r.start, &m));
         }
+        if let Some(last) = lines.last() {
+            prop_assert!(g.next(last.tick, &m) >= r.end);
+        }
         prop_assert!(lines.iter().all(|l| r.contains(&l.tick)));
+        for l in &lines {
+            prop_assert_eq!(l.kind == LineKind::Bar, m.bar_at(l.tick).start == l.tick);
+        }
+    }
+
+    #[test]
+    fn results_near_the_edges_stay_in_range(
+        m in meter(), g in grid(), d in 0i64..20_000,
+    ) {
+        let hi = TickTime(MAX_TICK - d);
+        let n = g.next(hi, &m);
+        prop_assert!(n.0 <= MAX_TICK);
+        prop_assert_eq!(g.floor(n, &m), n);
+        let lo = TickTime(-MAX_TICK + d);
+        let p = g.prev(lo, &m);
+        prop_assert!(p.0 >= -MAX_TICK);
+        prop_assert_eq!(g.floor(p, &m), p);
+        if p.0 > -MAX_TICK {
+            prop_assert_eq!(g.next(p, &m), g.ceil(lo, &m));
+        }
+        // lines() reaches both edges and agrees with next() there.
+        for r in [hi..TickTime(i64::MAX), TickTime(i64::MIN)..TickTime(lo.0 + 1)] {
+            let lines: Vec<_> = g.lines(r.clone(), &m).collect();
+            prop_assert!(!lines.is_empty());
+            prop_assert_eq!(lines[0].tick, g.ceil(r.start, &m));
+            for w in lines.windows(2) {
+                prop_assert_eq!(g.next(w[0].tick, &m), w[1].tick);
+            }
+            for l in &lines {
+                prop_assert_eq!(l.kind == LineKind::Bar, m.bar_at(l.tick).start == l.tick);
+            }
+        }
     }
 
     #[test]

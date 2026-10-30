@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use daw_core::event::EventList;
-use daw_core::node::{ProcessContext, TransportState};
+use daw_core::event::{Event, EventList, ParamId};
+use daw_core::node::ProcessContext;
 use daw_core::plugin::{PluginError, PluginInstance};
-use daw_core::time::SampleTime;
 use daw_plugins::PluginRegistry;
 
 use crate::protocol::{
@@ -71,8 +70,9 @@ pub fn run_host_child(
     };
     let result = host.run();
     host.stop_audio();
-    // Destroy the plugin here, on the thread that created it.
+    // Destroy the plugin here, on the thread that created it, then let its format clean up.
     drop(lock(&host.plugin).take());
+    registry.shutdown();
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -150,12 +150,17 @@ impl Host<'_> {
                 Err(e) => return Err(e),
             }
             if last_pump.elapsed() >= PUMP_INTERVAL {
-                if let Some(p) = lock(&self.plugin).as_mut() {
+                if let Some(p) = self.lock_inside().as_mut() {
                     p.on_main_thread();
                 }
                 last_pump = Instant::now();
             }
         }
+    }
+
+    /// Locks the plugin for the main thread, flagged in the audio block while held.
+    fn lock_inside(&self) -> InsidePlugin<'_> {
+        InsidePlugin::lock(&self.plugin, self.audio.as_ref().map(|a| a.shm.clone()))
     }
 
     fn handle(&mut self, request: Request, blob: &[u8]) -> (Reply, Vec<u8>) {
@@ -212,7 +217,7 @@ impl Host<'_> {
                     p.params().iter().map(WireParam::from).collect(),
                 ))
             }),
-            Request::ParamValue(id) => self.with_plugin(|p| Ok(Reply::Value(p.param_value(id)))),
+            Request::ParamValue(id) => self.with_plugin(|p| value_reply(id, p.param_value(id))),
             Request::SaveState => {
                 return match self.with_plugin(|p| p.save_state()) {
                     Ok(state) => (Reply::State, state),
@@ -237,7 +242,7 @@ impl Host<'_> {
         &self,
         f: impl FnOnce(&mut dyn PluginInstance) -> Result<T, PluginError>,
     ) -> Result<T, PluginError> {
-        match lock(&self.plugin).as_mut() {
+        match self.lock_inside().as_mut() {
             Some(p) => f(p.as_mut()),
             None => Err(PluginError::Load("no plugin loaded".into())),
         }
@@ -261,7 +266,9 @@ impl Host<'_> {
             None => old,
         };
         if self.prepared != (sample_rate, max_frames) {
-            if let Some(p) = lock(&self.plugin).as_mut() {
+            // The audio thread is stopped, so flag the block it restarts with: a cycle the
+            // application posts meanwhile waits for this.
+            if let Some(p) = InsidePlugin::lock(&self.plugin, block.clone()).as_mut() {
                 p.prepare(sample_rate, max_frames);
             }
             self.prepared = (sample_rate, max_frames);
@@ -280,6 +287,59 @@ impl Host<'_> {
     fn stop_audio(&mut self) -> Option<Arc<Shm>> {
         self.audio.take().map(AudioThread::stop)
     }
+}
+
+/// The plugin locked by the host's main thread. [`Header::main_in_plugin`] is set only once
+/// the lock is held, and cleared before it is released: a main thread still waiting for an
+/// audio thread stuck in the plugin must leave the hang timeout in force.
+///
+/// [`Header::main_in_plugin`]: crate::shm::Header::main_in_plugin
+struct InsidePlugin<'a> {
+    guard: MutexGuard<'a, Option<Box<dyn PluginInstance>>>,
+    shm: Option<Arc<Shm>>,
+}
+
+impl<'a> InsidePlugin<'a> {
+    fn lock(plugin: &'a SharedPlugin, shm: Option<Arc<Shm>>) -> Self {
+        let guard = lock(plugin);
+        if let Some(shm) = &shm {
+            shm.header().main_in_plugin.store(1, Ordering::SeqCst);
+        }
+        Self { guard, shm }
+    }
+}
+
+impl std::ops::Deref for InsidePlugin<'_> {
+    type Target = Option<Box<dyn PluginInstance>>;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for InsidePlugin<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for InsidePlugin<'_> {
+    // Runs before the guard field drops, so the flag is clear by the time the lock is free.
+    fn drop(&mut self) {
+        if let Some(shm) = &self.shm {
+            shm.header().main_in_plugin.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+/// JSON has no NaN or infinity, so they would not cross the wire: an infinity is clamped, and
+/// NaN (no value) is an error, which makes the application fall back to the last value it knows.
+fn value_reply(id: ParamId, value: f64) -> Result<Reply, PluginError> {
+    if value.is_nan() {
+        return Err(PluginError::Load(format!(
+            "the plugin has no value for parameter {id}"
+        )));
+    }
+    Ok(Reply::Value(value.clamp(f64::MIN, f64::MAX)))
 }
 
 struct AudioThread {
@@ -333,6 +393,8 @@ fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: 
     let cap = layout.event_capacity as usize;
     let mut events_in = EventList::with_capacity(cap);
     let mut events_out = EventList::with_capacity(cap);
+    // Events of a skipped cycle, delivered at the start of the next one the plugin processes.
+    let mut skipped = EventList::with_capacity(cap);
     let n_in = layout.audio_in as usize;
     let n_out = layout.audio_out as usize;
     loop {
@@ -348,17 +410,16 @@ fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: 
         }
 
         let frames = h.frames.load(Ordering::Relaxed).min(layout.max_frames) as usize;
-        let transport = TransportState {
-            playing: h.playing.load(Ordering::Relaxed) != 0,
-            position: SampleTime(h.position.load(Ordering::Relaxed) as i64),
-            bpm: f64::from_bits(h.bpm.load(Ordering::Relaxed)),
-            sample_rate: f64::from_bits(h.sample_rate.load(Ordering::Relaxed)),
-        };
+        let transport = h.read_transport();
         let flags = h.flags.swap(0, Ordering::Relaxed);
 
         // SAFETY: the state word is REQUEST, so the buffers are ours until we store DONE.
         let records_in = unsafe { shm.events_in() };
         events_in.clear();
+        for e in skipped.iter() {
+            let _ = events_in.push(*e);
+        }
+        skipped.clear();
         for i in 0..(h.events_in.load(Ordering::Relaxed) as usize).min(cap) {
             if let Some(mut e) = decode_event(shm::record(records_in, i)) {
                 e.frame = e.frame.min(frames.saturating_sub(1) as u32);
@@ -403,7 +464,17 @@ fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: 
                     };
                     p.process(&mut ctx);
                 }
-                None => outs[..n_out].iter_mut().for_each(|o| o.fill(0.0)),
+                None => {
+                    outs[..n_out].iter_mut().for_each(|o| o.fill(0.0));
+                    // The application counts the cycle as done, so keep what it asked for: a
+                    // note-off or a reset is late rather than lost.
+                    for e in events_in.iter() {
+                        let _ = skipped.push(Event { frame: 0, ..*e });
+                    }
+                    if flags & FLAG_RESET != 0 {
+                        h.flags.fetch_or(FLAG_RESET, Ordering::Relaxed);
+                    }
+                }
             }
         }
 
@@ -418,5 +489,268 @@ fn audio_loop(shm: &Shm, plugin: &SharedPlugin, quit: &AtomicBool, rt_priority: 
         h.completed.fetch_add(1, Ordering::Relaxed);
         h.state.store(DONE, Ordering::Release);
         futex_wake(&h.state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU32;
+
+    use daw_core::event::EventKind;
+    use daw_core::node::{Node, PortLayout};
+    use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginFormatKind};
+
+    use super::*;
+    use crate::shm::Layout;
+
+    /// Records what reaches it; `on_main_thread` notes whether the host flagged that its main
+    /// thread is inside the plugin.
+    #[derive(Default)]
+    struct Probe {
+        shm: Option<Arc<Shm>>,
+        in_plugin: Arc<AtomicU32>,
+        resets: Arc<AtomicU32>,
+        events: Arc<Mutex<Vec<Event>>>,
+        value: f64,
+    }
+
+    impl Node for Probe {
+        fn ports(&self) -> PortLayout {
+            PortLayout::default()
+        }
+        fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+        fn process(&mut self, ctx: &mut ProcessContext) {
+            self.events
+                .lock()
+                .unwrap()
+                .extend(ctx.events_in.iter().copied());
+        }
+        fn reset(&mut self) {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl PluginInstance for Probe {
+        fn descriptor(&self) -> &PluginDescriptor {
+            static D: std::sync::OnceLock<PluginDescriptor> = std::sync::OnceLock::new();
+            D.get_or_init(|| PluginDescriptor {
+                format: PluginFormatKind::Clap,
+                id: "probe".into(),
+                name: "probe".into(),
+                vendor: String::new(),
+                path: "/probe".into(),
+                is_instrument: false,
+                ports: (0, 0),
+            })
+        }
+        fn params(&self) -> Vec<ParamInfo> {
+            Vec::new()
+        }
+        fn param_value(&self, _id: u32) -> f64 {
+            self.value
+        }
+        fn save_state(&mut self) -> Result<Vec<u8>, PluginError> {
+            Ok(Vec::new())
+        }
+        fn load_state(&mut self, _data: &[u8]) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn close_editor(&mut self) {}
+        fn on_main_thread(&mut self) {
+            if let Some(shm) = &self.shm {
+                let flag = shm.header().main_in_plugin.load(Ordering::SeqCst);
+                self.in_plugin.fetch_max(flag + 1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn block() -> Arc<Shm> {
+        let layout = Layout {
+            audio_in: 0,
+            audio_out: 0,
+            max_frames: 64,
+            event_capacity: 16,
+        };
+        let (shm, path) = Shm::create(&std::env::temp_dir(), layout).unwrap();
+        std::fs::remove_file(path).unwrap();
+        Arc::new(shm)
+    }
+
+    fn shared(probe: Probe) -> SharedPlugin {
+        Arc::new(Mutex::new(Some(Box::new(probe))))
+    }
+
+    /// Posts one cycle with `events` and waits until the host is done with it.
+    fn cycle(shm: &Shm, events: &[Event], flags: u32) {
+        let h = shm.header();
+        // SAFETY: the state word is not REQUEST, so the buffers are ours.
+        let records = unsafe { shm.events_in() };
+        for (i, e) in events.iter().enumerate() {
+            encode_event(e, shm::record(records, i));
+        }
+        h.events_in.store(events.len() as u32, Ordering::Relaxed);
+        h.frames.store(16, Ordering::Relaxed);
+        h.flags.fetch_or(flags, Ordering::Relaxed);
+        h.state.store(REQUEST, Ordering::Release);
+        futex_wake(&h.state);
+        let start = Instant::now();
+        loop {
+            let state = h.state.load(Ordering::Acquire);
+            if state == DONE {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "cycle never done"
+            );
+            futex_wait(&h.state, state, Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn the_main_thread_pump_is_flagged_as_inside_the_plugin() {
+        let shm = block();
+        let in_plugin = Arc::new(AtomicU32::new(0));
+        let plugin = shared(Probe {
+            shm: Some(shm.clone()),
+            in_plugin: in_plugin.clone(),
+            ..Probe::default()
+        });
+        let registry = PluginRegistry::new();
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let mut host = Host {
+            registry: &registry,
+            stream,
+            plugin: plugin.clone(),
+            audio: Some(AudioThread::start(shm.clone(), plugin, None)),
+            prepared: (48_000.0, 64),
+            rt_priority: None,
+        };
+        // The host pumps between reads; close the socket once it has pumped at least once.
+        let closer = {
+            let in_plugin = in_plugin.clone();
+            std::thread::spawn(move || {
+                while in_plugin.load(Ordering::SeqCst) == 0 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                drop(peer);
+            })
+        };
+        host.run().unwrap();
+        closer.join().unwrap();
+        host.stop_audio();
+        // 2 means the flag was set while the pump ran.
+        assert_eq!(in_plugin.load(Ordering::SeqCst), 2);
+        assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_main_thread_waiting_on_a_stuck_audio_thread_is_not_flagged_as_inside_the_plugin() {
+        let shm = block();
+        let plugin = shared(Probe::default());
+        let registry = PluginRegistry::new();
+        let (stream, peer) = UnixStream::pair().unwrap();
+        // Holding the lock stands in for an audio thread stuck in process().
+        let stuck = lock(&plugin);
+        std::thread::scope(|s| {
+            let pumping = s.spawn(|| {
+                let mut host = Host {
+                    registry: &registry,
+                    stream,
+                    plugin: plugin.clone(),
+                    audio: Some(AudioThread::start(shm.clone(), plugin.clone(), None)),
+                    prepared: (48_000.0, 64),
+                    rt_priority: None,
+                };
+                host.run().unwrap();
+                host.stop_audio();
+            });
+            // Several pump intervals: the pump is blocked on the lock by now.
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(200) {
+                assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(peer);
+            drop(stuck);
+            pumping.join().unwrap();
+        });
+        assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_skipped_cycle_keeps_its_events_and_reset_for_the_next() {
+        let shm = block();
+        let (resets, events) = (Arc::new(AtomicU32::new(0)), Arc::default());
+        let plugin = shared(Probe {
+            resets: resets.clone(),
+            events: Arc::clone(&events),
+            ..Probe::default()
+        });
+        let audio = AudioThread::start(shm.clone(), plugin.clone(), None);
+        let off = Event {
+            frame: 3,
+            kind: EventKind::NoteOff {
+                channel: 0,
+                key: 60,
+                velocity: 0.0,
+                note_id: -1,
+            },
+        };
+
+        // The main thread is in a slow call: the cycle is skipped.
+        let guard = lock(&plugin);
+        shm.header().main_busy.store(1, Ordering::SeqCst);
+        cycle(&shm, &[off], FLAG_RESET);
+        shm.header().main_busy.store(0, Ordering::SeqCst);
+        drop(guard);
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+
+        // The next cycle the plugin processes gets them, at its start.
+        cycle(&shm, &[], 0);
+        audio.stop();
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+        assert_eq!(*events.lock().unwrap(), [Event { frame: 0, ..off }]);
+    }
+
+    #[test]
+    fn non_finite_param_values_reach_the_application_as_something_it_can_read() {
+        let registry = PluginRegistry::new();
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let mut host = Host {
+            registry: &registry,
+            stream,
+            plugin: Arc::new(Mutex::new(None)),
+            audio: None,
+            prepared: (48_000.0, 64),
+            rt_priority: None,
+        };
+        for (value, want) in [
+            (f64::NAN, None),
+            (f64::INFINITY, Some(f64::MAX)),
+            (f64::NEG_INFINITY, Some(f64::MIN)),
+            (0.5, Some(0.5)),
+        ] {
+            *lock(&host.plugin) = Some(Box::new(Probe {
+                value,
+                ..Probe::default()
+            }));
+            let (reply, _) = host.handle(Request::ParamValue(1), &[]);
+            let mut wire = Vec::new();
+            write_frame(&mut wire, &Response { latency: 0, reply }, &[]).unwrap();
+            let (response, _): (Response, _) = crate::protocol::read_frame(&wire[..]).unwrap();
+            match (response.reply, want) {
+                (Reply::Value(v), Some(want)) => assert_eq!(v, want),
+                (Reply::Err(_), None) => {}
+                (other, _) => panic!("{value}: {other:?}"),
+            }
+        }
     }
 }

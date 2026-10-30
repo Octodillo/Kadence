@@ -5,10 +5,12 @@ use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_core::event::EventList;
-use daw_core::time::{PPQ, SampleTime, TickTime};
+use daw_core::time::{PPQ, SampleTime, TempoMap, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
 use daw_media::{AudioData, WavFormat, write_wav};
-use daw_model::commands::{AddClip, AddTrack, ClipField, MoveClip, SetClip, SetTrack, TrackField};
+use daw_model::commands::{
+    AddClip, AddTrack, ClipField, MoveClip, SetClip, SetTempo, SetTrack, TrackField,
+};
 use daw_model::{
     AudioClip, Clip, ClipContent, ClipId, Document, Project, Track, TrackId, TrackKind,
 };
@@ -450,6 +452,19 @@ fn split_clip_plays_through_the_cut_without_a_dip() {
             cut - 128 + i
         );
     }
+}
+
+#[test]
+fn tempo_and_meter_edits_reach_the_engine() {
+    let mut rig = Rig::new(f64::INFINITY);
+    let mut tempo = rig.doc.project().tempo.clone();
+    tempo.tempos[0].bpm = 90.0;
+    tempo.meters[0].numerator = 3;
+    rig.doc.execute(SetTempo { tempo }).unwrap();
+    rig.sync();
+    let timeline = rig.session.controller().timeline();
+    assert_eq!(timeline.tempo.bpm_at(TickTime(0)), 90.0);
+    assert_eq!(timeline.meter.points()[0].numerator, 3);
 }
 
 #[test]

@@ -168,9 +168,13 @@ impl Session {
         self.master = Some(snapshot.master.id);
         let tempo_changed = self.tempo_data.as_ref() != Some(&snapshot.tempo);
         if tempo_changed {
-            self.tempo = tempo_map(&snapshot.tempo);
+            // Tempo and time signatures, so the metronome and plugins see
+            // the project's bars and beats.
+            let timeline = daw_midi::model::timeline(&snapshot.tempo);
+            self.tempo = timeline.tempo.clone();
+            // Marked as sent only once it is, so a full queue retries next sync.
+            self.controller.set_timeline(timeline)?;
             self.tempo_data = Some(snapshot.tempo.clone());
-            self.controller.set_bpm(self.tempo.bpm_at(TickTime(0)))?;
             self.apply_loop()?;
         }
         let structure = build::Structure::of(snapshot, &self.suspended);

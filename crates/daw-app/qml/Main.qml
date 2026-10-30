@@ -50,11 +50,18 @@ Kirigami.ApplicationWindow {
         }
     ]
 
+    // True when the user tabbed to a button (not clicked it), so Space
+    // should press that button rather than start playback.
+    readonly property bool buttonHasKeyboardFocus: activeFocusItem instanceof QQC2.AbstractButton
+                                                   && activeFocusItem.visualFocus
+
     // Shared by every page's toolbar.
     readonly property Kirigami.Action playAction: Kirigami.Action {
         text: Project.playing ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Play")
         icon.name: Project.playing ? "media-playback-stop" : "media-playback-start"
-        shortcut: "Space"
+        // A window shortcut gets Space before the focused control does, so
+        // step aside while a button has keyboard focus and let Space press it.
+        shortcut: root.buttonHasKeyboardFocus ? "" : "Space"
         displayHint: Kirigami.DisplayHint.KeepVisible
         onTriggered: Project.togglePlay()
     }
@@ -231,6 +238,7 @@ Kirigami.ApplicationWindow {
     Component {
         id: aboutComponent
         Kirigami.AboutPage {
+            objectName: "aboutPage"
             aboutData: root.aboutData
         }
     }
@@ -253,6 +261,13 @@ Kirigami.ApplicationWindow {
     }
 
     function openAbout(): Item {
+        // The drawer stays clickable next to the layer on a wide window, so
+        // don't stack a second About page on the first.
+        // instanceof does not match QML-defined Kirigami types, so compare
+        // the objectName set on aboutComponent instead.
+        if (pageStack.layers.currentItem?.objectName === "aboutPage") {
+            return pageStack.layers.currentItem;
+        }
         return pageStack.layers.push(aboutComponent);
     }
 

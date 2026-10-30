@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Vendored with its own workspace and tests; see third_party/livi/KADENCE.md.
+exclude = ["third_party/livi"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +22,10 @@ hound = "3.5"
 assert_no_alloc = { version = "1", features = ["warn_debug"] }
 loom = "0.7"
 proptest = "1"
+
+[patch.crates-io]
+# livi with Kadence's fixes; see third_party/livi/KADENCE.md.
+livi = { path = "third_party/livi" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

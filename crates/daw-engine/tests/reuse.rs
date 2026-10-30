@@ -11,7 +11,7 @@ use daw_engine::{
     AutomationLane, AutomationPoint, CompileError, Curve, EngineConfig, EngineController,
     EngineProcessor, GraphDesc, NodeKey, NodeMeter, RenderOptions, render,
 };
-use support::{Counter, Dc};
+use support::{Counter, Dc, Delay};
 
 const SYNTH: NodeKey = NodeKey(0x01_0000);
 const TRACK: NodeKey = NodeKey(42);
@@ -217,6 +217,36 @@ fn automation_is_sample_accurate_and_block_size_independent() {
     for bs in [1, 100, 256, 1024] {
         assert_eq!(automated(bs, Curve::Linear), ramp, "block size {bs}");
     }
+}
+
+#[test]
+fn automation_is_delayed_like_the_audio_behind_a_latent_node() {
+    // A look-ahead plugin before the strip: the strip's input is 300 samples
+    // late, so its gain change must be too, or it lands before the audio.
+    let mut g = GraphDesc::new(0, 1);
+    let dc = g.add_device("dc", Box::new(Dc(1.0)));
+    let la = g.add_device("lookahead", Box::new(Delay::new(300)));
+    let track = g.add_track("track", 1);
+    g.connect(dc, la);
+    g.connect(la, track);
+    let pt = |t, value| AutomationPoint {
+        time: SampleTime(t),
+        value,
+        curve: Curve::Step,
+    };
+    g.automate(
+        track,
+        Strip::GAIN,
+        AutomationLane::new(vec![pt(0, 1.0), pt(1000, 0.0)]),
+    );
+    let opts = RenderOptions {
+        block_size: 64,
+        frames: 2000,
+        ..Default::default()
+    };
+    let out = render(g, &opts).unwrap();
+    assert!(out[..1000].iter().all(|&v| v == 1.0));
+    assert!(out[1000..].iter().all(|&v| v == 0.0));
 }
 
 #[test]

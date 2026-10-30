@@ -22,8 +22,8 @@ mod sync;
 pub mod time;
 
 pub use event::{Event, EventKind, EventList, NoteId, ParamId};
-pub use node::{Node, PortLayout, ProcessContext, TransportState};
+pub use node::{Node, PortLayout, ProcessContext, TransportLoop, TransportState};
 pub use plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
-pub use time::{PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime};
+pub use time::{MusicalPosition, PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline};

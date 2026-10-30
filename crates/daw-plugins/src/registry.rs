@@ -96,6 +96,14 @@ impl PluginRegistry {
             .find(|p| p.format == *kind && p.id == id)
     }
 
+    /// Lets every format clean up before the process exits. Call it once, after dropping
+    /// every instance.
+    pub fn shutdown(&self) {
+        for format in &self.formats {
+            format.shutdown();
+        }
+    }
+
     pub fn instantiate(
         &self,
         d: &PluginDescriptor,
@@ -201,4 +209,46 @@ fn scan_parallel(
         .into_iter()
         .map(|r| r.into_inner().unwrap().expect("every bundle was scanned"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct Counting(PluginFormatKind, Arc<AtomicU32>);
+
+    impl PluginFormat for Counting {
+        fn kind(&self) -> PluginFormatKind {
+            self.0.clone()
+        }
+        fn default_search_paths(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        fn scan(&self, _path: &Path) -> Vec<PluginDescriptor> {
+            Vec::new()
+        }
+        fn shutdown(&self) {
+            self.1.fetch_add(1, Ordering::Relaxed);
+        }
+        fn instantiate(
+            &self,
+            _d: &PluginDescriptor,
+            _sample_rate: f64,
+            _max_frames: u32,
+        ) -> Result<Box<dyn PluginInstance>, PluginError> {
+            Err(PluginError::Load("test format".into()))
+        }
+    }
+
+    #[test]
+    fn shutdown_reaches_every_format() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut registry = PluginRegistry::new();
+        registry.register(Box::new(Counting(PluginFormatKind::Vst3, calls.clone())));
+        registry.register(Box::new(Counting(PluginFormatKind::Clap, calls.clone())));
+        registry.shutdown();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
 }

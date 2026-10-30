@@ -20,7 +20,9 @@ use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance}
 use daw_plugins::Scanner;
 
 use crate::child::HOST_ARG;
-use crate::protocol::{InstanceInfo, Reply, Request, Response, blob_fits, read_frame, write_frame};
+use crate::protocol::{
+    FrameReader, InstanceInfo, Reply, Request, Response, blob_fits, write_frame,
+};
 use crate::shm::{
     self, DONE, EVENT_CAPACITY, FLAG_RESET, Layout, REQUEST, Shm, decode_event, encode_event,
     futex_wait, futex_wake, shm_dir,
@@ -74,10 +76,12 @@ pub type CrashHook = Arc<dyn Fn(SandboxMonitor) + Send + Sync>;
 #[derive(Clone)]
 pub struct SandboxConfig {
     pub launcher: HostLauncher,
-    /// How long starting the host and loading the plugin may take. Default 30 s.
+    /// How long starting the host and loading the plugin, or saving or loading its state, may
+    /// take. Default 30 s.
     pub load_timeout: Duration,
-    /// How long other main-thread calls (state, params, editor, prepare) may take before the
-    /// host is treated as hung. Default 10 s.
+    /// How long other main-thread calls (params, editor, prepare) may take before the host is
+    /// treated as hung, and how long an audio cycle may wait while the host's main thread is in
+    /// the plugin. Default 10 s.
     pub call_timeout: Duration,
     /// How long one audio cycle may stay unfinished before the host is treated as hung and
     /// killed. Default 2 s.
@@ -182,8 +186,8 @@ impl Shared {
         true
     }
 
-    /// Calls the crash hook once for `generation`, if it crashed and is still current. Only the
-    /// watchdog calls this, so the hook never runs on a thread that holds the instance.
+    /// Calls the crash hook once for `generation`, if it crashed and is still current. Only
+    /// watchdog threads call this, so the hook never runs on a thread that holds the instance.
     fn notify(self: &Arc<Self>, generation: u64) {
         let current = self.generation.load(Ordering::Acquire) == generation;
         if current
@@ -283,6 +287,38 @@ fn socket_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+/// Creates a new directory in `parent` that only we can enter. Its name is unpredictable, and a
+/// name already taken (by another user in a shared `/tmp`, say) is skipped.
+fn create_socket_dir(parent: &Path) -> io::Result<PathBuf> {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    for _ in 0..64 {
+        let mut random = [0u8; 8];
+        // SAFETY: writes at most `random.len()` bytes into `random`.
+        let got = unsafe { libc::getrandom(random.as_mut_ptr().cast(), random.len(), 0) };
+        let random = if got == random.len() as isize {
+            u64::from_ne_bytes(random)
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64)
+        };
+        let dir = parent.join(format!(
+            "kadence-plugin-{}-{}-{random:016x}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free name for the host socket directory",
+    ))
+}
+
 fn kill(child: &Mutex<Child>) {
     let mut child = locked(child);
     let _ = child.kill();
@@ -298,20 +334,11 @@ impl Link {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<(Self, InstanceInfo, u32), PluginError> {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let load = |e: String| PluginError::Load(e);
 
         // The socket lives in a directory only we can enter, so no other user can connect to
         // it before our host does.
-        let dir = socket_dir().join(format!(
-            "kadence-plugin-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
+        let dir = create_socket_dir(&socket_dir())
             .map_err(|e| load(format!("cannot create the host socket directory: {e}")))?;
         let dir = RemoveOnDrop(dir);
         let socket = RemoveOnDrop(dir.0.join("host.sock"));
@@ -411,10 +438,20 @@ impl Link {
         let spawned = {
             let (child, watched, stop, shared) =
                 (child.clone(), watched.clone(), stop.clone(), shared.clone());
-            let hang_timeout = config.hang_timeout;
+            let (hang_timeout, call_timeout) = (config.hang_timeout, config.call_timeout);
             std::thread::Builder::new()
                 .name("plugin-watchdog".into())
-                .spawn(move || watchdog(&child, &watched, &stop, &shared, generation, hang_timeout))
+                .spawn(move || {
+                    watchdog(
+                        &child,
+                        &watched,
+                        &stop,
+                        &shared,
+                        generation,
+                        hang_timeout,
+                        call_timeout,
+                    )
+                })
         };
         let watchdog = match spawned {
             Ok(handle) => handle,
@@ -489,17 +526,63 @@ fn map_block(
     }
 }
 
-/// One request and its response.
+/// One request and its response, all within `timeout`, however the host paces its bytes.
 fn call(
     control: &UnixStream,
     request: &Request,
     blob: &[u8],
     timeout: Duration,
 ) -> io::Result<(Response, Vec<u8>)> {
-    control.set_read_timeout(Some(timeout.max(Duration::from_millis(1))))?;
-    control.set_write_timeout(Some(timeout.max(Duration::from_millis(1))))?;
-    write_frame(control, request, blob)?;
-    read_frame(control)
+    let mut stream = Deadline {
+        stream: control,
+        at: Instant::now() + timeout.max(Duration::from_millis(1)),
+    };
+    write_frame(&mut stream, request, blob)?;
+    // The reader grows its buffer as bytes arrive, rather than trusting the announced length.
+    let mut reader = FrameReader::default();
+    loop {
+        if let Some(frame) = reader.poll(&mut stream)? {
+            return Ok(frame);
+        }
+        stream.remaining()?;
+    }
+}
+
+/// A stream whose reads and writes all end by one deadline: each syscall gets the time left.
+struct Deadline<'a> {
+    stream: &'a UnixStream,
+    at: Instant,
+}
+
+impl Deadline<'_> {
+    fn remaining(&self) -> io::Result<Duration> {
+        let left = self.at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the plugin host did not answer in time",
+            ));
+        }
+        Ok(left)
+    }
+}
+
+impl io::Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        (&mut &*self.stream).read(buf)
+    }
+}
+
+impl io::Write for Deadline<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        (&mut &*self.stream).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn watchdog(
@@ -509,6 +592,7 @@ fn watchdog(
     shared: &Arc<Shared>,
     generation: u64,
     hang_timeout: Duration,
+    call_timeout: Duration,
 ) {
     let mut block: Option<Arc<Shm>> = None;
     let mut last_completed = 0;
@@ -548,7 +632,14 @@ fn watchdog(
             && h.main_busy.load(Ordering::SeqCst) == 0;
         if stalled {
             let since = *stalled_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= hang_timeout && shared.crash(generation, CrashReason::Hung) {
+            // The cycle may be waiting for the host's main thread, which is busy in the plugin
+            // (its main-thread pump, say): that is as slow as a main-thread call may be.
+            let limit = if h.main_in_plugin.load(Ordering::SeqCst) != 0 {
+                call_timeout.max(hang_timeout)
+            } else {
+                hang_timeout
+            };
+            if since.elapsed() >= limit && shared.crash(generation, CrashReason::Hung) {
                 let _ = locked(child).kill();
             }
         } else {
@@ -566,6 +657,28 @@ struct TrackedParam {
     value: f64,
     /// Changed since the last saved or loaded state.
     dirty: bool,
+}
+
+/// What to track for `params`: the automatable ones, sorted by id, taking value and dirty flag
+/// from `old` (sorted by id too) where it has them.
+fn tracked_params(params: &[ParamInfo], old: &[TrackedParam]) -> Vec<TrackedParam> {
+    let mut tracked: Vec<_> = params
+        .iter()
+        .filter(|p| p.automatable)
+        .map(|p| TrackedParam {
+            id: p.id,
+            value: p.default,
+            dirty: false,
+        })
+        .collect();
+    tracked.sort_by_key(|t| t.id);
+    tracked.dedup_by_key(|t| t.id);
+    for t in &mut tracked {
+        if let Ok(i) = old.binary_search_by_key(&t.id, |o| o.id) {
+            *t = old[i];
+        }
+    }
+    tracked
 }
 
 /// A [`PluginInstance`] whose plugin runs in its own host process.
@@ -659,9 +772,14 @@ impl SandboxedInstance {
         ) {
             Ok(v) => v,
             Err(e) => {
-                let mut reason = self.shared.reason();
-                *reason = Some(CrashReason::Lost(e.to_string()));
+                *self.shared.reason() = Some(CrashReason::Lost(e.to_string()));
                 self.shared.crashed.store(true, Ordering::Release);
+                // No watchdog runs for this generation, so tell the hook from a thread of our
+                // own: never this one, which holds the instance.
+                let shared = self.shared.clone();
+                let _ = std::thread::Builder::new()
+                    .name("plugin-watchdog".into())
+                    .spawn(move || shared.notify(generation));
                 return Err(e);
             }
         };
@@ -669,22 +787,24 @@ impl SandboxedInstance {
         self.latency = latency;
         let kept = std::mem::take(&mut self.rt.tracked);
         self.adopt(&info);
+        // Events carried for the old host are kept; a late cycle's outputs are gone with it.
+        self.rt.late_pending = false;
+        let restored = match self.state.clone() {
+            Some(state) => self
+                .control_with(Request::LoadState, &state, self.config.load_timeout)
+                .map(|(_, _, latency)| {
+                    self.latency = latency;
+                    // The state can bring parameters the freshly loaded plugin did not have.
+                    self.refresh_params();
+                }),
+            None => Ok(()),
+        };
         for t in kept.into_iter().filter(|t| t.dirty) {
             if let Ok(i) = self.rt.tracked.binary_search_by_key(&t.id, |p| p.id) {
                 self.rt.tracked[i] = t;
             }
         }
-        // Events carried for the old host are kept; a late cycle's outputs are gone with it.
-        self.rt.late_pending = false;
         self.rt.resend = self.rt.tracked.iter().any(|t| t.dirty).then_some(0);
-        let restored = match self.state.clone() {
-            Some(state) => self
-                .control(Request::LoadState, &state)
-                .map(|(_, _, latency)| {
-                    self.latency = latency;
-                }),
-            None => Ok(()),
-        };
         if self.editor_open {
             self.editor_open = false;
             let _ = self.open_editor();
@@ -696,18 +816,17 @@ impl SandboxedInstance {
         self.ports = (&info.ports).into();
         self.params = info.params.iter().map(ParamInfo::from).collect();
         self.has_editor = info.has_editor;
-        self.rt.tracked = self
-            .params
-            .iter()
-            .filter(|p| p.automatable)
-            .map(|p| TrackedParam {
-                id: p.id,
-                value: p.default,
-                dirty: false,
-            })
-            .collect();
-        self.rt.tracked.sort_by_key(|t| t.id);
-        self.rt.tracked.dedup_by_key(|t| t.id);
+        self.rt.tracked = tracked_params(&self.params, &[]);
+    }
+
+    /// Asks the host for its parameter list, which loading state can change, and tracks that
+    /// list, keeping what was tracked for the parameters still in it.
+    fn refresh_params(&mut self) {
+        if let Ok((Reply::Params(params), _, _)) = self.control(Request::Params, &[]) {
+            self.params = params.iter().map(ParamInfo::from).collect();
+            self.rt.tracked = tracked_params(&self.params, &self.rt.tracked);
+            self.rt.resend = self.rt.tracked.iter().any(|t| t.dirty).then_some(0);
+        }
     }
 
     fn running(&self) -> Option<&Link> {
@@ -720,10 +839,20 @@ impl SandboxedInstance {
     /// lost; a plugin error is returned as is.
     /// Returns the reply, its blob and the plugin's latency after the call.
     fn control(&self, request: Request, blob: &[u8]) -> Result<(Reply, Vec<u8>, u32), PluginError> {
+        self.control_with(request, blob, self.config.call_timeout)
+    }
+
+    /// [`Self::control`] with its own timeout.
+    fn control_with(
+        &self,
+        request: Request,
+        blob: &[u8],
+        timeout: Duration,
+    ) -> Result<(Reply, Vec<u8>, u32), PluginError> {
         let Some(link) = self.running() else {
             return Err(PluginError::Load(self.not_running()));
         };
-        match call(&link.control, &request, blob, self.config.call_timeout) {
+        match call(&link.control, &request, blob, timeout) {
             Ok((response, blob)) => match response.reply {
                 Reply::Err(e) => Err(e.into()),
                 reply => Ok((reply, blob, response.latency)),
@@ -749,6 +878,22 @@ impl SandboxedInstance {
             t.dirty = false;
         }
         self.rt.resend = None;
+    }
+
+    /// After a save, what the saved state holds is clean. Values still waiting to be re-sent
+    /// after a reload, or carried to the next cycle, have not reached the plugin and so are not
+    /// in that state: they stay dirty, and still go out.
+    fn mark_saved(&mut self) {
+        let pending = self.rt.resend.unwrap_or(self.rt.tracked.len());
+        let carry = &self.rt.carry;
+        for (i, t) in self.rt.tracked.iter_mut().enumerate() {
+            let carried = carry
+                .iter()
+                .any(|e| matches!(e.kind, EventKind::ParamValue { param, .. } if param == t.id));
+            if i < pending && !carried {
+                t.dirty = false;
+            }
+        }
     }
 
     fn silence(ctx: &mut ProcessContext, from: usize) {
@@ -896,14 +1041,8 @@ fn run_cycle(
     }
     h.events_in.store(count as u32, Ordering::Relaxed);
 
-    let t = ctx.transport;
     h.frames.store(n as u32, Ordering::Relaxed);
-    h.playing.store(u32::from(t.playing), Ordering::Relaxed);
-    h.position
-        .store((t.position.0 + offset as i64) as u64, Ordering::Relaxed);
-    h.bpm.store(t.bpm.to_bits(), Ordering::Relaxed);
-    h.sample_rate
-        .store(t.sample_rate.to_bits(), Ordering::Relaxed);
+    h.write_transport(&ctx.transport.advanced(offset as u32));
     if std::mem::take(&mut rt.reset_pending) {
         h.flags.fetch_or(FLAG_RESET, Ordering::Relaxed);
     }
@@ -1097,17 +1236,18 @@ impl PluginInstance for SandboxedInstance {
                 .clone()
                 .ok_or_else(|| PluginError::State(self.not_running()));
         }
-        match self.control(Request::SaveState, &[])? {
+        match self.control_with(Request::SaveState, &[], self.config.load_timeout)? {
             (Reply::State, state, _) => {
                 self.state = Some(state.clone());
-                self.mark_clean();
+                self.mark_saved();
                 Ok(state)
             }
             (other, _, _) => Err(PluginError::State(format!("unexpected reply {other:?}"))),
         }
     }
 
-    /// While the host is down, the state is kept and applied on reload.
+    /// While the host is down, the state is kept and applied on reload. So is a state the host
+    /// dies or hangs while loading, though that still returns the error.
     fn load_state(&mut self, data: &[u8]) -> Result<(), PluginError> {
         if !blob_fits(data.len()) {
             return Err(PluginError::State(format!(
@@ -1120,14 +1260,22 @@ impl PluginInstance for SandboxedInstance {
             self.mark_clean();
             return Ok(());
         }
-        let (_, _, latency) = self.control(Request::LoadState, data)?;
+        let latency = match self.control_with(Request::LoadState, data, self.config.load_timeout) {
+            Ok((_, _, latency)) => latency,
+            Err(e) => {
+                // A plugin error leaves the host running and the old state in place.
+                if self.running().is_none() {
+                    self.state = Some(data.to_vec());
+                    self.mark_clean();
+                }
+                return Err(e);
+            }
+        };
         self.state = Some(data.to_vec());
         self.mark_clean();
         self.latency = latency;
         // Loading state can change the parameter list (a different preset of a modular synth).
-        if let Ok((Reply::Params(params), _, _)) = self.control(Request::Params, &[]) {
-            self.params = params.iter().map(ParamInfo::from).collect();
-        }
+        self.refresh_params();
         Ok(())
     }
 
@@ -1164,5 +1312,140 @@ impl Drop for SandboxedInstance {
         if let Some(link) = self.link.take() {
             link.close(graceful, Duration::from_millis(500));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    use daw_core::plugin::PluginFormatKind;
+
+    use super::*;
+
+    fn shared() -> Arc<Shared> {
+        Arc::new(Shared {
+            descriptor: PluginDescriptor {
+                format: PluginFormatKind::Clap,
+                id: "test".into(),
+                name: "test".into(),
+                vendor: String::new(),
+                path: "/test".into(),
+                is_instrument: false,
+                ports: (0, 0),
+            },
+            crashed: AtomicBool::new(false),
+            reason: Mutex::new(None),
+            generation: AtomicU64::new(1),
+            reload_requested: AtomicBool::new(false),
+            pid: AtomicU32::new(0),
+            late_cycles: AtomicU64::new(0),
+            on_crash: None,
+            notified: AtomicU64::new(0),
+        })
+    }
+
+    #[test]
+    fn a_stall_while_the_host_main_thread_is_in_the_plugin_gets_the_call_timeout() {
+        let child = Arc::new(Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()));
+        let layout = Layout {
+            audio_in: 0,
+            audio_out: 0,
+            max_frames: 64,
+            event_capacity: 16,
+        };
+        let (shm, path) = Shm::create(&std::env::temp_dir(), layout).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let shm = Arc::new(shm);
+        // A cycle is waiting on the plugin lock, which the host's main thread holds.
+        shm.header().state.store(REQUEST, Ordering::Release);
+        shm.header().main_in_plugin.store(1, Ordering::SeqCst);
+        let watched = Arc::new(Mutex::new(shm.clone()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = shared();
+        let dog = {
+            let (child, watched, stop, shared) =
+                (child.clone(), watched.clone(), stop.clone(), shared.clone());
+            std::thread::spawn(move || {
+                let hang = Duration::from_millis(20);
+                let call = Duration::from_secs(3600);
+                watchdog(&child, &watched, &stop, &shared, 1, hang, call);
+            })
+        };
+        // Many hang timeouts pass without a kill.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!shared.crashed.load(Ordering::Acquire));
+        // Once the main thread is out of the plugin, the stall is a hang.
+        shm.header().main_in_plugin.store(0, Ordering::SeqCst);
+        let start = Instant::now();
+        while !shared.crashed.load(Ordering::Acquire) {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "hang not noticed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*shared.reason(), Some(CrashReason::Hung));
+        stop.store(true, Ordering::Release);
+        dog.join().unwrap();
+        kill(&child);
+    }
+
+    #[test]
+    fn a_host_that_trickles_its_reply_cannot_outlast_the_call_timeout() {
+        let (app, mut host) = UnixStream::pair().unwrap();
+        let trickle = std::thread::spawn(move || {
+            let mut request = [0u8; 256];
+            let _ = host.read(&mut request);
+            // Announce a large reply, then send it a byte at a time, each well inside the
+            // timeout, for far longer than the timeout.
+            let mut head = Vec::new();
+            head.extend_from_slice(&4096u32.to_le_bytes());
+            head.extend_from_slice(&(64u32 << 20).to_le_bytes());
+            if host.write_all(&head).is_err() {
+                return;
+            }
+            for _ in 0..400 {
+                std::thread::sleep(Duration::from_millis(50));
+                if host.write_all(b" ").is_err() {
+                    return;
+                }
+            }
+        });
+        let start = Instant::now();
+        let result = call(&app, &Request::Params, &[], Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        drop(app);
+        trickle.join().unwrap();
+        assert!(result.is_err());
+        // The trickle lasts 20 s; the call must give up long before.
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    }
+
+    #[test]
+    fn tracking_a_new_param_list_keeps_what_was_tracked_for_params_still_in_it() {
+        let param = |id, automatable| ParamInfo {
+            id,
+            name: String::new(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            automatable,
+        };
+        let old = [
+            TrackedParam {
+                id: 1,
+                value: 0.25,
+                dirty: true,
+            },
+            TrackedParam {
+                id: 2,
+                value: 0.75,
+                dirty: true,
+            },
+        ];
+        let tracked = tracked_params(&[param(120, true), param(1, true), param(7, false)], &old);
+        let got: Vec<_> = tracked.iter().map(|t| (t.id, t.value, t.dirty)).collect();
+        assert_eq!(got, [(1, 0.25, true), (120, 0.5, false)]);
     }
 }

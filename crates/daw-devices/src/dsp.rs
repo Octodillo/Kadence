@@ -472,15 +472,21 @@ impl Adsr {
             }
             Stage::Decay => {
                 self.level = self.sustain + (self.level - self.sustain) * self.decay_coef;
-                if self.level - self.sustain < ENV_FLOOR {
+                // Sustain may have been raised above the level mid-decay; the
+                // same curve then rises to it instead of jumping.
+                if (self.level - self.sustain).abs() < ENV_FLOOR {
                     self.level = self.sustain;
                     self.stage = Stage::Sustain;
                 }
             }
             Stage::Sustain => {
-                self.level = self.sustain;
-                if self.sustain <= 0.0 {
-                    self.stage = Stage::Idle;
+                // Follow a changed sustain along the decay curve, not in one step.
+                self.level = self.sustain + (self.level - self.sustain) * self.decay_coef;
+                if (self.level - self.sustain).abs() < ENV_FLOOR {
+                    self.level = self.sustain;
+                    if self.sustain <= 0.0 {
+                        self.stage = Stage::Idle;
+                    }
                 }
             }
             Stage::Release => {
@@ -553,6 +559,36 @@ pub fn key_to_hz(key: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #27: raising sustain above the level mid-decay jumped to it in
+    /// one sample; it now rises along the decay curve.
+    #[test]
+    fn raising_sustain_during_decay_does_not_jump() {
+        let mut env = Adsr::default();
+        env.set(0.0, 50.0, 0.2, 100.0, 48000.0);
+        env.gate_on();
+        let mut level = 0.0;
+        while env.level() > 0.4 || level == 0.0 {
+            level = env.tick();
+        }
+        env.set(0.0, 50.0, 0.9, 100.0, 48000.0);
+        let next = env.tick();
+        assert!(next > level && next - level < 0.01, "{level} -> {next}");
+        for _ in 0..48000 {
+            env.tick();
+        }
+        assert!((env.level() - 0.9).abs() < 1e-6);
+
+        // The same in the sustain stage: moving sustain glides there.
+        env.set(0.0, 50.0, 0.3, 100.0, 48000.0);
+        let next = env.tick();
+        assert!(next < 0.9 && 0.9 - next < 0.01, "{next}");
+        for _ in 0..48000 {
+            env.tick();
+        }
+        assert!((env.level() - 0.3).abs() < 1e-6);
+        assert!(env.is_active());
+    }
 
     #[test]
     fn db_conversions() {

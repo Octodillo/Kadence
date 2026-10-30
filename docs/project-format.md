@@ -22,11 +22,16 @@ My Song/                      bundle directory
   Opening the autosave path, or a bundle whose project file is missing but
   whose autosave remains, resolves to the bundle so `Document::recover` works.
 - A bundle directory holds exactly one `.kadence` file; creating a bundle in a
-  directory that already has one fails.
-- Saving copies the current project file into `backups/` (named with a
-  zero-padded millisecond Unix timestamp, so name order is time order), keeps
-  the newest 10, then writes the new file atomically: write `*.tmp`, fsync,
-  rename, fsync the directory. A crash never leaves a half-written project.
+  directory that already has one, or has a `.kadence.autosave`, fails. Save As
+  also fails rather than overwrite a file already in the target's `audio/`.
+- Saving copies the current project file into `backups/` as
+  `<name>-<timestamp>.kadence`, where the timestamp is a zero-padded
+  millisecond Unix time, always later than the newest backup's. It keeps that
+  project's newest 10 (backups under another name, from before the project
+  file was renamed, are left alone), then writes the new file atomically:
+  write `*.tmp`, fsync, rename, fsync the directory. A crash never leaves a
+  half-written project. The new file keeps the old one's permissions, and a
+  symlinked project file is written through rather than replaced.
 - Autosave writes `<name>.kadence.autosave` the same atomic way and never
   touches the project file. Saving deletes it, and so does undoing back to the
   saved state. If one exists when a bundle is opened, `Document::open` fails
@@ -151,8 +156,11 @@ fails is rejected rather than half-loaded.
 ## Versioning and migration
 
 - `SCHEMA_VERSION` goes up by one for any change an older build couldn't read
-  correctly. Adding an optional field with a default (`#[serde(default)]`)
-  does not need a bump.
+  or write back correctly. That includes adding a field, even an optional one
+  with a default (`#[serde(default)]`): an older build ignores fields it
+  doesn't know and would drop them on its next save, so it must reject the
+  file with `TooNew` instead. Give the new field a default and its
+  migration can return the JSON unchanged.
 - Each bump appends one function to `daw_model::bundle::MIGRATIONS`;
   `MIGRATIONS[i]` turns the `project` JSON of schema `i + 1` into `i + 2`.
   Loading runs every step from the file's version up to the current one, then

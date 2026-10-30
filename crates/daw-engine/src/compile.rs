@@ -82,6 +82,10 @@ pub(crate) struct Step {
     events_out: EventList,
     params: EventList,
     latency: u32,
+    /// How late this step's audio input is: the largest latency of its
+    /// sources. Automation is read this far back, so it lines up with the
+    /// audio it shapes.
+    in_latency: u32,
 }
 
 /// A graph ready to run on the RT thread: nodes in process order, every
@@ -244,6 +248,7 @@ impl CompiledGraph {
                         0
                     }),
                     params: EventList::with_capacity(PARAM_QUEUE),
+                    in_latency: 0,
                 }
             })
             .collect();
@@ -262,6 +267,7 @@ impl CompiledGraph {
                 .max()
                 .unwrap_or(0);
             in_latency[s] = latest;
+            steps[s].in_latency = latest;
             out_latency[s] = latest.saturating_add(steps[s].latency).min(max_latency);
         }
 
@@ -453,8 +459,11 @@ impl CompiledGraph {
                     reserve += done[src].events_out.len();
                 }
                 let limit = step.events_in.capacity().saturating_sub(reserve);
+                // The audio in this step's input left the timeline
+                // `in_latency` samples ago; before project start the lane
+                // holds its first value.
+                let now = transport.position.0 - i64::from(step.in_latency);
                 for (param, lane) in &step.automation {
-                    let now = transport.position.0;
                     lane.emit(*param, now, frames, &mut step.events_in, limit);
                 }
             }

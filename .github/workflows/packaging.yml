@@ -59,7 +59,11 @@ jobs:
           sudo -u builder env KADENCE_SOURCE="git+file://$GITHUB_WORKSPACE#commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" \
             makepkg --syncdeps --noconfirm
       - name: namcap
-        run: namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-git-*.pkg.tar.zst
+        # namcap exits 0 whatever it finds, so fail on its error lines.
+        run: |
+          set -o pipefail
+          namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-git-*.pkg.tar.zst | tee namcap.log
+          ! grep -q ' E: ' namcap.log
       - name: Install
         run: pacman -U --noconfirm /home/builder/pkg/kadence-git-*.pkg.tar.zst
       - name: Smoke test (installed)
@@ -105,34 +109,63 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:24.04
     steps:
-      - name: Install system packages
+      - name: Add the KDE neon archive
+        # archive.neon.kde.org has had outages (502s for hours). When it is
+        # unreachable on a pull request, skip this job with a warning instead
+        # of failing it; once it answers, build and test failures still fail.
+        id: neon
+        shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl gnupg
-          curl -fsSL --retry 5 --retry-delay 15 --retry-all-errors https://archive.neon.kde.org/public.key \
-            | gpg --dearmor -o /usr/share/keyrings/neon.gpg
-          echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
-            > /etc/apt/sources.list.d/neon.list
+          neon=https://archive.neon.kde.org
+          # Probe only neon, so an Ubuntu mirror hiccup still fails below.
+          if curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /tmp/neon.key "$neon/public.key" \
+              && curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /dev/null "$neon/user/dists/noble/InRelease"; then
+            gpg --batch --yes --dearmor -o /usr/share/keyrings/neon.gpg /tmp/neon.key
+            echo "deb [signed-by=/usr/share/keyrings/neon.gpg] $neon/user noble main" \
+              > /etc/apt/sources.list.d/neon.list
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "::warning title=KDE neon archive unreachable::Skipping this job: $neon did not answer. This is not a failure of the code under test."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            # On main and scheduled runs, stay red so the gap gets noticed.
+            echo "::error title=KDE neon archive unreachable::$neon did not answer."
+            exit 1
+          fi
+      - name: Install system packages
+        if: steps.neon.outputs.available == 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential git cmake ninja-build clang lld pkg-config \
             qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-wayland \
             kf6-kirigami-dev qml6-module-org-kde-kirigami kf6-qqc2-desktop-style \
+            qml6-module-qtquick-dialogs \
             kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
             kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme \
-            extra-cmake-modules libjack-jackd2-dev \
+            extra-cmake-modules gettext libjack-jackd2-dev \
             weston xvfb xauth
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
+      - if: steps.neon.outputs.available == 'true'
+        uses: actions/checkout@v4
       - name: Build and install to /usr
+        if: steps.neon.outputs.available == 'true'
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
           cmake --install build
       - name: Smoke test (installed)
+        if: steps.neon.outputs.available == 'true'
         run: |
           useradd -m tester
           su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
@@ -151,9 +184,10 @@ jobs:
             ca-certificates curl build-essential git cmake ninja-build clang lld pkg-config \
             qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-wayland \
             libkirigami-dev qml6-module-org-kde-kirigami qml6-module-org-kde-desktop \
+            qml6-module-qtquick-dialogs \
             libkf6coreaddons-dev libkf6i18n-dev libkf6crash-dev libkf6config-dev \
             libkf6colorscheme-dev libkf6iconthemes-dev breeze-icon-theme \
-            extra-cmake-modules libjack-jackd2-dev \
+            extra-cmake-modules gettext libjack-jackd2-dev \
             weston xvfb xauth
           # Debian's Rust is older than the workspace's rust-version.
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -210,6 +244,8 @@ jobs:
           flatpak run --command=sh io.github.octodillo.daw -c 'ldconfig -p | grep -F libjack.so.0'
           # Flatpak keeps the app's config in ~/.var/app; start from a clean one.
           rm -rf ~/.var/app/io.github.octodillo.daw
+          # The step needs kadence's exit status, not tee's.
+          set -o pipefail
           flatpak run \
             --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software \
             --env=QT_FORCE_STDERR_LOGGING=1 \

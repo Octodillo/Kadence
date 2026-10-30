@@ -5,10 +5,11 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use daw_core::event::{Event as DawEvent, EventKind, ParamId};
-use daw_core::node::{Node, PortLayout, ProcessContext};
+use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
 };
@@ -29,7 +30,8 @@ use vst3::{ComPtr, ComWrapper, Interface};
 
 use crate::editor::Editor;
 use crate::host::{
-    ComponentHandler, Edit, EventQueue, MemoryStream, ParamChanges, host, host_context,
+    ComponentHandler, ControllerProxy, Edit, EventQueue, MemoryStream, ParamChanges, host,
+    host_context, in_process,
 };
 use crate::module::{AUDIO_EFFECT_CLASS, ClassInfo, Module};
 use crate::util::{tuid_from_hex, tuid_to_hex, wstr_field};
@@ -103,6 +105,66 @@ impl Param {
         };
         ((i - 1) as f64 + t) / last as f64
     }
+}
+
+/// Values the processor saw, on their way to the controller off the real-time thread.
+///
+/// Known parameters keep only their newest value, so no amount of automation between two
+/// main-thread pumps can leave the controller (and `param_value`) on a stale one. Ids the
+/// controller does not list go through a small ring that drops what does not fit.
+struct ToController {
+    values: Box<[AtomicU64]>,
+    dirty: Box<[AtomicBool]>,
+    unknown_tx: rtrb::Producer<Edit>,
+    unknown_rx: Mutex<rtrb::Consumer<Edit>>,
+}
+
+impl ToController {
+    fn new(params: usize) -> ToController {
+        let (unknown_tx, unknown_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
+        ToController {
+            values: (0..params).map(|_| AtomicU64::new(0)).collect(),
+            dirty: (0..params).map(|_| AtomicBool::new(false)).collect(),
+            unknown_tx,
+            unknown_rx: Mutex::new(unknown_rx),
+        }
+    }
+
+    /// Real-time safe. `index` is the parameter's position in `params`, if it has one.
+    fn send(&mut self, index: Option<usize>, edit: Edit) {
+        match index.filter(|&i| i < self.values.len()) {
+            Some(i) => {
+                self.values[i].store(edit.normalized.to_bits(), Ordering::Relaxed);
+                self.dirty[i].store(true, Ordering::Release);
+            }
+            None => {
+                let _ = self.unknown_tx.push(edit);
+            }
+        }
+    }
+
+    /// Takes every value sent since the last call: `(Some(index), value)` for listed
+    /// parameters, `(None, edit)` for the rest.
+    fn drain(&self, mut f: impl FnMut(Option<usize>, Edit)) {
+        for (i, dirty) in self.dirty.iter().enumerate() {
+            if dirty.swap(false, Ordering::Acquire) {
+                let normalized = f64::from_bits(self.values[i].load(Ordering::Relaxed));
+                f(Some(i), Edit { id: 0, normalized });
+            }
+        }
+        let mut rx = self.unknown_rx.lock().unwrap_or_else(|e| e.into_inner());
+        while let Ok(e) = rx.pop() {
+            f(None, e);
+        }
+    }
+}
+
+/// The split component's connection to its controller, through a proxy that keeps messages
+/// sent from `process` from running controller code on the audio thread.
+struct Connection {
+    component: ComPtr<IConnectionPoint>,
+    controller: ComPtr<IConnectionPoint>,
+    proxy: ComWrapper<ControllerProxy>,
 }
 
 /// Channel counts of each audio bus, in bus order.
@@ -228,14 +290,23 @@ pub struct Vst3Instance {
     latency: u32,
     active: bool,
     processing: bool,
+    /// The plugin asked for a new port layout or latency since the last `prepare`. Reported
+    /// once through `take_layout_changed`.
+    layout_changed: bool,
+    /// The plugin's buses no longer match `rt`, so `process` outputs silence until `prepare`.
+    io_stale: bool,
+    /// Whether the plugin had parameters at the last `prepare`, which makes its ports take
+    /// and send events. Fixed between prepares like the rest of the layout.
+    has_params: bool,
+    /// The speaker arrangements `prepare` settled on, inputs then outputs.
+    arrangements: (Vec<SpeakerArrangement>, Vec<SpeakerArrangement>),
 
     /// Edits from the plugin's editor, read by `process`.
     edits_rx: rtrb::Consumer<Edit>,
     /// Values the processor saw, forwarded to the controller off the real-time thread.
-    to_controller_tx: rtrb::Producer<Edit>,
-    to_controller_rx: Mutex<rtrb::Consumer<Edit>>,
+    to_controller: ToController,
 
-    connection: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
+    connection: Option<Connection>,
     processor: ComPtr<IAudioProcessor>,
     controller: ComPtr<IEditController>,
     /// False when the component implements the controller itself.
@@ -373,7 +444,6 @@ impl Vst3Instance {
 
         let context = host_context();
         let (edits_tx, edits_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
-        let (to_controller_tx, to_controller_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
         let handler = ComWrapper::new(ComponentHandler::new(edits_tx));
 
         unsafe {
@@ -413,10 +483,17 @@ impl Vst3Instance {
                     component.cast::<IConnectionPoint>(),
                     controller.cast::<IConnectionPoint>(),
                 ) {
-                    (Some(a), Some(b)) => {
-                        a.connect(b.as_ptr());
-                        b.connect(a.as_ptr());
-                        Some((a, b))
+                    (Some(component), Some(controller)) => {
+                        let proxy = ComWrapper::new(ControllerProxy::new(controller.clone()));
+                        if let Some(p) = proxy.as_com_ref::<IConnectionPoint>() {
+                            component.connect(p.as_ptr());
+                        }
+                        controller.connect(component.as_ptr());
+                        Some(Connection {
+                            component,
+                            controller,
+                            proxy,
+                        })
                     }
                     _ => None,
                 }
@@ -441,9 +518,12 @@ impl Vst3Instance {
                 latency: 0,
                 active: false,
                 processing: false,
+                layout_changed: false,
+                io_stale: false,
+                arrangements: Default::default(),
+                has_params: false,
                 edits_rx,
-                to_controller_tx,
-                to_controller_rx: Mutex::new(to_controller_rx),
+                to_controller: ToController::new(0),
                 connection,
                 processor,
                 controller,
@@ -454,6 +534,7 @@ impl Vst3Instance {
             };
             instance.sync_controller_to_component();
             instance.read_params();
+            instance.has_params = !instance.params.is_empty();
             instance.read_midi_map();
             instance.descriptor.ports = (
                 channel_total(&instance.buses.inputs),
@@ -513,6 +594,9 @@ impl Vst3Instance {
                 params.push(param);
             }
         }
+        // Values still waiting are indexed by the old list.
+        self.flush_to_controller();
+        self.to_controller = ToController::new(params.len());
         self.param_index = params
             .iter()
             .enumerate()
@@ -579,13 +663,10 @@ impl Vst3Instance {
 
     /// Applies processor-side values to the controller so editors and `param_value` follow.
     fn flush_to_controller(&self) {
-        let mut rx = self
-            .to_controller_rx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        while let Ok(e) = rx.pop() {
-            unsafe { self.controller.setParamNormalized(e.id, e.normalized) };
-        }
+        self.to_controller.drain(|index, e| {
+            let id = index.map_or(e.id, |i| self.params[i].info.id);
+            unsafe { self.controller.setParamNormalized(id, e.normalized) };
+        });
     }
 
     /// Hands editor edits still queued for the processor over with a zero-sample `process`,
@@ -593,7 +674,8 @@ impl Vst3Instance {
     /// instance includes them. `&mut self` means the audio thread is not using it. Edits
     /// flushed this way are not reported to the host as `ParamValue` events.
     fn flush_edits(&mut self) {
-        if !self.processing {
+        // While stale, `rt`'s buffers no longer match the plugin's buses.
+        if !self.processing || self.io_stale {
             return;
         }
         let Some(rt) = self.rt.as_deref_mut() else {
@@ -618,13 +700,38 @@ impl Vst3Instance {
             unsafe { self.processor.process(&mut data) };
             for q in rt.out_params.queues() {
                 if let Some((_, normalized)) = q.last() {
-                    let _ = self.to_controller_tx.push(Edit {
-                        id: q.id(),
-                        normalized,
-                    });
+                    let id = q.id();
+                    self.to_controller
+                        .send(self.param_index.get(&id).copied(), Edit { id, normalized });
                 }
             }
         }
+    }
+
+    /// Asks the plugin to go back to the arrangements from `prepare` after it changed its
+    /// buses. Returns whether its buses match `rt` again.
+    fn keep_layout(&mut self) -> bool {
+        let old = (self.buses.inputs.clone(), self.buses.outputs.clone());
+        let (mut ins, mut outs) = self.arrangements.clone();
+        self.deactivate();
+        let now = read_buses(&self.component);
+        let kept = now.inputs.len() == ins.len()
+            && now.outputs.len() == outs.len()
+            && unsafe {
+                self.processor.setBusArrangements(
+                    ins.as_mut_ptr(),
+                    ins.len() as i32,
+                    outs.as_mut_ptr(),
+                    outs.len() as i32,
+                )
+            } == kResultTrue
+            && {
+                let now = read_buses(&self.component);
+                (now.inputs, now.outputs) == old
+            };
+        // Back to processing either way; `process` stays silent while the layout differs.
+        self.activate();
+        kept
     }
 
     fn handle_restart(&mut self) {
@@ -632,14 +739,16 @@ impl Vst3Instance {
         if flags == 0 {
             return;
         }
+        // The engine reads ports and latency once per prepare, so neither changes here: the
+        // host learns through `take_layout_changed` and may prepare again, which renegotiates
+        // the buses and does the deactivate/activate cycle the spec asks for before reading
+        // the new latency. Until then the plugin is asked to keep the layout the engine has.
         if flags & (RestartFlags_::kIoChanged as i32) != 0 && self.rt.is_some() {
-            self.buses = read_buses(&self.component);
-            let (sr, frames) = (self.sample_rate, self.max_frames);
-            self.prepare(sr, frames);
-        } else if flags & (RestartFlags_::kLatencyChanged as i32) != 0 && self.active {
-            // The spec asks for a deactivate/activate cycle before reading the new latency.
-            self.deactivate();
-            self.activate();
+            self.layout_changed = true;
+            self.io_stale = !self.keep_layout();
+        }
+        if flags & (RestartFlags_::kLatencyChanged as i32) != 0 && self.active {
+            self.layout_changed = true;
         }
         if flags
             & (RestartFlags_::kParamValuesChanged as i32
@@ -647,6 +756,10 @@ impl Vst3Instance {
             != 0
         {
             self.read_params();
+            // Gaining the first parameter or losing the last changes the event ports.
+            if self.params.is_empty() == self.has_params {
+                self.layout_changed = true;
+            }
         }
         if flags & (RestartFlags_::kMidiCCAssignmentChanged as i32) != 0 {
             self.read_midi_map();
@@ -720,13 +833,19 @@ impl Node for Vst3Instance {
         PortLayout {
             audio_in: channel_total(&self.buses.inputs),
             audio_out: channel_total(&self.buses.outputs),
-            event_in: self.buses.event_in,
-            event_out: self.buses.event_out,
+            // Parameter changes travel as events too, so a plugin with parameters takes and
+            // sends events even without event buses (most effects); notes need a bus.
+            event_in: self.buses.event_in || self.has_params,
+            event_out: self.buses.event_out || self.has_params,
         }
     }
 
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
         self.deactivate();
+        self.layout_changed = false;
+        self.io_stale = false;
+        // The plugin may have added or removed buses since they were last read.
+        self.buses = read_buses(&self.component);
         self.sample_rate = sample_rate;
         self.max_frames = max_frames.max(1);
         unsafe {
@@ -757,6 +876,10 @@ impl Node for Vst3Instance {
                 outs.len() as i32,
             );
             self.buses = read_buses(&self.component);
+            self.arrangements = (
+                arrangements(BusDirections_::kInput as i32, self.buses.inputs.len()),
+                arrangements(BusDirections_::kOutput as i32, self.buses.outputs.len()),
+            );
 
             for (media, dir, n) in [
                 (
@@ -785,12 +908,14 @@ impl Node for Vst3Instance {
                 }
             }
         }
+        self.has_params = !self.params.is_empty();
         self.rt = Some(Rt::new(&self.buses, self.max_frames, sample_rate));
         self.activate();
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        let Some(rt) = self.rt.as_deref_mut() else {
+        let rt = self.rt.as_deref_mut().filter(|_| !self.io_stale);
+        let Some(rt) = rt else {
             for out in ctx.audio_out.iter_mut() {
                 out.fill(0.0);
             }
@@ -870,10 +995,11 @@ impl Node for Vst3Instance {
                     // through the plugin's MIDI mapping.
                     let channel = (bytes[0] & 0x0f) as usize;
                     let (cc, normalized) = match bytes[0] & 0xf0 {
-                        0xb0 => (bytes[1] as usize & 0x7f, bytes[2] as f64 / 127.0),
+                        // Data bytes are 7 bits; a corrupt one must not push the value past 1.
+                        0xb0 => (bytes[1] as usize & 0x7f, (bytes[2] & 0x7f) as f64 / 127.0),
                         0xd0 => (
                             ControllerNumbers_::kAfterTouch as usize,
-                            bytes[1] as f64 / 127.0,
+                            (bytes[1] & 0x7f) as f64 / 127.0,
                         ),
                         0xe0 => (
                             ControllerNumbers_::kPitchBend as usize,
@@ -885,23 +1011,30 @@ impl Node for Vst3Instance {
                     let id = self.midi_map[channel][cc];
                     if id != kNoParamId {
                         rt.in_params.add(id, frame as i32, normalized);
-                        let _ = self.to_controller_tx.push(Edit { id, normalized });
+                        self.to_controller
+                            .send(self.param_index.get(&id).copied(), Edit { id, normalized });
                     }
                 }
                 EventKind::ParamValue { param, value } => {
-                    let normalized = self
-                        .param_index
-                        .get(&param)
-                        .map_or(value.clamp(0.0, 1.0), |&i| {
-                            self.params[i].to_normalized(value)
-                        });
-                    rt.in_params.add(param, frame as i32, normalized);
-                    let _ = self.to_controller_tx.push(Edit {
-                        id: param,
-                        normalized,
+                    let index = self.param_index.get(&param).copied();
+                    let normalized = index.map_or(value.clamp(0.0, 1.0), |i| {
+                        self.params[i].to_normalized(value)
                     });
+                    rt.in_params.add(param, frame as i32, normalized);
+                    self.to_controller.send(
+                        index,
+                        Edit {
+                            id: param,
+                            normalized,
+                        },
+                    );
                 }
             }
+        }
+
+        if !self.buses.event_in {
+            // Notes have nowhere to go without an event bus.
+            rt.in_events.clear();
         }
 
         for (i, buf) in rt.in_audio.iter_mut().enumerate() {
@@ -922,27 +1055,10 @@ impl Node for Vst3Instance {
             bus.silenceFlags = 0;
         }
 
-        let t = ctx.transport;
-        let sample_rate = if t.sample_rate > 0.0 {
-            t.sample_rate
-        } else {
-            self.sample_rate
-        };
-        let c = &mut rt.context;
-        c.state = StatesAndFlags_::kTempoValid as u32
-            | StatesAndFlags_::kProjectTimeMusicValid as u32
-            | StatesAndFlags_::kTimeSigValid as u32
-            | StatesAndFlags_::kContTimeValid as u32;
-        if t.playing {
-            c.state |= StatesAndFlags_::kPlaying as u32;
-        }
-        c.sampleRate = sample_rate;
-        c.projectTimeSamples = t.position.0;
-        c.tempo = if t.bpm > 0.0 { t.bpm } else { 120.0 };
-        c.projectTimeMusic = t.position.0 as f64 / sample_rate * c.tempo / 60.0;
+        fill_context(&mut rt.context, ctx.transport, self.sample_rate);
 
         let mut data = rt.process_data(frames as i32);
-        unsafe { self.processor.process(&mut data) };
+        in_process(|| unsafe { self.processor.process(&mut data) });
         rt.context.continousTimeSamples += frames as i64;
 
         for (i, out) in ctx.audio_out.iter_mut().enumerate() {
@@ -959,7 +1075,8 @@ impl Node for Vst3Instance {
             let Some((offset, normalized)) = q.last() else {
                 continue;
             };
-            let _ = self.to_controller_tx.push(Edit { id, normalized });
+            self.to_controller
+                .send(self.param_index.get(&id).copied(), Edit { id, normalized });
             let value = self
                 .param_index
                 .get(&id)
@@ -1031,13 +1148,13 @@ impl Node for Vst3Instance {
 
     /// Runs on the audio thread, so only cycles `setProcessing`, which the spec allows there
     /// and plugins treat as a state reset. `setActive` and the latency re-read stay on the
-    /// main thread, in `prepare` and `handle_restart`.
+    /// main thread, in `prepare` (and `handle_restart` for a changed layout).
     fn reset(&mut self) {
         if self.processing {
-            unsafe {
+            in_process(|| unsafe {
                 self.processor.setProcessing(0);
                 self.processor.setProcessing(1);
-            }
+            });
         }
     }
 }
@@ -1143,11 +1260,7 @@ impl PluginInstance for Vst3Instance {
         // queued for the processor would otherwise overwrite the restored state.
         self.handler.discard_overflow();
         while self.edits_rx.pop().is_ok() {}
-        let mut rx = self
-            .to_controller_rx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        while rx.pop().is_ok() {}
+        self.to_controller.drain(|_, _| {});
         Ok(())
     }
 
@@ -1183,6 +1296,10 @@ impl PluginInstance for Vst3Instance {
             self.editor = None;
         }
     }
+
+    fn take_layout_changed(&mut self) -> bool {
+        std::mem::take(&mut self.layout_changed)
+    }
 }
 
 impl Drop for Vst3Instance {
@@ -1191,9 +1308,11 @@ impl Drop for Vst3Instance {
         self.deactivate();
         self.rt = None;
         unsafe {
-            if let Some((a, b)) = self.connection.take() {
-                a.disconnect(b.as_ptr());
-                b.disconnect(a.as_ptr());
+            if let Some(c) = self.connection.take() {
+                if let Some(p) = c.proxy.as_com_ref::<IConnectionPoint>() {
+                    c.component.disconnect(p.as_ptr());
+                }
+                c.controller.disconnect(c.component.as_ptr());
             }
             self.controller.setComponentHandler(ptr::null_mut());
             if self.split {
@@ -1201,6 +1320,33 @@ impl Drop for Vst3Instance {
             }
             self.component.terminate();
         }
+    }
+}
+
+/// Fills the transport part of a VST3 process context. Continuous time is
+/// the caller's.
+fn fill_context(c: &mut VstProcessContext, transport: &TransportState, sample_rate: f64) {
+    let t = transport.or_default_tempo(sample_rate);
+    let m = &t.music;
+    c.state = StatesAndFlags_::kContTimeValid as u32
+        | StatesAndFlags_::kTempoValid as u32
+        | StatesAndFlags_::kProjectTimeMusicValid as u32
+        | StatesAndFlags_::kBarPositionValid as u32
+        | StatesAndFlags_::kTimeSigValid as u32;
+    if t.playing {
+        c.state |= StatesAndFlags_::kPlaying as u32;
+    }
+    c.sampleRate = t.sample_rate;
+    c.projectTimeSamples = t.position.0;
+    c.tempo = t.bpm;
+    c.projectTimeMusic = m.beats;
+    c.barPositionMusic = m.bar_start;
+    c.timeSigNumerator = i32::from(m.numerator);
+    c.timeSigDenominator = i32::from(m.denominator);
+    if let Some(l) = &t.looping {
+        c.state |= StatesAndFlags_::kCycleValid as u32 | StatesAndFlags_::kCycleActive as u32;
+        c.cycleStartMusic = l.start_beats;
+        c.cycleEndMusic = l.end_beats;
     }
 }
 
@@ -1215,8 +1361,72 @@ mod tests {
 
     const FRAMES: u32 = 16;
     const GAIN: ParamID = 0;
+    const ACTIVATIONS: ParamID = 2;
 
     /// The `testgain` example wrapped in a bundle, as `tests/vst3.rs` does.
+    #[test]
+    fn context_has_bars_beats_and_time_signature() {
+        use daw_core::time::{
+            Meter, MeterPoint, PPQ, SampleTime, SegmentTempoMap, TickTime, Timeline,
+        };
+        // Two bars of 4/4 at 120, then 6/8.
+        let meter = Meter::new([
+            MeterPoint {
+                tick: TickTime(0),
+                numerator: 4,
+                denominator: 4,
+            },
+            MeterPoint {
+                tick: TickTime(8 * PPQ),
+                numerator: 6,
+                denominator: 8,
+            },
+        ]);
+        let tl = Timeline::new(SegmentTempoMap::new(120.0), meter);
+        let t = TransportState::at(&tl, true, SampleTime(300_000), 48_000.0);
+        let mut c: VstProcessContext = unsafe { std::mem::zeroed() };
+        fill_context(&mut c, &t, 44_100.0);
+        assert_eq!(c.sampleRate, 48_000.0);
+        assert_eq!(c.projectTimeSamples, 300_000);
+        assert_eq!(c.tempo, 120.0);
+        assert_eq!(c.projectTimeMusic, 12.5);
+        assert_eq!(c.barPositionMusic, 11.0);
+        assert_eq!((c.timeSigNumerator, c.timeSigDenominator), (6, 8));
+        let valid = StatesAndFlags_::kPlaying as u32
+            | StatesAndFlags_::kTempoValid as u32
+            | StatesAndFlags_::kProjectTimeMusicValid as u32
+            | StatesAndFlags_::kBarPositionValid as u32
+            | StatesAndFlags_::kTimeSigValid as u32;
+        assert_eq!(c.state & valid, valid);
+        assert_eq!(c.state & StatesAndFlags_::kCycleActive as u32, 0);
+
+        let looping = TransportState {
+            looping: Some(daw_core::node::TransportLoop::at(
+                &tl,
+                SampleTime(96_000),
+                SampleTime(192_000),
+                48_000.0,
+            )),
+            ..t
+        };
+        fill_context(&mut c, &looping, 44_100.0);
+        let cycle = StatesAndFlags_::kCycleValid as u32 | StatesAndFlags_::kCycleActive as u32;
+        assert_eq!(c.state & cycle, cycle);
+        assert_eq!((c.cycleStartMusic, c.cycleEndMusic), (4.0, 8.0));
+
+        // No tempo: 120 bpm in 4/4 from sample 0, at the plugin's rate.
+        let stopped = TransportState {
+            position: SampleTime(88_200),
+            ..TransportState::default()
+        };
+        fill_context(&mut c, &stopped, 44_100.0);
+        assert_eq!(
+            (c.sampleRate, c.tempo, c.projectTimeMusic),
+            (44_100.0, 120.0, 4.0)
+        );
+        assert_eq!(c.state & StatesAndFlags_::kPlaying as u32, 0);
+    }
+
     fn testgain() -> PluginDescriptor {
         static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
         let bundle = BUNDLE.get_or_init(|| {
@@ -1272,9 +1482,17 @@ mod tests {
 
     /// Runs one block of ones through the plugin and returns the left output's first sample.
     fn gain_heard(p: &mut Vst3Instance) -> f32 {
+        gain_heard_with(p, &[])
+    }
+
+    /// `gain_heard` with events in.
+    fn gain_heard_with(p: &mut Vst3Instance, events: &[EventKind]) -> f32 {
         let input = [1.0f32; FRAMES as usize];
         let mut outs = [[0.0f32; FRAMES as usize]; 2];
-        let events_in = EventList::with_capacity(8);
+        let mut events_in = EventList::with_capacity(8);
+        for &kind in events {
+            events_in.push(DawEvent { frame: 0, kind }).unwrap();
+        }
         let mut events_out = EventList::with_capacity(64);
         let transport = TransportState::default();
         let audio_in: [&[f32]; 2] = [&input, &input];
@@ -1344,6 +1562,184 @@ mod tests {
             1.0,
             "the stale edit overrode the loaded state"
         );
+    }
+
+    /// Sends the plugin's component a message, as its controller would.
+    fn tell_component(p: &Vst3Instance, id: &std::ffi::CStr, ints: &[(&std::ffi::CStr, i64)]) {
+        use vst3::Steinberg::Vst::{
+            IAttributeListTrait, IHostApplicationTrait, IMessage, IMessageTrait,
+        };
+        let mut cid: TUID = unsafe { std::mem::transmute(IMessage::IID) };
+        let mut iid = cid;
+        let mut obj = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                host().createInstance(&mut cid, &mut iid, &mut obj),
+                kResultOk
+            );
+            let msg = ComPtr::<IMessage>::from_raw(obj as *mut IMessage).unwrap();
+            msg.setMessageID(id.as_ptr());
+            let attrs = vst3::ComRef::from_raw(msg.getAttributes()).unwrap();
+            for (key, value) in ints {
+                attrs.setInt(key.as_ptr(), *value);
+            }
+            let component = &p.connection.as_ref().unwrap().component;
+            assert_eq!(component.notify(msg.as_ptr()), kResultOk);
+        }
+    }
+
+    /// Makes the plugin switch its output to `channels` and report it the way plugins do. A
+    /// `locked` plugin refuses to switch back.
+    fn switch_outputs(p: &Vst3Instance, channels: i64, locked: bool) {
+        tell_component(
+            p,
+            c"set_outputs",
+            &[(c"channels", channels), (c"locked", locked as i64)],
+        );
+        unsafe { p.handler.restartComponent(RestartFlags_::kIoChanged as i32) };
+    }
+
+    #[test]
+    fn effects_without_an_event_bus_still_take_parameter_events() {
+        let mut p = instance();
+        // Most effects have no event bus; testgain has one, so take it away.
+        p.buses.event_in = false;
+        p.buses.event_out = false;
+        assert!(p.ports().event_in, "the engine would refuse automation");
+        assert!(p.ports().event_out, "editor edits could not be recorded");
+        let heard = gain_heard_with(
+            &mut p,
+            &[
+                EventKind::ParamValue {
+                    param: GAIN,
+                    value: 0.5,
+                },
+                EventKind::NoteOn {
+                    channel: 0,
+                    key: 60,
+                    velocity: 1.0,
+                    note_id: -1,
+                },
+            ],
+        );
+        assert_eq!(heard, 0.5);
+        assert!(p.rt.as_ref().unwrap().in_events.iter().next().is_none());
+
+        // A plugin that gains its first parameter (or loses its last) changes its event
+        // ports, which the host must hear about.
+        p.has_params = false;
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kParamTitlesChanged as i32)
+        };
+        main_thread(&mut p);
+        assert!(p.take_layout_changed());
+    }
+
+    #[test]
+    fn corrupt_midi_data_bytes_stay_in_range() {
+        let mut p = instance();
+        // CC 7 is mapped to the gain; 0xff is not a valid data byte.
+        let heard = gain_heard_with(&mut p, &[EventKind::Midi([0xb0, 7, 0xff])]);
+        assert!((0.0..=1.0).contains(&heard), "gain {heard} out of range");
+    }
+
+    #[test]
+    fn the_controller_sees_the_newest_value_however_long_the_main_thread_takes() {
+        let mut p = instance();
+        // Enough blocks to fill any fixed queue many times over (each block also reports
+        // two read-only parameters) before the main thread runs.
+        let blocks = 4 * EDIT_QUEUE;
+        for i in 0..blocks {
+            let value = i as f64 / blocks as f64;
+            gain_heard_with(&mut p, &[EventKind::ParamValue { param: GAIN, value }]);
+        }
+        gain_heard_with(
+            &mut p,
+            &[EventKind::ParamValue {
+                param: GAIN,
+                value: 0.25,
+            }],
+        );
+        assert_eq!(p.param_value(GAIN), 0.25);
+    }
+
+    #[test]
+    fn messages_sent_from_process_never_run_controller_code_on_the_audio_thread() {
+        const OFF_THREAD: ParamID = 3;
+        let mut p = instance();
+        tell_component(&p, c"meter_on", &[]);
+        // The engine runs `process` on its own thread.
+        std::thread::scope(|s| {
+            s.spawn(|| gain_heard(&mut p));
+        });
+        main_thread(&mut p);
+        assert_eq!(
+            p.param_value(OFF_THREAD),
+            0.0,
+            "the controller ran on the audio thread"
+        );
+    }
+
+    #[test]
+    fn io_changes_keep_the_engines_layout_when_the_plugin_agrees() {
+        let mut p = instance();
+        switch_outputs(&p, 1, false);
+        main_thread(&mut p);
+        assert_eq!(p.ports().audio_out, 2, "ports changed behind the engine");
+        assert!(p.take_layout_changed());
+        // The plugin took the stereo layout back, so it keeps playing without a prepare.
+        assert_eq!(gain_heard(&mut p), 1.0);
+        p.prepare(48_000.0, FRAMES);
+        assert_eq!(p.ports().audio_out, 2);
+    }
+
+    #[test]
+    fn io_changes_wait_for_the_host_to_prepare_again() {
+        let mut p = instance();
+        assert_eq!(p.ports().audio_out, 2);
+        switch_outputs(&p, 1, true);
+        main_thread(&mut p);
+
+        // The compiled graph still has two output channels wired, so the layout must not
+        // change under it, and the plugin must not run on buffers it no longer agrees with.
+        assert_eq!(p.ports().audio_out, 2, "ports changed behind the engine");
+        assert!(p.take_layout_changed());
+        assert!(!p.take_layout_changed(), "reported twice");
+        assert_eq!(gain_heard(&mut p), 0.0);
+
+        p.prepare(48_000.0, FRAMES);
+        assert_eq!(p.ports().audio_out, 1);
+        assert!(!p.take_layout_changed());
+        assert_eq!(gain_heard(&mut p), 1.0);
+    }
+
+    #[test]
+    fn latency_changes_are_reported_to_the_host() {
+        let mut p = instance();
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kLatencyChanged as i32)
+        };
+        main_thread(&mut p);
+        assert!(p.take_layout_changed());
+        assert_eq!(p.latency(), 32);
+        assert_eq!(
+            gain_heard(&mut p),
+            1.0,
+            "a latency change silenced the plugin"
+        );
+        // The deactivate/activate cycle that reads the new latency waits for `prepare`.
+        main_thread(&mut p);
+        assert_eq!(
+            p.param_value(ACTIVATIONS),
+            0.01,
+            "reactivated behind the engine"
+        );
+        p.prepare(48_000.0, FRAMES);
+        gain_heard(&mut p);
+        main_thread(&mut p);
+        assert_eq!(p.param_value(ACTIVATIONS), 0.02);
     }
 
     #[test]
