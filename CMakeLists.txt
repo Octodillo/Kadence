@@ -27,7 +27,15 @@ else()
     set(KDE_INSTALL_MIMEDIR ${CMAKE_INSTALL_DATADIR}/mime/packages)
     set(KDE_INSTALL_FULL_ICONDIR ${CMAKE_INSTALL_FULL_DATADIR}/icons)
     set(KDE_INSTALL_LOCALEDIR ${CMAKE_INSTALL_LOCALEDIR})
+    set(KDE_INSTALL_DATADIR ${CMAKE_INSTALL_DATADIR})
 endif()
+
+# Where LICENSE and THIRD-PARTY-LICENSES go. Arch wants
+# share/licenses/<pkgname>; Fedora's %license copies them itself and turns
+# this off.
+option(KADENCE_INSTALL_LICENSES "Install LICENSE and THIRD-PARTY-LICENSES" ON)
+set(KADENCE_LICENSE_DIR ${KDE_INSTALL_DATADIR}/licenses/${APP_BINARY}
+    CACHE STRING "Directory for LICENSE and THIRD-PARTY-LICENSES")
 
 # The Qt front end crate arrives in WU10. Until then CMake only installs data.
 set(APP_CRATE ${CMAKE_SOURCE_DIR}/crates/daw-app)
@@ -45,6 +53,25 @@ if(EXISTS ${APP_CRATE}/Cargo.toml)
         USES_TERMINAL
         COMMENT "Building ${APP_BINARY} with Cargo")
     install(PROGRAMS ${APP_EXECUTABLE} DESTINATION ${KDE_INSTALL_BINDIR})
+
+    # The binary statically links MIT, Apache-2.0, Zlib and MPL-2.0 crates,
+    # whose notices must ship with it. Build it from the same Cargo.lock.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(THIRD_PARTY_LICENSES ${CMAKE_BINARY_DIR}/THIRD-PARTY-LICENSES)
+    add_custom_command(OUTPUT ${THIRD_PARTY_LICENSES}
+        COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/packaging/third-party-licenses.py
+                --cargo ${CARGO} ${THIRD_PARTY_LICENSES}
+        DEPENDS ${CMAKE_SOURCE_DIR}/Cargo.lock ${CMAKE_SOURCE_DIR}/packaging/third-party-licenses.py
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Collecting third-party license notices")
+    add_custom_target(third_party_licenses ALL DEPENDS ${THIRD_PARTY_LICENSES})
+    if(KADENCE_INSTALL_LICENSES)
+        install(FILES ${THIRD_PARTY_LICENSES} DESTINATION ${KADENCE_LICENSE_DIR})
+    endif()
+endif()
+
+if(KADENCE_INSTALL_LICENSES)
+    install(FILES LICENSE DESTINATION ${KADENCE_LICENSE_DIR})
 endif()
 
 install(FILES data/${APP_ID}.desktop DESTINATION ${KDE_INSTALL_APPDIR})

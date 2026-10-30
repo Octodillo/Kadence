@@ -17,9 +17,10 @@ jobs:
     name: fmt, clippy, tests (Ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
       - name: system packages
         # jack-sys needs jack.pc to build; jackd2 runs the JACK integration tests.
@@ -29,8 +30,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest
       - name: rustfmt
@@ -61,8 +62,8 @@ jobs:
     name: cargo deny (licenses, sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check licenses bans sources
 
@@ -80,16 +81,16 @@ jobs:
             base-devel git rustup cmake ninja clang \
             qt6-base qt6-declarative qt6-wayland kirigami qqc2-desktop-style \
             kcoreaddons ki18n kcrash kconfig kcolorscheme kiconthemes \
-            breeze breeze-icons noto-fonts lld gettext \
+            breeze breeze-icons noto-fonts lld gettext python \
             extra-cmake-modules pipewire-jack lilv \
             desktop-file-utils appstream xorg-server-xvfb
           rustup default stable
           rustup component add rustfmt clippy
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: arch
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest
       - name: clippy
@@ -113,7 +114,7 @@ jobs:
                 --screenshot-dir screenshots/$scheme-$((scale * 100))
             done
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: screenshots
           path: screenshots/
@@ -141,15 +142,19 @@ jobs:
             kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
             kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme breeze \
             lld fonts-noto-core \
-            extra-cmake-modules libjack-jackd2-dev liblilv-dev \
+            extra-cmake-modules python3 libjack-jackd2-dev liblilv-dev \
             desktop-file-utils appstream xvfb
-          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
+          # A pinned rustup-init, checked against its sha256, rather than curl | sh.
+          curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
+          echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --component clippy
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: neon
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest
       - name: clippy

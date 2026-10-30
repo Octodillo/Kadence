@@ -47,7 +47,7 @@ jobs:
             weston xorg-server-xvfb xorg-xauth
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: makepkg
@@ -68,7 +68,7 @@ jobs:
         run: pacman -U --noconfirm /home/builder/pkg/kadence-git-*.pkg.tar.zst
       - name: Smoke test (installed)
         run: sudo -u builder env REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: arch-package
           path: /home/builder/pkg/kadence-git-*.pkg.tar.zst
@@ -82,7 +82,7 @@ jobs:
         run: |
           dnf -y install git cargo rpm-build rpmlint dnf-plugins-core \
             weston xorg-x11-server-Xvfb xorg-x11-xauth
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Source tarball (vendored crates)
         run: |
           git config --system --add safe.directory '*'
@@ -99,7 +99,7 @@ jobs:
         run: |
           useradd -m tester
           su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fedora-package
           path: ~/rpmbuild/RPMS/*/kadence-0*.rpm
@@ -126,11 +126,15 @@ jobs:
             kf6-kirigami-dev qml6-module-org-kde-kirigami kf6-qqc2-desktop-style \
             kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
             kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme \
-            extra-cmake-modules gettext libjack-jackd2-dev \
+            extra-cmake-modules gettext python3 libjack-jackd2-dev \
             weston xvfb xauth
-          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # A pinned rustup-init, checked against its sha256, rather than curl | sh.
+          curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
+          echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build and install to /usr
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
@@ -157,12 +161,16 @@ jobs:
             libkirigami-dev qml6-module-org-kde-kirigami qml6-module-org-kde-desktop \
             libkf6coreaddons-dev libkf6i18n-dev libkf6crash-dev libkf6config-dev \
             libkf6colorscheme-dev libkf6iconthemes-dev breeze-icon-theme \
-            extra-cmake-modules gettext libjack-jackd2-dev \
+            extra-cmake-modules gettext python3 libjack-jackd2-dev \
             weston xvfb xauth
           # Debian's Rust is older than the workspace's rust-version.
-          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          # A pinned rustup-init, checked against its sha256, rather than curl | sh.
+          curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
+          echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build and install to /usr
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
@@ -190,7 +198,7 @@ jobs:
             org.freedesktop.Sdk.Extension.rust-stable//25.08 \
             org.freedesktop.Sdk.Extension.llvm21//25.08 \
             org.flatpak.Builder
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Crate sources from Cargo.lock
         run: packaging/flatpak/cargo-sources.py
       - name: flatpak-builder
@@ -221,7 +229,7 @@ jobs:
             --env=QT_FORCE_STDERR_LOGGING=1 \
             io.github.octodillo.daw --smoke-test 2>&1 | tee smoke.log
           grep -q "smoke test: passed" smoke.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: flatpak-bundle
           path: kadence.flatpak

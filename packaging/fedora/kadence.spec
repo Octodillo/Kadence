@@ -31,6 +31,7 @@ BuildRequires:  ninja-build
 BuildRequires:  extra-cmake-modules
 # msgfmt, for the translations in po/<lang>/.
 BuildRequires:  gettext
+BuildRequires:  python3
 BuildRequires:  desktop-file-utils
 BuildRequires:  libappstream-glib
 BuildRequires:  qt6-qtbase-devel
@@ -64,7 +65,7 @@ to PipeWire or JACK.
 
 %build
 export CARGO_NET_OFFLINE=true
-%cmake -G Ninja
+%cmake -G Ninja -DKADENCE_INSTALL_LICENSES=OFF
 %cmake_build
 
 %install
@@ -79,7 +80,7 @@ XDG_CONFIG_HOME=$config QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
 rm -rf "$config"
 
 %files
-%license LICENSE
+%license LICENSE %{__cmake_builddir}/THIRD-PARTY-LICENSES
 %doc README.md
 %{_bindir}/kadence
 %{_datadir}/applications/%{appid}.desktop
