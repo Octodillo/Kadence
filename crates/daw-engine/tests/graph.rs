@@ -361,3 +361,68 @@ fn strip_ignores_nan_params() {
     assert_eq!(l, input);
     assert_eq!(r, input);
 }
+
+/// Passes audio through and reports whatever latency it is given, like a
+/// misbehaving plugin, without allocating a buffer of that size.
+struct ReportsLatency(u32);
+
+impl daw_core::node::Node for ReportsLatency {
+    fn ports(&self) -> daw_core::node::PortLayout {
+        daw_core::node::PortLayout {
+            audio_in: 1,
+            audio_out: 1,
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+
+    fn process(&mut self, ctx: &mut daw_core::node::ProcessContext) {
+        let n = ctx.frames as usize;
+        ctx.audio_out[0][..n].copy_from_slice(&ctx.audio_in[0][..n]);
+    }
+
+    fn latency(&self) -> u32 {
+        self.0
+    }
+}
+
+/// A source feeding the master both directly and through a node with
+/// `latency`, so the direct edge needs a delay line of that length.
+fn parallel_paths(latency: u32) -> (GraphDesc, NodeId) {
+    let mut g = GraphDesc::new(0, 1);
+    let sine = g.add_device("sine", Box::new(Sine::new(1)));
+    let late = g.add_device("late", Box::new(ReportsLatency(latency)));
+    g.connect(sine, late);
+    g.connect(sine, g.master());
+    g.connect(late, g.master());
+    (g, late)
+}
+
+#[test]
+fn refuses_unbounded_plugin_latency() {
+    // 0xFFFFFFFF from getLatencySamples would otherwise ask for a 16 GiB
+    // delay line on the direct edge and abort the process.
+    let (g, late) = parallel_paths(u32::MAX);
+    let max = (48_000.0 * daw_engine::MAX_LATENCY_SECONDS) as u32;
+    assert!(matches!(
+        CompiledGraph::compile(g, 48_000.0, 64, 16),
+        Err(CompileError::LatencyTooLarge { node, latency: u32::MAX, max: m }) if node == late && m == max
+    ));
+
+    // Latency that only adds up past the limit along a chain is refused too.
+    let mut g = GraphDesc::new(0, 1);
+    let a = g.add_device("a", Box::new(ReportsLatency(max / 2 + 1)));
+    let b = g.add_device("b", Box::new(ReportsLatency(max / 2 + 1)));
+    g.connect(a, b);
+    g.connect(b, g.master());
+    assert!(matches!(
+        CompiledGraph::compile(g, 48_000.0, 64, 16),
+        Err(CompileError::LatencyTooLarge { node, .. }) if node == b
+    ));
+
+    // A large but plausible latency still compiles and is compensated.
+    let (g, _) = parallel_paths(max);
+    let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
+    assert_eq!(compiled.latency(), max);
+}

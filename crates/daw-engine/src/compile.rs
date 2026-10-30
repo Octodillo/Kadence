@@ -43,7 +43,18 @@ pub enum CompileError {
     DuplicateKey(NodeKey),
     #[error("the graph reuses nodes from a graph that is no longer the latest sent")]
     StaleGraph,
+    #[error("node {node:?} is {latency} samples late; the limit is {max}")]
+    LatencyTooLarge {
+        node: NodeId,
+        latency: u32,
+        max: u32,
+    },
 }
+
+/// The most latency a path through the graph may have, in seconds. Each
+/// early edge gets a delay line of up to this length, so a plugin reporting a
+/// huge latency must not make compile allocate gigabytes.
+pub const MAX_LATENCY_SECONDS: f64 = 10.0;
 
 /// One summing input of a step: a source channel, optionally through a
 /// latency compensation delay.
@@ -244,6 +255,7 @@ impl CompiledGraph {
         // Latency in topological order: a node's output is late by the
         // latest of its audio inputs plus its own latency. Every edge that
         // arrives early is delayed to match the latest one.
+        let max_latency = (sample_rate * MAX_LATENCY_SECONDS).min(u32::MAX as f64) as u32;
         let mut out_latency = vec![0u32; steps.len()];
         let mut in_latency = vec![0u32; steps.len()];
         for s in 0..steps.len() {
@@ -255,6 +267,13 @@ impl CompiledGraph {
                 .unwrap_or(0);
             in_latency[s] = latest;
             out_latency[s] = latest.saturating_add(steps[s].latency);
+            if out_latency[s] > max_latency {
+                return Err(CompileError::LatencyTooLarge {
+                    node: steps[s].id,
+                    latency: out_latency[s],
+                    max: max_latency,
+                });
+            }
         }
 
         let mut delays = Vec::new();
