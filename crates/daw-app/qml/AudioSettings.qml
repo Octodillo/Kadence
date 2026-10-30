@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import QtQuick
+import QtQuick.Controls as QQC2
+import QtQuick.Layouts
+import org.kde.kirigami as Kirigami
+
+import io.github.octodillo.daw
+
+// Audio device settings. Changes apply (and are saved) as soon as they are
+// made; if the engine refuses one, the old setting stays and we say why.
+ColumnLayout {
+    id: settings
+
+    spacing: Kirigami.Units.largeSpacing
+
+    function apply(): void {
+        const error = Engine.applyAudioSettings(deviceBox.currentIndex,
+                                                rateBox.currentValue,
+                                                bufferBox.currentValue);
+        if (error !== "") {
+            // Show what is actually running again.
+            settings.syncFromEngine();
+        }
+    }
+
+    function syncFromEngine(): void {
+        deviceBox.currentIndex = Engine.deviceIndex;
+        rateBox.currentIndex = rateBox.indexOfValue(Engine.sampleRate);
+        bufferBox.currentIndex = bufferBox.indexOfValue(Engine.bufferSize);
+    }
+
+    Component.onCompleted: syncFromEngine()
+
+    Kirigami.InlineMessage {
+        Layout.fillWidth: true
+        type: Kirigami.MessageType.Error
+        visible: Engine.errorText !== ""
+        text: i18nc("@info", "Could not change audio settings: %1", Engine.errorText)
+    }
+
+    Kirigami.FormLayout {
+        Layout.fillWidth: true
+
+        QQC2.Label {
+            Kirigami.FormData.label: i18nc("@label", "Audio system:")
+            text: Engine.backendName
+        }
+
+        QQC2.Label {
+            Kirigami.FormData.label: i18nc("@label", "Status:")
+            text: Engine.running ? i18nc("@info audio engine status", "Running")
+                                 : i18nc("@info audio engine status", "Stopped")
+        }
+
+        Kirigami.Separator {
+            Kirigami.FormData.isSection: true
+        }
+
+        QQC2.ComboBox {
+            id: deviceBox
+            Kirigami.FormData.label: i18nc("@label:listbox", "Device:")
+            model: Engine.deviceNames.map((name, i) => i === 0 ? i18nc("@item:inlistbox audio device", "System default") : name)
+            onActivated: settings.apply()
+        }
+
+        QQC2.ComboBox {
+            id: rateBox
+            Kirigami.FormData.label: i18nc("@label:listbox", "Sample rate:")
+            textRole: "text"
+            valueRole: "value"
+            model: Engine.sampleRates.map(rate => ({
+                value: rate,
+                text: i18nc("@item:inlistbox sample rate", "%1 Hz", rate.toLocaleString(Qt.locale(), "f", 0))
+            }))
+            onActivated: settings.apply()
+        }
+
+        QQC2.ComboBox {
+            id: bufferBox
+            Kirigami.FormData.label: i18nc("@label:listbox", "Buffer size:")
+            textRole: "text"
+            valueRole: "value"
+            model: Engine.bufferSizes.map(size => ({
+                value: size,
+                text: i18ncp("@item:inlistbox buffer size", "%1 sample", "%1 samples", size)
+            }))
+            onActivated: settings.apply()
+        }
+
+        QQC2.Label {
+            Kirigami.FormData.label: i18nc("@label", "Latency:")
+            text: Engine.sampleRate > 0
+                ? i18nc("@info milliseconds", "%1 ms", (Engine.bufferSize / Engine.sampleRate * 1000).toLocaleString(Qt.locale(), "f", 1))
+                : ""
+        }
+    }
+}
