@@ -24,6 +24,9 @@ const QML_FILES: &[&str] = &[
     "qml/EditPage.qml",
     "qml/SettingsPage.qml",
     "qml/AudioSettings.qml",
+    "qml/MidiSettings.qml",
+    "qml/GeneralSettings.qml",
+    "qml/MidiInputButton.qml",
     "qml/EngineErrorText.qml",
     "qml/ProjectMessageText.qml",
     "qml/EditNames.qml",
@@ -81,6 +84,7 @@ fn main() {
         "src/arrange_view.rs",
         "src/piano_roll.rs",
         "src/paint.rs",
+        "src/settings_bridge.rs",
     ])
     .qt_module("Gui")
     .qt_module("Widgets")

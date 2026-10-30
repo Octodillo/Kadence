@@ -7,20 +7,24 @@ import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
 
-// One row of the track list beside the timeline: colour, name, mute, solo.
+// One row of the track list beside the timeline: colour, name, MIDI input,
+// arm, mute, solo.
 // Everything is read from Project by index; `revision` re-reads it after
-// any change.
+// any change. The bindings use `revision` in an expression: a bare
+// `revision;` statement is dropped by the QML compiler, and then the
+// binding never re-reads (an undone mute or a rename stayed stale).
 QQC2.ItemDelegate {
     id: header
 
     required property int index
     property int revision: Project.revision
 
-    readonly property int kind: { revision; return Project.trackKind(index); }
-    readonly property string trackName: { revision; return Project.trackName(index); }
-    readonly property bool muted: { revision; return Project.trackMuted(index); }
-    readonly property bool soloed: { revision; return Project.trackSoloed(index); }
-    readonly property color trackColor: { revision; return Project.trackColor(index); }
+    readonly property int kind: revision >= 0 ? Project.trackKind(index) : -1
+    readonly property string trackName: revision >= 0 ? Project.trackName(index) : ""
+    readonly property bool muted: revision >= 0 ? Project.trackMuted(index) : false
+    readonly property bool soloed: revision >= 0 ? Project.trackSoloed(index) : false
+    readonly property bool armed: revision >= 0 ? Project.trackArmed(index) : false
+    readonly property color trackColor: revision >= 0 ? Project.trackColor(index) : "transparent"
 
     highlighted: Project.selectedTrack === index
     padding: 0
@@ -77,6 +81,42 @@ QQC2.ItemDelegate {
             }
             onActiveFocusChanged: if (!activeFocus) visible = false
             Keys.onEscapePressed: visible = false
+        }
+
+        MidiInputButton {
+            Layout.alignment: Qt.AlignVCenter
+            visible: header.kind === 1
+            trackIndex: header.index
+        }
+
+        // Audio and instrument tracks record; buses don't.
+        // Breeze's record icon is always red, so draw the light: a ring
+        // when off, filled red when armed.
+        QQC2.ToolButton {
+            id: armButton
+            Layout.alignment: Qt.AlignVCenter
+            visible: header.kind === 0 || header.kind === 1
+            contentItem: Item {
+                implicitWidth: Kirigami.Units.iconSizes.smallMedium
+                implicitHeight: Kirigami.Units.iconSizes.smallMedium
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: Math.round(parent.width * 0.6)
+                    height: width
+                    radius: width / 2
+                    color: armButton.checked ? Kirigami.Theme.negativeTextColor : "transparent"
+                    border.width: 2
+                    border.color: armButton.checked ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+                }
+            }
+            checkable: true
+            checked: header.armed
+            display: QQC2.AbstractButton.IconOnly
+            text: i18nc("@action:button arm track for recording", "Arm")
+            onToggled: Project.setTrackArmed(header.index, checked)
+            QQC2.ToolTip.text: i18nc("@info:tooltip", "Arm for recording. An armed instrument track plays what you play live.")
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         }
 
         QQC2.ToolButton {

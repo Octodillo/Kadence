@@ -17,6 +17,7 @@ use daw_pianoroll::PianoRoll;
 
 use crate::engine::{EngineHandle, default_engine};
 use crate::message::{Context, Fields, Message};
+use crate::settings::MidiSettings;
 
 pub struct AppState {
     pub doc: Document,
@@ -43,6 +44,12 @@ pub struct AppState {
     /// Counts documents opened, so views can tell a new document from an
     /// edit (document revisions start over).
     pub doc_serial: u64,
+    /// Which MIDI sources get ports of their own.
+    pub midi: MidiSettings,
+    /// How often a changed project is autosaved; `None` turns it off.
+    pub autosave_every: Option<Duration>,
+    /// When the last autosave was tried.
+    last_autosave: Option<Instant>,
 }
 
 thread_local! {
@@ -74,6 +81,9 @@ impl AppState {
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
+            midi: MidiSettings::default(),
+            autosave_every: Some(Duration::from_secs(60)),
+            last_autosave: None,
         };
         s.sync();
         s
@@ -104,6 +114,12 @@ impl AppState {
     /// was passing (a full disk that was cleared).
     pub fn autosave(&mut self) {
         const RETRY: Duration = Duration::from_secs(10);
+        let Some(every) = self.autosave_every else {
+            return;
+        };
+        if self.last_autosave.is_some_and(|at| at.elapsed() < every) {
+            return;
+        }
         let revision = self.doc.revision();
         let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
         if let Some((r, at)) = self.autosave_failed
@@ -113,7 +129,13 @@ impl AppState {
             return;
         }
         match self.doc.autosave() {
-            Ok(_) => self.autosave_failed = None,
+            Ok(wrote) => {
+                self.autosave_failed = None;
+                // The next one waits a whole interval after this one.
+                if wrote {
+                    self.last_autosave = Some(Instant::now());
+                }
+            }
             Err(e) => {
                 self.autosave_failed = Some((revision, Instant::now()));
                 if !failed_here {
@@ -121,6 +143,34 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Gives the MIDI sources the settings use ports of their own, and
+    /// connects any that came back. Returns whether anything the MIDI
+    /// settings show changed.
+    pub fn refresh_midi(&mut self) -> bool {
+        let mut changed = self.engine.refresh_midi();
+        let present: Vec<(String, bool)> = self
+            .engine
+            .midi_sources()
+            .into_iter()
+            .map(|s| (s.name, s.is_physical))
+            .collect();
+        let current: Vec<String> = self.engine.midi_inputs().into_iter().map(|i| i.0).collect();
+        let wanted = self.midi.wanted(&present, &current);
+        if wanted != current {
+            self.engine.set_midi_inputs(&wanted);
+            changed = true;
+        }
+        // A source got or lost its port: the session wants a rebuild.
+        if self
+            .engine
+            .session()
+            .is_some_and(|session| session.wants_sync())
+        {
+            self.resync();
+        }
+        changed
     }
 
     /// Forces a full resync, after the engine was restarted.

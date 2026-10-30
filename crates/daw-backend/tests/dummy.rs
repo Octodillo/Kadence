@@ -496,7 +496,7 @@ fn midi_inputs_added_while_running_keep_their_events_apart() {
     b.remove_midi_input(a.slot).unwrap();
     assert!(b.connections().is_empty());
     assert!(b.remove_midi_input(a.slot).is_err());
-    assert_eq!(b.midi_inputs(), [c.clone()]);
+    assert_eq!(b.midi_inputs(), std::slice::from_ref(&c));
     // Its slot is free for the next port.
     assert_eq!(b.add_midi_input("more").unwrap().slot, a.slot);
     b.stop().unwrap();

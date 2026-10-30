@@ -48,7 +48,7 @@ pub struct JackBackend {
 enum State {
     #[default]
     Closed,
-    Open(Client, Ports),
+    Open(Client, Box<Ports>),
     Running(jack::AsyncClient<Notifications, Processor>),
 }
 
@@ -283,7 +283,7 @@ impl AudioBackend for JackBackend {
         self.shared = Arc::new(SharedStats::new());
         self.shared.sample_rate.store(client.sample_rate(), Relaxed);
         self.shared.buffer_size.store(client.buffer_size(), Relaxed);
-        self.state = State::Open(client, ports);
+        self.state = State::Open(client, Box::new(ports));
         self.cfg = Some(cfg);
         self.extra = Some(extra_control);
         self.links.clear();
@@ -293,7 +293,7 @@ impl AudioBackend for JackBackend {
 
     fn start(&mut self, cb: ProcessCallback) -> Result<(), BackendError> {
         let (client, ports) = match std::mem::take(&mut self.state) {
-            State::Open(c, p) => (c, p),
+            State::Open(c, p) => (c, *p),
             other @ State::Running(_) => {
                 self.state = other;
                 return Err(BackendError::AlreadyRunning);
@@ -385,7 +385,7 @@ impl AudioBackend for JackBackend {
                     .deactivate()
                     .map_err(|e| BackendError::Other(format!("could not deactivate: {e}")))?;
                 // The callback drops here, on the caller's thread.
-                self.state = State::Open(client, processor.ports);
+                self.state = State::Open(client, Box::new(processor.ports));
                 self.apply_extra_now();
             }
             other => self.state = other,

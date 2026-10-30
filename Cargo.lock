@@ -494,6 +494,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "daw-arrange",
+ "daw-backend",
  "daw-core",
  "daw-devices",
  "daw-engine",

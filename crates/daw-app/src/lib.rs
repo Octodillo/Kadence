@@ -19,6 +19,7 @@ pub mod project;
 mod recording;
 pub mod session_mixer;
 pub mod settings;
+pub mod settings_bridge;
 pub mod state;
 mod test_helper;
 
