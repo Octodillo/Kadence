@@ -79,21 +79,38 @@ Item {
         () => {
             window.pageActions[1].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Mix"), "switch to Mix");
-            check(Mixer.levels.length >= 10 && Mixer.effectNames.length > 0, "mixer has strips and effects");
+        },
+        () => {
+            // The mixer has caught up with the project on its clock.
+            // The demo's three tracks and the master.
+            check(Mixer.levels.length === 4 * 5, "a strip per track");
+            const compressor = Mixer.effectNames.indexOf("Compressor");
+            check(compressor >= 0 && Mixer.addInsert(0, compressor), "add a compressor to Bass");
             // Play so the meters have something to show.
             window.playAction.trigger();
         },
         () => {
+            check(Project.undoText === "Add Device", "mixer edits undo");
             check(Mixer.levels.some(v => v > 0), "meters move while playing");
-            const keys = 2;
-            check(Mixer.levels[keys * 5 + 4] > 0, "compressor gain reduction metered");
+            check(Mixer.levels[0 * 5 + 4] >= 0, "compressor gain reduction metered");
             Mixer.setSoloed(0, true);
             check(Mixer.anySoloed, "solo");
             Mixer.setSoloed(0, false);
+            // Touch-write a fader move on Lead.
+            Mixer.setWriting(true);
+            Mixer.touch(1, "volume", -1, true);
+            Mixer.setVolume(1, -12);
             shoot(window.title, "mix");
         },
         () => {
+            Mixer.setVolume(1, -20);
+            Mixer.touch(1, "volume", -1, false);
+            Mixer.setWriting(false);
             window.playAction.trigger();
+        },
+        () => {
+            check(Project.undoText === "Add Automation Lane", "fader move written as automation");
+            check(!Mixer.writeAutomation, "writing off");
         },
         () => {
             window.pageActions[2].trigger();

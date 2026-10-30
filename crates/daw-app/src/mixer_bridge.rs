@@ -14,7 +14,8 @@ use cxx_qt_lib::{
 };
 
 use crate::mixer::{
-    MeterBallistics, MeterDisplay, MixerHandle, StripInfo, StripKind, default_mixer,
+    Control, MeterBallistics, MeterDisplay, MixerHandle, StripId, StripInfo, StripKind,
+    default_mixer,
 };
 
 #[cxx_qt::bridge]
@@ -54,6 +55,9 @@ pub mod qobject {
         /// Names of the effects `add_insert` can add, in catalog order.
         #[qproperty(QStringList, effect_names)]
         #[qproperty(bool, any_soloed)]
+        /// Touch writing: controls moved during playback are recorded as
+        /// automation.
+        #[qproperty(bool, write_automation, READ, NOTIFY)]
         type Mixer = super::MixerRust;
 
         #[qinvokable]
@@ -73,7 +77,15 @@ pub mod qobject {
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
         #[qinvokable]
         fn remove_insert(self: Pin<&mut Mixer>, row: i32, insert: i32);
-        /// Advances the preview by `seconds` and refreshes `levels`.
+        /// Turns touch writing on or off.
+        #[qinvokable]
+        fn set_writing(self: Pin<&mut Mixer>, on: bool);
+        /// The user grabbed (`pressed`) or let go of a control: `control`
+        /// is "volume", "pan" or "send" (with `send` its index).
+        #[qinvokable]
+        fn touch(self: Pin<&mut Mixer>, row: i32, control: &QString, send: i32, pressed: bool);
+        /// Picks up edits made elsewhere, records held controls and
+        /// refreshes `levels`; `seconds` since the last call.
         #[qinvokable]
         fn tick(self: Pin<&mut Mixer>, playing: bool, seconds: f64);
     }
@@ -88,6 +100,13 @@ pub mod qobject {
             bottom_right: &QModelIndex,
             roles: &QVector_i32,
         );
+
+        #[inherit]
+        #[cxx_name = "beginResetModel"]
+        fn begin_reset_model(self: Pin<&mut Mixer>);
+        #[inherit]
+        #[cxx_name = "endResetModel"]
+        fn end_reset_model(self: Pin<&mut Mixer>);
 
         #[inherit]
         fn index(self: &Mixer, row: i32, column: i32, parent: &QModelIndex) -> QModelIndex;
@@ -144,6 +163,9 @@ pub struct MixerRust {
     levels: QList<f64>,
     effect_names: QStringList,
     any_soloed: bool,
+    write_automation: bool,
+    /// The mixer's revision when `strips` was read.
+    revision: u64,
     strips: Vec<StripInfo>,
     meters: Vec<MeterDisplay>,
     ballistics: MeterBallistics,
@@ -157,6 +179,8 @@ impl Default for MixerRust {
             levels: QList::default(),
             effect_names: QStringList::default(),
             any_soloed: false,
+            write_automation: false,
+            revision: 0,
             strips: Vec::new(),
             meters: Vec::new(),
             ballistics: MeterBallistics::default(),
@@ -216,65 +240,46 @@ impl cxx_qt::Initialize for qobject::Mixer {
         let soloed = strips.iter().any(|s| s.soloed);
         let meters = vec![MeterDisplay::default(); strips.len()];
         self.as_mut().set_levels(flatten(&meters));
+        let revision = self.mixer.revision();
         let mut rust = self.as_mut().rust_mut();
         rust.strips = strips;
         rust.meters = meters;
+        rust.revision = revision;
         self.as_mut().set_any_soloed(soloed);
     }
 }
 
 impl qobject::Mixer {
-    fn strip_id(&self, row: i32) -> Option<u64> {
+    fn strip_id(&self, row: i32) -> Option<StripId> {
         let row = usize::try_from(row).ok()?;
         self.strips.get(row).map(|s| s.id)
-    }
-
-    /// Re-reads the strips from the mixer and signals `names` (all roles if
-    /// empty) on `rows` (all rows if `None`). Row count never changes in the
-    /// preview, so no reset is needed.
-    fn refresh(mut self: Pin<&mut Self>, rows: Option<i32>, names: &[&str]) {
-        let strips = self.mixer.strips();
-        let soloed = strips.iter().any(|s| s.soloed);
-        let count = strips.len() as i32;
-        self.as_mut().rust_mut().strips = strips;
-        self.as_mut().set_any_soloed(soloed);
-        let (first, last) = match rows {
-            Some(r) => (r, r),
-            None => (0, count - 1),
-        };
-        if count > 0 && first >= 0 && last < count {
-            let root = QModelIndex::default();
-            let first = self.index(first, 0, &root);
-            let last = self.index(last, 0, &root);
-            self.as_mut().data_changed(&first, &last, &roles(names));
-        }
     }
 
     fn set_volume(mut self: Pin<&mut Self>, row: i32, db: f64) {
         if let Some(id) = self.strip_id(row) {
             self.as_mut().rust_mut().mixer.set_volume(id, db);
-            self.refresh(Some(row), &["volumeDb"]);
+            self.reload();
         }
     }
 
     fn set_pan(mut self: Pin<&mut Self>, row: i32, pan: f64) {
         if let Some(id) = self.strip_id(row) {
             self.as_mut().rust_mut().mixer.set_pan(id, pan);
-            self.refresh(Some(row), &["pan"]);
+            self.reload();
         }
     }
 
     fn set_muted(mut self: Pin<&mut Self>, row: i32, muted: bool) {
         if let Some(id) = self.strip_id(row) {
             self.as_mut().rust_mut().mixer.set_muted(id, muted);
-            self.refresh(None, &["muted", "soloed", "silenced"]);
+            self.reload();
         }
     }
 
     fn set_soloed(mut self: Pin<&mut Self>, row: i32, soloed: bool) {
         if let Some(id) = self.strip_id(row) {
             self.as_mut().rust_mut().mixer.set_soloed(id, soloed);
-            self.refresh(None, &["muted", "soloed", "silenced"]);
+            self.reload();
         }
     }
 
@@ -300,9 +305,7 @@ impl qobject::Mixer {
                 .rust_mut()
                 .mixer
                 .set_send_level(id, target, db);
-            // Sliders read levels through `send_level`; no role to signal.
-            let strips = self.mixer.strips();
-            self.as_mut().rust_mut().strips = strips;
+            self.reload();
         }
     }
 
@@ -315,7 +318,7 @@ impl qobject::Mixer {
         };
         let added = self.as_mut().rust_mut().mixer.add_insert(id, &device);
         if added {
-            self.refresh(Some(row), &["inserts", "insertMeters"]);
+            self.reload();
         }
         added
     }
@@ -323,13 +326,85 @@ impl qobject::Mixer {
     fn remove_insert(mut self: Pin<&mut Self>, row: i32, insert: i32) {
         if let (Some(id), Ok(insert)) = (self.strip_id(row), usize::try_from(insert)) {
             self.as_mut().rust_mut().mixer.remove_insert(id, insert);
-            self.refresh(Some(row), &["inserts", "insertMeters"]);
+            self.reload();
         }
     }
 
+    fn set_writing(mut self: Pin<&mut Self>, on: bool) {
+        self.as_mut().rust_mut().mixer.set_write_automation(on);
+        let on = self.mixer.write_automation();
+        if on != self.write_automation {
+            self.as_mut().rust_mut().write_automation = on;
+            self.as_mut().write_automation_changed();
+        }
+        self.reload();
+    }
+
+    fn touch(mut self: Pin<&mut Self>, row: i32, control: &QString, send: i32, pressed: bool) {
+        let Some(id) = self.strip_id(row) else {
+            return;
+        };
+        let control = match control.to_string().as_str() {
+            "volume" => Control::Volume,
+            "pan" => Control::Pan,
+            "send" => {
+                let target = usize::try_from(send)
+                    .ok()
+                    .and_then(|i| self.strips.get(row as usize)?.sends.get(i))
+                    .map(|s| s.target);
+                match target {
+                    Some(t) => Control::Send(t),
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        self.as_mut().rust_mut().mixer.touch(id, control, pressed);
+        self.reload();
+    }
+
+    /// Re-reads the strips, which may also have changed elsewhere (another
+    /// view, undo, a new project): resets the model if strips came or went,
+    /// otherwise signals the rows that changed.
+    fn reload(mut self: Pin<&mut Self>) {
+        let strips = self.mixer.strips();
+        let revision = self.mixer.revision();
+        self.as_mut().rust_mut().revision = revision;
+        if strips == self.strips {
+            return;
+        }
+        let soloed = strips.iter().any(|s| s.soloed);
+        let same_rows = strips.len() == self.strips.len()
+            && strips.iter().zip(&self.strips).all(|(a, b)| a.id == b.id);
+        if same_rows {
+            let changed: Vec<i32> = (0..strips.len())
+                .filter(|&i| strips[i] != self.strips[i])
+                .map(|i| i as i32)
+                .collect();
+            self.as_mut().rust_mut().strips = strips;
+            let root = QModelIndex::default();
+            for row in changed {
+                let index = self.index(row, 0, &root);
+                self.as_mut()
+                    .data_changed(&index, &index, &QVector::default());
+            }
+        } else {
+            self.as_mut().begin_reset_model();
+            let mut rust = self.as_mut().rust_mut();
+            rust.meters = vec![MeterDisplay::default(); strips.len()];
+            rust.ballistics = MeterBallistics::default();
+            rust.strips = strips;
+            self.as_mut().end_reset_model();
+        }
+        self.as_mut().set_any_soloed(soloed);
+    }
+
     fn tick(mut self: Pin<&mut Self>, playing: bool, seconds: f64) {
+        self.as_mut().rust_mut().mixer.tick(playing, seconds);
+        if self.mixer.revision() != self.revision {
+            self.as_mut().reload();
+        }
         let mut rust = self.as_mut().rust_mut();
-        rust.mixer.tick(playing, seconds);
         let levels = rust.mixer.levels();
         let meters = rust.ballistics.update(&levels, seconds).to_vec();
         if meters == rust.meters {

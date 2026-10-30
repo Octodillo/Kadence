@@ -14,7 +14,17 @@ Kirigami.Page {
     property list<Kirigami.Action> transportActions
 
     title: i18nc("@title", "Mix")
-    actions: transportActions
+    // QML list literals can't spread lists, so name each entry.
+    actions: [page.transportActions[0], page.writeAction]
+
+    readonly property Kirigami.Action writeAction: Kirigami.Action {
+        icon.name: "media-record-symbolic"
+        text: i18nc("@action:intoolbar", "Write Automation")
+        tooltip: i18nc("@info:tooltip", "Record fader, pan and send moves as automation while playing")
+        checkable: true
+        checked: Mixer.writeAutomation
+        onToggled: Mixer.setWriting(checked)
+    }
     padding: 0
 
     Kirigami.Theme.colorSet: Kirigami.Theme.View

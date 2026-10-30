@@ -14,6 +14,7 @@ pub mod mixer;
 pub mod mixer_bridge;
 mod paint;
 pub mod project;
+pub mod session_mixer;
 pub mod settings;
 pub mod state;
 mod test_helper;

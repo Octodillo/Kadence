@@ -30,7 +30,7 @@ use daw_core::time::{SampleTime, TempoMap, TickTime};
 use daw_engine::{
     EngineConfig, EngineController, EngineError, EngineProcessor, LoopRange, NodeKey, NodeMeter,
 };
-use daw_model::{ClipId, DeviceId, ProjectSnapshot, TrackId};
+use daw_model::{ClipId, DeviceId, LaneId, ProjectSnapshot, TrackId};
 
 pub use build::effective_mutes;
 pub use media::{MEMORY_LIMIT_SECONDS, MediaPool};
@@ -91,6 +91,9 @@ pub struct Session {
     /// What the transport was last told, so the UI doesn't wait a period
     /// for the audio thread to confirm.
     playing: bool,
+    /// Automation lanes left out of the graph while the user overwrites
+    /// them (touch write).
+    suspended: HashSet<LaneId>,
 }
 
 impl Session {
@@ -111,6 +114,7 @@ impl Session {
             warnings: Vec::new(),
             playing: false,
             master: None,
+            suspended: HashSet::new(),
         };
         (session, processor)
     }
@@ -165,7 +169,7 @@ impl Session {
             self.controller.set_bpm(self.tempo.bpm_at(TickTime(0)))?;
             self.apply_loop()?;
         }
-        let structure = build::Structure::of(snapshot);
+        let structure = build::Structure::of(snapshot, &self.suspended);
         // Automation is in samples, so a tempo change re-times it.
         let rebuild = self.built.as_ref().is_none_or(|b| {
             b.structure != structure || (tempo_changed && structure.has_automation())
@@ -178,6 +182,33 @@ impl Session {
         }
         self.send_params(snapshot)?;
         self.send_clips(snapshot, tempo_changed);
+        Ok(())
+    }
+
+    /// Leaves the automation lanes in `lanes` out of playback, so a control
+    /// being recorded over them is heard instead. Takes effect on the next
+    /// [`sync`](Self::sync).
+    pub fn set_suspended_lanes(&mut self, lanes: HashSet<LaneId>) {
+        self.suspended = lanes;
+    }
+
+    pub fn suspended_lanes(&self) -> &HashSet<LaneId> {
+        &self.suspended
+    }
+
+    /// Sends a parameter value that isn't in the document yet, such as a
+    /// fader being recorded as automation. The next [`sync`](Self::sync)
+    /// sends the document's value again if it differs.
+    pub fn set_live_param(
+        &mut self,
+        key: NodeKey,
+        param: u32,
+        value: f64,
+    ) -> Result<(), SessionError> {
+        self.controller.set_param_by_key(key, param, value)?;
+        if let Some(b) = &mut self.built {
+            b.params.insert((key, param), value);
+        }
         Ok(())
     }
 
