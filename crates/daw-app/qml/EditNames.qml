@@ -17,6 +17,7 @@ QtObject {
         "Add Track": i18nc("@item:inmenu name of an edit", "Add Track"),
         "Bypass Device": i18nc("@item:inmenu name of an edit", "Bypass Device"),
         "Change Clip Gain": i18nc("@item:inmenu name of an edit", "Change Clip Gain"),
+        "Change Instrument": i18nc("@item:inmenu name of an edit", "Change Instrument"),
         "Change Pan": i18nc("@item:inmenu name of an edit", "Change Pan"),
         "Change Parameter": i18nc("@item:inmenu name of an edit", "Change Parameter"),
         "Change Plugin State": i18nc("@item:inmenu name of an edit", "Change Plugin State"),

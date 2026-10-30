@@ -77,6 +77,9 @@ pub mod qobject {
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
         #[qinvokable]
         fn remove_insert(self: Pin<&mut Mixer>, row: i32, insert: i32);
+        /// Swaps the strip's instrument for row `choice` of `Instruments`.
+        #[qinvokable]
+        fn set_instrument(self: Pin<&mut Mixer>, row: i32, choice: i32);
         /// Turns touch writing on or off.
         #[qinvokable]
         fn set_writing(self: Pin<&mut Mixer>, on: bool);
@@ -140,6 +143,9 @@ const ROLES: &[&str] = &[
     "muted",
     "soloed",
     "silenced",
+    "hasInstrument",
+    "instrument",
+    "instrumentChoice",
     "inserts",
     "insertMeters",
     "sends",
@@ -331,6 +337,13 @@ impl qobject::Mixer {
         }
     }
 
+    fn set_instrument(mut self: Pin<&mut Self>, row: i32, choice: i32) {
+        if let (Some(id), Ok(choice)) = (self.strip_id(row), usize::try_from(choice)) {
+            self.as_mut().rust_mut().mixer.set_instrument(id, choice);
+            self.reload();
+        }
+    }
+
     fn set_writing(mut self: Pin<&mut Self>, on: bool) {
         self.as_mut().rust_mut().mixer.set_write_automation(on);
         let on = self.mixer.write_automation();
@@ -444,6 +457,15 @@ impl qobject::Mixer {
             Some("muted") => QVariant::from(&s.muted),
             Some("soloed") => QVariant::from(&s.soloed),
             Some("silenced") => QVariant::from(&s.silenced),
+            Some("hasInstrument") => QVariant::from(&s.has_instrument),
+            Some("instrument") => QVariant::from(&QString::from(
+                s.instrument.as_ref().map_or("", |i| i.name.as_str()),
+            )),
+            Some("instrumentChoice") => QVariant::from(
+                &s.instrument_choice
+                    .and_then(|i| i32::try_from(i).ok())
+                    .unwrap_or(-1),
+            ),
             Some("inserts") => {
                 QVariant::from(&string_list(s.inserts.iter().map(|i| i.name.as_str())))
             }
