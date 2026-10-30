@@ -498,7 +498,9 @@ dependencies = [
  "daw-devices",
  "daw-engine",
  "daw-media",
+ "daw-midi",
  "daw-model",
+ "daw-pianoroll",
  "daw-session",
 ]
 

@@ -13,6 +13,7 @@ mod ffi;
 pub mod mixer;
 pub mod mixer_bridge;
 mod paint;
+pub mod piano_roll;
 pub mod project;
 pub mod settings;
 pub mod state;

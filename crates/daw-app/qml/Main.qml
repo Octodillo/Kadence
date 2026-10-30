@@ -228,6 +228,12 @@ Kirigami.ApplicationWindow {
         transportActions: [root.playAction]
     }
 
+    // Double-clicking a clip in the arrange view opens it in the editor.
+    Connections {
+        target: arrangePage.view
+        function onClipActivated() { root.showPage(editPage, editAction); }
+    }
+
     Component {
         id: aboutComponent
         Kirigami.AboutPage {

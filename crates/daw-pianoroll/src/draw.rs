@@ -159,26 +159,30 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
         s.push(Prim::PopClip);
     }
 
-    // Keyboard strip.
+    // Keyboard strip. Keys are light and dark whatever the colour scheme,
+    // taken from the scheme's own darkest and lightest colours.
     let kb = Rect::new(0.0, n.y, pr.keyboard_width, n.h);
+    let (dark, light) = if pal.background.luminance() < pal.text.luminance() {
+        (pal.background, pal.text)
+    } else {
+        (pal.text, pal.background)
+    };
+    let white_key = light.mix(dark, 0.06);
+    let black_key = dark.mix(light, 0.12);
     s.push(Prim::PushClip(kb));
-    s.rect(kb, pal.background);
+    s.rect(kb, white_key);
     for key in rows {
         let y = n.y + v.key_to_y(key);
-        let r = Rect::new(0.0, y, pr.keyboard_width, pr.key_height);
         if is_black(key) {
-            s.rect(
-                Rect::new(0.0, y, pr.keyboard_width * 0.62, pr.key_height),
-                pal.text.mix(pal.background, 0.15),
-            );
+            s.rect(Rect::new(0.0, y, pr.keyboard_width * 0.62, pr.key_height), black_key);
         } else {
-            s.hline(y + pr.key_height - 0.5, 0.0, pr.keyboard_width, line, 1.0);
+            s.hline(y + pr.key_height - 0.5, 0.0, pr.keyboard_width, white_key.mix(dark, 0.25), 1.0);
         }
         if key % 12 == 0 && pr.key_height >= 9.0 {
             s.push(Prim::Text {
-                r: Rect::new(0.0, r.y, pr.keyboard_width - 4.0, r.h),
+                r: Rect::new(pr.keyboard_width * 0.62, y, pr.keyboard_width * 0.38 - 2.0, pr.key_height),
                 text: note_name(key),
-                color: pal.disabled_text,
+                color: dark.mix(light, 0.35),
                 bold: false,
                 align: Align::Left,
             });
