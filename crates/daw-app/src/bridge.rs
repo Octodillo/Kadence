@@ -61,6 +61,7 @@ pub mod qobject {
     impl cxx_qt::Initialize for Engine {}
 }
 
+#[derive(Default)]
 pub struct EngineRust {
     backend_name: QString,
     running: bool,
@@ -74,24 +75,6 @@ pub struct EngineRust {
     buffer_size: i32,
     /// Device ids, parallel to `device_names` (minus the default entry).
     device_ids: Vec<String>,
-}
-
-impl Default for EngineRust {
-    fn default() -> Self {
-        Self {
-            backend_name: QString::default(),
-            running: false,
-            error_text: QString::default(),
-            playing: false,
-            device_names: QStringList::default(),
-            device_index: 0,
-            sample_rates: QList::default(),
-            sample_rate: 0,
-            buffer_sizes: QList::default(),
-            buffer_size: 0,
-            device_ids: Vec::new(),
-        }
-    }
 }
 
 fn to_qlist(values: &[u32]) -> QList<i32> {
