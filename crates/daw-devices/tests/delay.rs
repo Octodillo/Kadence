@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use daw_core::node::Node;
+use daw_core::time::Timeline;
 use daw_devices::devices::delay::*;
 use daw_devices::{Delay, Device};
 
@@ -68,7 +69,14 @@ fn starts_at_the_transport_tempo_after_reset() {
     let r = render(&mut d, 20000, &[impulse(20000)], &[], s);
     assert_eq!(echo(&r), 12000);
     Node::reset(&mut d);
-    let r = render_prepared(&mut d, 20000, &[impulse(20000)], &[], s, |_| 60.0);
+    let r = render_prepared(
+        &mut d,
+        20000,
+        &[impulse(20000)],
+        &[],
+        s,
+        &Timeline::constant(60.0, 4, 4),
+    );
     assert_eq!(echo(&r), 12000);
 }
 

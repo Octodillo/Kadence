@@ -10,10 +10,13 @@ use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, vio
 use daw_core::dispose::deferred_drop;
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::meter::PeakMeter;
+use daw_core::node::TransportState;
 use daw_core::queue::spsc;
 use daw_core::rt_log;
 use daw_core::rtlog::{RtLevel, rt_log};
-use daw_core::time::{SegmentTempoMap, TempoMap, TickTime};
+use daw_core::time::{
+    Meter, MeterPoint, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline,
+};
 
 #[global_allocator]
 static ALLOC: AllocDisabler = AllocDisabler;
@@ -116,5 +119,27 @@ fn rt_operations_do_not_allocate() {
         }),
         0,
         "tempo map"
+    );
+
+    let meter = Meter::new([
+        MeterPoint {
+            tick: TickTime(0),
+            numerator: 4,
+            denominator: 4,
+        },
+        MeterPoint {
+            tick: TickTime(4 * 960),
+            numerator: 7,
+            denominator: 8,
+        },
+    ]);
+    let timeline = Timeline::new(tempo, meter);
+    assert_eq!(
+        allocations_in(|| {
+            let t = TransportState::at(&timeline, true, SampleTime(200_000), 48_000.0);
+            t.advanced(4096);
+        }),
+        0,
+        "timeline"
     );
 }

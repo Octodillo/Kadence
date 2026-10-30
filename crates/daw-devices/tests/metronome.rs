@@ -1,6 +1,8 @@
 mod common;
 
 use common::*;
+use daw_core::node::Node;
+use daw_core::time::{Meter, MeterPoint, PPQ, SegmentTempoMap, TickTime, Timeline};
 use daw_devices::Metronome;
 use daw_devices::devices::metronome::*;
 
@@ -66,4 +68,93 @@ fn denormals() {
     assert!(r.channels[0][..1000].iter().any(|&x| x != 0.0));
     assert!(r.channels[0][20_000..].iter().all(|&x| x == 0.0));
     assert!(!r.channels[0].iter().any(|x| x.is_subnormal()));
+}
+
+fn clicks(r: &Rendered) -> Vec<usize> {
+    // Each click starts at phase 0, so the first nonzero sample is one later.
+    onsets(&r.channels[0]).iter().map(|i| i - 1).collect()
+}
+
+#[test]
+fn tempo_changes_keep_the_beat_grid() {
+    // Issue #45: 120 bpm, then 160 from beat 4. The grid continues from
+    // beat 4 at the new tempo instead of jumping to where 160 bpm from the
+    // start would put it.
+    let mut tempo = SegmentTempoMap::new(120.0);
+    tempo.set_tempo(TickTime(4 * PPQ), 160.0, false);
+    let timeline = Timeline::new(tempo, Meter::default());
+    for block in [64, 97] {
+        let s = Setup {
+            block,
+            ..Setup::default()
+        };
+        let mut m = Metronome::new();
+        m.prepare(s.sample_rate, block as u32);
+        let r = render_prepared(&mut m, 140_000, &[], &[], s, &timeline);
+        assert_eq!(
+            clicks(&r),
+            vec![0, 24000, 48000, 72000, 96000, 114000, 132000],
+            "block {block}"
+        );
+    }
+}
+
+#[test]
+fn accents_follow_the_time_signature() {
+    // 6/8: a click every eighth note, the downbeat of each bar accented.
+    let s = Setup::default();
+    let timeline = Timeline::constant(120.0, 6, 8);
+    let mut m = Metronome::new();
+    m.prepare(s.sample_rate, s.block as u32);
+    let r = render_prepared(&mut m, 150_000, &[], &[], s, &timeline);
+    let found = clicks(&r);
+    assert_eq!(found, (0..13).map(|i| i * 12_000).collect::<Vec<_>>());
+    let p = |at: usize| peak(&r.channels[0][at..at + 2000]);
+    for &at in &found {
+        let downbeat = at % 72_000 == 0;
+        assert_eq!(p(at) > p(12_000) * 1.3, downbeat, "click at {at}");
+    }
+}
+
+#[test]
+fn meter_changes_move_the_accent() {
+    // One bar of 4/4, then 3/4.
+    let meter = Meter::new([
+        MeterPoint {
+            tick: TickTime(0),
+            numerator: 4,
+            denominator: 4,
+        },
+        MeterPoint {
+            tick: TickTime(4 * PPQ),
+            numerator: 3,
+            denominator: 4,
+        },
+    ]);
+    let timeline = Timeline::new(SegmentTempoMap::new(120.0), meter);
+    let s = Setup::default();
+    let mut m = Metronome::new();
+    m.prepare(s.sample_rate, s.block as u32);
+    let r = render_prepared(&mut m, 240_000, &[], &[], s, &timeline);
+    let found = clicks(&r);
+    assert_eq!(found, (0..10).map(|i| i * 24_000).collect::<Vec<_>>());
+    let p = |at: usize| peak(&r.channels[0][at..at + 2000]);
+    let accented: Vec<usize> = found
+        .into_iter()
+        .filter(|&at| p(at) > p(24_000) * 1.3)
+        .collect();
+    assert_eq!(accented, vec![0, 96_000, 168_000]);
+}
+
+#[test]
+fn a_jump_back_clicks_again() {
+    let s = Setup::default();
+    let timeline = Timeline::default();
+    let mut m = Metronome::new();
+    m.prepare(s.sample_rate, s.block as u32);
+    // The second render starts over at sample 0, like a loop.
+    let first = render_prepared(&mut m, 30_000, &[], &[], s, &timeline);
+    let second = render_prepared(&mut m, 30_000, &[], &[], s, &timeline);
+    assert_eq!(clicks(&first), vec![0, 24000]);
+    assert_eq!(clicks(&second), vec![0, 24000]);
 }
