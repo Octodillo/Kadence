@@ -74,7 +74,7 @@ Kirigami.ApplicationWindow {
         text: Project.recording ? i18nc("@action:button", "Stop Recording") : i18nc("@action:button", "Record")
         icon.name: "media-record"
         shortcut: "R"
-        tooltip: i18nc("@info:tooltip", "Record MIDI into the open clip, or into a new clip on the selected instrument track")
+        tooltip: i18nc("@info:tooltip", "Record onto the armed tracks; with none armed, record MIDI into the open clip or onto the selected instrument track")
         displayHint: Kirigami.DisplayHint.KeepVisible
         onTriggered: Project.toggleRecord()
     }
