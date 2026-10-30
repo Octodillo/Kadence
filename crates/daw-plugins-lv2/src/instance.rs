@@ -97,6 +97,22 @@ impl Lv2Instance {
         // in `run_segment`, for the duration of each run.
         let inst = unsafe { plugin.instantiate(features.clone(), sample_rate) }
             .map_err(|e| PluginError::Load(format!("{}: {e}", descriptor.id)))?;
+        // livi clamps every control write to the port's bounds, and clamping
+        // panics when they are inverted or NaN: on the audio thread, or while
+        // restoring a project. Such metadata is broken, so refuse the plugin.
+        if let Some(c) = inst
+            .iter_control_inputs()
+            .find(|c| c.minimum.partial_cmp(&c.maximum).is_none_or(|o| o.is_gt()))
+        {
+            let name = plugin
+                .ports()
+                .find(|p| p.index == c.port_index)
+                .map_or_else(|| c.port_index.0.to_string(), |p| p.name);
+            return Err(PluginError::Load(format!(
+                "{}: control port {name} has an invalid range {}..{}",
+                descriptor.id, c.minimum, c.maximum
+            )));
+        }
 
         let lilv = world.raw();
         let raw = plugin.raw();
@@ -260,8 +276,10 @@ impl Lv2Instance {
         }
     }
 
-    /// Applies what the UI (or `queue_atom`) sent since the last block.
-    fn drain_from_ui(&mut self) {
+    /// Applies what the UI (or `queue_atom`) sent since the last block. UI
+    /// writes to parameters are also reported in `events_out`, as changes the
+    /// plugin made, so the host's view of its parameters stays current.
+    fn drain_from_ui(&mut self, events_out: &mut EventList) {
         let buf = &mut self.ui_scratch;
         while let Some((port, kind, size)) = ring::peek(&mut self.from_ui) {
             let atom_port = if kind == ring::ATOM {
@@ -285,7 +303,17 @@ impl Lv2Instance {
             match m.kind {
                 ring::CONTROL if len == 4 => {
                     let v = f32::from_ne_bytes(buf[..4].try_into().unwrap());
-                    self.inst.set_control_input(PortIndex(m.port as usize), v);
+                    let set = self.inst.set_control_input(PortIndex(m.port as usize), v);
+                    let param = m.port as ParamId;
+                    if let Some(value) = set
+                        && self.params.iter().any(|p| p.id == param)
+                    {
+                        let kind = EventKind::ParamValue {
+                            param,
+                            value: f64::from(value),
+                        };
+                        let _ = events_out.push(Event { frame: 0, kind });
+                    }
                 }
                 ring::ATOM if len >= 8 => {
                     let Some(i) = atom_port else {
@@ -392,14 +420,14 @@ impl Lv2Instance {
 
         let mut events_out = events_out;
         for (j, seq) in self.atom_out.iter().enumerate() {
-            for ev in seq.iter() {
-                let ty = ev.event.body.type_;
+            for ev in atom::output_events(seq, self.urids.atom_sequence) {
+                let ty = ev.ty;
                 if ty == self.urids.midi_event
                     && self.atom_out_midi[j]
                     && let (Some(out), Some(kind)) =
                         (events_out.as_deref_mut(), midi::from_midi(ev.data))
                 {
-                    let time = ev.event.time_in_frames.clamp(0, (n - 1) as i64);
+                    let time = ev.time.clamp(0, (n - 1) as i64);
                     let frame = (start as i64 + time) as u32;
                     let _ = out.push(Event { frame, kind });
                 }
@@ -550,7 +578,8 @@ impl Node for Lv2Instance {
             audio_in: self.n_audio_in as u16,
             audio_out: self.n_audio_out as u16,
             event_in: self.midi_in.is_some() || !self.params.is_empty(),
-            event_out: self.atom_out_midi.iter().any(|&m| m),
+            // Parameter changes made in the plugin's UI go out as events.
+            event_out: self.atom_out_midi.iter().any(|&m| m) || !self.params.is_empty(),
         }
     }
 
@@ -587,7 +616,7 @@ impl Node for Lv2Instance {
         if frames == 0 {
             return;
         }
-        self.drain_from_ui();
+        self.drain_from_ui(ctx.events_out);
         self.send_transport(ctx.transport, frames);
         if self.pending_reset {
             self.send_reset();
@@ -782,3 +811,77 @@ impl<I: Iterator> Iterator for Exact<I> {
 }
 
 impl<I: Iterator> ExactSizeIterator for Exact<I> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use daw_core::plugin::PluginFormat;
+
+    fn mda_delay() -> Option<Lv2Instance> {
+        let format = crate::Lv2Format::new();
+        let Some(dir) = format
+            .default_search_paths()
+            .into_iter()
+            .find(|d| d.join("mda.lv2").is_dir())
+        else {
+            assert!(
+                std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
+                "mda-lv2 must be installed"
+            );
+            eprintln!("skipped: mda-lv2 not installed");
+            return None;
+        };
+        let id = "http://drobilla.net/plugins/mda/Delay";
+        let d = format
+            .scan(&dir.join("mda.lv2"))
+            .into_iter()
+            .find(|d| d.id == id)?;
+        Some(format.instantiate_lv2(&d, 48_000.0).unwrap())
+    }
+
+    /// A UI's control writes reach the host as output parameter events, so
+    /// whatever tracks parameters (the sandbox client, automation) sees them.
+    #[test]
+    fn ui_control_writes_are_reported_to_the_host() {
+        let Some(mut p) = mda_delay() else { return };
+        assert!(p.ports().event_out);
+        let fb = p.params.iter().find(|i| i.name == "Feedback").unwrap().id;
+        let to_dsp = &mut p.ui_ends.as_mut().unwrap().to_dsp;
+        assert!(ring::write(
+            to_dsp,
+            fb,
+            ring::CONTROL,
+            &0.25f32.to_ne_bytes()
+        ));
+        // Not a parameter: the plugin has no such port.
+        assert!(ring::write(
+            to_dsp,
+            999,
+            ring::CONTROL,
+            &0.5f32.to_ne_bytes()
+        ));
+
+        let frames = 64;
+        let mut outs = vec![vec![0.0f32; frames]; 2];
+        let mut out_refs: Vec<&mut [f32]> = outs.iter_mut().map(|b| &mut b[..]).collect();
+        let events_in = EventList::with_capacity(0);
+        let mut events_out = EventList::with_capacity(8);
+        p.process(&mut ProcessContext {
+            frames: frames as u32,
+            transport: &TransportState::default(),
+            audio_in: &[],
+            audio_out: &mut out_refs,
+            events_in: &events_in,
+            events_out: &mut events_out,
+        });
+        assert_eq!(p.param_value(fb), 0.25);
+        let params: Vec<_> = events_out
+            .iter()
+            .filter_map(|e| match e.kind {
+                EventKind::ParamValue { param, value } => Some((e.frame, param, value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(params, [(0, fb, 0.25)]);
+    }
+}
