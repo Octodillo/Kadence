@@ -14,6 +14,7 @@
 //! regularly (about 60 times a second) so that plugin callbacks, timers, file descriptors and
 //! editor events are serviced.
 
+mod editor;
 mod events;
 mod host;
 mod instance;
@@ -86,9 +87,9 @@ pub(crate) fn load_entry(path: &Path) -> Result<PluginEntry, PluginError> {
 
 pub(crate) fn host_info() -> HostInfo {
     HostInfo::new(
-        "DAW",
-        "DAW",
-        "https://github.com/Octodillo/daw",
+        "Kadence",
+        "Kadence",
+        "https://github.com/Octodillo/Kadence",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("host info has no NUL bytes")
@@ -114,10 +115,24 @@ fn scan_file(path: &Path) -> Option<Vec<PluginDescriptor>> {
             is_instrument,
             ports: (0, 0),
         };
-        d.ports = main_ports(&entry, id).unwrap_or((0, 0));
+        d.ports = main_ports(&entry, id, is_instrument).unwrap_or((0, 0));
         found.push(d);
     }
     Some(found)
+}
+
+/// Which port the graph connects to: the one flagged main, else the first. Many effects leave
+/// the main flag off, but an instrument's unflagged input is a sidechain (Surge XT's is), not the
+/// signal to process.
+pub(crate) fn main_port(
+    ports: &[(AudioPortFlags, u32)],
+    is_input: bool,
+    is_instrument: bool,
+) -> Option<usize> {
+    ports
+        .iter()
+        .position(|(flags, _)| flags.contains(AudioPortFlags::IS_MAIN))
+        .or_else(|| (!ports.is_empty() && !(is_input && is_instrument)).then_some(0))
 }
 
 fn lossy(s: Option<&std::ffi::CStr>) -> Option<String> {
@@ -125,27 +140,38 @@ fn lossy(s: Option<&std::ffi::CStr>) -> Option<String> {
 }
 
 /// Channel counts of the main input and output ports, read from a short-lived instance.
-fn main_ports(entry: &PluginEntry, id: &str) -> Option<(u16, u16)> {
+fn main_ports(entry: &PluginEntry, id: &str, is_instrument: bool) -> Option<(u16, u16)> {
     let id = CString::new(id).ok()?;
     let mut instance = host::new_instance(entry, &id).ok()?;
     let ports: PluginAudioPorts = instance.plugin_shared_handle().get_extension()?;
     let handle = instance.plugin_handle();
     let main = |is_input| {
         let mut buf = AudioPortInfoBuffer::new();
-        let count = ports.count(&handle, is_input);
-        let infos: Vec<_> = (0..count)
-            .filter_map(|i| {
+        let infos: Vec<_> = (0..ports.count(&handle, is_input))
+            .map(|i| {
                 ports
                     .get(&handle, i, is_input, &mut buf)
-                    .map(|p| (p.flags, p.channel_count))
+                    .map_or((AudioPortFlags::empty(), 0), |p| (p.flags, p.channel_count))
             })
             .collect();
-        // Fall back to the first port for plugins that do not flag a main one.
-        infos
-            .iter()
-            .find(|(flags, _)| flags.contains(AudioPortFlags::IS_MAIN))
-            .or(infos.first())
-            .map_or(0, |&(_, c)| u16::try_from(c).unwrap_or(u16::MAX))
+        main_port(&infos, is_input, is_instrument)
+            .map_or(0, |i| u16::try_from(infos[i].1).unwrap_or(u16::MAX))
     };
     Some((main(true), main(false)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unflagged_ports_count_except_an_instruments_inputs() {
+        let main = AudioPortFlags::IS_MAIN;
+        let none = AudioPortFlags::empty();
+        assert_eq!(main_port(&[(none, 2), (main, 2)], true, true), Some(1));
+        assert_eq!(main_port(&[(none, 2)], true, true), None);
+        assert_eq!(main_port(&[(none, 2)], true, false), Some(0));
+        assert_eq!(main_port(&[(none, 2), (none, 1)], false, true), Some(0));
+        assert_eq!(main_port(&[], false, false), None);
+    }
 }
