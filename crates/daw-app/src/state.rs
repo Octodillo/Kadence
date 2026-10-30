@@ -9,10 +9,10 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use daw_arrange::{Arrange, Env};
-use daw_pianoroll::PianoRoll;
 use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
 use daw_model::{Document, FormatError, Project};
+use daw_pianoroll::PianoRoll;
 
 use crate::engine::{EngineHandle, default_engine};
 

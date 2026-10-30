@@ -20,7 +20,6 @@
 
 pub mod edit;
 pub mod grid;
-pub mod model;
 pub mod note;
 pub mod player;
 pub mod record;
