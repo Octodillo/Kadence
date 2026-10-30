@@ -685,6 +685,56 @@ fn a_split_sandbox_plays_through_a_slow_main_thread_call() {
     );
 }
 
+/// A reload with the half out restores the state before the new host plays, so no block
+/// comes out at the plugin's defaults.
+#[test]
+fn a_split_sandbox_reloads_without_playing_its_defaults() {
+    let mut plugin = instance();
+    run(&mut plugin, 16, 0.0, &[param(GAIN, 0.25, 0)]);
+    plugin.save_state().unwrap();
+    let mut half = plugin.split().unwrap();
+    let reloading = std::sync::atomic::AtomicBool::new(true);
+    let blocks = std::thread::scope(|s| {
+        let audio = s.spawn(|| {
+            let mut blocks = Vec::new();
+            // A few blocks that start after the reload is done.
+            let mut after = 0;
+            while after < 5 {
+                if !reloading.load(Ordering::Acquire) {
+                    after += 1;
+                }
+                let input = [1.0f32; 64];
+                let (mut left, mut right) = ([f32::NAN; 64], [f32::NAN; 64]);
+                let events_in = EventList::with_capacity(4);
+                let mut events_out = EventList::with_capacity(64);
+                let transport = TransportState::default();
+                let audio_in = [&input[..], &input[..]];
+                let mut audio_out = [&mut left[..], &mut right[..]];
+                half.process(&mut ProcessContext {
+                    frames: 64,
+                    transport: &transport,
+                    audio_in: &audio_in,
+                    audio_out: &mut audio_out,
+                    events_in: &events_in,
+                    events_out: &mut events_out,
+                });
+                blocks.push(left[0]);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            blocks
+        });
+        plugin.reload().expect("reload");
+        reloading.store(false, Ordering::Release);
+        audio.join().unwrap()
+    });
+    assert!(
+        blocks.iter().all(|&s| s == 0.0 || s == 0.25),
+        "a block played something else: {blocks:?}"
+    );
+    assert_eq!(blocks.last(), Some(&0.25), "{blocks:?}");
+    plugin.join(half);
+}
+
 /// Pumps the main thread until the instance reports a layout change, or `timeout` passes.
 fn layout_changed_within(plugin: &mut SandboxedInstance, timeout: Duration) -> bool {
     let start = Instant::now();

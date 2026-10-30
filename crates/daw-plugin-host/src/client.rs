@@ -666,11 +666,12 @@ struct TrackedParam {
     value: f64,
     /// Changed since the last saved or loaded state.
     dirty: bool,
+    /// [`Rt::seq`] when it last changed, so a save only cleans what it can contain.
+    seq: u64,
 }
 
-/// What to track for `params`: the automatable ones, sorted by id, taking value and dirty flag
-/// from `old` (sorted by id too) where it has them.
-fn tracked_params(params: &[ParamInfo], old: &[TrackedParam]) -> Vec<TrackedParam> {
+/// What to track for `params`: the automatable ones, sorted by id, at their defaults.
+fn tracked_params(params: &[ParamInfo]) -> Vec<TrackedParam> {
     let mut tracked: Vec<_> = params
         .iter()
         .filter(|p| p.automatable)
@@ -678,16 +679,22 @@ fn tracked_params(params: &[ParamInfo], old: &[TrackedParam]) -> Vec<TrackedPara
             id: p.id,
             value: p.default,
             dirty: false,
+            seq: 0,
         })
         .collect();
     tracked.sort_by_key(|t| t.id);
     tracked.dedup_by_key(|t| t.id);
-    for t in &mut tracked {
+    tracked
+}
+
+/// Takes value and dirty flag from `old` (sorted by id) into `tracked` where it has them.
+/// Without allocating, so it can run while the audio path waits.
+fn keep_tracked(tracked: &mut [TrackedParam], old: &[TrackedParam]) {
+    for t in tracked {
         if let Ok(i) = old.binary_search_by_key(&t.id, |o| o.id) {
             *t = old[i];
         }
     }
-    tracked
 }
 
 /// A [`PluginInstance`] whose plugin runs in its own host process.
@@ -726,7 +733,9 @@ pub struct SandboxedInstance {
 /// What the audio path works on. The instance and its [`SandboxProcessor`] share it through
 /// an [`Exclusive`]: the audio thread takes it for one cycle, the main thread only to swap the
 /// block or update the tracked parameters, never across a call to the host. So a slow
-/// main-thread call (saving state, opening the editor) does not hold the audio up.
+/// main-thread call (saving state, opening the editor) does not hold the audio up. The other
+/// way round, a cycle holds it while it waits for the host, so a main-thread caller can wait
+/// up to one cycle's timeout.
 struct Audio {
     /// The running host's block; `None` while there is none.
     shm: Option<Arc<Shm>>,
@@ -872,14 +881,8 @@ impl SandboxedInstance {
         self.link = Some(link);
         let (old_ports, old_latency) = (self.ports.clone(), self.latency);
         self.latency = latency;
-        let kept = self.audio.main(|a| std::mem::take(&mut a.rt.tracked));
-        self.adopt(&info);
-        self.audio.main(|a| {
-            a.shm = Some(shm);
-            // Events carried for the old host are kept; a late cycle's outputs are gone with
-            // it.
-            a.rt.late_pending = false;
-        });
+        // Changes made from here on are tracked in the new list, and are newer than `kept`.
+        let kept = self.adopt(&info);
         let restored = match self.state.clone() {
             Some(state) => self
                 .control_with(Request::LoadState, &state, self.config.load_timeout)
@@ -890,13 +893,21 @@ impl SandboxedInstance {
                 }),
             None => Ok(()),
         };
+        // The new host plays only now, with its state restored: until then it would play its
+        // defaults.
         self.audio.main(|a| {
             for t in kept.iter().filter(|t| t.dirty) {
-                if let Ok(i) = a.rt.tracked.binary_search_by_key(&t.id, |p| p.id) {
+                if let Ok(i) = a.rt.tracked.binary_search_by_key(&t.id, |p| p.id)
+                    && !a.rt.tracked[i].dirty
+                {
                     a.rt.tracked[i] = *t;
                 }
             }
             a.rt.resend = a.rt.tracked.iter().any(|t| t.dirty).then_some(0);
+            // Events carried for the old host are kept; a late cycle's outputs are gone with
+            // it.
+            a.rt.late_pending = false;
+            a.shm = Some(shm);
         });
         if self.editor_open {
             self.editor_open = false;
@@ -916,15 +927,15 @@ impl SandboxedInstance {
         restored
     }
 
-    fn adopt(&mut self, info: &InstanceInfo) {
+    /// Takes on a freshly loaded plugin's ports and parameters, and returns what was tracked
+    /// for the one before.
+    fn adopt(&mut self, info: &InstanceInfo) -> Vec<TrackedParam> {
         self.ports = (&info.ports).into();
         self.params = info.params.iter().map(ParamInfo::from).collect();
         self.has_editor = info.has_editor;
-        let tracked = tracked_params(&self.params, &[]);
-        let old = self
-            .audio
-            .main(|a| std::mem::replace(&mut a.rt.tracked, tracked));
-        drop(old);
+        let tracked = tracked_params(&self.params);
+        self.audio
+            .main(|a| std::mem::replace(&mut a.rt.tracked, tracked))
     }
 
     /// Asks the host for its parameter list, which loading state can change, and tracks that
@@ -932,9 +943,9 @@ impl SandboxedInstance {
     fn refresh_params(&mut self) {
         if let Ok((Reply::Params(params), _, _)) = self.control(Request::Params, &[]) {
             self.params = params.iter().map(ParamInfo::from).collect();
-            let params = &self.params;
+            let mut tracked = tracked_params(&self.params);
             let old = self.audio.main(|a| {
-                let tracked = tracked_params(params, &a.rt.tracked);
+                keep_tracked(&mut tracked, &a.rt.tracked);
                 a.rt.resend = tracked.iter().any(|t| t.dirty).then_some(0);
                 std::mem::replace(&mut a.rt.tracked, tracked)
             });
@@ -1066,9 +1077,15 @@ impl SandboxedInstance {
         }
     }
 
-    fn mark_clean(&mut self) {
+    /// Where tracked changes stand now; see [`Rt::seq`].
+    fn tracked_seq(&self) -> u64 {
+        self.audio.main(|a| a.rt.seq)
+    }
+
+    /// After a load, what was tracked up to `before` is replaced by the loaded state.
+    fn mark_clean(&mut self, before: u64) {
         self.audio.main(|a| {
-            for t in &mut a.rt.tracked {
+            for t in a.rt.tracked.iter_mut().filter(|t| t.seq <= before) {
                 t.dirty = false;
             }
             a.rt.resend = None;
@@ -1076,9 +1093,10 @@ impl SandboxedInstance {
     }
 
     /// After a save, what the saved state holds is clean. Values still waiting to be re-sent
-    /// after a reload, or carried to the next cycle, have not reached the plugin and so are not
-    /// in that state: they stay dirty, and still go out.
-    fn mark_saved(&mut self) {
+    /// after a reload, carried to the next cycle, or tracked after `before`, may not have
+    /// reached the plugin by the time it saved and so are not in that state: they stay dirty,
+    /// and still go out.
+    fn mark_saved(&mut self, before: u64) {
         self.audio.main(|a| {
             let rt = &mut a.rt;
             let pending = rt.resend.unwrap_or(rt.tracked.len());
@@ -1087,7 +1105,7 @@ impl SandboxedInstance {
                 let carried = carry.iter().any(
                     |e| matches!(e.kind, EventKind::ParamValue { param, .. } if param == t.id),
                 );
-                if i < pending && !carried {
+                if i < pending && !carried && t.seq <= before {
                     t.dirty = false;
                 }
             }
@@ -1121,6 +1139,9 @@ struct Rt {
     /// A cycle missed its deadline. When the host finishes it, its output events are still
     /// collected; its audio is too late to use.
     late_pending: bool,
+    /// Counts tracked changes. Cycles run while the main thread waits on the host, so a save
+    /// or load cleans only what was tracked before it was sent.
+    seq: u64,
 }
 
 impl Rt {
@@ -1131,13 +1152,19 @@ impl Rt {
             reset_pending: false,
             carry: EventList::with_capacity(EVENT_CAPACITY as usize),
             late_pending: false,
+            seq: 0,
         }
     }
 
     fn track(&mut self, param: ParamId, value: f64) {
         if let Ok(i) = self.tracked.binary_search_by_key(&param, |t| t.id) {
-            self.tracked[i].value = value;
-            self.tracked[i].dirty = true;
+            self.seq += 1;
+            self.tracked[i] = TrackedParam {
+                value,
+                dirty: true,
+                seq: self.seq,
+                ..self.tracked[i]
+            };
         }
     }
 
@@ -1438,10 +1465,11 @@ impl PluginInstance for SandboxedInstance {
                 .clone()
                 .ok_or_else(|| PluginError::State(self.not_running()));
         }
+        let before = self.tracked_seq();
         match self.control_with(Request::SaveState, &[], self.config.load_timeout)? {
             (Reply::State, state, _) => {
                 self.state = Some(state.clone());
-                self.mark_saved();
+                self.mark_saved(before);
                 Ok(state)
             }
             (other, _, _) => Err(PluginError::State(format!("unexpected reply {other:?}"))),
@@ -1457,9 +1485,10 @@ impl PluginInstance for SandboxedInstance {
                 data.len()
             )));
         }
+        let before = self.tracked_seq();
         if self.running().is_none() {
             self.state = Some(data.to_vec());
-            self.mark_clean();
+            self.mark_clean(before);
             return Ok(());
         }
         let latency = match self.control_with(Request::LoadState, data, self.config.load_timeout) {
@@ -1468,13 +1497,13 @@ impl PluginInstance for SandboxedInstance {
                 // A plugin error leaves the host running and the old state in place.
                 if self.running().is_none() {
                     self.state = Some(data.to_vec());
-                    self.mark_clean();
+                    self.mark_clean(before);
                 }
                 return Err(e);
             }
         };
         self.state = Some(data.to_vec());
-        self.mark_clean();
+        self.mark_clean(before);
         self.latency = latency;
         // Loading state can change the parameter list (a different preset of a modular synth).
         self.refresh_params();
@@ -1681,14 +1710,17 @@ mod tests {
                 id: 1,
                 value: 0.25,
                 dirty: true,
+                seq: 1,
             },
             TrackedParam {
                 id: 2,
                 value: 0.75,
                 dirty: true,
+                seq: 2,
             },
         ];
-        let tracked = tracked_params(&[param(120, true), param(1, true), param(7, false)], &old);
+        let mut tracked = tracked_params(&[param(120, true), param(1, true), param(7, false)]);
+        keep_tracked(&mut tracked, &old);
         let got: Vec<_> = tracked.iter().map(|t| (t.id, t.value, t.dirty)).collect();
         assert_eq!(got, [(1, 0.25, true), (120, 0.5, false)]);
     }

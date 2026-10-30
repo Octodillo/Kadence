@@ -179,9 +179,15 @@ impl Host<'_> {
         }
     }
 
-    /// Locks the plugin for the main thread, flagged in the audio block while held.
+    /// Locks the plugin for the main thread, flagged in the audio block while held, unless
+    /// the audio thread runs a split half, which never waits for it.
     fn lock_inside(&self) -> InsidePlugin<'_> {
-        InsidePlugin::lock(&self.plugin, self.audio.as_ref().map(|a| a.shm.clone()))
+        let shm = self
+            .audio
+            .as_ref()
+            .filter(|a| !a.split)
+            .map(|a| a.shm.clone());
+        InsidePlugin::lock(&self.plugin, shm)
     }
 
     fn handle(&mut self, request: Request, blob: &[u8]) -> (Reply, Vec<u8>) {
@@ -190,7 +196,13 @@ impl Host<'_> {
             request,
             Request::SaveState | Request::LoadState | Request::OpenEditor | Request::CloseEditor
         );
-        let busy = self.audio.as_ref().map(|a| a.shm.clone()).filter(|_| slow);
+        // A split plugin's audio never waits for this thread, so there is nothing to flag.
+        let busy = self
+            .audio
+            .as_ref()
+            .filter(|a| !a.split)
+            .map(|a| a.shm.clone())
+            .filter(|_| slow);
         if let Some(shm) = &busy {
             shm.header().main_busy.store(1, Ordering::SeqCst);
         }
@@ -396,6 +408,8 @@ struct AudioThread {
     quit: Arc<AtomicBool>,
     shm: Arc<Shm>,
     plugin: SharedPlugin,
+    /// It runs the plugin's split half.
+    split: bool,
     handle: JoinHandle<Option<Box<dyn PluginProcessor>>>,
 }
 
@@ -403,6 +417,7 @@ impl AudioThread {
     fn start(shm: Arc<Shm>, plugin: SharedPlugin, rt_priority: Option<i32>) -> Self {
         let quit = Arc::new(AtomicBool::new(false));
         let mut half = lock(&plugin).as_mut().and_then(|p| p.split());
+        let split = half.is_some();
         let handle = {
             let (shm, quit, plugin) = (shm.clone(), quit.clone(), plugin.clone());
             std::thread::Builder::new()
@@ -417,6 +432,7 @@ impl AudioThread {
             quit,
             shm,
             plugin,
+            split,
             handle,
         }
     }
