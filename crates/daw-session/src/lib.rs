@@ -74,6 +74,10 @@ pub(crate) struct Built {
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Gain reduction meters of devices that have one.
     pub device_meters: HashMap<DeviceId, Arc<PeakMeter>>,
+    /// MIDI players of instrument tracks.
+    pub midi: HashMap<TrackId, daw_midi::player::PlayerHandle>,
+    /// The clips each MIDI player's sequence was last compiled from.
+    pub midi_clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
 }
 
 /// The engine as the model sees it. See the crate docs.
@@ -133,6 +137,21 @@ impl Session {
 
     pub fn controller(&self) -> &EngineController {
         &self.controller
+    }
+
+    /// Whether the last sync couldn't send everything (a player's queue was
+    /// full) and should run again even if the document hasn't changed.
+    pub fn wants_sync(&self) -> bool {
+        self.built.as_ref().is_some_and(|b| {
+            b.midi.keys().any(|t| !b.midi_clips.contains_key(t))
+                || b.players.keys().any(|t| !b.clips.contains_key(t))
+        })
+    }
+
+    /// The MIDI player of an instrument track, for record arming and
+    /// collecting what was played.
+    pub fn midi_player(&mut self, track: TrackId) -> Option<&mut daw_midi::player::PlayerHandle> {
+        self.built.as_mut()?.midi.get_mut(&track)
     }
 
     pub fn media_mut(&mut self) -> &mut MediaPool {
@@ -265,20 +284,34 @@ impl Session {
     fn send_clips(&mut self, snapshot: &ProjectSnapshot, all: bool) {
         let mut built = self.built.take().expect("built before clips");
         for track in snapshot.all_tracks() {
+            let Some(handle) = built.midi.get_mut(&track.id) else {
+                continue;
+            };
+            if !all && same_clips(built.midi_clips.get(&track.id), &track.clips) {
+                continue;
+            }
+            let seq = daw_midi::model::compile_track(track, &self.tempo, self.sample_rate());
+            if handle.set_sequence(seq).is_err() {
+                // Left marked as stale, so the next sync tries again.
+                self.warnings
+                    .push(format!("note update for track {} was dropped", track.name));
+                built.midi_clips.remove(&track.id);
+                continue;
+            }
+            built.midi_clips.insert(track.id, track.clips.clone());
+        }
+        for track in snapshot.all_tracks() {
             let Some(handle) = built.players.get_mut(&track.id) else {
                 continue;
             };
-            let same = built.clips.get(&track.id).is_some_and(|old| {
-                old.len() == track.clips.len()
-                    && old.iter().zip(&track.clips).all(|(a, b)| Arc::ptr_eq(a, b))
-            });
-            if same && !all {
+            if !all && same_clips(built.clips.get(&track.id), &track.clips) {
                 continue;
             }
             let set = build::clip_set(self, track, handle);
             if handle.send(set).is_err() {
                 self.warnings
                     .push(format!("clip update for track {} was dropped", track.name));
+                built.clips.remove(&track.id);
                 continue;
             }
             built.clips.insert(track.id, track.clips.clone());
@@ -301,6 +334,9 @@ impl Session {
         self.controller.collect_garbage();
         if let Some(b) = &mut self.built {
             for p in b.players.values_mut() {
+                p.collect_garbage();
+            }
+            for p in b.midi.values_mut() {
                 p.collect_garbage();
             }
         }
@@ -404,4 +440,11 @@ pub fn db_to_gain(db: f64) -> f64 {
     } else {
         10f64.powf(db / 20.0).min(4.0)
     }
+}
+
+/// Whether `new` holds the very clips `old` did.
+fn same_clips(old: Option<&Vec<Arc<daw_model::Clip>>>, new: &[Arc<daw_model::Clip>]) -> bool {
+    old.is_some_and(|old| {
+        old.len() == new.len() && old.iter().zip(new).all(|(a, b)| Arc::ptr_eq(a, b))
+    })
 }
