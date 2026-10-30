@@ -40,7 +40,7 @@ pub struct Event {
 /// All storage is allocated by [`EventList::with_capacity`]; `push`, `clear` and
 /// iteration never allocate, so the list is safe to use from `Node::process`.
 /// Events with equal frames keep their insertion order.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct EventList {
     events: Vec<Event>,
     // `Vec::with_capacity` may round up, so the logical limit is tracked separately.
@@ -101,6 +101,19 @@ impl EventList {
     /// The events sorted by frame.
     pub fn as_slice(&self) -> &[Event] {
         &self.events
+    }
+}
+
+// Derived `Clone` would size the copy to its length, so the first `push` on
+// a clone could allocate.
+impl Clone for EventList {
+    fn clone(&self) -> Self {
+        let mut events = Vec::with_capacity(self.capacity);
+        events.extend_from_slice(&self.events);
+        Self {
+            events,
+            capacity: self.capacity,
+        }
     }
 }
 
