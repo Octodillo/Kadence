@@ -62,8 +62,7 @@ rpmbuild -ba packaging/fedora/kadence.spec
 ```
 
 The spec is good for COPR and local builds. An official Fedora package
-would also need the vendored crates' licenses in `License:` and a
-`Provides: bundled(crate(...))` line for each crate.
+would also need a `Provides: bundled(crate(...))` line for each crate.
 
 ## From source (any distribution)
 
@@ -72,6 +71,14 @@ cmake -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build build
 sudo cmake --install build
 ```
+
+The build also writes `THIRD-PARTY-LICENSES`, the license and notice files
+of every crate linked into `kadence`, collected by
+`packaging/third-party-licenses.py` from `cargo metadata` after the build
+(offline when the build is, so it works from vendored sources). CMake installs it with `LICENSE` to
+`share/licenses/kadence`; set `-DKADENCE_LICENSE_DIR=` to move both, or
+`-DKADENCE_INSTALL_LICENSES=OFF` when the packaging installs them itself
+(Fedora's `%license`). It needs Python 3.
 
 ## Flatpak
 

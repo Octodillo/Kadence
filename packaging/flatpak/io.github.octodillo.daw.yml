@@ -61,6 +61,7 @@ modules:
     builddir: true
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
+      - -DKADENCE_LICENSE_DIR=share/licenses/io.github.octodillo.daw
     build-options:
       append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin
       env:
