@@ -73,8 +73,11 @@ impl Transport {
         let position = SampleTime(self.position);
         let mut state =
             TransportState::at(&self.timeline, self.playing, position, self.sample_rate);
+        // Past the end the loop no longer wraps (see `advance`), so plugins
+        // must not expect it to.
         state.looping = self
             .loop_range
+            .filter(|r| self.position < r.end.0)
             .map(|r| TransportLoop::at(&self.timeline, r.start, r.end, self.sample_rate));
         state
     }
@@ -182,6 +185,11 @@ mod tests {
         let l = t.state().looping.unwrap();
         assert_eq!((l.start, l.end), (SampleTime(96_000), SampleTime(192_000)));
         assert_eq!((l.start_beats, l.end_beats), (4.0, 8.0));
+        // Past the end playback runs on, so there is no loop to report.
+        t.apply(TransportCommand::Locate(SampleTime(192_000)));
+        assert_eq!(t.state().looping, None);
+        t.apply(TransportCommand::Locate(SampleTime(191_999)));
+        assert!(t.state().looping.is_some());
         t.apply(TransportCommand::SetLoop(None));
         assert_eq!(t.state().looping, None);
     }
