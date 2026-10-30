@@ -424,3 +424,88 @@ impl EngineProcessor {
         }
     }
 }
+
+// Lives here rather than in tests/no_alloc.rs because it pushes graphs onto
+// the command queue directly: send_graph collects garbage first, so from the
+// public API the garbage queue only fills when the two threads race.
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
+
+    use super::*;
+    use crate::nodes::Strip;
+
+    #[global_allocator]
+    static ALLOC: AllocDisabler = AllocDisabler;
+
+    /// Queues a graph without collecting garbage first, as a controller
+    /// whose sends race the audio thread's retirements would.
+    fn push_graph(ctl: &mut EngineController, desc: GraphDesc) {
+        let g = Box::new(ctl.compile(desc).unwrap());
+        assert!(ctl.commands.push(Command::Graph(g)).is_ok());
+    }
+
+    fn process(proc: &mut EngineProcessor, out: &mut [f32]) -> u32 {
+        let input = [1.0f32; 32];
+        let events = EventList::with_capacity(0);
+        reset_violation_count();
+        assert_no_alloc(|| proc.process(32, &[&input], &mut [out], &events));
+        violation_count()
+    }
+
+    #[test]
+    fn swaps_with_a_full_garbage_queue_neither_free_nor_reorder() {
+        let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+            max_frames: 32,
+            command_capacity: 2,
+            ..Default::default()
+        });
+        let mut out = [0.0f32; 32];
+        let plain = || {
+            let mut g = GraphDesc::new(1, 1);
+            g.connect(g.input(), g.master());
+            g
+        };
+
+        push_graph(&mut ctl, plain());
+        assert_eq!(process(&mut proc, &mut out), 0);
+        // Two swaps retire the first two graphs and fill the garbage queue.
+        push_graph(&mut ctl, plain());
+        push_graph(&mut ctl, plain());
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(ctl.graphs_swapped(), 3);
+
+        // The next swap cannot retire its old graph, so the processor holds
+        // it, and the graph after that has to wait.
+        push_graph(&mut ctl, plain());
+        let mut last = GraphDesc::new(1, 1);
+        let track = last.add_track("track", 1);
+        last.connect(last.input(), track);
+        last.connect(track, last.master());
+        push_graph(&mut ctl, last);
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(ctl.graphs_swapped(), 4);
+        assert!(proc.retired.is_some() && proc.pending.is_some());
+
+        // `track` only exists in the pending graph: the change must wait
+        // behind it instead of reaching the running graph, where it would be
+        // dropped.
+        ctl.set_param(track, Strip::MUTE, 1.0).unwrap();
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(ctl.graphs_swapped(), 4);
+        assert!(out.iter().all(|&v| v == 1.0));
+
+        assert_eq!(ctl.collect_garbage(), 2);
+        assert_eq!(process(&mut proc, &mut out), 0);
+        assert_eq!(ctl.graphs_swapped(), 5);
+        assert_eq!(ctl.dropped_params(), 0);
+        assert!(
+            out.iter().all(|&v| v == 0.0),
+            "the change reached the track"
+        );
+
+        // Every replaced graph comes back to be freed here.
+        assert_eq!(ctl.collect_garbage(), 2);
+        drop(proc);
+    }
+}
