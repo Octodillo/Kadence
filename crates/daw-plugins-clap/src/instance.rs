@@ -687,8 +687,8 @@ impl plugin::PluginInstance for ClapInstance {
         }
         let (latency_changed, rescan) = self.inst().access_handler(|h| {
             (
-                h.latency_changed.replace(false),
-                h.params_rescan.replace(false),
+                HostShared::take(&h.latency_changed),
+                HostShared::take(&h.params_rescan),
             )
         });
         if rescan {

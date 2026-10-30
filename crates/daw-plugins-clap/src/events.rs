@@ -70,40 +70,6 @@ pub(crate) fn push_clap(out: &mut EventBuffer, e: &Event, frame: u32, notes_as_m
     }
 }
 
-/// The `daw_core` form of a CLAP event the plugin sent, if there is one.
-pub(crate) fn from_clap(e: &UnknownEvent, frame_offset: u32) -> Option<Event> {
-    let frame = e.header().time() + frame_offset;
-    let kind = match e.as_core_event()? {
-        CoreEventSpace::NoteOn(n) => {
-            let raw = n.as_raw();
-            EventKind::NoteOn {
-                channel: to_u8(raw.channel),
-                key: to_u8(raw.key),
-                #[allow(clippy::cast_possible_truncation)]
-                velocity: raw.velocity as f32,
-                note_id: raw.note_id,
-            }
-        }
-        CoreEventSpace::NoteOff(n) => {
-            let raw = n.as_raw();
-            EventKind::NoteOff {
-                channel: to_u8(raw.channel),
-                key: to_u8(raw.key),
-                #[allow(clippy::cast_possible_truncation)]
-                velocity: raw.velocity as f32,
-                note_id: raw.note_id,
-            }
-        }
-        CoreEventSpace::Midi(m) => EventKind::Midi(m.data()),
-        CoreEventSpace::ParamValue(p) => EventKind::ParamValue {
-            param: p.param_id()?.get(),
-            value: p.value(),
-        },
-        _ => return None,
-    };
-    Some(Event { frame, kind })
-}
-
 /// Receives a plugin's output events and converts them into a fixed-capacity [`EventList`].
 /// Events the list cannot hold, and kinds `daw_core` has no form for, are dropped.
 pub(crate) struct Sink<'a> {
@@ -113,11 +79,78 @@ pub(crate) struct Sink<'a> {
 
 impl OutputEventBuffer for Sink<'_> {
     fn try_push(&mut self, event: &UnknownEvent) -> Result<(), TryPushError> {
-        match from_clap(event, self.frame_offset) {
-            Some(e) => self.out.push(e).map_err(|_| TryPushError::new()),
-            None => Ok(()),
-        }
+        push_daw(self.out, event, self.frame_offset).map_err(|()| TryPushError::new())
     }
+}
+
+/// Pushes the `daw_core` form of a CLAP event the plugin sent into `out`. Fails when `out` is
+/// full. Kinds `daw_core` has no form for are skipped.
+pub(crate) fn push_daw(out: &mut EventList, e: &UnknownEvent, frame_offset: u32) -> Result<(), ()> {
+    let frame = e.header().time() + frame_offset;
+    let mut push = |kind| out.push(Event { frame, kind }).map_err(|_| ());
+    match e.as_core_event() {
+        Some(CoreEventSpace::NoteOn(n)) => {
+            let raw = n.as_raw();
+            // A note on for "any key" or "any channel" names no note to start.
+            let (Ok(channel), Ok(key)) = (u8::try_from(raw.channel), u8::try_from(raw.key)) else {
+                return Ok(());
+            };
+            push(EventKind::NoteOn {
+                channel,
+                key,
+                #[allow(clippy::cast_possible_truncation)]
+                velocity: raw.velocity as f32,
+                note_id: raw.note_id,
+            })
+        }
+        Some(CoreEventSpace::NoteOff(n)) => {
+            let raw = n.as_raw();
+            note_off(raw.channel, raw.key, raw.velocity, raw.note_id, &mut push)
+        }
+        // Nothing downstream can cut a note short more abruptly than a note off.
+        Some(CoreEventSpace::NoteChoke(n)) => {
+            let raw = n.as_raw();
+            note_off(raw.channel, raw.key, 0.0, raw.note_id, &mut push)
+        }
+        Some(CoreEventSpace::Midi(m)) => push(EventKind::Midi(m.data())),
+        Some(CoreEventSpace::ParamValue(p)) => match p.param_id() {
+            Some(param) => push(EventKind::ParamValue {
+                param: param.get(),
+                value: p.value(),
+            }),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// A note off, where -1 for the channel or key means every channel or key. `daw_core` notes have
+/// no wildcard, so "any channel" becomes one event per channel and "any key" becomes MIDI all
+/// notes off (CC 123).
+fn note_off(
+    channel: i16,
+    key: i16,
+    velocity: f64,
+    note_id: NoteId,
+    push: &mut impl FnMut(EventKind) -> Result<(), ()>,
+) -> Result<(), ()> {
+    let channels = match u8::try_from(channel) {
+        Ok(c) => c..c.saturating_add(1),
+        Err(_) => 0..16,
+    };
+    for channel in channels {
+        push(match u8::try_from(key) {
+            Ok(key) => EventKind::NoteOff {
+                channel,
+                key,
+                #[allow(clippy::cast_possible_truncation)]
+                velocity: velocity as f32,
+                note_id,
+            },
+            Err(_) => EventKind::Midi([0xb0 | (channel & 0x0f), 123, 0]),
+        })?;
+    }
+    Ok(())
 }
 
 /// CLAP transport for a block starting `offset` frames after the context's position.
@@ -172,13 +205,10 @@ fn midi_velocity(v: f32) -> u8 {
     v
 }
 
-fn to_u8(v: i16) -> u8 {
-    u8::try_from(v).unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clack_host::events::event_types::NoteChokeEvent;
 
     #[test]
     fn quiet_notes_sent_as_midi_stay_note_ons() {
@@ -197,5 +227,90 @@ mod tests {
             panic!("expected a MIDI event");
         };
         assert_eq!(m.data(), [0x92, 60, 1]);
+    }
+
+    fn converted(e: &UnknownEvent) -> Vec<EventKind> {
+        let mut out = EventList::with_capacity(32);
+        push_daw(&mut out, e, 0).unwrap();
+        out.iter().map(|e| e.kind).collect()
+    }
+
+    fn note_off(channel: i16, key: i16, note_id: i32) -> EventKind {
+        let mut buf = EventBuffer::with_capacity(1);
+        buf.push(&NoteOffEvent::new(
+            0,
+            Pckn::from_raw(0, channel, key, note_id),
+            0.5,
+        ));
+        let kinds = converted(buf.get(0).unwrap());
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        kinds[0]
+    }
+
+    #[test]
+    fn wildcard_note_offs_release_every_matching_note() {
+        // Any key on one channel: all notes off on that channel.
+        let mut buf = EventBuffer::with_capacity(4);
+        buf.push(&NoteOffEvent::new(0, Pckn::from_raw(0, 3, -1, -1), 0.0));
+        assert_eq!(
+            converted(buf.get(0).unwrap()),
+            [EventKind::Midi([0xb3, 123, 0])]
+        );
+
+        // One key on any channel: a note off on every channel.
+        buf.clear();
+        buf.push(&NoteOffEvent::new(0, Pckn::from_raw(0, -1, 60, 7), 0.0));
+        let kinds = converted(buf.get(0).unwrap());
+        assert_eq!(kinds.len(), 16);
+        for (ch, kind) in (0u8..).zip(&kinds) {
+            assert!(
+                matches!(kind, EventKind::NoteOff { channel, key: 60, note_id: 7, .. } if *channel == ch),
+                "{kind:?}"
+            );
+        }
+
+        // Everything: all notes off on every channel.
+        buf.clear();
+        buf.push(&NoteChokeEvent::new(0, Pckn::match_all()));
+        let kinds = converted(buf.get(0).unwrap());
+        assert_eq!(kinds.len(), 16);
+        for (ch, kind) in (0u8..).zip(&kinds) {
+            assert_eq!(*kind, EventKind::Midi([0xb0 | ch, 123, 0]));
+        }
+    }
+
+    #[test]
+    fn specific_note_offs_and_chokes_stay_single() {
+        assert!(matches!(
+            note_off(2, 64, 9),
+            EventKind::NoteOff {
+                channel: 2,
+                key: 64,
+                note_id: 9,
+                ..
+            }
+        ));
+        let mut buf = EventBuffer::with_capacity(1);
+        buf.push(&NoteChokeEvent::new(0, Pckn::from_raw(0, 1, 50, -1)));
+        let kinds = converted(buf.get(0).unwrap());
+        assert!(
+            matches!(
+                kinds[..],
+                [EventKind::NoteOff {
+                    channel: 1,
+                    key: 50,
+                    note_id: -1,
+                    ..
+                }]
+            ),
+            "{kinds:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_note_ons_are_dropped() {
+        let mut buf = EventBuffer::with_capacity(1);
+        buf.push(&NoteOnEvent::new(0, Pckn::from_raw(0, 0, -1, -1), 1.0));
+        assert!(converted(buf.get(0).unwrap()).is_empty());
     }
 }
