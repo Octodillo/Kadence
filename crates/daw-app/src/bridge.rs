@@ -175,6 +175,8 @@ impl qobject::Engine {
             .audio_config_from(device_index, sample_rate, buffer_size);
         let result = result.and_then(|config| {
             state::with(|s| {
+                // The session is replaced: keep the take made so far.
+                s.stop_recording();
                 let position = s.playhead();
                 let r = s.engine.apply_audio_config(&config);
                 // A restart brings a fresh session: give it the project and

@@ -236,7 +236,7 @@ Kirigami.ApplicationWindow {
     MixPage {
         id: mixPage
         visible: false
-        transportActions: [root.playAction]
+        transportActions: [root.playAction, root.recordAction]
     }
     EditPage {
         id: editPage
