@@ -34,8 +34,9 @@ finish-args:
   - --filesystem=~/.clap:ro
   - --filesystem=~/.lv2:ro
   - --filesystem=~/.vst3:ro
-  # Both are searched before the standard locations. LV2_PATH would replace
-  # them instead, so the LV2 host adds the extension directory itself.
+  # The CLAP and VST3 hosts search these before the standard locations.
+  # LV2_PATH would replace lilv's defaults instead, so the LV2 host will have
+  # to add /app/extensions/Plugins/lv2 itself (not done yet).
   - --env=CLAP_PATH=/app/extensions/Plugins/clap
   - --env=VST3_PATH=/app/extensions/Plugins/vst3
 
