@@ -138,8 +138,9 @@ impl SegmentTempoMap {
         if k == 0.0 || ticks < 0.0 {
             ticks * TempoSegment::seconds_per_tick(b0)
         } else {
-            // Integral of 60 / (PPQ * (b0 + k t)) dt.
-            60.0 / (PPQ as f64 * k) * ((b0 + k * ticks) / b0).ln()
+            // Integral of 60 / (PPQ * (b0 + k t)) dt. `ln_1p` keeps its
+            // precision when the ramp is nearly flat and `k` tiny.
+            60.0 / (PPQ as f64 * k) * (k * ticks / b0).ln_1p()
         }
     }
 
@@ -149,7 +150,7 @@ impl SegmentTempoMap {
         if k == 0.0 || seconds < 0.0 {
             seconds / TempoSegment::seconds_per_tick(b0)
         } else {
-            b0 / k * ((seconds * PPQ as f64 * k / 60.0).exp() - 1.0)
+            b0 / k * (seconds * PPQ as f64 * k / 60.0).exp_m1()
         }
     }
 
@@ -272,6 +273,26 @@ mod tests {
         // After the ramp the tempo is constant at 120.
         let after = map.ticks_to_seconds(TickTime(5 * PPQ));
         assert!((after - secs - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ramp_between_nearly_equal_tempos() {
+        for eps in [1e-9, 1e-11, 1e-13] {
+            let mut map = SegmentTempoMap::new(120.0);
+            map.set_tempo(TickTime(0), 120.0, true);
+            map.set_tempo(TickTime(64 * PPQ), 120.0 + eps, false);
+            // 64 beats at (almost exactly) 120 bpm take 32 s.
+            assert_eq!(
+                map.ticks_to_samples(TickTime(64 * PPQ), SR),
+                SampleTime(1_536_000),
+                "{eps}"
+            );
+            assert_eq!(
+                map.samples_to_ticks(SampleTime(768_000), SR),
+                TickTime(32 * PPQ),
+                "{eps}"
+            );
+        }
     }
 
     #[test]

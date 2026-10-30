@@ -49,6 +49,33 @@ fn plays_in_tune() {
     assert!(crossings.abs_diff(440) <= 1, "{crossings}");
 }
 
+/// Keys above 127 are clamped on note-on, so the note-off must clamp too.
+#[test]
+fn out_of_range_key_note_off_releases() {
+    let s = Setup::default();
+    let mut synth = Synth::new();
+    let events = [(0, note_on(130, 1.0)), (1000, note_off(130))];
+    render(&mut synth, 48000, &[], &events, s);
+    assert_eq!(synth.active_voices(), 0);
+}
+
+/// A note started without an id (raw MIDI) is still released by key when
+/// the note-off carries one.
+#[test]
+fn note_off_with_id_releases_note_without_id() {
+    let s = Setup::default();
+    let mut synth = Synth::new();
+    let off = EventKind::NoteOff {
+        channel: 0,
+        key: 60,
+        velocity: 0.0,
+        note_id: 7,
+    };
+    let events = [(0, EventKind::Midi([0x90, 60, 100])), (1000, off)];
+    render(&mut synth, 48000, &[], &events, s);
+    assert_eq!(synth.active_voices(), 0);
+}
+
 #[test]
 fn heavy_polyphony_stays_bounded_and_realtime_safe() {
     let s = Setup::default();

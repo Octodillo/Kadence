@@ -142,7 +142,7 @@ fn processes_audio_params_and_events() {
     assert_eq!(p.latency(), 32);
 
     let params = p.params();
-    assert_eq!(params.len(), 2);
+    assert_eq!(params.len(), 3);
     assert_eq!(params[0].name, "Gain");
     assert!(params[0].automatable);
     assert!(
@@ -214,6 +214,41 @@ fn state_round_trips() {
     assert_eq!(b.save_state().unwrap(), state);
 
     assert!(b.load_state(b"garbage").is_err());
+}
+
+/// The value of output parameter `id` among `events`.
+fn reported(events: &[Event], id: u32) -> Option<f64> {
+    events.iter().find_map(|e| match e.kind {
+        EventKind::ParamValue { param, value } if param == id => Some(value),
+        _ => None,
+    })
+}
+
+#[test]
+fn reset_keeps_the_plugin_active() {
+    const ACTIVATIONS: u32 = 2;
+    let mut p = Vst3Format
+        .instantiate(&testgain(), SAMPLE_RATE, FRAMES)
+        .unwrap();
+    let input = ramp();
+    let (_, events) = run(p.as_mut(), &input, &[]);
+    let before = reported(&events, ACTIVATIONS).unwrap();
+    assert!(before > 0.0);
+
+    // `reset` runs on the audio thread, where setActive (which plugins allocate and lock in)
+    // must not be called.
+    let violations = assert_no_alloc::violation_count();
+    assert_no_alloc(|| p.reset());
+    assert_eq!(
+        assert_no_alloc::violation_count(),
+        violations,
+        "reset allocated"
+    );
+
+    let (out, events) = run(p.as_mut(), &input, &[]);
+    assert_eq!(reported(&events, ACTIVATIONS), Some(before));
+    assert_scaled(&out[0], &input, 1.0);
+    assert_eq!(p.latency(), 32);
 }
 
 #[test]

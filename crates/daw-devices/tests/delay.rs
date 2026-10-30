@@ -82,3 +82,8 @@ fn denormals() {
     d.set_param(FEEDBACK, 0.9);
     check_denormals(&mut d, &[noise(4, 1.0, 4800)], &[], 10.0);
 }
+
+#[test]
+fn recovers_from_non_finite_input() {
+    check_recovers_from_non_finite(&mut Delay::new());
+}

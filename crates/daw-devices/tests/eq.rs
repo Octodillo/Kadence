@@ -68,3 +68,11 @@ fn denormals() {
     eq.set_param(PEAK1_FREQ, 40.0);
     check_denormals(&mut eq, &[impulse(4800)], &[], 8.0);
 }
+
+#[test]
+fn recovers_from_non_finite_input() {
+    let mut eq = ParametricEq::new();
+    eq.set_param(HP_ON, 1.0);
+    eq.set_param(PEAK1_GAIN, 6.0);
+    check_recovers_from_non_finite(&mut eq);
+}
