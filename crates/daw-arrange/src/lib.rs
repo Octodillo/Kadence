@@ -19,19 +19,19 @@ pub mod scene;
 pub mod snap;
 pub mod view;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use daw_core::time::{PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::grid::Meter;
-use daw_model::commands::{AddClip, AddTrack, ClipField, MoveClip, RemoveClip, SetClip};
+use daw_model::commands::{AddClip, AddTrack, ClipField, RemoveClip, SetClip};
 use daw_model::{
     AudioClip, Clip, ClipContent, ClipId, Command, Document, MidiClip, ModelError, Project, Track,
     TrackId, TrackKind,
 };
 
-use commands::{Group, TrimClip};
+use commands::{Group, PlaceClip, TrimClip};
 pub use draw::track_color;
 pub use peaks::{PeakPool, Peaks};
 pub use scene::{Palette, Prim, Rect, Rgba, Scene};
@@ -72,6 +72,16 @@ impl Env<'_> {
 
     fn samples_to_ticks(&self, s: SampleTime) -> TickTime {
         self.tempo.samples_to_ticks(s, self.sample_rate)
+    }
+
+    /// Frames of a file at `rate` (what clip offsets count) as engine
+    /// samples, and back.
+    fn file_to_engine(&self, frames: i64, rate: f64) -> i64 {
+        (frames as f64 * self.sample_rate / rate).round() as i64
+    }
+
+    fn engine_to_file(&self, samples: i64, rate: f64) -> i64 {
+        (samples as f64 * rate / self.sample_rate).round() as i64
     }
 }
 
@@ -210,6 +220,9 @@ enum Drag {
         lead: ClipId,
         /// Each selected clip's original row and start.
         clips: Vec<(ClipId, usize, TickTime)>,
+        /// Whether the drag has changed the document, so cancelling it has
+        /// something of its own to undo.
+        edited: bool,
     },
     Trim {
         clip: ClipId,
@@ -218,6 +231,7 @@ enum Drag {
         start: TickTime,
         length: TickTime,
         offset: Option<SampleTime>,
+        edited: bool,
     },
     Rubber {
         x0: f64,
@@ -249,6 +263,8 @@ pub struct Arrange {
     pub selected_track: Option<TrackId>,
     pub peaks: PeakPool,
     drag: Option<Drag>,
+    /// Sample rates of audio files whose peaks aren't loaded yet.
+    rates: HashMap<PathBuf, f64>,
 }
 
 impl Default for Arrange {
@@ -273,6 +289,7 @@ impl Arrange {
             selected_track: None,
             peaks: PeakPool::new(),
             drag: None,
+            rates: HashMap::new(),
         }
     }
 
@@ -421,6 +438,9 @@ impl Arrange {
     /// A pinch gesture: `scale` relative to the previous update, centred on
     /// `x`.
     pub fn pinch(&mut self, project: &Project, scale: f64, x: f64) -> Outcome {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Outcome::default();
+        }
         self.view.zoom_at(scale, x);
         self.clamp_scroll(project);
         Outcome::view()
@@ -542,7 +562,12 @@ impl Arrange {
                 row,
                 lead,
                 clips,
-            } => self.drag_move(doc, p, tick, row, lead, &clips),
+                ..
+            } => {
+                let o = self.drag_move(doc, p, tick, row, lead, &clips);
+                self.mark_edited(&o);
+                o
+            }
             Drag::Trim {
                 clip,
                 zone,
@@ -550,7 +575,12 @@ impl Arrange {
                 start,
                 length,
                 offset,
-            } => self.drag_trim(doc, env, p, clip, zone, tick, start, length, offset),
+                ..
+            } => {
+                let o = self.drag_trim(doc, env, p, clip, zone, tick, start, length, offset);
+                self.mark_edited(&o);
+                o
+            }
             Drag::Rubber { x0, y0, base, .. } => {
                 let r = Rect::spanning(x0, y0, p.x, p.y);
                 let mut sel = base.clone();
@@ -624,7 +654,7 @@ impl Arrange {
     /// Drops the drag in progress (Escape, or the pointer was taken away).
     pub fn cancel(&mut self, doc: &mut Document) -> Outcome {
         match self.drag.take() {
-            Some(Drag::Move { .. } | Drag::Trim { .. }) => {
+            Some(Drag::Move { edited: true, .. } | Drag::Trim { edited: true, .. }) => {
                 // The drag is one merged undo step: undo it.
                 doc.seal();
                 let _ = doc.undo();
@@ -635,8 +665,25 @@ impl Arrange {
         }
     }
 
+    /// Ends the drag in progress, keeping what it did. Call it before any
+    /// other edit (a shortcut, undo) while a button may still be held, so the
+    /// drag neither merges with that edit nor works on clips it removed.
+    pub fn end_drag(&mut self, doc: &mut Document) {
+        if let Some(Drag::Move { .. } | Drag::Trim { .. }) = self.drag.take() {
+            doc.seal();
+        }
+    }
+
+    fn mark_edited(&mut self, o: &Outcome) {
+        if o.document
+            && let Some(Drag::Move { edited, .. } | Drag::Trim { edited, .. }) = &mut self.drag
+        {
+            *edited = true;
+        }
+    }
+
     pub fn double_click(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
-        self.drag = None;
+        self.end_drag(doc);
         match self.hit(doc.project(), p.x, p.y) {
             Hit::Clip { clip, .. } => Outcome {
                 open_clip: Some(clip),
@@ -691,10 +738,16 @@ impl Arrange {
                     row,
                     lead: clip,
                     clips,
+                    edited: false,
                 })
             }
             Hit::Clip { clip, zone, .. } => {
-                let c = project.clip(clip).expect("hit a clip that exists");
+                // The clip can be gone if a shortcut deleted it while the
+                // button was down.
+                let Some(c) = project.clip(clip) else {
+                    self.drag = None;
+                    return;
+                };
                 let offset = match &c.content {
                     ClipContent::Audio(a) => Some(a.offset),
                     ClipContent::Midi(_) => None,
@@ -709,6 +762,7 @@ impl Arrange {
                     start,
                     length,
                     offset,
+                    edited: false,
                 })
             }
             Hit::Lane { .. } | Hit::Empty(_) => {
@@ -740,6 +794,14 @@ impl Arrange {
     ) -> Outcome {
         let project = doc.project();
         let rows = project.tracks.len();
+        if clips
+            .iter()
+            .any(|&(id, r, _)| r >= rows || project.clip(id).is_none())
+        {
+            // Tracks or clips went away under the drag.
+            self.end_drag(doc);
+            return Outcome::default();
+        }
         let Some(&(_, _, lead_start)) = clips.iter().find(|c| c.0 == lead) else {
             return Outcome::default();
         };
@@ -783,7 +845,7 @@ impl Arrange {
             .iter()
             .map(|&(id, r, start)| {
                 let to = (r as i64 + drow) as usize;
-                Box::new(MoveClip::new(
+                Box::new(PlaceClip::new(
                     id,
                     project.tracks[to].id,
                     TickTime(start.0 + delta),
@@ -816,6 +878,10 @@ impl Arrange {
             return Outcome::default();
         };
         let file_end = self.file_end_tick(env, clip, start, offset);
+        let rate = match &clip.content {
+            ClipContent::Audio(a) => self.file_rate(env, &a.source),
+            ClipContent::Midi(_) => env.sample_rate,
+        };
         let meter = self.meter(project);
         let moved = TickTime(self.view.x_to_tick(p.x).0 - tick.0);
         let snap = |t: TickTime| {
@@ -844,12 +910,13 @@ impl Arrange {
                 let new_offset = match offset {
                     Some(o) => {
                         // Can't start before the beginning of the file.
-                        let earliest =
-                            env.samples_to_ticks(SampleTime(env.ticks_to_samples(start).0 - o.0));
+                        let o_engine = env.file_to_engine(o.0, rate);
+                        let earliest = env
+                            .samples_to_ticks(SampleTime(env.ticks_to_samples(start).0 - o_engine));
                         new_start = new_start.max(earliest.0);
                         let shift = env.ticks_to_samples(TickTime(new_start)).0
                             - env.ticks_to_samples(start).0;
-                        Some(SampleTime((o.0 + shift).max(0)))
+                        Some(SampleTime((o.0 + env.engine_to_file(shift, rate)).max(0)))
                     }
                     None => {
                         // Don't cut notes off the front of a MIDI clip.
@@ -889,10 +956,30 @@ impl Arrange {
         let Peaks::Ready(cache) = self.peaks.get(&env.resolve(&a.source)) else {
             return None;
         };
-        let frames =
-            (cache.frames as f64 * env.sample_rate / f64::from(cache.sample_rate.max(1))) as i64;
+        let rate = f64::from(cache.sample_rate.max(1));
+        let left = env.file_to_engine(cache.frames as i64 - o.0, rate).max(0);
         let start_s = env.ticks_to_samples(start).0;
-        Some(env.samples_to_ticks(SampleTime(start_s + frames - o.0)).0)
+        Some(env.samples_to_ticks(SampleTime(start_s + left)).0)
+    }
+
+    /// The sample rate of an audio file, which its clips' offsets count in.
+    /// The engine rate if the file can't be read (it then plays silent).
+    fn file_rate(&mut self, env: &Env, source: &Path) -> f64 {
+        let path = env.resolve(source);
+        if let Peaks::Ready(cache) = self.peaks.get(&path) {
+            return f64::from(cache.sample_rate.max(1));
+        }
+        if let Some(&rate) = self.rates.get(&path) {
+            return rate;
+        }
+        match daw_media::Decoder::open(&path) {
+            Ok(d) => {
+                let rate = f64::from(d.info().sample_rate.max(1));
+                self.rates.insert(path, rate);
+                rate
+            }
+            Err(_) => env.sample_rate,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -917,6 +1004,7 @@ impl Arrange {
     }
 
     pub fn delete_selection(&mut self, doc: &mut Document) -> Outcome {
+        self.end_drag(doc);
         let ids: Vec<ClipId> = self
             .selected_clips(doc.project())
             .iter()
@@ -942,6 +1030,7 @@ impl Arrange {
 
     /// Copies the selection to just after itself and selects the copies.
     pub fn duplicate_selection(&mut self, doc: &mut Document) -> Outcome {
+        self.end_drag(doc);
         let project = doc.project();
         let sel = self.selected_clips(project);
         let (Some(first), Some(last)) = (
@@ -979,6 +1068,7 @@ impl Arrange {
     /// Splits every selected clip under `at` in two (or, with nothing
     /// selected, every clip under it on the selected track).
     pub fn split_at(&mut self, doc: &mut Document, env: &Env, at: TickTime) -> Outcome {
+        self.end_drag(doc);
         let project = doc.project();
         let targets: Vec<(TrackId, Arc<Clip>)> = project
             .tracks
@@ -1009,7 +1099,8 @@ impl Arrange {
             match &mut right.content {
                 ClipContent::Audio(a) => {
                     let shift = env.ticks_to_samples(at).0 - env.ticks_to_samples(c.start).0;
-                    a.offset = SampleTime(a.offset.0 + shift);
+                    let rate = self.file_rate(env, &a.source);
+                    a.offset = SampleTime(a.offset.0 + env.engine_to_file(shift, rate));
                 }
                 ClipContent::Midi(m) => {
                     // Notes starting in the right half move to the new clip.
@@ -1049,6 +1140,7 @@ impl Arrange {
 
     /// Moves the selection one grid step left (`-1`) or right (`1`).
     pub fn nudge(&mut self, doc: &mut Document, direction: i64) -> Outcome {
+        self.end_drag(doc);
         let project = doc.project();
         let meter = self.meter(project);
         let sel = self.selected_clips(project);
@@ -1068,7 +1160,8 @@ impl Arrange {
         let items: Vec<Box<dyn Command>> = sel
             .iter()
             .map(|(t, c)| {
-                Box::new(MoveClip::new(c.id, t.id, TickTime(c.start.0 + delta))) as Box<dyn Command>
+                Box::new(PlaceClip::new(c.id, t.id, TickTime(c.start.0 + delta)))
+                    as Box<dyn Command>
             })
             .collect();
         let key = sel.iter().map(|(_, c)| c.id).collect();
@@ -1091,6 +1184,7 @@ impl Arrange {
         track: Option<TrackId>,
         at: TickTime,
     ) -> Result<ClipId, ModelError> {
+        self.end_drag(doc);
         let project = doc.project();
         let at = TickTime(at.0.max(0));
         let name = file

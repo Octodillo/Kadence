@@ -134,6 +134,9 @@ impl Session {
     /// The directory relative clip paths are resolved against (the project
     /// bundle). Takes effect on the next [`sync`](Self::sync).
     pub fn set_root(&mut self, root: Option<PathBuf>) {
+        if self.media.root() == root.as_deref() {
+            return;
+        }
         self.media.set_root(root);
         // Paths may resolve differently now; rebuild everything.
         self.built = None;

@@ -204,3 +204,96 @@ impl Command for TrimClip {
         }
     }
 }
+
+/// Moves a clip to a track and start. Unlike `daw-model`'s `MoveClip`, undo
+/// puts the clip back by its start rather than at the index it had, so a
+/// group of moves stays correct after it merged with later groups (the
+/// other clips are then no longer where the index assumed). Consecutive
+/// moves of the same clip merge.
+#[derive(Debug)]
+pub struct PlaceClip {
+    pub id: ClipId,
+    pub track: TrackId,
+    pub start: TickTime,
+    old: Option<(TrackId, TickTime)>,
+}
+
+impl PlaceClip {
+    pub fn new(id: ClipId, track: TrackId, start: TickTime) -> Self {
+        Self {
+            id,
+            track,
+            start,
+            old: None,
+        }
+    }
+
+    /// Puts the clip on `track` at `start`; returns where it was.
+    fn place(
+        project: &mut Project,
+        id: ClipId,
+        track: TrackId,
+        start: TickTime,
+    ) -> Result<(TrackId, TickTime, ChangeSet), ModelError> {
+        let (from, index) = project
+            .clip_location(id)
+            .ok_or(ModelError::ClipNotFound(id))?;
+        if start.0 < 0 {
+            return Err(ModelError::Invalid("clips can't start before 0".into()));
+        }
+        let dest = project
+            .track(track)
+            .ok_or(ModelError::TrackNotFound(track))?;
+        let clip = &project.track(from).expect("found above").clips[index];
+        if !dest.kind.accepts(&clip.content) {
+            return Err(ModelError::Invalid(
+                "this kind of clip doesn't fit on that track".into(),
+            ));
+        }
+        let mut arc = project.track_mut(from)?.clips.remove(index);
+        let old_start = mem::replace(&mut std::sync::Arc::make_mut(&mut arc).start, start);
+        let t = project.track_mut(track)?;
+        let at = t.clips.partition_point(|c| c.start <= start);
+        t.clips.insert(at, arc);
+        let changes = [
+            Change::ClipList(from),
+            Change::ClipList(track),
+            Change::Clip(id),
+        ]
+        .into_iter()
+        .collect();
+        Ok((from, old_start, changes))
+    }
+}
+
+impl Command for PlaceClip {
+    fn label(&self) -> String {
+        "Move Clip".into()
+    }
+
+    fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
+        let (from, old_start, changes) = Self::place(project, self.id, self.track, self.start)?;
+        self.old = Some((from, old_start));
+        Ok(changes)
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
+        let (track, start) = self
+            .old
+            .take()
+            .ok_or_else(|| ModelError::Invalid("PlaceClip reverted before apply".into()))?;
+        let (_, _, changes) = Self::place(project, self.id, track, start)?;
+        Ok(changes)
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        match next.downcast_ref::<Self>() {
+            Some(n) if n.id == self.id => {
+                self.track = n.track;
+                self.start = n.start;
+                true
+            }
+            _ => false,
+        }
+    }
+}

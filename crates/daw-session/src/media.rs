@@ -15,8 +15,10 @@ pub const MEMORY_LIMIT_SECONDS: f64 = 60.0;
 /// How a file is played.
 #[derive(Clone)]
 pub(crate) enum Loaded {
-    Memory(Arc<AudioData>),
-    Stream,
+    /// Resampled to the engine rate. The `u32` is the file's own rate.
+    Memory(Arc<AudioData>, u32),
+    /// Streamed at the engine rate from a file at this rate.
+    Stream(u32),
     Missing,
 }
 
@@ -59,6 +61,10 @@ impl MediaPool {
         self.loaded.clear();
     }
 
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
     pub fn resolve(&self, source: &Path) -> PathBuf {
         match &self.root {
             Some(root) if source.is_relative() => root.join(source),
@@ -91,9 +97,10 @@ impl MediaPool {
             .map(|f| f as f64 / f64::from(info.sample_rate.max(1)));
         match seconds {
             Some(s) if s <= self.memory_limit => {
-                Ok(Loaded::Memory(Arc::new(load_file(path, self.sample_rate)?)))
+                let data = load_file(path, self.sample_rate)?;
+                Ok(Loaded::Memory(Arc::new(data), info.sample_rate))
             }
-            _ => Ok(Loaded::Stream),
+            _ => Ok(Loaded::Stream(info.sample_rate)),
         }
     }
 }

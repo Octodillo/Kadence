@@ -323,3 +323,131 @@ fn volume_automation_plays() {
         out[beat + beat / 2]
     );
 }
+
+#[test]
+fn stream_edited_while_stopped_plays_without_gap() {
+    let mut rig = Rig::new(0.0);
+    dc_file(rig.dir(), "long.wav", 16 * BEAT as usize, 0.25);
+    let clip = rig.add_clip("long.wav", 0, 8);
+    rig.session.locate(TickTime(2 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(200));
+    // Move the clip half a beat left while stopped; it still covers the playhead.
+    rig.doc
+        .execute(MoveClip::new(clip, rig.track, TickTime(0)))
+        .unwrap();
+    rig.doc
+        .execute(SetClip::new(
+            clip,
+            ClipField::AudioOffset(SampleTime(BEAT / 2)),
+        ))
+        .unwrap();
+    rig.sync();
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(300));
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(300));
+    rig.session.play().unwrap();
+    let out = rig.run_paced(BEAT as usize / 2);
+    let gaps = out.iter().filter(|&&x| x == 0.0).count();
+    assert_eq!(
+        gaps, 0,
+        "{gaps} silent samples after play following a stopped edit"
+    );
+}
+
+#[test]
+fn loop_wraps_cleanly_after_offset_edit() {
+    let mut rig = Rig::new(0.0);
+    dc_file(rig.dir(), "long.wav", 16 * BEAT as usize, 0.25);
+    let clip = rig.add_clip("long.wav", 0, 8);
+    rig.session
+        .set_loop(Some((TickTime(2 * PPQ), TickTime(3 * PPQ))))
+        .unwrap();
+    rig.session.locate(TickTime(2 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(200));
+    rig.session.play().unwrap();
+    let _ = rig.run_paced(BEAT as usize / 4);
+    // Change the file offset while playing (like a slip edit); the clip still spans the loop start.
+    rig.doc
+        .execute(SetClip::new(clip, ClipField::AudioOffset(SampleTime(BEAT))))
+        .unwrap();
+    rig.sync();
+    // The edit itself re-seeks the playing reader; only the wraps after it
+    // must be clean.
+    let _ = rig.run_paced(BEAT as usize / 2);
+    let rest = rig.run_paced(3 * BEAT as usize); // crosses several wraps
+    let gaps = rest.iter().filter(|&&x| x == 0.0).count();
+    assert_eq!(
+        gaps, 0,
+        "{gaps} silent samples at loop wraps after the edit"
+    );
+}
+
+#[test]
+fn stream_parked_then_played_has_no_gap() {
+    let mut rig = Rig::new(0.0);
+    dc_file(rig.dir(), "long.wav", 16 * BEAT as usize, 0.25);
+    let _clip = rig.add_clip("long.wav", 0, 8);
+    rig.session.locate(TickTime(2 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(200));
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(300));
+    rig.session.play().unwrap();
+    let out = rig.run_paced(BEAT as usize / 2);
+    let gaps = out.iter().filter(|&&x| x == 0.0).count();
+    assert_eq!(gaps, 0, "{gaps} control");
+}
+
+#[test]
+fn setting_the_same_root_keeps_the_graph() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 48_000, 0.5);
+    let clip = rig.add_clip("a.wav", 0, 1);
+    rig.run(BLOCK);
+    let swaps = rig.session.controller().graphs_swapped();
+    rig.doc
+        .execute(MoveClip::new(clip, rig.track, TickTime(2 * PPQ)))
+        .unwrap();
+    // What AppState::sync does on every document change:
+    let root = rig.dir().to_path_buf();
+    rig.session.set_root(Some(root));
+    rig.sync();
+    rig.run(BLOCK);
+    assert_eq!(
+        rig.session.controller().graphs_swapped(),
+        swaps,
+        "a clip move rebuilt the graph"
+    );
+}
+
+#[test]
+fn split_clip_plays_through_the_cut_without_a_dip() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "pad.wav", 4 * BEAT as usize, 0.5);
+    // The two halves of a split: the right one starts where the left ends,
+    // two beats into the file.
+    let left = rig.add_clip("pad.wav", 0, 2);
+    let right = rig.add_clip("pad.wav", 2, 2);
+    rig.doc
+        .execute(SetClip::new(
+            right,
+            ClipField::AudioOffset(SampleTime(2 * BEAT)),
+        ))
+        .unwrap();
+    rig.sync();
+    assert!(rig.session.has_clip(rig.track, left));
+    rig.session.play().unwrap();
+    let out = rig.run(3 * BEAT as usize);
+    let level = out[BEAT as usize];
+    let cut = 2 * BEAT as usize;
+    for (i, &x) in out[cut - 128..cut + 128].iter().enumerate() {
+        assert!(
+            (x - level).abs() < 1e-6,
+            "dip at {}: {x} vs {level}",
+            cut - 128 + i
+        );
+    }
+}

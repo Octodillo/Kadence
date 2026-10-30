@@ -108,6 +108,10 @@ pub struct PlayClip {
     pub file_start: i64,
     /// Linear gain.
     pub gain: f32,
+    /// Whether to fade at each edge. Off where the clip runs straight on
+    /// into the next one, as after a split.
+    pub fade_in: bool,
+    pub fade_out: bool,
     pub source: ClipSource,
 }
 
@@ -117,10 +121,20 @@ impl PlayClip {
     }
 }
 
+/// The edges of a clip as the fade sees them: `(start, end, gain, fade_in,
+/// fade_out)`.
+type Edges = (i64, i64, f32, bool, bool);
+
 /// Clip gain at `timeline`, faded in and out over `EDGE_FADE` samples at the
-/// clip's edges.
-fn edge_gain(start: i64, end: i64, gain: f32, timeline: i64) -> f32 {
-    let d = (timeline - start).min(end - 1 - timeline);
+/// clip's edges where it has fades.
+fn edge_gain((start, end, gain, fade_in, fade_out): Edges, timeline: i64) -> f32 {
+    let from_start = if fade_in { timeline - start } else { i64::MAX };
+    let to_end = if fade_out {
+        end - 1 - timeline
+    } else {
+        i64::MAX
+    };
+    let d = from_start.min(to_end);
     if d >= EDGE_FADE {
         gain
     } else {
@@ -260,13 +274,26 @@ impl AudioClipPlayer {
                 let Some(old) = self.clips.clips.get_mut(from) else {
                     continue;
                 };
+                let new = &mut set.clips[i];
+                // The readers' markers are timeline positions; they only
+                // still hold if the timeline maps to the same file frames.
+                let same_mapping = old.start - old.file_start == new.start - new.file_start;
                 if let (ClipSource::Stream(dst), ClipSource::Stream(src)) =
-                    (&mut set.clips[i].source, &mut old.source)
+                    (&mut new.source, &mut old.source)
                 {
                     *dst = src.take();
+                    if let Some(s) = dst
+                        && !same_mapping
+                    {
+                        s.main_next = NOWHERE;
+                        s.cue_next = NOWHERE;
+                    }
                 }
             }
             let old = std::mem::replace(&mut self.clips, set);
+            // New or moved clips need cueing even if the transport is parked
+            // where it was.
+            self.parked_at = NOWHERE;
             if let Err(old) = self.retirer.retire(old) {
                 self.retired = Some(old);
                 return;
@@ -376,7 +403,7 @@ impl Node for AudioClipPlayer {
                 continue;
             }
             let at = (from - pos) as usize;
-            let (cs, ce, cg) = (c.start, c.end, c.gain);
+            let edges = (c.start, c.end, c.gain, c.fade_in, c.fade_out);
             let len = (to - from) as usize;
             match &mut c.source {
                 ClipSource::Memory(data) => {
@@ -393,7 +420,7 @@ impl Node for AudioClipPlayer {
                             if f >= 0
                                 && let Some(x) = src.get(f as usize)
                             {
-                                let g = edge_gain(cs, ce, cg, from + i as i64);
+                                let g = edge_gain(edges, from + i as i64);
                                 out[at + i] += x * g;
                             }
                         }
@@ -406,7 +433,7 @@ impl Node for AudioClipPlayer {
                     s.main_next = to;
                     for (ch, out) in ctx.audio_out.iter_mut().enumerate().take(2) {
                         for i in 0..len {
-                            let g = edge_gain(cs, ce, cg, from + i as i64);
+                            let g = edge_gain(edges, from + i as i64);
                             out[at + i] += bufs[ch][i] * g;
                         }
                     }

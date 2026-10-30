@@ -274,6 +274,8 @@ impl qobject::Project {
     /// Runs `f` on the state, then refreshes every property.
     fn edit(self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
         state::with(|s| {
+            // A button may still be held on the timeline.
+            s.end_drag();
             f(s);
             s.sync();
             s.touch();

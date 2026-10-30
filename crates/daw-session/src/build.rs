@@ -440,11 +440,22 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
             continue;
         }
         let path = session.media.resolve(&a.source);
+        let engine_rate = session.sample_rate();
+        let mut file_rate = engine_rate;
         let source = match session.media.get(&path) {
-            Loaded::Memory(data) => ClipSource::Memory(data),
-            Loaded::Stream if handle.has_stream(c.id, &path) => ClipSource::Stream(None),
-            Loaded::Stream => match session.media.open_streams(&path) {
-                Ok(s) => ClipSource::Stream(Some(Box::new(s))),
+            Loaded::Memory(data, rate) => {
+                file_rate = f64::from(rate);
+                ClipSource::Memory(data)
+            }
+            Loaded::Stream(rate) if handle.has_stream(c.id, &path) => {
+                file_rate = f64::from(rate);
+                ClipSource::Stream(None)
+            }
+            Loaded::Stream(rate) => match session.media.open_streams(&path) {
+                Ok(s) => {
+                    file_rate = f64::from(rate);
+                    ClipSource::Stream(Some(Box::new(s)))
+                }
                 Err(e) => {
                     session
                         .warnings
@@ -463,13 +474,37 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
             id: c.id,
             start: session.ticks_to_samples(c.start).0,
             end: session.ticks_to_samples(TickTime(c.start.0 + c.length.0)).0,
-            file_start: a.offset.0,
+            // The model keeps the offset in the file's own frames.
+            file_start: (a.offset.0 as f64 * engine_rate / file_rate.max(1.0)).round() as i64,
+            fade_in: true,
+            fade_out: true,
             gain: 10f64.powf(a.gain_db / 20.0) as f32,
             path,
             source,
         });
     }
+    join_contiguous(&mut set);
     set
+}
+
+/// Clips that continue each other (the two halves of a split: same file,
+/// one ends where the next starts, the file running on) play without the
+/// edge fades between them, so a cut is inaudible.
+fn join_contiguous(set: &mut ClipSet) {
+    for i in 1..set.clips.len() {
+        let (before, after) = set.clips.split_at_mut(i);
+        let next = &mut after[0];
+        if let Some(prev) = before
+            .iter_mut()
+            .rev()
+            .find(|p| p.end == next.start && p.path == next.path)
+            && prev.file_start + (prev.end - prev.start) == next.file_start
+            && prev.gain == next.gain
+        {
+            prev.fade_out = false;
+            next.fade_in = false;
+        }
+    }
 }
 
 /// The engine node for a model device, its gain reduction meter if it has

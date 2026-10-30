@@ -123,8 +123,13 @@ impl AudioHost {
         let position = self.session.position();
         let looped = self.session.loop_range();
         let playing = self.session.is_playing();
+        let tempo = self.session.tempo().clone();
         let _ = self.backend.close();
         *self = Self::start(config);
+        // Positions are in ticks: map them with the project's tempo, not the
+        // fresh session's default, so the playhead stays on the same bar.
+        // The next sync applies the tempo to the engine.
+        self.session.tempo = tempo;
         let _ = self.session.set_loop(looped);
         let _ = self.session.locate(position);
         if playing {

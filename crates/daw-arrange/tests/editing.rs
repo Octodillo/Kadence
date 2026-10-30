@@ -495,3 +495,62 @@ fn waveforms_draw_for_clips_anywhere() {
     assert_eq!(waves.len(), 4, "{waves:?}");
     assert!(waves.iter().all(|&(_, n)| n > 40), "{waves:?}");
 }
+
+#[test]
+fn cancelling_a_drag_that_edited_nothing_undoes_nothing() {
+    let mut r = Rig::new();
+    let a = r.audio(0, BAR, BAR, 0);
+    let b = r.audio(1, BAR, BAR, 0); // the user's last edit
+    let tempo = r.tempo.clone();
+    let env = Env {
+        tempo: &tempo,
+        sample_rate: 48_000.0,
+        root: None,
+        playhead: TickTime(0),
+        loop_range: None,
+    };
+    let (x, y) = (r.x(BAR + BAR / 2), r.y(0));
+    // Click selects A; ctrl-press toggles it off; drag; Escape.
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange.release(&mut r.doc, Pointer::left(x, y));
+    let ctrl = Pointer {
+        ctrl: true,
+        ..Pointer::left(x, y)
+    };
+    r.arrange.press(&mut r.doc, ctrl);
+    r.arrange.motion(
+        &mut r.doc,
+        &env,
+        Pointer {
+            ctrl: true,
+            ..Pointer::left(x + 40.0, y)
+        },
+    );
+    r.arrange.cancel(&mut r.doc);
+    assert!(r.doc.project().clip(a).is_some());
+    assert!(
+        r.doc.project().clip(b).is_some(),
+        "Escape on a no-op drag undid adding clip B"
+    );
+}
+
+#[test]
+fn deleting_a_clip_while_pressed_on_it_does_not_panic() {
+    let mut r = Rig::new();
+    let _a = r.audio(0, BAR, BAR, 0);
+    let tempo = r.tempo.clone();
+    let env = Env {
+        tempo: &tempo,
+        sample_rate: 48_000.0,
+        root: None,
+        playhead: TickTime(0),
+        loop_range: None,
+    };
+    let (x, y) = (r.x(BAR) + 1.0, r.y(0)); // left edge
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange.delete_selection(&mut r.doc); // Delete shortcut while the button is held
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 20.0, y));
+    r.arrange.release(&mut r.doc, Pointer::left(x + 20.0, y));
+    assert!(r.doc.project().tracks[0].clips.is_empty());
+}

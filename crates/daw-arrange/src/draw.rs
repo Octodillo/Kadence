@@ -274,8 +274,9 @@ fn waveform(
     let ratio = f64::from(cache.sample_rate) / env.sample_rate;
     let file_frame = |x: f64| {
         let t = a.view.x_to_tick(x);
-        let engine = env.tempo.ticks_to_samples(t, env.sample_rate).0 - clip_start + offset.0;
-        (engine.max(0) as f64 * ratio) as u64
+        // The offset is in the file's own frames.
+        let engine = env.tempo.ticks_to_samples(t, env.sample_rate).0 - clip_start;
+        ((engine.max(0) as f64 * ratio) as i64 + offset.0).max(0) as u64
     };
     let (f0, full) = (file_frame(x0), file_frame(x1));
     // The file may end before the clip does.
