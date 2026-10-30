@@ -105,17 +105,34 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:24.04
     steps:
-      - name: Install system packages
+      - name: Add the KDE neon archive
+        # archive.neon.kde.org has had outages (502s for hours). When it is
+        # unreachable, skip this job with a warning instead of failing it;
+        # once the archive answers, build and test failures still fail.
+        id: neon
+        shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl gnupg
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 https://archive.neon.kde.org/public.key \
-            | gpg --dearmor -o /usr/share/keyrings/neon.gpg
-          echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
-            > /etc/apt/sources.list.d/neon.list
-          apt-get update
+          if curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 \
+                -o /tmp/neon.key https://archive.neon.kde.org/public.key \
+              && gpg --dearmor -o /usr/share/keyrings/neon.gpg /tmp/neon.key \
+              && echo "deb [signed-by=/usr/share/keyrings/neon.gpg] https://archive.neon.kde.org/user noble main" \
+                > /etc/apt/sources.list.d/neon.list \
+              && apt-get update --error-on=any; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=KDE neon archive unreachable::Skipping this job: archive.neon.kde.org did not answer. This is not a failure of the code under test."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install system packages
+        if: steps.neon.outputs.available == 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
           apt-get install -y --no-install-recommends \
             build-essential git cmake ninja-build clang lld pkg-config \
             qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-wayland \
@@ -126,13 +143,16 @@ jobs:
             weston xvfb xauth
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
+      - if: steps.neon.outputs.available == 'true'
+        uses: actions/checkout@v4
       - name: Build and install to /usr
+        if: steps.neon.outputs.available == 'true'
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
           cmake --install build
       - name: Smoke test (installed)
+        if: steps.neon.outputs.available == 'true'
         run: |
           useradd -m tester
           su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
