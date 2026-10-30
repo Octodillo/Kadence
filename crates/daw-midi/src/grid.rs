@@ -454,12 +454,16 @@ impl Grid {
     ) -> impl Iterator<Item = GridLine> + 'a {
         let end = clamp_tick(range.end);
         let first = self.ceil(range.start, meter).0;
-        // `-MAX_TICK` is a line even when the grid has none there.
-        let edge = (first == -MAX_TICK && first < end && self.grid_floor(first, meter) != first)
-            .then_some(GridLine {
-                tick: TickTime(first),
-                kind: LineKind::Step,
-            });
+        // The `±MAX_TICK` edges are lines even when the grid has none there.
+        let edge = |tick: i64| GridLine {
+            tick: TickTime(tick),
+            kind: line_kind(tick, &meter.bar_at(TickTime(tick))),
+        };
+        let low = (first == -MAX_TICK && first < end && self.grid_floor(first, meter) != first)
+            .then(|| edge(-MAX_TICK));
+        // Grid lines stop before `end`, so a range past `MAX_TICK` still
+        // needs the edge itself.
+        let high = (range.end.0 > MAX_TICK).then(|| edge(MAX_TICK));
         let mut s = self.steps(meter.bar_at(TickTime(first)));
         let mut k = s.index(first);
         // Step back to the first line at or after `first`.
@@ -469,7 +473,7 @@ impl Grid {
         while s.line(k).is_some_and(|l| l < first) {
             k += 1;
         }
-        edge.into_iter().chain(std::iter::from_fn(move || {
+        let grid = std::iter::from_fn(move || {
             let tick = match s.line(k) {
                 Some(l) => l,
                 None => {
@@ -485,19 +489,24 @@ impl Grid {
                 return None;
             }
             k += 1;
-            let into = tick - s.bar.start.0;
-            let kind = if into == 0 {
-                LineKind::Bar
-            } else if into % s.bar.beat_ticks() == 0 {
-                LineKind::Beat
-            } else {
-                LineKind::Step
-            };
             Some(GridLine {
                 tick: TickTime(tick),
-                kind,
+                kind: line_kind(tick, &s.bar),
             })
-        }))
+        });
+        low.into_iter().chain(grid).chain(high)
+    }
+}
+
+/// Whether a line at `tick` inside `bar` is a bar, beat or plain step line.
+fn line_kind(tick: i64, bar: &Bar) -> LineKind {
+    let into = tick - bar.start.0;
+    if into == 0 {
+        LineKind::Bar
+    } else if into % bar.beat_ticks() == 0 {
+        LineKind::Beat
+    } else {
+        LineKind::Step
     }
 }
 
@@ -678,6 +687,15 @@ mod tests {
         for w in lines.windows(2) {
             assert_eq!(g.next(t(w[0]), &m), t(w[1]));
         }
+        let lines: Vec<i64> = g
+            .lines(t(MAX_TICK - 300)..t(i64::MAX), &m)
+            .map(|l| l.tick.0)
+            .collect();
+        assert_eq!(lines.last(), Some(&MAX_TICK));
+        for w in lines.windows(2) {
+            assert_eq!(g.next(t(w[0]), &m), t(w[1]));
+        }
+        assert_eq!(g.lines(t(MAX_TICK)..t(i64::MAX), &m).count(), 1);
     }
 
     #[test]

@@ -68,6 +68,7 @@ proptest! {
         // The last line of a bar is followed by the next downbeat.
         let bar = m.bar_at(t);
         prop_assert_eq!(g.next(g.prev(bar.end(), &m), &m), bar.end());
+        prop_assert_eq!(g.floor(bar.end(), &m), bar.end());
     }
 
     #[test]
@@ -107,6 +108,18 @@ proptest! {
         prop_assert_eq!(g.floor(p, &m), p);
         if p.0 > -MAX_TICK {
             prop_assert_eq!(g.next(p, &m), g.ceil(lo, &m));
+        }
+        // lines() reaches both edges and agrees with next() there.
+        for r in [hi..TickTime(i64::MAX), TickTime(i64::MIN)..TickTime(lo.0 + 1)] {
+            let lines: Vec<_> = g.lines(r.clone(), &m).collect();
+            prop_assert!(!lines.is_empty());
+            prop_assert_eq!(lines[0].tick, g.ceil(r.start, &m));
+            for w in lines.windows(2) {
+                prop_assert_eq!(g.next(w[0].tick, &m), w[1].tick);
+            }
+            for l in &lines {
+                prop_assert_eq!(l.kind == LineKind::Bar, m.bar_at(l.tick).start == l.tick);
+            }
         }
     }
 
