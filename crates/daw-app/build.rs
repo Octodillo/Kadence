@@ -76,6 +76,7 @@ fn main() {
         "src/test_helper.rs",
         "src/project.rs",
         "src/arrange_view.rs",
+        "src/piano_roll.rs",
         "src/paint.rs",
     ])
     .qt_module("Gui")

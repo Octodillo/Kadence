@@ -20,6 +20,8 @@ daw-arrange = { path = "../daw-arrange" }
 daw-core.workspace = true
 daw-media = { path = "../daw-media" }
 daw-model = { path = "../daw-model" }
+daw-midi = { path = "../daw-midi" }
+daw-pianoroll = { path = "../daw-pianoroll" }
 daw-session = { path = "../daw-session" }
 cxx = "1.0.176"
 cxx-qt = "0.10"
