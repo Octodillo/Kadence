@@ -13,7 +13,9 @@
 use daw_core::event::ParamId;
 use daw_devices::{ParamKind, ParamSpec, ParamUnit, Taper};
 use daw_model::commands::{DeviceField, MoveDevice, SetDevice, SetParam};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use daw_model::{AutomationTarget, Device, DeviceId, DeviceSource, Document, Project, TrackKind};
@@ -130,6 +132,13 @@ pub trait ParamSource {
     /// The parameters of `device` in display order, or `None` if this
     /// source doesn't know the device.
     fn describe(&self, device: &Device) -> Option<Vec<ParamDesc>>;
+
+    /// The value the device itself holds for a parameter the document
+    /// doesn't set (a plugin's own state), if this source knows it. The
+    /// default is used otherwise.
+    fn current(&self, _device: &Device, _param: ParamId) -> Option<f64> {
+        None
+    }
 }
 
 /// The built-in devices of `daw-devices`.
@@ -252,17 +261,20 @@ impl DevicePanel {
         let (track_id, index) = project.device_location(id)?;
         let track = project.track(track_id)?;
         let device = &track.devices[index];
-        let params = self
+        let (source, descs) = self
             .sources
             .iter()
-            .find_map(|s| s.describe(device))
-            .unwrap_or_default()
+            .find_map(|s| Some((s, s.describe(device)?)))
+            .map_or((None, Vec::new()), |(s, d)| (Some(s), d));
+        let params = descs
             .into_iter()
             .map(|desc| {
                 let value = device
                     .params
                     .get(&desc.id)
-                    .map_or(desc.default, |&v| desc.sanitize(v));
+                    .copied()
+                    .or_else(|| source?.current(device, desc.id))
+                    .map_or(desc.default, |v| desc.sanitize(v));
                 let automated = track.automation.iter().any(|l| {
                     l.enabled
                         && !l.points.is_empty()
@@ -423,10 +435,86 @@ impl DevicePanel {
     }
 }
 
+/// The parameters of loaded plugins, as the session describes them. The
+/// app fills it for the open device ([`PluginParams::update`]), since the
+/// session lives in the app state.
+#[derive(Clone, Default)]
+pub struct PluginParams(Rc<RefCell<Option<PluginSnapshot>>>);
+
+struct PluginSnapshot {
+    device: DeviceId,
+    params: Vec<ParamDesc>,
+    /// The plugin's own values when the snapshot was taken.
+    values: HashMap<ParamId, f64>,
+}
+
+impl PluginParams {
+    /// Describes `device` from `session` unless it is already described.
+    /// Returns true if the description changed (the plugin loaded or
+    /// went away).
+    pub fn update(&self, session: Option<&daw_session::Session>, device: Option<DeviceId>) -> bool {
+        let mut cache = self.0.borrow_mut();
+        let params = device.zip(session).and_then(|(d, s)| s.plugin_params(d));
+        match (&*cache, params) {
+            (Some(c), Some(_)) if Some(c.device) == device => false,
+            (None, None) => false,
+            (_, None) => {
+                *cache = None;
+                true
+            }
+            (_, Some(params)) => {
+                let (device, session) = (device.unwrap(), session.unwrap());
+                let ids: Vec<ParamId> = params.iter().map(|p| p.id).collect();
+                let values = session
+                    .with_plugin(device, |p| {
+                        ids.iter().map(|&id| (id, p.param_value(id))).collect()
+                    })
+                    .unwrap_or_default();
+                *cache = Some(PluginSnapshot {
+                    device,
+                    params: params.iter().map(ParamDesc::from_info).collect(),
+                    values,
+                });
+                true
+            }
+        }
+    }
+}
+
+impl ParamSource for PluginParams {
+    fn describe(&self, device: &Device) -> Option<Vec<ParamDesc>> {
+        let cache = self.0.borrow();
+        let c = cache.as_ref().filter(|c| c.device == device.id)?;
+        Some(c.params.clone())
+    }
+
+    fn current(&self, device: &Device, param: ParamId) -> Option<f64> {
+        let cache = self.0.borrow();
+        let c = cache.as_ref().filter(|c| c.device == device.id)?;
+        c.values.get(&param).copied()
+    }
+}
+
 /// [`DevicePanel`] on the app state: the panel the QML shows.
-#[derive(Default)]
 pub struct AppDevicePanel {
     pub inner: DevicePanel,
+    plugins: PluginParams,
+    /// Counts plugin descriptions, so the view refreshes when a plugin
+    /// finishes loading.
+    loads: Cell<u64>,
+}
+
+impl Default for AppDevicePanel {
+    fn default() -> Self {
+        let plugins = PluginParams::default();
+        let mut inner = DevicePanel::default();
+        inner.add_source(Box::new(plugins.clone()));
+        Self {
+            inner,
+            plugins,
+            loads: Cell::new(0),
+        }
+    }
 }
 
 impl AppDevicePanel {
@@ -444,6 +532,10 @@ impl AppDevicePanel {
         match found {
             Some(d) => {
                 self.inner.open(d);
+                // Read the plugin's values afresh: they may have changed
+                // since it was last open.
+                self.plugins.update(None, None);
+                self.update_plugins();
                 true
             }
             None => false,
@@ -454,9 +546,19 @@ impl AppDevicePanel {
         crate::state::with(|s| self.inner.view(s.doc.project()))
     }
 
+    /// Describes the open device's plugin once it has loaded.
+    fn update_plugins(&self) {
+        let device = self.inner.device();
+        if crate::state::with(|s| self.plugins.update(s.engine.session(), device)) {
+            self.loads.set(self.loads.get() + 1);
+        }
+    }
+
     /// Changes whenever the view may have changed from elsewhere.
     pub fn revision(&self) -> u64 {
-        crate::state::with(|s| (s.doc_serial << 40) ^ s.doc.revision())
+        self.update_plugins();
+        let doc = crate::state::with(|s| (s.doc_serial << 40) ^ s.doc.revision());
+        doc ^ (self.loads.get() << 56)
     }
 
     /// Runs an edit, plays the change and reports errors on the status
@@ -711,6 +813,11 @@ mod tests {
                     })]
                 })
             }
+
+            // The plugin's own state holds 0.75.
+            fn current(&self, _: &Device, param: ParamId) -> Option<f64> {
+                (param == 7).then_some(0.75)
+            }
         }
         let (mut doc, mut panel, track, _) = rig(TrackKind::Audio);
         let plugin = Device::new(
@@ -730,9 +837,15 @@ mod tests {
         panel.open(id);
         assert!(panel.view(doc.project()).unwrap().params.is_empty());
         panel.add_source(Box::new(Fake));
-        assert_eq!(value(&doc, &panel, 7), 0.25);
+        // The plugin's value until the document sets one.
+        assert_eq!(value(&doc, &panel, 7), 0.75);
         panel.set_value(&mut doc, 7, 0.5).unwrap();
         assert_eq!(value(&doc, &panel, 7), 0.5);
+        // A plugin's default is stored, as the plugin keeps its own value.
+        doc.seal();
+        panel.click.set(None);
+        panel.reset(&mut doc, 7).unwrap();
+        assert_eq!(value(&doc, &panel, 7), 0.25);
         // Ids it doesn't describe are refused.
         let revision = doc.revision();
         panel.set_value(&mut doc, 8, 0.5).unwrap();
