@@ -423,9 +423,7 @@ impl qobject::Project {
                     s.touch();
                 }
             }
-            if let Err(e) = s.doc.autosave() {
-                s.report(Message::File(Context::Autosave, e));
-            }
+            s.autosave();
         });
         self.refresh(false);
     }

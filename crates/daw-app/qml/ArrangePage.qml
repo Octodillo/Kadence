@@ -172,13 +172,24 @@ Kirigami.Page {
         spacing: 0
 
         Kirigami.InlineMessage {
+            id: statusMessage
             Layout.fillWidth: true
             position: Kirigami.InlineMessage.Position.Header
             type: Kirigami.MessageType.Warning
             showCloseButton: true
-            visible: text !== ""
+            // Set rather than bound: the close button assigns visible, which
+            // would break a binding and keep later messages hidden.
+            visible: false
             text: projectMessage.text(Project.status)
             onVisibleChanged: if (!visible) Project.clearStatus()
+            Component.onCompleted: visible = projectMessage.text(Project.status) !== ""
+
+            Connections {
+                target: Project
+                function onStatusChanged() {
+                    statusMessage.visible = projectMessage.text(Project.status) !== ""
+                }
+            }
         }
 
         RowLayout {
@@ -272,7 +283,12 @@ Kirigami.Page {
                     onBackgroundColorChanged: refresh()
                     onTextColorChanged: refresh()
                     onHighlightColorChanged: refresh()
-                    Component.onCompleted: refresh()
+                    Component.onCompleted: {
+                        setDefaultNames(
+                            i18nc("@label default name of a new MIDI clip", "MIDI clip"),
+                            i18nc("@label default name of audio from a file without a name", "Audio"));
+                        refresh();
+                    }
 
                     onContextMenuRequested: (x, y, onClip) => {
                         (onClip ? clipMenu : laneMenu).popup(view, x, y);

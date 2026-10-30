@@ -34,8 +34,8 @@ QtObject {
         case Project.NoLocation:
             return i18nc("@info", "Choose where to save it first.");
         case Project.AutosavePending:
-            return i18nc("@info %1 is a folder path",
-                         "Unsaved changes from an earlier session are waiting in “%1”.", m.path);
+            return i18nc("@info %1 is a file path",
+                         "Unsaved changes from an earlier session are saved in “%1”.", m.path);
         case Project.CannotDecode:
             return i18nc("@info %1 is a decoder message which may be in English",
                          "It could not be read as audio (%1).", m.detail);

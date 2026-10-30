@@ -15,7 +15,7 @@ use daw_model::{Document, FormatError, Project};
 use daw_pianoroll::PianoRoll;
 
 use crate::engine::{EngineHandle, default_engine};
-use crate::message::{Fields, Message};
+use crate::message::{Context, Fields, Message};
 
 pub struct AppState {
     pub doc: Document,
@@ -30,6 +30,9 @@ pub struct AppState {
     pub view_revision: u64,
     /// The last error or warning, for the status line.
     pub status: Option<Fields>,
+    /// The document revision whose autosave failed, so the timer doesn't
+    /// retry and report it again until there is a new edit.
+    autosave_failed: Option<u64>,
     /// Scroll to keep the playhead in view while playing.
     pub follow_playhead: bool,
     /// Tempo map for the view when no session runs.
@@ -60,6 +63,7 @@ impl AppState {
             synced: None,
             view_revision: 0,
             status: None,
+            autosave_failed: None,
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
         };
@@ -85,6 +89,22 @@ impl AppState {
         }
         self.synced = Some(revision);
         self.view_revision += 1;
+    }
+
+    /// Writes an autosave if the document changed, reporting a failure once
+    /// per revision.
+    pub fn autosave(&mut self) {
+        let revision = self.doc.revision();
+        if self.autosave_failed == Some(revision) {
+            return;
+        }
+        match self.doc.autosave() {
+            Ok(_) => self.autosave_failed = None,
+            Err(e) => {
+                self.autosave_failed = Some(revision);
+                self.report(Message::File(Context::Autosave, e));
+            }
+        }
     }
 
     /// Forces a full resync, after the engine was restarted.
@@ -212,6 +232,7 @@ impl AppState {
             let _ = s.set_loop(None);
         }
         self.doc = doc;
+        self.autosave_failed = None;
         self.arrange.selection.clear();
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;
