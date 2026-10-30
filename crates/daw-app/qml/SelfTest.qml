@@ -95,7 +95,14 @@ Item {
             check(Engine.applyAudioSettings(1, 44100, 512) === "", "apply final settings");
         },
         () => {
-            settingsPage.Kirigami.PageStack.closeDialog();
+            // Older Kirigami (KF 6.13 in Debian 13) has no PageStack.closeDialog();
+            // the dialog layer is its own window, so close that instead.
+            const stack = settingsPage.Kirigami.PageStack;
+            if (typeof stack.closeDialog === "function") {
+                stack.closeDialog();
+            } else {
+                settingsPage.Window.window.close();
+            }
             window.openAbout();
             check(window.pageStack.layers.depth === 2, "open About");
         },

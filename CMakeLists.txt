@@ -32,10 +32,13 @@ endif()
 set(APP_CRATE ${CMAKE_SOURCE_DIR}/crates/daw-app)
 if(EXISTS ${APP_CRATE}/Cargo.toml)
     find_program(CARGO cargo REQUIRED)
+    # cxx-qt and build.rs ask qmake where Qt lives. Distros call it qmake6
+    # or qmake-qt6; the Flatpak KDE SDK only has plain qmake.
+    find_program(QMAKE NAMES qmake6 qmake-qt6 qmake REQUIRED)
     set(CARGO_TARGET_DIR ${CMAKE_BINARY_DIR}/cargo)
     set(APP_EXECUTABLE ${CARGO_TARGET_DIR}/release/${APP_BINARY})
     add_custom_target(cargo_build ALL
-        COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CARGO_TARGET_DIR}
+        COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CARGO_TARGET_DIR} QMAKE=${QMAKE}
                 ${CARGO} build --release --locked -p daw-app
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         USES_TERMINAL
