@@ -10,12 +10,15 @@ Kirigami.ScrollablePage {
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
 
+        // The two forms share one label column.
         AudioSettings {
+            id: audio
             Layout.fillWidth: true
         }
 
         PluginSettings {
             Layout.fillWidth: true
+            twinFormLayouts: [audio.form]
         }
     }
 }
