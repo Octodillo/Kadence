@@ -129,6 +129,7 @@ Kirigami.ApplicationWindow {
     Component {
         id: aboutComponent
         Kirigami.AboutPage {
+            objectName: "aboutPage"
             aboutData: root.aboutData
         }
     }
@@ -153,7 +154,9 @@ Kirigami.ApplicationWindow {
     function openAbout(): Item {
         // The drawer stays clickable next to the layer on a wide window, so
         // don't stack a second About page on the first.
-        if (pageStack.layers.currentItem instanceof Kirigami.AboutPage) {
+        // instanceof does not match QML-defined Kirigami types, so compare
+        // the objectName set on aboutComponent instead.
+        if (pageStack.layers.currentItem?.objectName === "aboutPage") {
             return pageStack.layers.currentItem;
         }
         return pageStack.layers.push(aboutComponent);
