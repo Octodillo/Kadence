@@ -23,6 +23,7 @@ use crate::model::Project;
 /// The `format` field every project file carries.
 pub const FORMAT_NAME: &str = "kadence-project";
 /// The schema version this build writes. Older files are migrated on load.
+/// Bump it for every added field too, or older builds drop it when they save.
 pub const SCHEMA_VERSION: u64 = 1;
 /// File extension of the project file (matches the MIME glob `*.kadence`).
 pub const EXTENSION: &str = "kadence";
@@ -143,8 +144,13 @@ impl Bundle {
             stem,
             file_name,
         };
-        // Any other project file there would make the bundle ambiguous to open.
-        if let Some(existing) = project_files(&bundle.root)?.into_iter().next() {
+        // Any other project file there would make the bundle ambiguous to
+        // open, and saving would delete an autosave left to recover from.
+        let existing = project_files(&bundle.root)?
+            .into_iter()
+            .chain(files_with_suffix(&bundle.root, AUTOSAVE_SUFFIX)?)
+            .next();
+        if let Some(existing) = existing {
             return Err(FormatError::Io {
                 path: existing,
                 source: std::io::ErrorKind::AlreadyExists.into(),
@@ -237,57 +243,72 @@ impl Bundle {
         if file.exists() {
             self.backup(&file)?;
         }
-        write_atomic(&file, project)?;
+        write_atomic(&file, &file, project)?;
         self.discard_autosave()
     }
 
     fn backup(&self, file: &Path) -> Result<(), FormatError> {
-        let millis = SystemTime::now()
+        let mut backups = self.own_backups()?;
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis());
-        // Zero-padded so that name order is time order.
+            .map_or(0, |d| d.as_millis() as u64);
+        // Always after the newest backup, even when two saves share a
+        // millisecond or the clock was set back.
+        let stamp = backups
+            .last()
+            .map_or(now, |&(newest, _)| now.max(newest + 1));
         let dest = self
             .backups_dir()
-            .join(format!("{}-{millis:016}.{EXTENSION}", self.stem));
+            .join(format!("{}-{stamp:016}.{EXTENSION}", self.stem));
         fs::copy(file, &dest).map_err(FormatError::io(&dest))?;
-        let mut backups: Vec<PathBuf> = fs::read_dir(self.backups_dir())
-            .map_err(FormatError::io(self.backups_dir()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
-            })
-            .collect();
-        backups.sort();
+        backups.push((stamp, dest));
+        // Only this project's backups rotate; ones left by a project file of
+        // another name (before a rename) are kept.
         let excess = backups.len().saturating_sub(BACKUPS_KEPT);
-        for old in &backups[..excess] {
+        for (_, old) in &backups[..excess] {
             fs::remove_file(old).map_err(FormatError::io(old))?;
         }
         Ok(())
     }
 
-    /// Lists backups, oldest first.
-    pub fn backups(&self) -> Result<Vec<PathBuf>, FormatError> {
-        let dir = self.backups_dir();
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut v: Vec<PathBuf> = fs::read_dir(&dir)
-            .map_err(FormatError::io(&dir))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
-            })
+    /// This project's `<stem>-<timestamp>` backups, oldest first.
+    fn own_backups(&self) -> Result<Vec<(u64, PathBuf)>, FormatError> {
+        let mut v: Vec<(u64, PathBuf)> = files_with_suffix(&self.backups_dir(), PROJECT_SUFFIX)?
+            .into_iter()
+            .filter_map(|p| Some((self.backup_stamp(&p)?, p)))
             .collect();
         v.sort();
         Ok(v)
     }
 
+    /// The timestamp in a backup's name, if it is one of this project's.
+    fn backup_stamp(&self, path: &Path) -> Option<u64> {
+        let name = path.file_name()?.to_str()?;
+        let ts = strip_suffix_ci(name, PROJECT_SUFFIX)?
+            .strip_prefix(self.stem.as_str())?
+            .strip_prefix('-')?;
+        (ts.len() == 16 && ts.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| ts.parse().ok())
+            .flatten()
+    }
+
+    /// Lists backups, oldest first. Backups left by a project file of another
+    /// name (before a rename) come before this project's own.
+    pub fn backups(&self) -> Result<Vec<PathBuf>, FormatError> {
+        let mut others: Vec<PathBuf> = files_with_suffix(&self.backups_dir(), PROJECT_SUFFIX)?
+            .into_iter()
+            .filter(|p| self.backup_stamp(p).is_none())
+            .collect();
+        others.sort();
+        others.extend(self.own_backups()?.into_iter().map(|(_, p)| p));
+        Ok(others)
+    }
+
     /// Writes the autosave file atomically. The project file is untouched.
     pub fn write_autosave(&self, project: &Project) -> Result<(), FormatError> {
         self.make_dirs()?;
-        write_atomic(&self.autosave_file(), project)
+        // The autosave holds the same data, so it gets the same permissions.
+        write_atomic(&self.autosave_file(), &self.project_file(), project)
     }
 
     /// Whether an autosave exists that is newer than the project file, which
@@ -422,12 +443,26 @@ pub fn read_project(path: &Path) -> Result<Project, FormatError> {
 }
 
 /// Writes to a temporary file next to `path`, syncs it, then renames it over
-/// `path`, so a crash never leaves a half-written project.
-fn write_atomic(path: &Path, project: &Project) -> Result<(), FormatError> {
+/// `path`, so a crash never leaves a half-written project. The new file keeps
+/// the permissions of `path`, or of `like` if `path` doesn't exist yet. A
+/// symlink at `path` is written through, not replaced.
+fn write_atomic(path: &Path, like: &Path, project: &Project) -> Result<(), FormatError> {
+    let path = match fs::symlink_metadata(path) {
+        // A dangling link is replaced, as before.
+        Ok(m) if m.file_type().is_symlink() => {
+            fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
+    let path = path.as_path();
+    let perms = fs::metadata(path)
+        .or_else(|_| fs::metadata(like))
+        .ok()
+        .map(|m| m.permissions());
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let result = write_synced(&tmp, project)
+    let result = write_synced(&tmp, perms, project)
         .and_then(|()| fs::rename(&tmp, path).map_err(FormatError::io(path)));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -440,8 +475,20 @@ fn write_atomic(path: &Path, project: &Project) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn write_synced(path: &Path, project: &Project) -> Result<(), FormatError> {
+fn write_synced(
+    path: &Path,
+    perms: Option<fs::Permissions>,
+    project: &Project,
+) -> Result<(), FormatError> {
     let file = File::create(path).map_err(FormatError::io(path))?;
+    // Narrowed before any data goes in. Elsewhere permissions are only a
+    // read-only flag, which would stop the write.
+    #[cfg(unix)]
+    if let Some(perms) = perms {
+        file.set_permissions(perms).map_err(FormatError::io(path))?;
+    }
+    #[cfg(not(unix))]
+    let _ = perms;
     let mut w = BufWriter::new(file);
     serde_json::to_writer_pretty(&mut w, &envelope(project)).map_err(|e| {
         // A full disk is an I/O error, not a malformed file.

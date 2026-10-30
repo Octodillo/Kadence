@@ -229,17 +229,28 @@ impl Document {
     }
 }
 
+/// Copies the files in `from` into `to`, refusing before copying anything if
+/// a file of the same name is already there, since clips may use it.
 fn copy_dir_files(from: &Path, to: &Path) -> Result<(), FormatError> {
     if !from.is_dir() {
         return Ok(());
     }
     std::fs::create_dir_all(to).map_err(FormatError::io(to))?;
+    let mut copies = Vec::new();
     for entry in std::fs::read_dir(from).map_err(FormatError::io(from))? {
         let path = entry.map_err(FormatError::io(from))?.path();
         if path.is_file() {
             let dest = to.join(path.file_name().expect("files have names"));
-            std::fs::copy(&path, &dest).map_err(FormatError::io(&dest))?;
+            if dest.exists() {
+                return Err(FormatError::io(dest)(
+                    std::io::ErrorKind::AlreadyExists.into(),
+                ));
+            }
+            copies.push((path, dest));
         }
+    }
+    for (path, dest) in copies {
+        std::fs::copy(&path, &dest).map_err(FormatError::io(&dest))?;
     }
     Ok(())
 }

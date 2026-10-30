@@ -349,3 +349,163 @@ fn discarding_never_destroys_the_only_copy() {
     assert!(root.join("Only.kadence.autosave").exists());
     assert_eq!(Document::recover(&root).unwrap().project(), doc.project());
 }
+
+/// Saves `doc` with a new track name each time, `n` times.
+fn save_versions(doc: &mut Document, id: TrackId, n: usize) {
+    for i in 0..n {
+        doc.execute(SetTrack::new(id, TrackField::Name(format!("v{i}"))))
+            .unwrap();
+        doc.save().unwrap();
+    }
+}
+
+fn backup_names(bundle: &Bundle) -> Vec<String> {
+    bundle
+        .backups()
+        .unwrap()
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn backups_survive_renaming_the_project_file() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Song");
+    let mut doc = Document::new(p);
+    doc.save_as(&root).unwrap();
+    save_versions(&mut doc, id, bundle::BACKUPS_KEPT + 1);
+    // Renamed outside the app to a name that sorts first.
+    std::fs::rename(root.join("Song.kadence"), root.join("Ballad.kadence")).unwrap();
+    let mut doc = Document::open(&root).unwrap();
+    save_versions(&mut doc, id, 2);
+    let names = backup_names(doc.bundle().unwrap());
+    assert_eq!(
+        names.iter().filter(|n| n.starts_with("Ballad-")).count(),
+        2,
+        "{names:?}"
+    );
+    // The backups made before the rename are neither pruned nor listed last.
+    assert_eq!(
+        names.iter().filter(|n| n.starts_with("Song-")).count(),
+        bundle::BACKUPS_KEPT
+    );
+    assert!(names.last().unwrap().starts_with("Ballad-"));
+}
+
+#[test]
+fn backups_survive_a_clock_set_back() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Clock");
+    let mut doc = Document::new(p);
+    doc.save_as(&root).unwrap();
+    // Backups stamped far in the future, as if the clock was stepped back.
+    let b = doc.bundle().unwrap().clone();
+    for i in 0..bundle::BACKUPS_KEPT {
+        let ts = 5_000_000_000_000u64 + i as u64;
+        std::fs::copy(
+            b.project_file(),
+            b.backups_dir().join(format!("Clock-{ts:016}.kadence")),
+        )
+        .unwrap();
+    }
+    save_versions(&mut doc, id, 2);
+    let newest = b.backups().unwrap().pop().unwrap();
+    let last = bundle::read_project(&newest).unwrap();
+    assert_eq!(last.tracks[0].name, "v0");
+    assert_eq!(b.backups().unwrap().len(), bundle::BACKUPS_KEPT);
+}
+
+#[test]
+fn quick_saves_never_overwrite_a_backup() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Fast")).unwrap();
+    // No pause between saves: several land in the same millisecond.
+    save_versions(&mut doc, id, 5);
+    let backups = doc.bundle().unwrap().backups().unwrap();
+    assert_eq!(backups.len(), 5);
+    let names: Vec<String> = backups
+        .iter()
+        .map(|b| bundle::read_project(b).unwrap().tracks[0].name.clone())
+        .collect();
+    assert_eq!(names, ["A", "v0", "v1", "v2", "v3"]);
+}
+
+#[test]
+fn save_as_refuses_a_folder_holding_an_autosave() {
+    let (p, _) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("Demo");
+    std::fs::create_dir(&target).unwrap();
+    let autosave = target.join("Demo.kadence.autosave");
+    std::fs::write(&autosave, "unsaved work").unwrap();
+    let mut doc = Document::new(p);
+    assert!(doc.save_as(&target).is_err());
+    assert_eq!(std::fs::read_to_string(&autosave).unwrap(), "unsaved work");
+}
+
+#[test]
+fn save_as_never_overwrites_audio_in_the_target() {
+    let (p, _) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Old")).unwrap();
+    let src = dir.path().join("take1.wav");
+    std::fs::write(&src, b"old take").unwrap();
+    doc.bundle().unwrap().import_audio(&src).unwrap();
+    let target = dir.path().join("New");
+    std::fs::create_dir_all(target.join("audio")).unwrap();
+    std::fs::write(target.join("audio/take1.wav"), b"other take").unwrap();
+    assert!(doc.save_as(&target).is_err());
+    assert_eq!(
+        std::fs::read(target.join("audio/take1.wav")).unwrap(),
+        b"other take"
+    );
+    // The document stays on its old bundle.
+    assert!(doc.bundle().unwrap().root().ends_with("Old"));
+}
+
+#[cfg(unix)]
+#[test]
+fn save_keeps_the_project_file_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Private")).unwrap();
+    let b = doc.bundle().unwrap().clone();
+    std::fs::set_permissions(b.project_file(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    save_versions(&mut doc, id, 1);
+    let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(b.project_file()), 0o600);
+    // The autosave holds the same data, so it gets the same mode.
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    assert!(doc.autosave().unwrap());
+    assert_eq!(mode(b.autosave_file()), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn save_writes_through_a_symlinked_project_file() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Linked")).unwrap();
+    let b = doc.bundle().unwrap().clone();
+    let real = dir.path().join("synced.kadence");
+    std::fs::rename(b.project_file(), &real).unwrap();
+    std::os::unix::fs::symlink(&real, b.project_file()).unwrap();
+    save_versions(&mut doc, id, 1);
+    assert!(
+        std::fs::symlink_metadata(b.project_file())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(bundle::read_project(&real).unwrap().tracks[0].name, "v0");
+}
