@@ -401,6 +401,8 @@ pub enum TrackField {
     Pan(f64),
     Mute(bool),
     Solo(bool),
+    Armed(bool),
+    AudioInput(AudioInput),
     Output(TrackOutput),
 }
 
@@ -426,6 +428,8 @@ impl SetTrack {
             TrackField::Pan(v) => mem::swap(&mut t.pan, v),
             TrackField::Mute(v) => mem::swap(&mut t.mute, v),
             TrackField::Solo(v) => mem::swap(&mut t.solo, v),
+            TrackField::Armed(v) => mem::swap(&mut t.armed, v),
+            TrackField::AudioInput(v) => mem::swap(&mut t.audio_input, v),
             TrackField::Output(v) => mem::swap(&mut t.output, v),
         }
         Ok(ChangeSet::one(Change::Track(self.id)))
@@ -441,6 +445,8 @@ impl Command for SetTrack {
             TrackField::Pan(_) => "Change Pan",
             TrackField::Mute(_) => "Mute Track",
             TrackField::Solo(_) => "Solo Track",
+            TrackField::Armed(_) => "Arm Track",
+            TrackField::AudioInput(_) => "Change Track Input",
             TrackField::Output(_) => "Change Track Output",
         }
         .into()
@@ -452,6 +458,11 @@ impl Command for SetTrack {
             TrackField::VolumeDb(v) => check_finite(v, "volume")?,
             TrackField::Pan(v) if !(-1.0..=1.0).contains(&v) => {
                 return Err(invalid("pan must be within -1..1"));
+            }
+            TrackField::Armed(true)
+                if !matches!(track.kind, TrackKind::Audio | TrackKind::Instrument) =>
+            {
+                return Err(invalid("only audio and instrument tracks can record"));
             }
             TrackField::Output(TrackOutput::Bus(b)) => {
                 if track.kind == TrackKind::Master {

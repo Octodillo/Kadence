@@ -11,7 +11,7 @@ use daw_core::queue::{Consumer, Producer, spsc};
 use crate::cycle::{PortBuffers, push_or_count};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, PortDirection,
+    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
     PortFilter, PortInfo, PortKind, ProcessCallback, midi,
 };
 
@@ -85,6 +85,9 @@ impl MidiTap {
 pub struct DummyBackend {
     pacing: Pacing,
     max_cycles: Option<u64>,
+    /// Feed the outputs back into the inputs this late; see
+    /// [`with_loopback`](Self::with_loopback).
+    loopback: Option<Latency>,
     cfg: Option<BackendConfig>,
     shared: Arc<SharedStats>,
     connections: BTreeSet<(String, String)>,
@@ -104,6 +107,7 @@ impl DummyBackend {
         Self {
             pacing,
             max_cycles: None,
+            loopback: None,
             cfg: None,
             shared: Arc::new(SharedStats::new()),
             connections: BTreeSet::new(),
@@ -117,6 +121,17 @@ impl DummyBackend {
     /// until [`stop`](AudioBackend::stop) is called.
     pub fn with_max_cycles(mut self, n: u64) -> Self {
         self.max_cycles = Some(n);
+        self
+    }
+
+    /// Wires each output back into the input of the same number, as a cable
+    /// from the sound card's output to its input would, and reports
+    /// `latency`: what comes out of the outputs arrives in the inputs
+    /// `latency.total()` frames later. For testing recording and latency
+    /// compensation. A total shorter than the period is raised to one
+    /// period, since a cycle's inputs are read before its outputs exist.
+    pub fn with_loopback(mut self, latency: Latency) -> Self {
+        self.loopback = Some(latency);
         self
     }
 
@@ -265,6 +280,10 @@ impl AudioBackend for DummyBackend {
             bufs: PortBuffers::new(cfg.audio_inputs.into(), cfg.audio_outputs.into()),
             midi_in: EventList::with_capacity(cfg.midi_capacity),
             midi_out: EventList::with_capacity(cfg.midi_capacity),
+            loopback: self.loopback.map(|l| {
+                let delay = l.total().max(frames) as usize;
+                Loopback::new(usize::from(cfg.audio_inputs), delay, frames as usize)
+            }),
             // Without the port, the queue stays here for a later `open`.
             midi_in_rx: if cfg.midi_input {
                 self.midi_in_rx.take()
@@ -387,6 +406,60 @@ impl AudioBackend for DummyBackend {
     fn stats(&self) -> BackendStats {
         self.shared.snapshot()
     }
+
+    fn latency(&self) -> Latency {
+        let Some(l) = self.loopback else {
+            return Latency::default();
+        };
+        // Report what `start` will really use, raised to a period.
+        let frames = self.shared.buffer_size.load(Relaxed);
+        Latency {
+            input: l.input,
+            output: l.output.max(frames.saturating_sub(l.input)),
+        }
+    }
+}
+
+/// Delay lines from the outputs back to the inputs: one ring per input,
+/// written after each cycle and read before the next.
+struct Loopback {
+    rings: Vec<Vec<f32>>,
+    /// Ring index of the next sample to read.
+    read: usize,
+    delay: usize,
+}
+
+impl Loopback {
+    fn new(channels: usize, delay: usize, frames: usize) -> Self {
+        Self {
+            rings: vec![vec![0.0; delay + frames]; channels],
+            read: 0,
+            delay,
+        }
+    }
+
+    /// Fills `inputs` with what was played `delay` frames ago.
+    fn read(&mut self, inputs: &mut [Vec<f32>], frames: usize) {
+        for (ring, input) in self.rings.iter().zip(inputs.iter_mut()) {
+            let len = ring.len();
+            for (i, s) in input[..frames].iter_mut().enumerate() {
+                *s = ring[(self.read + i) % len];
+            }
+        }
+    }
+
+    /// Stores this cycle's outputs to be read `delay` frames from now, and
+    /// moves on a cycle.
+    fn write(&mut self, outputs: &[Vec<f32>], frames: usize) {
+        for (ch, ring) in self.rings.iter_mut().enumerate() {
+            let len = ring.len();
+            let start = self.read + self.delay;
+            for i in 0..frames {
+                ring[(start + i) % len] = outputs.get(ch).map_or(0.0, |o| o[i]);
+            }
+        }
+        self.read = (self.read + frames) % self.rings.first().map_or(1, |r| r.len().max(1));
+    }
 }
 
 impl DummyBackend {
@@ -419,6 +492,7 @@ struct Worker {
     midi_in_rx: Option<Consumer<RawMessage>>,
     midi_out_tx: Option<Producer<RawMessage>>,
     frame_time: u64,
+    loopback: Option<Loopback>,
 }
 
 impl Worker {
@@ -463,6 +537,9 @@ impl Worker {
                 }
             }
         }
+        if let Some(l) = &mut self.loopback {
+            l.read(&mut self.inputs, frames as usize);
+        }
         let xruns = self.shared.xruns.load(Relaxed);
         let (frame_time, sample_rate) = (self.frame_time, self.sample_rate);
         let (cb, midi_in, midi_out) = (&mut self.cb, &self.midi_in, &mut self.midi_out);
@@ -498,6 +575,9 @@ impl Worker {
                     dropped += 1;
                 }
             }
+        }
+        if let Some(l) = &mut self.loopback {
+            l.write(&self.outputs, frames as usize);
         }
         self.frame_time += u64::from(frames);
         self.shared.frames.fetch_add(u64::from(frames), Relaxed);
