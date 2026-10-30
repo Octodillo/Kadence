@@ -98,6 +98,29 @@ Item {
         () => {
             window.pageActions[2].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Edit"), "switch to Edit");
+            check(TestHelper.openFirstMidiClip(), "open the demo's MIDI clip");
+            window.pageStack.currentItem.roll.refresh();
+        },
+        () => {
+            const roll = window.pageStack.currentItem.roll;
+            check(roll.hasClip, "piano roll has the clip");
+            const notes = TestHelper.pianoNoteCount();
+            check(notes === 12, "demo clip has 12 notes");
+            // Double-click empty space low in the grid: a note is added.
+            roll.doubleClick(roll.width * 0.8, roll.height - roll.velocityHeight - 20, 0);
+            check(TestHelper.pianoNoteCount() === notes + 1, "double-click adds a note");
+            Project.undo();
+            check(TestHelper.pianoNoteCount() === notes, "undo removes it");
+            roll.selectAll();
+            check(roll.hasSelection, "select all");
+            shoot(window.title, "edit");
+        },
+        () => {
+            const keys = TestHelper.pianoKeySum();
+            window.pageStack.currentItem.roll.transpose(1);
+            check(TestHelper.pianoKeySum() === keys + TestHelper.pianoNoteCount(), "transpose up a semitone");
+            Project.undo();
+            check(TestHelper.pianoKeySum() === keys, "undo the transpose");
             window.pageActions[0].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Arrange"), "back to Arrange");
         },
