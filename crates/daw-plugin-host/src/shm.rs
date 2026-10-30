@@ -20,7 +20,7 @@ use daw_core::time::{MusicalPosition, SampleTime};
 use memmap2::MmapMut;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"KDSB");
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// Bytes reserved for [`Header`] at the start of the block.
 const HEADER_BYTES: usize = 192;
 /// `u64` words per event record.
