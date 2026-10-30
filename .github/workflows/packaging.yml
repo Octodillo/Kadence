@@ -152,7 +152,7 @@ jobs:
             qml6-module-qtquick-dialogs \
             kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
             kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme \
-            extra-cmake-modules gettext python3 libjack-jackd2-dev \
+            extra-cmake-modules gettext python3 libjack-jackd2-dev liblilv-dev \
             weston xvfb xauth
           # A pinned rustup-init, checked against its sha256, rather than curl | sh.
           curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
@@ -191,7 +191,7 @@ jobs:
             qml6-module-qtquick-dialogs \
             libkf6coreaddons-dev libkf6i18n-dev libkf6crash-dev libkf6config-dev \
             libkf6colorscheme-dev libkf6iconthemes-dev breeze-icon-theme \
-            extra-cmake-modules gettext python3 libjack-jackd2-dev \
+            extra-cmake-modules gettext python3 libjack-jackd2-dev liblilv-dev \
             weston xvfb xauth
           # Debian's Rust is older than the workspace's rust-version.
           # A pinned rustup-init, checked against its sha256, rather than curl | sh.

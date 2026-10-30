@@ -67,6 +67,15 @@ pub enum Reason {
     UnknownDevice,
     /// Plugin `detail` of device `name` is bypassed until it is loaded.
     PluginNotLoaded,
+    /// Plugin `detail` of device `name` is not installed; it is bypassed.
+    PluginMissing,
+    /// The plugin of device `name` would not load; `detail` is its id and
+    /// the plugin's message. It is bypassed.
+    PluginLoadFailed,
+    /// Plugin `detail` of device `name` crashed; it is bypassed.
+    PluginCrashed,
+    /// Device `name` did not save its plugin state; `detail`.
+    PluginStateNotSaved,
     /// Audio file `path` cannot be streamed; `detail`.
     CannotStream,
     /// Audio file `path` cannot be read.
@@ -375,6 +384,28 @@ impl Message {
                     Fields::new(C::Playback, R::PluginNotLoaded)
                         .name(device)
                         .detail(plugin)
+                }
+                Warning::PluginMissing { device, plugin } => {
+                    Fields::new(C::Playback, R::PluginMissing)
+                        .name(device)
+                        .detail(plugin)
+                }
+                Warning::PluginLoadFailed {
+                    device,
+                    plugin,
+                    detail,
+                } => Fields::new(C::Playback, R::PluginLoadFailed)
+                    .name(device)
+                    .detail(format!("{plugin}: {detail}")),
+                Warning::PluginCrashed { device, plugin } => {
+                    Fields::new(C::Playback, R::PluginCrashed)
+                        .name(device)
+                        .detail(plugin)
+                }
+                Warning::PluginStateNotSaved { device, detail } => {
+                    Fields::new(C::Save, R::PluginStateNotSaved)
+                        .name(device)
+                        .detail(detail)
                 }
                 Warning::CannotStream { path, detail } => Fields::new(C::Playback, R::CannotStream)
                     .path(path)

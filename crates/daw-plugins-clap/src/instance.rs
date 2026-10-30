@@ -605,8 +605,10 @@ impl plugin::PluginInstance for ClapInstance {
 
     fn param_value(&self, id: ParamId) -> f64 {
         let value = self.ext.params.and_then(|params| {
+            // `u32::MAX` is no valid id, and `ClapId::new` would panic on it.
+            let id = ClapId::from_raw(id)?;
             let mut instance = self.instance.borrow_mut();
-            params.get_value(&instance.plugin_handle(), ClapId::new(id))
+            params.get_value(&instance.plugin_handle(), id)
         });
         value.unwrap_or_else(|| {
             self.params

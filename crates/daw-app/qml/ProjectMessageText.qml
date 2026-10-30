@@ -58,6 +58,18 @@ QtObject {
         case Project.PluginNotLoaded:
             return i18nc("@info %1 is a device name, %2 a plugin id",
                          "“%1” is bypassed until its plugin (%2) is loaded.", m.name, m.detail);
+        case Project.PluginMissing:
+            return i18nc("@info %1 is a device name, %2 a plugin id",
+                         "“%1” is bypassed because its plugin (%2) is not installed.", m.name, m.detail);
+        case Project.PluginLoadFailed:
+            return i18nc("@info %1 is a device name, %2 a plugin id and message which may be in English",
+                         "“%1” is bypassed because its plugin would not load (%2).", m.name, m.detail);
+        case Project.PluginCrashed:
+            return i18nc("@info %1 is a device name, %2 a plugin id",
+                         "The plugin of “%1” (%2) stopped working and is bypassed.", m.name, m.detail);
+        case Project.PluginStateNotSaved:
+            return i18nc("@info %1 is a device name, %2 a message which may be in English",
+                         "“%1” did not hand over its plugin settings, so the project keeps the ones saved before (%2).", m.name, m.detail);
         case Project.CannotStream:
             return i18nc("@info %1 is a file path, %2 a message which may be in English",
                          "“%1” could not be played from disk, so its clips are silent (%2).", m.path, m.detail);
@@ -142,6 +154,10 @@ QtObject {
         case Project.OpenContext:
             return i18nc("@info %1 is the reason, a full sentence", "Could not open the project. %1", why);
         case Project.SaveContext:
+            // The project was saved, only without that plugin's latest settings.
+            if (m.reason === Project.PluginStateNotSaved) {
+                return why;
+            }
             return i18nc("@info %1 is the reason, a full sentence", "Could not save the project. %1", why);
         case Project.AutosaveContext:
             return i18nc("@info %1 is the reason, a full sentence",

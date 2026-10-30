@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-30 22:00+0000\n"
+"POT-Creation-Date: 2026-10-30 22:18+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,8 +18,8 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: crates/daw-app/qml/ArrangePage.qml:20 crates/daw-app/qml/SelfTest.qml:66
-#: crates/daw-app/qml/SelfTest.qml:207
+#: crates/daw-app/qml/ArrangePage.qml:20 crates/daw-app/qml/SelfTest.qml:68
+#: crates/daw-app/qml/SelfTest.qml:209
 msgctxt "@title"
 msgid "Arrange"
 msgstr ""
@@ -36,7 +36,7 @@ msgid ""
 "to set the loop."
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:46 crates/daw-app/qml/SelfTest.qml:74
+#: crates/daw-app/qml/ArrangePage.qml:46 crates/daw-app/qml/SelfTest.qml:76
 msgctxt "@item default track name, %1 is a number"
 msgid "Instrument %1"
 msgstr ""
@@ -814,7 +814,7 @@ msgctxt "@title %1 is a clip name"
 msgid "Edit — %1"
 msgstr ""
 
-#: crates/daw-app/qml/EditPage.qml:18 crates/daw-app/qml/SelfTest.qml:182
+#: crates/daw-app/qml/EditPage.qml:18 crates/daw-app/qml/SelfTest.qml:184
 msgctxt "@title"
 msgid "Edit"
 msgstr ""
@@ -905,13 +905,13 @@ msgid "The audio device “%1” is not available."
 msgstr ""
 
 #: crates/daw-app/qml/EngineErrorText.qml:20
-#: crates/daw-app/qml/SelfTest.qml:259
+#: crates/daw-app/qml/SelfTest.qml:265
 msgctxt "@info %1 is a number"
 msgid "The audio device does not support a sample rate of %1 Hz."
 msgstr ""
 
 #: crates/daw-app/qml/EngineErrorText.qml:23
-#: crates/daw-app/qml/SelfTest.qml:265
+#: crates/daw-app/qml/SelfTest.qml:271
 msgctxt "@info"
 msgid "The audio device does not support a buffer size of %1 sample."
 msgid_plural "The audio device does not support a buffer size of %1 samples."
@@ -939,7 +939,7 @@ msgid "The chosen buffer size is not valid."
 msgstr ""
 
 #: crates/daw-app/qml/EngineErrorText.qml:43
-#: crates/daw-app/qml/SelfTest.qml:257
+#: crates/daw-app/qml/SelfTest.qml:263
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not change the audio settings. %1"
 msgstr ""
@@ -994,7 +994,7 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: crates/daw-app/qml/ExportDialog.qml:70
-#: crates/daw-app/qml/ProjectMessageText.qml:88
+#: crates/daw-app/qml/ProjectMessageText.qml:100
 msgctxt "@info"
 msgid "The song has no clips yet."
 msgstr ""
@@ -1295,7 +1295,7 @@ msgctxt "@title:window"
 msgid "Configure — Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/MixPage.qml:16 crates/daw-app/qml/SelfTest.qml:146
+#: crates/daw-app/qml/MixPage.qml:16 crates/daw-app/qml/SelfTest.qml:148
 msgctxt "@title"
 msgid "Mix"
 msgstr ""
@@ -1409,125 +1409,148 @@ msgid "“%1” is bypassed until its plugin (%2) is loaded."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:63
+msgctxt "@info %1 is a device name, %2 a plugin id"
+msgid "“%1” is bypassed because its plugin (%2) is not installed."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml:66
+msgctxt ""
+"@info %1 is a device name, %2 a plugin id and message which may be in English"
+msgid "“%1” is bypassed because its plugin would not load (%2)."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml:69
+msgctxt "@info %1 is a device name, %2 a plugin id"
+msgid "The plugin of “%1” (%2) stopped working and is bypassed."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml:72
+msgctxt "@info %1 is a device name, %2 a message which may be in English"
+msgid ""
+"“%1” did not hand over its plugin settings, so the project keeps the ones "
+"saved before (%2)."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml:75
 msgctxt "@info %1 is a file path, %2 a message which may be in English"
 msgid "“%1” could not be played from disk, so its clips are silent (%2)."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:65
+#: crates/daw-app/qml/ProjectMessageText.qml:77
 msgctxt "@info %1 is a file path"
 msgid "“%1” could not be read, so its clips are silent."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:68
+#: crates/daw-app/qml/ProjectMessageText.qml:80
 msgctxt "@info %1 is a track name"
 msgid "Changes to the notes on “%1” have not reached the audio engine yet."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:71
+#: crates/daw-app/qml/ProjectMessageText.qml:83
 msgctxt "@info %1 is a track name"
 msgid "Changes to the clips on “%1” have not reached the audio engine yet."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:73
+#: crates/daw-app/qml/ProjectMessageText.qml:85
 msgctxt "@info"
 msgid ""
 "Arm an audio track to record audio, or add an instrument track to record "
 "MIDI on."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:75
+#: crates/daw-app/qml/ProjectMessageText.qml:87
 msgctxt "@info"
 msgid "The audio engine is not running."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:77
+#: crates/daw-app/qml/ProjectMessageText.qml:89
 msgctxt "@info"
 msgid "The track is not ready to record yet; try again in a moment."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:79
+#: crates/daw-app/qml/ProjectMessageText.qml:91
 msgctxt "@info"
 msgid ""
 "Some MIDI input arrived too fast to be recorded, so the take may be missing "
 "notes."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:81
+#: crates/daw-app/qml/ProjectMessageText.qml:93
 msgctxt "@info"
 msgid "The take was outside the song, so nothing was added."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:83
+#: crates/daw-app/qml/ProjectMessageText.qml:95
 msgctxt "@info %2 is a file path"
 msgid "Exported %1 second of audio to “%2”."
 msgid_plural "Exported %1 seconds of audio to “%2”."
 msgstr[0] ""
 msgstr[1] ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:86
+#: crates/daw-app/qml/ProjectMessageText.qml:98
 msgctxt "@info"
 msgid "The export was stopped, so no file was written."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:90
+#: crates/daw-app/qml/ProjectMessageText.qml:102
 msgctxt "@info"
 msgid "No loop is set; choose another range or set a loop first."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:92
+#: crates/daw-app/qml/ProjectMessageText.qml:104
 msgctxt "@info"
 msgid "The range to export is empty."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:94
+#: crates/daw-app/qml/ProjectMessageText.qml:106
 msgctxt "@info"
 msgid "Another export is still running."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:96
+#: crates/daw-app/qml/ProjectMessageText.qml:108
 msgctxt "@info"
 msgid ""
 "Audio files could not be read from disk fast enough, so the export would "
 "have had gaps."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:99
+#: crates/daw-app/qml/ProjectMessageText.qml:111
 msgctxt "@info %1 is a file name extension like wav"
 msgid "The file name ends in “.%1”, which is not the chosen format."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:102
+#: crates/daw-app/qml/ProjectMessageText.qml:114
 msgctxt "@info %1 is a message which may be in English"
 msgid "The audio could not be written (%1)."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:105
+#: crates/daw-app/qml/ProjectMessageText.qml:117
 msgctxt "@info %1 is a file path, %2 a message which may be in English"
 msgid "“%1” could not be created (%2)."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:108
+#: crates/daw-app/qml/ProjectMessageText.qml:120
 msgctxt "@info %1 is a track name"
 msgid ""
 "“%1” records from an input the audio system does not have, so it was not "
 "recorded."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:111
+#: crates/daw-app/qml/ProjectMessageText.qml:123
 msgctxt "@info %1 is a track name"
 msgid ""
 "“%1” is not ready to record yet, so it was not recorded; try again in a "
 "moment."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:114
+#: crates/daw-app/qml/ProjectMessageText.qml:126
 msgctxt "@info %1 is a track name, %2 a message which may be in English"
 msgid ""
 "Recording “%1” stopped early, possibly because the disk is full. What was "
 "recorded before is kept (%2)."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:117
+#: crates/daw-app/qml/ProjectMessageText.qml:129
 msgctxt "@info %1 is a number of samples, %2 a track name"
 msgid ""
 "The disk was too slow and %1 sample of “%2” was lost, so the rest of its "
@@ -1538,19 +1561,19 @@ msgid_plural ""
 msgstr[0] ""
 msgstr[1] ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:122
+#: crates/daw-app/qml/ProjectMessageText.qml:134
 msgctxt "@info %1 is a track name"
 msgid ""
 "The play position jumped while recording “%1”; the take carries on straight "
 "past the jump."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:125
+#: crates/daw-app/qml/ProjectMessageText.qml:137
 msgctxt "@info %1 is a track name"
 msgid "“%1” was deleted while recording, so its take was not kept."
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:128
+#: crates/daw-app/qml/ProjectMessageText.qml:140
 msgctxt "@info"
 msgid ""
 "The audio system missed %1 cycle while recording, so the take may have a gap "
@@ -1561,57 +1584,57 @@ msgid_plural ""
 msgstr[0] ""
 msgstr[1] ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:143
+#: crates/daw-app/qml/ProjectMessageText.qml:155
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not open the project. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:145
+#: crates/daw-app/qml/ProjectMessageText.qml:161
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not save the project. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:148
+#: crates/daw-app/qml/ProjectMessageText.qml:164
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not keep a backup of your unsaved changes. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:151
+#: crates/daw-app/qml/ProjectMessageText.qml:167
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not add the file. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:154
+#: crates/daw-app/qml/ProjectMessageText.qml:170
 msgctxt "@info %1 is a file name, %2 the reason, a full sentence"
 msgid "Could not add “%1”. %2"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:156
+#: crates/daw-app/qml/ProjectMessageText.qml:172
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "That edit could not be made. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:158
+#: crates/daw-app/qml/ProjectMessageText.qml:174
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Playback may be incomplete. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:165
+#: crates/daw-app/qml/ProjectMessageText.qml:181
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not export the song. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:171
+#: crates/daw-app/qml/ProjectMessageText.qml:187
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not start recording. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:173
+#: crates/daw-app/qml/ProjectMessageText.qml:189
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not record. %1"
 msgstr ""
 
-#: crates/daw-app/qml/ProjectMessageText.qml:175
+#: crates/daw-app/qml/ProjectMessageText.qml:191
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "The take could not be added. %1"
 msgstr ""
