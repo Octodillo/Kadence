@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use std::any::Any;
+
 use crate::event::ParamId;
-use crate::node::Node;
+use crate::node::{Node, ProcessContext};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PluginFormatKind {
@@ -76,6 +78,34 @@ pub trait PluginInstance: Node {
     fn take_layout_changed(&mut self) -> bool {
         false
     }
+    /// Hands out the audio-thread half of the plugin, so the audio thread can run `process`
+    /// while this object serves main-thread calls (`on_main_thread`, state, editors). Without
+    /// it the host has to keep the two apart, and a slow main-thread call costs the plugin's
+    /// audio. A format whose plugins allow those calls during processing (CLAP, VST3)
+    /// returns `Some` while the plugin is prepared; the default, and a format that cannot,
+    /// returns `None`.
+    ///
+    /// While the half is out, this object's own [`Node::process`] and [`Node::reset`] do
+    /// nothing, and the host gives the half back with [`join`](Self::join) before it calls
+    /// [`Node::prepare`] or drops the instance. `ports` and `latency` stay those of the
+    /// prepare that came before.
+    fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
+        None
+    }
+    /// Takes back the half [`split`](Self::split) handed out, once the audio thread no longer
+    /// uses it. Called on the main thread.
+    fn join(&mut self, processor: Box<dyn PluginProcessor>) {
+        drop(processor);
+    }
+}
+
+/// The audio-thread half of a plugin, from [`PluginInstance::split`]. Real-time safe, like
+/// [`Node::process`].
+pub trait PluginProcessor: Send {
+    fn process(&mut self, ctx: &mut ProcessContext);
+    fn reset(&mut self) {}
+    /// For [`PluginInstance::join`] to take back its own type.
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
 }
 
 /// One plugin format: knows where its plugins live, how to scan them and how
