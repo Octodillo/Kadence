@@ -30,6 +30,8 @@ depends=(
   qt6-declarative
   # libjack is loaded at run time; PipeWire's is the usual one on Plasma.
   jack
+  # LV2 plugin hosting.
+  lilv
 )
 makedepends=(
   cargo
