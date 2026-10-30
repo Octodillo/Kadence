@@ -24,7 +24,7 @@ use crate::model::Project;
 pub const FORMAT_NAME: &str = "kadence-project";
 /// The schema version this build writes. Older files are migrated on load.
 /// Bump it for every added field too, or older builds drop it when they save.
-pub const SCHEMA_VERSION: u64 = 3;
+pub const SCHEMA_VERSION: u64 = 4;
 /// File extension of the project file (matches the MIME glob `*.kadence`).
 pub const EXTENSION: &str = "kadence";
 /// How many previous saves `backups/` keeps.
@@ -38,7 +38,7 @@ pub type Migration = fn(Value) -> Result<Value, FormatError>;
 
 /// `MIGRATIONS[i]` turns schema `i + 1` into `i + 2`. Append one each time
 /// `SCHEMA_VERSION` goes up.
-pub const MIGRATIONS: &[Migration] = &[v1_unname_defaults, v2_add_track_inputs];
+pub const MIGRATIONS: &[Migration] = &[v1_unname_defaults, v2_clip_fades, v3_add_track_inputs];
 
 /// Version 1 saved the English defaults "Untitled" and "Master" as names.
 /// Version 2 leaves them empty and the UI words them in the user's language.
@@ -55,8 +55,14 @@ fn v1_unname_defaults(mut v: Value) -> Result<Value, FormatError> {
     Ok(v)
 }
 
-/// Version 3 adds `armed` and `midi_input` to tracks. Both have defaults.
-fn v2_add_track_inputs(v: Value) -> Result<Value, FormatError> {
+/// Version 3 adds `fade_in` and `fade_out` to audio clips. Both default to
+/// no fade, so version 2 files load unchanged.
+fn v2_clip_fades(v: Value) -> Result<Value, FormatError> {
+    Ok(v)
+}
+
+/// Version 4 adds `armed` and `midi_input` to tracks. Both have defaults.
+fn v3_add_track_inputs(v: Value) -> Result<Value, FormatError> {
     Ok(v)
 }
 

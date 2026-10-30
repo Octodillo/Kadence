@@ -6,8 +6,8 @@ use std::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QMap, QMapPair_QString_QVariant, QString, QUrl, QVariant};
 use daw_core::time::{PPQ, TickTime};
-use daw_model::commands::{AddTrack, RemoveTrack, SetTrack, TrackField};
-use daw_model::{MidiInput, Track, TrackKind};
+use daw_model::commands::{AddTrack, MoveTrack, RemoveTrack, SetTrack, TrackField};
+use daw_model::{FadeShape, MidiInput, Track, TrackKind};
 
 use crate::message::{Context, Fields, Message, Reason};
 use crate::state::{self, AppState};
@@ -95,6 +95,8 @@ pub mod qobject {
         /// Minutes:seconds of the playhead.
         #[qproperty(QString, time_text)]
         #[qproperty(bool, has_selection)]
+        /// The selection holds an audio clip (for clip gain and fades).
+        #[qproperty(bool, audio_selected)]
         #[qproperty(i32, selected_track)]
         /// The last error or warning, as a message map (see
         /// `message_map`); empty when there is none. QML words it.
@@ -175,6 +177,14 @@ pub mod qobject {
         fn rename_track(self: Pin<&mut Project>, index: i32, name: &QString);
         #[qinvokable]
         fn select_track(self: Pin<&mut Project>, index: i32);
+        /// Moves the track at `from` to index `to`, as one undo step.
+        #[qinvokable]
+        fn move_track(self: Pin<&mut Project>, from: i32, to: i32);
+        /// Imports an audio file at the playhead: the first (`index` 0) on
+        /// the selected audio track, the rest on new tracks. Returns false
+        /// if it could not; `status` says why.
+        #[qinvokable]
+        fn import_audio(self: Pin<&mut Project>, url: &QUrl, index: i32) -> bool;
 
         #[qinvokable]
         fn toggle_play(self: Pin<&mut Project>);
@@ -206,6 +216,14 @@ pub mod qobject {
         fn zoom(self: Pin<&mut Project>, factor: f64);
         #[qinvokable]
         fn zoom_to_fit(self: Pin<&mut Project>);
+        /// Sets both fades of the selected audio clips to a shape:
+        /// 0 linear, 1 equal power, 2 S-curve.
+        #[qinvokable]
+        fn set_fade_shape(self: Pin<&mut Project>, shape: i32);
+        #[qinvokable]
+        fn remove_fades(self: Pin<&mut Project>);
+        #[qinvokable]
+        fn reset_clip_gain(self: Pin<&mut Project>);
         #[qinvokable]
         fn clear_status(self: Pin<&mut Project>);
     }
@@ -230,6 +248,7 @@ pub struct ProjectRust {
     position_text: QString,
     time_text: QString,
     has_selection: bool,
+    audio_selected: bool,
     selected_track: i32,
     status: QMap<QMapPair_QString_QVariant>,
     /// Last view revision copied into the properties.
@@ -388,6 +407,7 @@ impl qobject::Project {
                 format!("{}.{}", bb.bar + 1, bb.beat + 1),
                 format!("{}:{:04.1}", (secs / 60.0).floor() as i64, secs % 60.0),
                 !s.arrange.selection.is_empty(),
+                s.arrange.audio_selected(p),
                 selected,
                 s.status.clone(),
             ))
@@ -408,6 +428,7 @@ impl qobject::Project {
             position,
             time,
             has_selection,
+            audio_selected,
             selected,
             status,
         )) = snapshot
@@ -438,6 +459,7 @@ impl qobject::Project {
             .set_position_text(QString::from(position.as_str()));
         this.as_mut().set_time_text(QString::from(time.as_str()));
         this.as_mut().set_has_selection(has_selection);
+        this.as_mut().set_audio_selected(audio_selected);
         this.as_mut().set_selected_track(selected);
         this.as_mut().set_status(message_or_empty(status.as_ref()));
         // Last, so QML that reacts to it sees the other values already.
@@ -818,6 +840,64 @@ impl qobject::Project {
             let p = s.doc.project().clone();
             s.arrange.zoom_to_fit(&p);
         });
+    }
+
+    fn move_track(self: Pin<&mut Self>, from: i32, to: i32) {
+        self.edit(|s| {
+            let Some(id) = track_at(s, from).map(|t| t.id) else {
+                return;
+            };
+            let count = s.doc.project().tracks.len();
+            let Ok(to) = usize::try_from(to) else {
+                return;
+            };
+            if to >= count || Some(to) == s.doc.project().track_index(id) {
+                return;
+            }
+            if let Err(e) = s.doc.execute(MoveTrack::new(id, to)) {
+                s.report(e.into());
+            }
+            s.doc.seal();
+        });
+    }
+
+    fn import_audio(self: Pin<&mut Self>, url: &QUrl, index: i32) -> bool {
+        let mut ok = false;
+        self.edit(|s| {
+            let Some(path) = url.to_local_file() else {
+                s.report(Message::NotLocalFile(Context::Import));
+                return;
+            };
+            let path = std::path::PathBuf::from(path.to_string());
+            let track = if index == 0 {
+                s.arrange.selected_track
+            } else {
+                None
+            };
+            let at = s.playhead();
+            match s.import_audio(&path, track, at) {
+                Ok(()) => ok = true,
+                Err(m) => s.report(m),
+            }
+        });
+        ok
+    }
+
+    fn set_fade_shape(self: Pin<&mut Self>, shape: i32) {
+        let shape = match shape {
+            1 => FadeShape::EqualPower,
+            2 => FadeShape::SCurve,
+            _ => FadeShape::Linear,
+        };
+        self.arrange_command(move |a, doc, _| a.set_fade_shape(doc, shape));
+    }
+
+    fn remove_fades(self: Pin<&mut Self>) {
+        self.arrange_command(|a, doc, _| a.remove_fades(doc));
+    }
+
+    fn reset_clip_gain(self: Pin<&mut Self>) {
+        self.arrange_command(|a, doc, _| a.reset_clip_gain(doc));
     }
 
     fn clear_status(self: Pin<&mut Self>) {

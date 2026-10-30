@@ -584,6 +584,9 @@ impl Clip {
                 if a.offset.0 < 0 {
                     return Err(invalid("audio offset must not be negative"));
                 }
+                if a.fade_in.length.0 < 0 || a.fade_out.length.0 < 0 {
+                    return Err(invalid("fade length must not be negative"));
+                }
             }
             ClipContent::Midi(m) => {
                 for n in &m.notes {
@@ -629,6 +632,83 @@ pub struct AudioClip {
     /// Where playback starts inside the file.
     pub offset: SampleTime,
     pub gain_db: f64,
+    /// Fades at the clip's start and end. Their lengths may add up to more
+    /// than the clip after a trim; playback then shortens both in proportion.
+    #[serde(default)]
+    pub fade_in: Fade,
+    #[serde(default)]
+    pub fade_out: Fade,
+}
+
+impl AudioClip {
+    /// A clip playing `source` from `offset` at unity gain without fades.
+    pub fn new(source: impl Into<PathBuf>, offset: SampleTime) -> Self {
+        Self {
+            source: source.into(),
+            offset,
+            gain_db: 0.0,
+            fade_in: Fade::default(),
+            fade_out: Fade::default(),
+        }
+    }
+}
+
+/// A fade at one end of an audio clip. A zero length means no fade.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Fade {
+    pub length: TickTime,
+    pub shape: FadeShape,
+}
+
+impl Fade {
+    pub fn new(length: TickTime, shape: FadeShape) -> Self {
+        Self { length, shape }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.length.0 <= 0
+    }
+}
+
+/// Shortens a clip's fade-in and fade-out lengths in proportion so they fit
+/// its `length` together. Works in any unit (ticks, samples).
+pub fn fit_fades(fade_in: i64, fade_out: i64, length: i64) -> (i64, i64) {
+    let (fi, fo, len) = (fade_in.max(0), fade_out.max(0), length.max(0));
+    let sum = i128::from(fi) + i128::from(fo);
+    if sum <= i128::from(len) {
+        return (fi, fo);
+    }
+    let fi_fit = (i128::from(fi) * i128::from(len) / sum) as i64;
+    (fi_fit, len - fi_fit)
+}
+
+/// How a fade's gain rises from silence to full level.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FadeShape {
+    /// Gain rises in a straight line.
+    #[default]
+    Linear,
+    /// Quarter sine: two overlapping clips fading in and out keep a constant
+    /// power, the usual crossfade.
+    EqualPower,
+    /// Raised cosine: slow at both ends.
+    SCurve,
+}
+
+impl FadeShape {
+    pub const ALL: [FadeShape; 3] = [Self::Linear, Self::EqualPower, Self::SCurve];
+
+    /// Gain at `x` through a fade-in, `x` from 0 (silent) to 1 (full).
+    /// A fade-out uses the same curve backwards. Doesn't allocate.
+    pub fn gain(self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => x,
+            Self::EqualPower => (x * std::f32::consts::FRAC_PI_2).sin(),
+            Self::SCurve => 0.5 - 0.5 * (x * std::f32::consts::PI).cos(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

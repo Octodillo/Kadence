@@ -51,7 +51,7 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 ```json
 {
   "format": "kadence-project",
-  "version": 3,
+  "version": 4,
   "generator": "daw-model 0.1.0",
   "project": { ... }
 }
@@ -60,7 +60,7 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 | Field       | Meaning                                                        |
 |-------------|----------------------------------------------------------------|
 | `format`    | Always `kadence-project`. Anything else is rejected.           |
-| `version`   | Schema version (`daw_model::SCHEMA_VERSION`, currently 3).     |
+| `version`   | Schema version (`daw_model::SCHEMA_VERSION`, currently 4).     |
 | `generator` | What wrote the file. Informational only.                       |
 | `project`   | The `Project` tree below.                                      |
 
@@ -119,7 +119,12 @@ denominator a power of two.
 `{id, name, start, length, muted, content}`, with `start >= 0` and
 `length > 0`. `content` is one of:
 
-- `{"type": "audio", "source": path, "offset": samples, "gain_db": number}`
+- `{"type": "audio", "source": path, "offset": samples, "gain_db": number,
+  "fade_in": Fade, "fade_out": Fade}`. A Fade is `{length, shape}`: `length`
+  in ticks (0 is no fade, never negative) and `shape` one of `linear`,
+  `equal_power` (quarter sine) or `s_curve` (raised cosine). Both default to
+  no fade. If the two lengths add up to more than the clip (after a trim),
+  playback shortens both in proportion.
 - `{"type": "midi", "notes": Note[]}`. Notes are
   `{id, start, length, channel, key, velocity}` with times relative to the clip
   start, sorted by `(start, key, id)`.
@@ -176,4 +181,5 @@ fails is rejected rather than half-loaded.
 |---------|--------|
 | 1       | First schema. |
 | 2       | Default names are no longer saved in English: a project name of `"Untitled"` and a master named `"Master"` become `""`, and the UI words them in the user's language. |
-| 3       | Tracks gain `armed` (record arm, default `false`) and `midi_input` (`device`: a source port name or `null` for every input; `channel`: 0–15 or `null` for every channel). |
+| 3       | Audio clips get `fade_in` and `fade_out`. Missing fades mean no fade, so version 2 files load unchanged. |
+| 4       | Tracks gain `armed` (record arm, default `false`) and `midi_input` (`device`: a source port name or `null` for every input; `channel`: 0–15 or `null` for every channel). |
