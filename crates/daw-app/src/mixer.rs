@@ -160,9 +160,8 @@ pub trait MixerHandle {
     fn add_insert(&mut self, id: StripId, device_id: &str) -> bool;
     /// Removes the effect at `index` in [`StripInfo::inserts`].
     fn remove_insert(&mut self, id: StripId, index: usize);
-    /// Swaps an instrument track's instrument for the app's instrument
-    /// choice at `choice` (see [`crate::instrument::InstrumentChoices`]).
-    fn set_instrument(&mut self, _id: StripId, _choice: usize) {}
+    /// Puts `choice` in an instrument track's instrument slot.
+    fn set_instrument(&mut self, _id: StripId, _choice: &crate::instrument::InstrumentChoice) {}
     fn effects(&self) -> Vec<EffectChoice>;
     /// Meter readings, parallel to [`strips`](Self::strips). Resets them.
     fn levels(&mut self) -> Vec<StripLevels>;

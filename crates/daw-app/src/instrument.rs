@@ -109,6 +109,10 @@ impl InstrumentChoices {
 /// Whether a device from `source` makes sound from notes: a built-in
 /// instrument, or any plugin (a plugin in the instrument slot is there
 /// because it was chosen as one; its descriptor isn't needed to tell).
+///
+/// Adding effects appends them, so a plugin effect lands in slot 0 only on
+/// an instrument track with an empty chain. Once plugin effects can be
+/// inserted, ask the plugin catalog here instead of assuming.
 pub fn is_instrument(source: &DeviceSource) -> bool {
     match source {
         DeviceSource::Builtin { kind } => daw_devices::devices()
@@ -320,7 +324,9 @@ mod tests {
 
     /// Peak level of `track` while the stub engine plays `doc` for up to
     /// `wait`, stopping early once it is loud.
-    fn stub_peak(doc: &mut Document, track: TrackId, wait: std::time::Duration) -> f32 {
+    /// Also returns whether playback moved, so silence means silence and
+    /// not a backend that never ran.
+    fn stub_peak(doc: &mut Document, track: TrackId, wait: std::time::Duration) -> (f32, bool) {
         use crate::engine::{EngineHandle, StubEngine};
         let mut engine = StubEngine::default();
         let session = engine.session_mut().unwrap();
@@ -333,8 +339,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             peak = meter.take().iter().fold(peak, |m, v| m.max(v.abs()));
         }
+        let moved = engine.session().unwrap().position() > daw_core::time::TickTime(0);
         engine.stop();
-        peak
+        (peak, moved)
     }
 
     /// A clip holding middle C for its whole bar, at the start of the song.
@@ -364,7 +371,7 @@ mod tests {
         let wait = std::time::Duration::from_secs(5);
         let (mut doc, id) = doc_with_track(TrackKind::Instrument);
         add_notes(&mut doc, id);
-        let peak = stub_peak(&mut doc, id, wait);
+        let (peak, _) = stub_peak(&mut doc, id, wait);
         assert!(peak > 1e-3, "the synth sounds: peak {peak}");
 
         // Without the instrument (as before), the same notes are silent.
@@ -373,7 +380,8 @@ mod tests {
         let id = track.id;
         doc.execute(AddTrack::new(0, track)).unwrap();
         add_notes(&mut doc, id);
-        let peak = stub_peak(&mut doc, id, std::time::Duration::from_millis(500));
+        let (peak, moved) = stub_peak(&mut doc, id, std::time::Duration::from_millis(500));
+        assert!(moved, "the stub engine played");
         assert!(peak < 1e-6, "no instrument, no sound: peak {peak}");
     }
 }

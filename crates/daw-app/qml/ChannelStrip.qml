@@ -120,7 +120,7 @@ Item {
                     visible: strip.hasInstrument
                     instrument: strip.instrument
                     currentChoice: strip.instrumentChoice
-                    onChosen: choice => Mixer.setInstrument(strip.index, choice)
+                    onChosen: (choice, revision) => Mixer.setInstrument(strip.index, choice, revision)
                 }
 
                 // Inserts

@@ -77,9 +77,10 @@ pub mod qobject {
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
         #[qinvokable]
         fn remove_insert(self: Pin<&mut Mixer>, row: i32, insert: i32);
-        /// Swaps the strip's instrument for row `choice` of `Instruments`.
+        /// Swaps the strip's instrument for row `choice` of `Instruments`
+        /// at its `revision`.
         #[qinvokable]
-        fn set_instrument(self: Pin<&mut Mixer>, row: i32, choice: i32);
+        fn set_instrument(self: Pin<&mut Mixer>, row: i32, choice: i32, revision: i32);
         /// Turns touch writing on or off.
         #[qinvokable]
         fn set_writing(self: Pin<&mut Mixer>, on: bool);
@@ -337,9 +338,10 @@ impl qobject::Mixer {
         }
     }
 
-    fn set_instrument(mut self: Pin<&mut Self>, row: i32, choice: i32) {
-        if let (Some(id), Ok(choice)) = (self.strip_id(row), usize::try_from(choice)) {
-            self.as_mut().rust_mut().mixer.set_instrument(id, choice);
+    fn set_instrument(mut self: Pin<&mut Self>, row: i32, choice: i32, revision: i32) {
+        let choice = crate::instruments_bridge::choice_at(choice, revision);
+        if let (Some(id), Some(choice)) = (self.strip_id(row), choice) {
+            self.as_mut().rust_mut().mixer.set_instrument(id, &choice);
             self.reload();
         }
     }

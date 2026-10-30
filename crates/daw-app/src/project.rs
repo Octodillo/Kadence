@@ -157,9 +157,10 @@ pub mod qobject {
         /// The row in `Instruments` of the track's instrument, or -1.
         #[qinvokable]
         fn track_instrument_choice(self: &Project, index: i32) -> i32;
-        /// Swaps the track's instrument for row `choice` of `Instruments`.
+        /// Swaps the track's instrument for row `choice` of `Instruments`
+        /// at its `revision`.
         #[qinvokable]
-        fn set_track_instrument(self: Pin<&mut Project>, index: i32, choice: i32);
+        fn set_track_instrument(self: Pin<&mut Project>, index: i32, choice: i32, revision: i32);
         #[qinvokable]
         fn select_track(self: Pin<&mut Project>, index: i32);
 
@@ -656,14 +657,13 @@ impl qobject::Project {
         })
     }
 
-    fn set_track_instrument(self: Pin<&mut Self>, index: i32, choice: i32) {
+    fn set_track_instrument(self: Pin<&mut Self>, index: i32, choice: i32, revision: i32) {
+        // Read before `edit`, which holds the state.
+        let Some(choice) = crate::instruments_bridge::choice_at(choice, revision) else {
+            return;
+        };
         self.edit(|s| {
-            let Some(choice) = usize::try_from(choice)
-                .ok()
-                .and_then(|i| s.instruments.get(i))
-            else {
-                return;
-            };
+            let choice = &choice;
             let Some(track) = track_at(s, index) else {
                 return;
             };

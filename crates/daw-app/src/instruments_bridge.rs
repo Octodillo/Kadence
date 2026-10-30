@@ -36,6 +36,9 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(i32, count)]
+        /// The list's revision the rows show; pass it back with a row so a
+        /// list that changed since cannot apply a different instrument.
+        #[qproperty(i32, revision)]
         type Instruments = super::InstrumentsRust;
 
         /// Re-reads the list if it changed since the last read.
@@ -79,9 +82,27 @@ const USER_ROLE: i32 = 0x0100;
 #[derive(Default)]
 pub struct InstrumentsRust {
     count: i32,
+    revision: i32,
     choices: Vec<InstrumentChoice>,
     /// The list's revision when `choices` was read.
-    revision: Option<u64>,
+    read: Option<u64>,
+}
+
+/// A list revision as QML sees it.
+pub fn revision_i32(revision: u64) -> i32 {
+    // Wraps; only equality matters.
+    revision as i32
+}
+
+/// The choice at `row` of the list as of `revision`, if the list is still
+/// at that revision.
+pub fn choice_at(row: i32, revision: i32) -> Option<InstrumentChoice> {
+    state::with(|s| {
+        if revision_i32(s.instruments.revision()) != revision {
+            return None;
+        }
+        s.instruments.get(usize::try_from(row).ok()?).cloned()
+    })
 }
 
 impl cxx_qt::Initialize for qobject::Instruments {
@@ -94,7 +115,7 @@ impl qobject::Instruments {
     fn refresh(mut self: Pin<&mut Self>) {
         let (revision, choices) = state::with(|s| {
             let r = s.instruments.revision();
-            let changed = self.revision != Some(r);
+            let changed = self.read != Some(r);
             (r, changed.then(|| s.instruments.as_slice().to_vec()))
         });
         let Some(choices) = choices else {
@@ -104,9 +125,10 @@ impl qobject::Instruments {
         self.as_mut().begin_reset_model();
         let mut rust = self.as_mut().rust_mut();
         rust.choices = choices;
-        rust.revision = Some(revision);
+        rust.read = Some(revision);
         self.as_mut().end_reset_model();
         self.as_mut().set_count(count);
+        self.as_mut().set_revision(revision_i32(revision));
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {

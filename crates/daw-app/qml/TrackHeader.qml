@@ -87,7 +87,7 @@ QQC2.ItemDelegate {
             visible: header.kind === 1
             instrument: header.instrument
             currentChoice: { header.revision; return Project.trackInstrumentChoice(header.index); }
-            onChosen: choice => Project.setTrackInstrument(header.index, choice)
+            onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
         }
 
         QQC2.ToolButton {

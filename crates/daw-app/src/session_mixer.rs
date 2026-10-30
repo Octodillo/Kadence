@@ -735,11 +735,8 @@ impl MixerHandle for AppMixer {
         self.inner.effects()
     }
 
-    fn set_instrument(&mut self, id: StripId, choice: usize) {
-        let Some(choice) = state::with(|s| s.instruments.get(choice).cloned()) else {
-            return;
-        };
-        self.report(|m, d, _| m.set_instrument(d, id, &choice));
+    fn set_instrument(&mut self, id: StripId, choice: &InstrumentChoice) {
+        self.report(|m, d, _| m.set_instrument(d, id, choice));
     }
 
     fn levels(&mut self) -> Vec<StripLevels> {

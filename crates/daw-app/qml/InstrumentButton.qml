@@ -16,8 +16,8 @@ QQC2.ToolButton {
     // Its row in Instruments, or -1; that row shows checked.
     property int currentChoice: -1
 
-    // The user picked row `choice` of Instruments.
-    signal chosen(int choice)
+    // The user picked row `choice` of Instruments at `revision`.
+    signal chosen(int choice, int revision)
 
     icon.name: "audio-midi"
     text: instrument || i18nc("@action:button the track has no instrument", "Choose Instrument")
@@ -45,7 +45,11 @@ QQC2.ToolButton {
                 text: name
                 checkable: true
                 checked: index === button.currentChoice
-                onTriggered: button.chosen(index)
+                onTriggered: {
+                    // Picking the checked one unchecks it; keep the binding.
+                    checked = Qt.binding(() => index === button.currentChoice);
+                    button.chosen(index, Instruments.revision);
+                }
             }
         }
     }
