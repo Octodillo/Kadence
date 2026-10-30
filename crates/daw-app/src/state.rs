@@ -26,6 +26,8 @@ pub struct AppState {
     pub piano: PianoRoll,
     /// The MIDI take in progress.
     pub recording: Option<crate::recording::Recording>,
+    /// The export to a file in progress (see `crate::export`).
+    pub export: Option<daw_session::export::ExportJob>,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -67,6 +69,7 @@ impl AppState {
             arrange: Arrange::new(),
             piano: PianoRoll::new(),
             recording: None,
+            export: None,
             synced: None,
             view_revision: 0,
             status: None,

@@ -197,7 +197,7 @@ pub(crate) fn graph(
                     chain.push(id);
                 }
                 _ => {
-                    let (node, mut handle) = player(session.loop_points.clone());
+                    let (node, mut handle) = player(session.loop_points.clone(), session.offline);
                     let set = clip_set(session, track, &handle);
                     // A fresh queue has room for the first set.
                     let _ = handle.send(set);

@@ -36,6 +36,7 @@ pub mod qobject {
         EditContext,
         PlaybackContext,
         RecordContext,
+        ExportContext,
     }
 
     /// The `reason` of a message map. See `crate::message::Reason` for
@@ -68,6 +69,13 @@ pub mod qobject {
         NoMidiPlayer,
         MidiInputDropped,
         NothingRecorded,
+        Exported,
+        ExportCancelled,
+        EmptySong,
+        NoLoop,
+        EmptyRange,
+        ExportBusy,
+        EncodeFailed,
     }
 
     #[auto_cxx_name]
@@ -259,6 +267,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Context::Edit => QC::EditContext,
         Context::Playback => QC::PlaybackContext,
         Context::Record => QC::RecordContext,
+        Context::Export => QC::ExportContext,
     };
     let reason = match f.reason {
         Reason::NotLocalFile => QR::NotLocalFile,
@@ -287,9 +296,16 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::NoMidiPlayer => QR::NoMidiPlayer,
         Reason::MidiInputDropped => QR::MidiInputDropped,
         Reason::NothingRecorded => QR::NothingRecorded,
+        Reason::Exported => QR::Exported,
+        Reason::ExportCancelled => QR::ExportCancelled,
+        Reason::EmptySong => QR::EmptySong,
+        Reason::NoLoop => QR::NoLoop,
+        Reason::EmptyRange => QR::EmptyRange,
+        Reason::ExportBusy => QR::ExportBusy,
+        Reason::EncodeFailed => QR::EncodeFailed,
     };
     let text = |s: &str| QVariant::from(&QString::from(s));
-    // Numbers are schema versions; they fit an i32.
+    // Numbers are schema versions or lengths in seconds; they fit an i32.
     let number = |n: u64| QVariant::from(&i32::try_from(n).unwrap_or(i32::MAX));
     let path = f
         .path

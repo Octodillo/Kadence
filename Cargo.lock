@@ -502,6 +502,7 @@ dependencies = [
  "daw-model",
  "daw-pianoroll",
  "daw-session",
+ "tempfile",
 ]
 
 [[package]]

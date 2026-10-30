@@ -33,6 +33,10 @@ const EDGE_FADE: i64 = 64;
 /// How far ahead a streamed clip is cued before it starts, in seconds.
 const LOOK_AHEAD_SECONDS: f64 = 0.5;
 
+/// How long an offline player waits for the disk on one read before it gives
+/// up and plays silence.
+const OFFLINE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Marker for "this reader is not positioned anywhere known".
 const NOWHERE: i64 = i64::MIN;
 
@@ -161,8 +165,11 @@ impl ClipSet {
     }
 }
 
-/// Creates a player node and the handle that feeds it.
-pub fn player(loop_points: Arc<LoopPoints>) -> (AudioClipPlayer, PlayerHandle) {
+/// Creates a player node and the handle that feeds it. An `offline` player waits
+/// for the disk instead of playing silence when a streamed clip's audio isn't
+/// buffered yet, so a render gets every sample; it must not run on a real-time
+/// thread.
+pub fn player(loop_points: Arc<LoopPoints>, offline: bool) -> (AudioClipPlayer, PlayerHandle) {
     let (tx, rx) = spsc(8);
     let (retirer, garbage) = deferred_drop(8);
     let node = AudioClipPlayer {
@@ -176,6 +183,7 @@ pub fn player(loop_points: Arc<LoopPoints>) -> (AudioClipPlayer, PlayerHandle) {
         look_ahead: 24_000,
         expected: None,
         parked_at: NOWHERE,
+        offline,
     };
     let handle = PlayerHandle {
         tx,
@@ -257,6 +265,8 @@ pub struct AudioClipPlayer {
     expected: Option<i64>,
     /// Position streams were cued for while stopped.
     parked_at: i64,
+    /// See [`player`].
+    offline: bool,
 }
 
 impl AudioClipPlayer {
@@ -429,7 +439,12 @@ impl Node for AudioClipPlayer {
                 ClipSource::Stream(Some(s)) => {
                     let file = c.file_start + (from - c.start);
                     let mut bufs = [&mut sl[..len], &mut sr[..len]];
-                    s.main.read(SampleTime(file), &mut bufs);
+                    if self.offline {
+                        s.main
+                            .read_blocking(SampleTime(file), &mut bufs, OFFLINE_WAIT);
+                    } else {
+                        s.main.read(SampleTime(file), &mut bufs);
+                    }
                     s.main_next = to;
                     for (ch, out) in ctx.audio_out.iter_mut().enumerate().take(2) {
                         for i in 0..len {

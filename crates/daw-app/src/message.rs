@@ -25,6 +25,8 @@ pub enum Context {
     Playback,
     /// Recording MIDI.
     Record,
+    /// Exporting the song to an audio file.
+    Export,
 }
 
 /// Why, which picks the second sentence.
@@ -82,6 +84,20 @@ pub enum Reason {
     MidiInputDropped,
     /// The take has no notes inside the song.
     NothingRecorded,
+    /// The song was exported to `path`; `number` is its length in seconds.
+    Exported,
+    /// The user cancelled the export; no file was written.
+    ExportCancelled,
+    /// There is nothing to export: the song has no clips.
+    EmptySong,
+    /// "Loop" was chosen but no loop is set.
+    NoLoop,
+    /// The chosen range is empty or backwards.
+    EmptyRange,
+    /// Another export is still running.
+    ExportBusy,
+    /// The audio could not be encoded; `detail`.
+    EncodeFailed,
 }
 
 /// A message, flattened for a front end.
@@ -148,6 +164,18 @@ pub enum RecordProblem {
     Refused(ModelError),
 }
 
+/// What went wrong with exporting the song.
+#[derive(Debug)]
+pub enum ExportProblem {
+    EmptySong,
+    NoLoop,
+    EmptyRange,
+    Busy,
+    /// The worker thread could not start.
+    Thread(std::io::Error),
+    Failed(daw_session::export::ExportError),
+}
+
 /// Something to tell the user about the project.
 #[derive(Debug)]
 pub enum Message {
@@ -165,6 +193,12 @@ pub enum Message {
     Playback(daw_session::SessionError),
     Warning(Warning),
     Record(RecordProblem),
+    Export(ExportProblem),
+    /// The song was exported to this file, `seconds` long.
+    Exported {
+        path: PathBuf,
+        seconds: u64,
+    },
 }
 
 impl From<ModelError> for Message {
@@ -199,6 +233,30 @@ fn file_fields(context: Context, e: &FormatError) -> Fields {
         FormatError::Model(e) => Fields::new(context, R::Inconsistent).detail(e),
         FormatError::NoBundle => Fields::new(context, R::NoLocation),
         FormatError::AutosavePending(path) => Fields::new(context, R::AutosavePending).path(path),
+    }
+}
+
+fn export_fields(p: &ExportProblem) -> Fields {
+    use Reason as R;
+    use daw_session::export::ExportError as E;
+    let new = |reason| Fields::new(Context::Export, reason);
+    match p {
+        ExportProblem::EmptySong => new(R::EmptySong),
+        ExportProblem::NoLoop => new(R::NoLoop),
+        ExportProblem::EmptyRange => new(R::EmptyRange),
+        ExportProblem::Busy => new(R::ExportBusy),
+        ExportProblem::Thread(e) => new(R::EngineRefused).detail(e),
+        ExportProblem::Failed(e) => match e {
+            E::EmptyRange => new(R::EmptyRange),
+            E::Cancelled => new(R::ExportCancelled),
+            E::Write(MediaError::Io { path, source }) => {
+                new(R::FileAccess).path(path).detail(source)
+            }
+            E::Write(e) => new(R::EncodeFailed).detail(e),
+            E::Session(e) => new(R::EngineRefused).detail(e),
+            // The dialog only offers valid settings.
+            E::SampleRate(_) | E::Tail(_) => new(R::EditRefused).detail(e),
+        },
     }
 }
 
@@ -239,6 +297,11 @@ impl Message {
                 RecordProblem::InputDropped => Fields::new(C::Record, R::MidiInputDropped),
                 RecordProblem::NothingRecorded => Fields::new(C::Record, R::NothingRecorded),
                 RecordProblem::Refused(e) => Fields::new(C::Record, R::EditRefused).detail(e),
+            },
+            Self::Export(p) => export_fields(p),
+            Self::Exported { path, seconds } => Fields {
+                number: *seconds,
+                ..Fields::new(C::Export, R::Exported).path(path)
             },
             Self::Warning(w) => match w {
                 Warning::DeviceStateRejected { device, detail } => {

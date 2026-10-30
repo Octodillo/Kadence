@@ -9,6 +9,10 @@ pub mod arrange_view;
 pub mod bridge;
 mod demo;
 pub mod engine;
+pub mod export;
+// `Exporter.start` takes the export dialog's fields one by one.
+#[allow(clippy::too_many_arguments)]
+pub mod export_bridge;
 mod ffi;
 pub mod message;
 pub mod mixer;
