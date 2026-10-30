@@ -524,12 +524,16 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         let end = session.ticks_to_samples(TickTime(end_tick)).0;
         // Fades are in ticks, so they follow tempo changes like the clip.
         let fade_in = session
-            .ticks_to_samples(TickTime((c.start.0 + a.fade_in.length.0).min(end_tick)))
+            .ticks_to_samples(TickTime(
+                c.start.0.saturating_add(a.fade_in.length.0).min(end_tick),
+            ))
             .0
             - start;
         let fade_out = end
             - session
-                .ticks_to_samples(TickTime((end_tick - a.fade_out.length.0).max(c.start.0)))
+                .ticks_to_samples(TickTime(
+                    end_tick.saturating_sub(a.fade_out.length.0).max(c.start.0),
+                ))
                 .0;
         let (fade_in, fade_out) = daw_model::fit_fades(fade_in, fade_out, end - start);
         set.clips.push(PlayClip {

@@ -375,13 +375,11 @@ Kirigami.Page {
                 // The clip gain while its handle is dragged.
                 QQC2.ToolTip {
                     parent: pointer
-                    visible: view.gainDragging
+                    visible: view.gainDragging && pointer.pressed
                     x: pointer.mouseX + Kirigami.Units.gridUnit
                     y: pointer.mouseY - height - Kirigami.Units.smallSpacing
-                    text: view.draggedGain <= -60
-                          ? i18nc("@info:tooltip clip gain at its lowest", "−∞ dB")
-                          : i18nc("@info:tooltip clip gain in decibels", "%1 dB",
-                                  (view.draggedGain > 0 ? "+" : "") + view.draggedGain.toLocaleString(Qt.locale(), "f", 1))
+                    text: i18nc("@info:tooltip clip gain in decibels", "%1 dB",
+                                (view.draggedGain > 0 ? "+" : "") + view.draggedGain.toLocaleString(Qt.locale(), "f", 1))
                 }
 
                 // Two-finger zoom on touch screens.

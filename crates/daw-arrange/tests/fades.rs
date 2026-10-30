@@ -140,7 +140,9 @@ fn dragging_a_fade_handle_sets_the_fade_in_one_undo_step() {
     let mut r = Rig::new();
     let id = r.clip(BAR, BAR);
     let (top, from) = (r.top(), r.x(BAR) + 2.0);
-    r.drag((from, top), (r.x(BAR + BEAT), top), false, false);
+    // The fade follows the pointer from wherever the handle was grabbed.
+    let beat_px = r.x(BEAT) - r.x(0);
+    r.drag((from, top), (from + beat_px, top), false, false);
     let a = r.audio(id);
     assert_eq!(a.fade_in.length, TickTime(BEAT));
     assert_eq!(a.fade_in.shape, FadeShape::Linear);
@@ -148,12 +150,7 @@ fn dragging_a_fade_handle_sets_the_fade_in_one_undo_step() {
 
     // The fade-out handle, dragged a beat and a half in from the end.
     let from = r.x(2 * BAR) - 2.0;
-    r.drag(
-        (from, top),
-        (r.x(2 * BAR - 3 * BEAT / 2), top),
-        false,
-        false,
-    );
+    r.drag((from, top), (from - 1.5 * beat_px, top), false, false);
     assert_eq!(r.audio(id).fade_out.length, TickTime(3 * BEAT / 2));
 
     // A fade can't run into the other one or past the clip.
@@ -355,4 +352,49 @@ fn fades_and_handles_are_drawn() {
     let (lines, handles) = count(&mut r);
     assert!(lines >= 10, "{lines} curve segments");
     assert_eq!(handles, 3);
+}
+
+#[test]
+fn splitting_inside_a_fade_cuts_it_short() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR);
+    let fade = |len| Fade::new(TickTime(len), FadeShape::Linear);
+    r.doc
+        .execute(SetClip::new(id, ClipField::FadeIn(fade(2 * BEAT))))
+        .unwrap();
+    r.doc
+        .execute(SetClip::new(id, ClipField::FadeOut(fade(2 * BEAT))))
+        .unwrap();
+    r.doc.seal();
+    // Inside the fade-in: the left half keeps a fade no longer than itself.
+    r.arrange.selection = [id].into();
+    r.with_env(|a, doc, env| a.split_at(doc, env, TickTime(BEAT)));
+    assert_eq!(r.audio(id).fade_in, fade(BEAT));
+    assert!(r.audio(id).fade_out.is_none());
+    let right = r.doc.project().tracks[0].clips[1].id;
+    assert_eq!(r.audio(right).fade_out, fade(2 * BEAT));
+    // Inside the fade-out: the right half's fade fits it.
+    r.arrange.selection = [right].into();
+    r.with_env(|a, doc, env| a.split_at(doc, env, TickTime(3 * BEAT)));
+    let last = r.doc.project().tracks[0].clips[2].id;
+    assert_eq!(r.audio(last).fade_out, fade(BEAT));
+    assert!(r.audio(right).fade_out.is_none());
+}
+
+#[test]
+fn grabbing_a_fade_handle_does_not_jump() {
+    let mut r = Rig::new();
+    let id = r.clip(BAR, BAR);
+    let top = r.top();
+    // Press in the middle of the fade-out handle and move straight down.
+    let h = r
+        .arrange
+        .handles(0, r.doc.project().clip(id).unwrap())
+        .unwrap();
+    let x = h.fade_out.x + h.fade_out.w / 2.0;
+    r.drag((x, top), (x, top + 5.0), false, false);
+    assert!(r.audio(id).fade_out.is_none());
+    // And then moving left by a beat makes a one-beat fade.
+    r.drag((x, top), (x - r.x(BEAT) + r.x(0), top), false, false);
+    assert_eq!(r.audio(id).fade_out.length, TickTime(BEAT));
 }

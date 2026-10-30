@@ -644,10 +644,11 @@ impl Fade {
 /// its `length` together. Works in any unit (ticks, samples).
 pub fn fit_fades(fade_in: i64, fade_out: i64, length: i64) -> (i64, i64) {
     let (fi, fo, len) = (fade_in.max(0), fade_out.max(0), length.max(0));
-    if fi + fo <= len {
+    let sum = i128::from(fi) + i128::from(fo);
+    if sum <= i128::from(len) {
         return (fi, fo);
     }
-    let fi_fit = (i128::from(fi) * i128::from(len) / i128::from(fi + fo)) as i64;
+    let fi_fit = (i128::from(fi) * i128::from(len) / sum) as i64;
     (fi_fit, len - fi_fit)
 }
 

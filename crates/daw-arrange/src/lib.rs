@@ -272,6 +272,9 @@ enum Drag {
     Fade {
         clip: ClipId,
         out: bool,
+        /// Ticks from the press to the fade's edge, so grabbing the handle
+        /// anywhere doesn't make the fade jump.
+        grab: i64,
         edited: bool,
     },
     Gain {
@@ -711,8 +714,10 @@ impl Arrange {
                 self.mark_edited(&o);
                 o
             }
-            Drag::Fade { clip, out, .. } => {
-                let o = self.drag_fade(doc, p, clip, out);
+            Drag::Fade {
+                clip, out, grab, ..
+            } => {
+                let o = self.drag_fade(doc, p, clip, out, grab);
                 self.mark_edited(&o);
                 o
             }
@@ -924,11 +929,22 @@ impl Arrange {
                 zone: zone @ (Zone::FadeIn | Zone::FadeOut | Zone::Gain),
                 ..
             } => {
-                let Some(ClipContent::Audio(a)) = project.clip(clip).map(|c| &c.content) else {
+                let Some(c) = project.clip(clip) else {
+                    self.drag = None;
+                    return;
+                };
+                let ClipContent::Audio(a) = &c.content else {
                     self.drag = None;
                     return;
                 };
                 let db = a.gain_db;
+                let (fi, fo) =
+                    daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, c.length.0);
+                let edge = if zone == Zone::FadeOut {
+                    c.start.0 + c.length.0 - fo
+                } else {
+                    c.start.0 + fi
+                };
                 self.selection = BTreeSet::from([clip]);
                 doc.seal();
                 Some(match zone {
@@ -941,6 +957,7 @@ impl Arrange {
                     _ => Drag::Fade {
                         clip,
                         out: zone == Zone::FadeOut,
+                        grab: edge - tick.0,
                         edited: false,
                     },
                 })
@@ -1065,7 +1082,14 @@ impl Arrange {
 
     /// Sets a fade's length to reach the pointer, leaving the other fade
     /// room. Not snapped: fades are usually set by ear.
-    fn drag_fade(&mut self, doc: &mut Document, p: Pointer, id: ClipId, out: bool) -> Outcome {
+    fn drag_fade(
+        &mut self,
+        doc: &mut Document,
+        p: Pointer,
+        id: ClipId,
+        out: bool,
+        grab: i64,
+    ) -> Outcome {
         let Some(clip) = doc.project().clip(id) else {
             self.drag = None;
             return Outcome::default();
@@ -1073,7 +1097,7 @@ impl Arrange {
         let ClipContent::Audio(a) = &clip.content else {
             return Outcome::default();
         };
-        let at = self.view.x_to_tick(p.x).0;
+        let at = self.view.x_to_tick(p.x).0 + grab;
         let end = clip.start.0 + clip.length.0;
         let (fade, other) = if out {
             (end - at, a.fade_in.length.0)
@@ -1334,8 +1358,12 @@ impl Arrange {
                     let rate = self.file_rate(env, &a.source);
                     a.offset = SampleTime(a.offset.0 + env.engine_to_file(shift, rate));
                     // The fade-in stays with the left half and the fade-out
-                    // goes with the right one.
+                    // goes with the right one, cut short if the split is
+                    // inside it (the cut-off part is lost, as in most DAWs).
+                    let (_, fo) =
+                        daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, c.length.0);
                     a.fade_in = Fade::default();
+                    a.fade_out.length = TickTime(fo.min(right.length.0));
                 }
                 ClipContent::Midi(m) => {
                     // Notes starting in the right half move to the new clip.
@@ -1357,13 +1385,21 @@ impl Arrange {
                     items.push(Box::new(daw_model::commands::RemoveNotes::new(c.id, moved)));
                 }
             }
-            if let ClipContent::Audio(a) = &c.content
-                && !a.fade_out.is_none()
-            {
-                items.push(Box::new(SetClip::new(
-                    c.id,
-                    ClipField::FadeOut(Fade::default()),
-                )));
+            if let ClipContent::Audio(a) = &c.content {
+                let (fi, _) =
+                    daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, c.length.0);
+                if fi.min(left_len) != a.fade_in.length.0 {
+                    items.push(Box::new(SetClip::new(
+                        c.id,
+                        ClipField::FadeIn(Fade::new(TickTime(fi.min(left_len)), a.fade_in.shape)),
+                    )));
+                }
+                if !a.fade_out.is_none() {
+                    items.push(Box::new(SetClip::new(
+                        c.id,
+                        ClipField::FadeOut(Fade::default()),
+                    )));
+                }
             }
             items.push(Box::new(SetClip::new(
                 c.id,
