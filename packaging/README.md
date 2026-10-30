@@ -91,10 +91,10 @@ gets the PipeWire socket. Plugins come from two places:
 - `~/.clap`, `~/.lv2` and `~/.vst3`, read only.
 
 `CLAP_PATH` and `VST3_PATH` point at the extension's directories, and the
-CLAP and VST3 hosts search them before the standard locations. LV2 is not
-wired up yet: `LV2_PATH` would replace lilv's defaults rather than add to
-them, so the LV2 host will need to add `/app/extensions/Plugins/lv2` itself
-when it runs inside Flatpak (`/.flatpak-info` exists).
+CLAP and VST3 hosts search them before the standard locations. `LV2_PATH` is
+left unset, since it would replace lilv's defaults rather than add to them;
+instead the LV2 host adds `/app/extensions/Plugins/lv2` (and the app's own
+`/app/lib/lv2`) itself when it runs inside Flatpak (`/.flatpak-info` exists).
 
 Plugins installed system-wide (`/usr/lib/{clap,lv2,vst3}`) are not visible
 inside the sandbox, so the native packages remain the better choice for
