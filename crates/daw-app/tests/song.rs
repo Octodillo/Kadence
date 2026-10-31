@@ -376,14 +376,12 @@ fn draw_lane(
     );
     assert!(arrange.add_lane(doc, track, target).document);
     let project = doc.project();
-    let row = project.tracks.iter().position(|t| t.id == track).unwrap();
     let t = project.track(track).unwrap();
     let index = t.automation.len() - 1;
     let lane = t.automation[index].id;
-    let scale = arrange.lane_scale(t, target);
-    let rect = arrange.lane_rect(row, index);
+    let frame = arrange.lane_frame(project, lane).unwrap();
     for &(beat, value) in points {
-        let (x, y) = arrange.point_pos(&rect, scale, &AutomationPoint::new(beats(beat), value));
+        let (x, y) = frame.point_pos(&AutomationPoint::new(beats(beat), value));
         // A pixel late: the click snaps to the beat.
         assert!(arrange.press(doc, Pointer::left(x + 1.0, y)).document);
         arrange.release(doc, Pointer::left(x + 1.0, y));

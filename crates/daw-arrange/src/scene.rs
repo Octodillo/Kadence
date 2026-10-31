@@ -199,6 +199,11 @@ impl Scene {
         });
     }
 
+    /// Ends the clip the last [`Prim::PushClip`] started.
+    pub fn pop_clip(&mut self) {
+        self.push(Prim::PopClip);
+    }
+
     pub fn hline(&mut self, y: f64, x0: f64, x1: f64, color: Rgba, width: f64) {
         self.push(Prim::Line {
             x0,

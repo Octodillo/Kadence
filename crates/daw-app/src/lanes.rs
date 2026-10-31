@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 
+use daw_arrange::automation::{lane_scale, static_value};
 use daw_model::{AutomationLane, AutomationTarget, LaneId, Project, Track};
 
 use crate::device_panel::{BuiltinParams, ParamDesc};
@@ -139,14 +140,14 @@ impl AppState {
     /// The value lane `lane` of track `track` controls, as it is now.
     pub fn lane_control(&self, track: i32, lane: i32) -> Option<LaneControl> {
         let (t, l) = self.lane_at(track, lane)?;
-        let scale = self.arrange.lane_scale(t, l.target);
+        let scale = lane_scale(self.arrange.params.as_ref(), t, l.target);
         let following = l.enabled && !l.points.is_empty();
         let value = if following {
             l.value_at(self.playhead())
         } else {
             None
         }
-        .unwrap_or_else(|| self.arrange.static_value(t, l.target));
+        .unwrap_or_else(|| static_value(self.arrange.params.as_ref(), t, l.target));
         Some(LaneControl {
             norm: scale.to_norm(value),
             value,
@@ -202,7 +203,7 @@ impl AppState {
     pub fn begin_lane_control(&mut self, track: i32, lane: i32) {
         let static_value = self
             .lane_at(track, lane)
-            .map(|(t, l)| self.arrange.static_value(t, l.target));
+            .map(|(t, l)| static_value(self.arrange.params.as_ref(), t, l.target));
         self.control_lane(track, lane, |s, id, control, param| {
             s.doc.seal();
             let session = s.engine.session_mut();
@@ -237,7 +238,7 @@ impl AppState {
         }
         let Some(scale) = self
             .lane_at(track, lane)
-            .map(|(t, l)| self.arrange.lane_scale(t, l.target))
+            .map(|(t, l)| lane_scale(self.arrange.params.as_ref(), t, l.target))
         else {
             return;
         };

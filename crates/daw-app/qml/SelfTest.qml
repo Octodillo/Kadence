@@ -529,8 +529,12 @@ Item {
         () => {
             const edit = window.pageStack.currentItem;
             const strip = edit.trackStrip.strip;
-            check(edit.roll.stripRow === test.stripRow + 1 && strip !== null && strip.index === edit.roll.stripRow
-                  && strip.name === Project.trackName(edit.roll.stripRow), "the strip follows its track to another row");
+            check(edit.roll.stripRow === test.stripRow + 1,
+                  "the clip's track moved a row on (" + test.stripRow + " to " + edit.roll.stripRow + ")");
+            check(strip !== null && strip.index === edit.roll.stripRow
+                  && strip.name === Project.trackName(edit.roll.stripRow),
+                  "the strip follows its track to another row (strip "
+                  + (strip === null ? "none" : strip.index + " " + strip.name) + ")");
             Project.undo();
             Project.undo();
         },

@@ -270,6 +270,7 @@ impl qobject::Automation {
     fn point_shape(&self) -> i32 {
         state::with(|s| {
             s.arrange
+                .lanes
                 .selected_shape(s.doc.project())
                 .map_or(-1, shape_index)
         })

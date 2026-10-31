@@ -38,20 +38,32 @@ Item {
         }
     }
 
+    // Puts the strip of `row` in the "chosen" group, unless it already is.
     function choose(): void {
-        chosen.remove(0, chosen.count);
-        if (row >= 0 && row < rows.items.count) {
+        const wanted = row >= 0 && row < rows.items.count;
+        if (wanted && chosen.count === 1 && chosen.get(0).itemsIndex === row) {
+            return;
+        }
+        if (chosen.count > 0) {
+            chosen.remove(0, chosen.count);
+        }
+        if (wanted) {
             rows.items.addGroups(row, 1, "chosen");
         }
     }
     onRowChanged: choose()
     Component.onCompleted: choose()
-    // A reset (strips came or went) empties the groups. The DelegateModel
-    // rebuilds them in its own modelReset handler, which runs after this
-    // one, so choose again once that is done.
+    // A reset (strips came or went) empties the groups, and the
+    // DelegateModel refills its items only after the Mixer's own signal,
+    // so choose again once the rows have settled: after the reset, and
+    // whenever the number of rows changes.
     Connections {
         target: Mixer
         function onModelReset() { Qt.callLater(track.choose); }
+    }
+    Connections {
+        target: rows.items
+        function onCountChanged() { Qt.callLater(track.choose); }
     }
 
     Repeater {

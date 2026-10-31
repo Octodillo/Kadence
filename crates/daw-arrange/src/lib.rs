@@ -15,6 +15,7 @@
 pub mod automation;
 pub mod commands;
 mod draw;
+pub mod lane_editor;
 pub mod peaks;
 pub mod scene;
 pub mod snap;
@@ -28,13 +29,14 @@ use daw_core::time::{PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::grid::Meter;
 use daw_model::commands::{AddClip, AddTrack, ClipField, RemoveClip, SetClip};
 use daw_model::{
-    AudioClip, AutomationPoint, Clip, ClipContent, ClipId, Command, Document, Fade, FadeShape,
-    LaneId, MidiClip, ModelError, Project, Track, TrackId, TrackKind,
+    AudioClip, Clip, ClipContent, ClipId, Command, Document, Fade, FadeShape, LaneId, MidiClip,
+    ModelError, Project, Track, TrackId, TrackKind,
 };
 
 pub use automation::{LaneScale, ParamCatalog, PointShape};
 use commands::{Group, PlaceClip, TrimClip};
 pub use draw::track_color;
+pub use lane_editor::{LaneEditor, LaneFrame, LaneGrid};
 pub use peaks::{PeakPool, Peaks};
 pub use scene::{Palette, Prim, Rect, Rgba, Scene};
 pub use snap::Snap;
@@ -300,27 +302,6 @@ enum Drag {
         db: f64,
         edited: bool,
     },
-    /// Automation points being moved.
-    Points {
-        lane: LaneId,
-        /// Tick and y under the pointer at the press.
-        tick: TickTime,
-        y: f64,
-        /// The point grabbed; its tick is what snaps.
-        lead: usize,
-        /// The lane's points at the press, and the indices being moved.
-        orig: Vec<AutomationPoint>,
-        moving: Vec<usize>,
-        edited: bool,
-    },
-    /// The bend of the segment after point `index`.
-    Curve {
-        lane: LaneId,
-        index: usize,
-        y: f64,
-        orig: Vec<AutomationPoint>,
-        edited: bool,
-    },
     Rubber {
         x0: f64,
         y0: f64,
@@ -380,11 +361,8 @@ pub struct Arrange {
     pub expanded: BTreeSet<TrackId>,
     /// Height of one automation lane.
     pub lane_height: f64,
-    /// Selected automation points: a lane and indices into its points.
-    /// Dropped when the lane's points change other than by this view's own
-    /// gestures (undo, a touch-write take), as the indices may then point
-    /// elsewhere.
-    pub points: Option<(LaneId, BTreeSet<usize>)>,
+    /// Selected automation points and drags on lanes.
+    pub lanes: LaneEditor,
     /// Ranges and parameter lists of device parameters, for lanes that
     /// automate them. Without one, device parameter lanes show 0 to 1.
     pub params: Option<Arc<dyn ParamCatalog>>,
@@ -397,9 +375,6 @@ pub struct Arrange {
     /// first track), and the bottom of the last: rows are as tall as a
     /// track plus its shown lanes. See [`Arrange::relayout`].
     tops: Vec<f64>,
-    /// The selected lane's points when [`points`](Self::points) was last
-    /// set or edited here.
-    points_seen: Vec<AutomationPoint>,
 }
 
 impl Default for Arrange {
@@ -426,14 +401,13 @@ impl Arrange {
             hovered: None,
             expanded: BTreeSet::new(),
             lane_height: 40.0,
-            points: None,
+            lanes: LaneEditor::default(),
             params: None,
             peaks: PeakPool::new(),
             names: DefaultNames::default(),
             drag: None,
             rates: HashMap::new(),
             tops: Vec::new(),
-            points_seen: Vec::new(),
         }
     }
 
@@ -444,7 +418,7 @@ impl Arrange {
     /// [`expanded`](Self::expanded) changed and before asking for geometry;
     /// every input method and [`scene`](Self::scene) call it themselves.
     pub fn relayout(&mut self, project: &Project) {
-        self.check_points(project);
+        self.lanes.check(project);
         self.tops.clear();
         self.tops.reserve(project.tracks.len() + 1);
         let mut y = 0.0;
@@ -612,9 +586,11 @@ impl Arrange {
     }
 
     pub fn cursor(&self, project: &Project, x: f64, y: f64) -> Cursor {
+        if let Some(c) = self.lanes.cursor() {
+            return c;
+        }
         match &self.drag {
-            Some(Drag::Move { .. } | Drag::Points { .. }) => return Cursor::Move,
-            Some(Drag::Curve { .. }) => return Cursor::ResizeVertical,
+            Some(Drag::Move { .. }) => return Cursor::Move,
             Some(Drag::Trim { .. } | Drag::Fade { .. }) => return Cursor::ResizeHorizontal,
             Some(Drag::Gain { .. }) => return Cursor::ResizeVertical,
             _ => {}
@@ -636,7 +612,7 @@ impl Arrange {
 
     /// Whether a drag is in progress (the front end should grab the pointer).
     pub fn dragging(&self) -> bool {
-        self.drag.is_some()
+        self.drag.is_some() || self.lanes.dragging().is_some()
     }
 
     /// The fade and gain handles of an audio clip on track row `row`, or
@@ -810,16 +786,16 @@ impl Arrange {
     // Pointer input
 
     pub fn press(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        // At most one drag at a time: one whose release got lost ends here.
+        self.end_drag(doc);
         self.relayout(doc.project());
         let project = doc.project();
         let hit = self.hit(project, p.x, p.y);
         if let Hit::Automation { .. } = hit {
-            let o = self.press_lane(doc, p, hit);
-            self.saw_points(doc.project());
-            return o;
+            return self.press_lane(doc, p, hit);
         }
         if p.button != Button::Middle && !matches!(hit, Hit::Ruler(_)) {
-            self.points = None;
+            self.lanes.clear_selection();
         }
         if p.button == Button::Right {
             if let Hit::Clip { clip, .. } = hit
@@ -881,6 +857,12 @@ impl Arrange {
     }
 
     pub fn motion(&mut self, doc: &mut Document, env: &Env, p: Pointer) -> Outcome {
+        if let Some(lane) = self.lanes.dragging() {
+            self.relayout(doc.project());
+            let frame = self.lane_frame(doc.project(), lane);
+            let grid = self.lane_grid(doc.project());
+            return self.lanes.drag(doc, frame.as_ref(), &grid, p);
+        }
         let Some(drag) = self.drag.clone() else {
             return Outcome::default();
         };
@@ -921,30 +903,6 @@ impl Arrange {
                 clip, out, grab, ..
             } => {
                 let o = self.drag_fade(doc, p, clip, out, grab);
-                self.mark_edited(&o);
-                o
-            }
-            Drag::Points {
-                lane,
-                tick,
-                y,
-                lead,
-                orig,
-                moving,
-                ..
-            } => {
-                let o = self.drag_points(doc, p, lane, tick, y, lead, &orig, &moving);
-                self.mark_edited(&o);
-                o
-            }
-            Drag::Curve {
-                lane,
-                index,
-                y,
-                orig,
-                ..
-            } => {
-                let o = self.drag_curve(doc, p, lane, index, y, &orig);
                 self.mark_edited(&o);
                 o
             }
@@ -1004,6 +962,9 @@ impl Arrange {
     }
 
     pub fn release(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        if let Some(o) = self.lanes.release(doc, p) {
+            return o;
+        }
         let drag = self.drag.take();
         match drag {
             Some(Drag::Pending { hit, start }) => match hit {
@@ -1024,22 +985,6 @@ impl Arrange {
                 doc.seal();
                 Outcome::view()
             }
-            Some(Drag::Points {
-                lane, lead, edited, ..
-            }) => {
-                doc.seal();
-                // A click (no drag) on one of several selected points
-                // selects only it.
-                if !edited && !p.shift && !p.ctrl {
-                    self.points = Some((lane, BTreeSet::from([lead])));
-                    self.saw_points(doc.project());
-                }
-                Outcome::view()
-            }
-            Some(Drag::Curve { .. }) => {
-                doc.seal();
-                Outcome::view()
-            }
             Some(Drag::Rubber { .. }) => Outcome::view(),
             Some(Drag::Scrub) => Outcome {
                 locate: Some(self.view.x_to_tick(p.x).max(TickTime(0))),
@@ -1052,14 +997,15 @@ impl Arrange {
 
     /// Drops the drag in progress (Escape, or the pointer was taken away).
     pub fn cancel(&mut self, doc: &mut Document) -> Outcome {
+        if let Some(o) = self.lanes.cancel(doc) {
+            return o;
+        }
         match self.drag.take() {
             Some(
                 Drag::Move { edited: true, .. }
                 | Drag::Trim { edited: true, .. }
                 | Drag::Fade { edited: true, .. }
-                | Drag::Gain { edited: true, .. }
-                | Drag::Points { edited: true, .. }
-                | Drag::Curve { edited: true, .. },
+                | Drag::Gain { edited: true, .. },
             ) => {
                 // The drag is one merged undo step: undo it.
                 doc.seal();
@@ -1075,14 +1021,9 @@ impl Arrange {
     /// other edit (a shortcut, undo) while a button may still be held, so the
     /// drag neither merges with that edit nor works on clips it removed.
     pub fn end_drag(&mut self, doc: &mut Document) {
-        if let Some(
-            Drag::Move { .. }
-            | Drag::Trim { .. }
-            | Drag::Fade { .. }
-            | Drag::Gain { .. }
-            | Drag::Points { .. }
-            | Drag::Curve { .. },
-        ) = self.drag.take()
+        self.lanes.end_drag(doc);
+        if let Some(Drag::Move { .. } | Drag::Trim { .. } | Drag::Fade { .. } | Drag::Gain { .. }) =
+            self.drag.take()
         {
             doc.seal();
         }
@@ -1094,9 +1035,7 @@ impl Arrange {
                 Drag::Move { edited, .. }
                 | Drag::Trim { edited, .. }
                 | Drag::Fade { edited, .. }
-                | Drag::Gain { edited, .. }
-                | Drag::Points { edited, .. }
-                | Drag::Curve { edited, .. },
+                | Drag::Gain { edited, .. },
             ) = &mut self.drag
         {
             *edited = true;
@@ -1112,11 +1051,7 @@ impl Arrange {
                 lane: Some(lane),
                 point: Some(i),
                 ..
-            } => {
-                self.points = Some((lane, BTreeSet::from([i])));
-                self.saw_points(doc.project());
-                self.delete_points(doc)
-            }
+            } => self.lanes.delete_point(doc, lane, i),
             // Double-clicking a handle resets what it sets.
             Hit::Clip {
                 clip,
@@ -1525,7 +1460,7 @@ impl Arrange {
 
     pub fn delete_selection(&mut self, doc: &mut Document) -> Outcome {
         self.end_drag(doc);
-        if self.points_selected(doc.project()) {
+        if self.lanes.points_selected(doc.project()) {
             return self.delete_points(doc);
         }
         let ids: Vec<ClipId> = self
