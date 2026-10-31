@@ -99,6 +99,12 @@ impl ParamDesc {
         !matches!(self.control, ParamControl::Continuous { .. })
     }
 
+    /// Moving its control during playback can record a take: it is
+    /// automatable and continuous (a step at a time would only click).
+    pub fn records(&self) -> bool {
+        self.automatable && !self.is_discrete()
+    }
+
     /// Clamps to the range and rounds discrete parameters. NaN becomes the
     /// default.
     pub fn sanitize(&self, value: f64) -> f64 {
@@ -710,8 +716,7 @@ impl AppDevicePanel {
                     device: view.id,
                     param: p.desc.id,
                 };
-                p.writable = p.desc.automatable
-                    && matches!(p.desc.control, ParamControl::Continuous { .. })
+                p.writable = p.desc.records()
                     && (s.mixer.write()
                         || track.is_some_and(|t| {
                             t.automation
@@ -818,11 +823,7 @@ impl AppDevicePanel {
         };
         let id = crate::session_mixer::strip_id(track);
         let control = Control::Param { device, param };
-        if start
-            && p.desc.automatable
-            && matches!(p.desc.control, ParamControl::Continuous { .. })
-            && !s.mixer.recording_control(id, control)
-        {
+        if start && p.desc.records() && !s.mixer.recording_control(id, control) {
             s.mixer.write_lanes.clone_from(&s.lanes.write);
             let start = crate::session_mixer::ParamStart {
                 value: p.value,
