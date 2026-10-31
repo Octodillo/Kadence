@@ -75,6 +75,10 @@ const TAIL_BEATS: usize = 4;
 /// The test plugin, a gain, and its gain parameter.
 const PLUGIN_ID: &str = "org.daw.test.gain";
 const GAIN: u32 = 1;
+/// The latency the test plugin reports (`daw_clap_test_plugin::LATENCY`).
+/// It doesn't actually delay, so a render that compensates for it plays the
+/// plugin's track this much early.
+const PLUGIN_LATENCY: usize = 32;
 
 /// What the test needs to find again after building the song.
 struct Song {
@@ -332,10 +336,14 @@ fn plugin_binaries() -> &'static (PathBuf, PathBuf) {
             .status()
             .expect("run cargo");
         assert!(status.success(), "building the test plugin and host failed");
-        let dir = target.join(format!("song-plugins-{}", std::process::id()));
+        // One folder for every run; the copy is renamed into place so a
+        // plugin another run has loaded is never overwritten.
+        let dir = target.join("song-plugins");
         std::fs::create_dir_all(&dir).unwrap();
         let lib = target.join("debug").join("libdaw_clap_test_plugin.so");
-        std::fs::copy(&lib, dir.join("test-gain.clap")).expect("copy the test plugin");
+        let tmp = dir.join(format!(".test-gain-{}", std::process::id()));
+        std::fs::copy(&lib, &tmp).expect("copy the test plugin");
+        std::fs::rename(&tmp, dir.join("test-gain.clap")).unwrap();
         (dir, target.join("debug").join("daw-plugin-host"))
     })
 }
@@ -346,7 +354,8 @@ fn plugin_binaries() -> &'static (PathBuf, PathBuf) {
 fn plugin_loader(adjust: fn(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
     let (plugins, host) = plugin_binaries();
     let mut config = SandboxConfig::new(HostLauncher::new(host, Vec::<String>::new()));
-    // CI machines are slow and the host is a debug build.
+    // CI machines are slow and the host is a debug build. An export's
+    // offline_sandbox replaces this with the hang timeout.
     config.process_timeout = Some(Duration::from_secs(5));
     config.rt_priority = None;
     let mut loader = SandboxLoader::new(adjust(config));
@@ -357,8 +366,8 @@ fn plugin_loader(adjust: fn(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
     loader
 }
 
-/// What the app's Export Song renders by default: the whole song, from the
-/// top to the end of its last clip, plus the tail.
+/// The whole song, from the top to the end of its last clip as Export
+/// Song's default range, plus a bar of tail (the dialog's default is 2 s).
 fn render_settings(doc: &Document) -> RenderSettings {
     let end = song_end(doc.project());
     assert_eq!(
@@ -400,7 +409,7 @@ fn render(doc: &mut Document) -> AudioData {
     }
 }
 
-/// Exports the song to `path` as the app's Export Song does: a snapshot of
+/// Exports the song to `path` the way the app's Export Song does: a snapshot of
 /// the saved project, rendered on the export's own thread with a plugin
 /// loader made there.
 fn export(doc: &mut Document, path: PathBuf, format: FileFormat) {
@@ -514,7 +523,7 @@ fn make_save_reload_and_render_a_song() {
 
     // Play the first bar live, which also stores the plugin's state, and
     // save.
-    let live = play(&mut doc, plugin, 4);
+    let live = play(&mut doc, plugin, SONG_END_BEATS + TAIL_BEATS);
     doc.save().unwrap();
 
     // Export to WAV and FLAC, as Export Song does with the saved project.
@@ -522,14 +531,17 @@ fn make_save_reload_and_render_a_song() {
     // to.
     let wav = bundle.join("Smoke Song.wav");
     let flac = bundle.join("Smoke Song.flac");
+    let keep = |file: &Path, name: &str| {
+        if let Some(out) = std::env::var_os("KADENCE_SMOKE_OUT") {
+            let out = Path::new(&out);
+            std::fs::create_dir_all(out).unwrap();
+            std::fs::copy(file, out.join(name)).unwrap();
+        }
+    };
     export(&mut doc, wav.clone(), FileFormat::Wav(WavFormat::Float32));
+    keep(&wav, "smoke-song.wav");
     export(&mut doc, flac.clone(), FileFormat::Flac(FlacBits::B24));
-    if let Some(out) = std::env::var_os("KADENCE_SMOKE_OUT") {
-        let out = Path::new(&out);
-        std::fs::create_dir_all(out).unwrap();
-        std::fs::copy(&wav, out.join("smoke-song.wav")).unwrap();
-        std::fs::copy(&flac, out.join("smoke-song.flac")).unwrap();
-    }
+    keep(&flac, "smoke-song.flac");
 
     // The WAV holds the render, exactly; the FLAC to within its 24 bits.
     let song = render(&mut doc);
@@ -538,6 +550,7 @@ fn make_save_reload_and_render_a_song() {
     assert_eq!(read.channels, song.channels, "the WAV holds the render");
     let read = decode_file(&flac).unwrap();
     assert_eq!(read.sample_rate, RATE as u32);
+    assert_eq!(read.channels.len(), 2, "the FLAC is stereo");
     assert_eq!(read.channels[0].len(), song.channels[0].len());
     let error = read
         .channels
@@ -559,16 +572,16 @@ fn make_save_reload_and_render_a_song() {
 
     let pluck = rms(&song, 0.1, 3.0);
     assert!(pluck > 0.01, "the audio clip plays in bar 1 ({pluck})");
-    assert!(
-        song.channels[0][1..64].iter().any(|&x| x != 0.0),
-        "the export starts at the top of the song, after the plugin's latency"
-    );
-    // Live playback sounds the same, give or take the plugin's latency.
-    let live_pluck = rms(&live, 0.1, 3.0);
-    assert!(
-        (live_pluck / pluck - 1.0).abs() < 0.02,
-        "playback and export agree ({live_pluck} vs {pluck})"
-    );
+    // Live playback is the export, delayed by the plugin's latency (which
+    // the export leaves out), sample for sample give or take rounding in
+    // the different block sizes.
+    let lag = live
+        .channels
+        .iter()
+        .zip(&song.channels)
+        .flat_map(|(l, s)| l[PLUGIN_LATENCY..].iter().zip(s))
+        .fold(0f32, |m, (l, s)| m.max((l - s).abs()));
+    assert!(lag < 1e-5, "playback and export agree (off by {lag})");
     // The source repeats every beat, so the end of its last beat would
     // match the end of its first without the fade out.
     let (first, last) = (rms(&song, 0.5, 1.0), rms(&song, 3.5, 4.0));
@@ -600,10 +613,21 @@ fn make_save_reload_and_render_a_song() {
     doc.execute(RemoveDevice::new(plugin)).unwrap();
     let unplugged = render(&mut doc);
     doc.undo().unwrap();
-    let ratio = rms(&unplugged, 0.1, 3.0) / pluck;
+    // Without it there is no latency to compensate either: the export
+    // starts at the top of the song with or without plugins.
+    let off = (0..2)
+        .flat_map(|c| {
+            let (u, s) = (&unplugged.channels[c], &song.channels[c]);
+            (0..4 * BEAT - PLUGIN_LATENCY).map(move |i| (u[i + PLUGIN_LATENCY] - 2.0 * s[i]).abs())
+        })
+        .fold(0f32, f32::max);
     assert!(
-        (ratio - 2.0).abs() < 0.01,
-        "the plugin plays in the export at its gain (x{ratio} without it)"
+        off < 1e-6,
+        "the plugin plays in the export at half gain, and the export skips its latency (off by {off})"
+    );
+    assert!(
+        unplugged.channels[0][..64].iter().any(|&x| x != 0.0),
+        "the export starts at the top of the song"
     );
 
     // The tail in bar 4 comes from the send into the reverb bus: without
