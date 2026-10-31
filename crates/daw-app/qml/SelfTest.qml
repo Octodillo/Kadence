@@ -246,6 +246,8 @@ Item {
             check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
             check(DevicePanel.paramCount > 0, "compressor parameters listed");
             // Drag the threshold: one undo step.
+            Project.tick();
+            const before = Project.undoText;
             DevicePanel.setValue(0, -30, true);
             DevicePanel.setValue(0, -24, true);
             DevicePanel.endGesture();
@@ -253,7 +255,7 @@ Item {
             Project.tick();
             check(Project.undoText === "Change Parameter", "parameter edit undoes");
             Project.undo();
-            check(Project.undoText === "Add Automation Lane", "a drag is one undo step");
+            check(Project.undoText === before, "a drag is one undo step");
             Project.redo();
             DevicePanel.setDeviceEnabled(false);
             Project.tick();
