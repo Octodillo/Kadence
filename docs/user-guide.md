@@ -155,9 +155,11 @@ master.
   instead of after it.
 - The output button at the bottom chooses where the track goes: the master
   or a bus.
-- Drag the edge of a strip to make strips wider or narrower, and the handle
-  above the fader to give the effects more or less room. The metronome has
-  a strip of its own for its volume.
+- Drag the right edge of a strip to make the strips wider or narrower, and
+  the line under the effects and sends to give them more or less room.
+  Double-click either to go back to the default size.
+- The metronome has a strip of its own, with its level, on/off and the
+  count-in.
 
 ### Automation
 
