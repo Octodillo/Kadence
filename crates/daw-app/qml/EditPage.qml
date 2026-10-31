@@ -35,8 +35,7 @@ Kirigami.Page {
         minimumUnits: 4
         maximumUnits: 60
     }
-    // Whether the strip is shown, remembered with the layout (1 or 0).
-    property bool stripShown: AppSettings.layoutValue("EditStripShown", 1) > 0
+    readonly property bool stripShown: AppSettings.editStripShown
     readonly property alias roll: roll
     readonly property alias trackStrip: trackStrip
 
@@ -197,8 +196,8 @@ Kirigami.Page {
             enabled: page.visible
             tooltip: i18nc("@info:tooltip", "Show the mixer strip of the clip's track beside the notes")
             onToggled: {
-                page.stripShown = checked;
-                AppSettings.setLayoutValue("EditStripShown", checked ? 1 : 0);
+                AppSettings.chooseEditStripShown(checked);
+                // Toggling replaced the binding; follow the setting again.
                 checked = Qt.binding(() => page.stripShown);
             }
         },
@@ -245,12 +244,16 @@ Kirigami.Page {
         page.editActions[22]
     ]
 
-    // The strip's row follows the project, so the Mixer's rows must too
-    // before the roll says which row is the clip's track.
+    // The strip's row follows the project, so while the strip is on
+    // screen the Mixer's rows must too, before the roll says which row is
+    // the clip's track. Hidden, the Mixer catches up when shown.
     function refresh(): void {
-        Mixer.sync();
+        if (page.visible && page.stripShown) {
+            Mixer.sync();
+        }
         roll.refresh();
     }
+    onStripShownChanged: page.refresh()
     Connections {
         target: Project
         function onRevisionChanged() { page.refresh(); }

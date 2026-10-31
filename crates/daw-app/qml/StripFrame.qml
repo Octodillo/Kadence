@@ -18,7 +18,8 @@ Item {
     // Strips before this one in the row: a width drag widens them too.
     property int position: 0
     // Where the line and the width handle are: Qt.RightEdge in a row of
-    // strips, Qt.LeftEdge for a strip alone at a page's right side.
+    // strips, Qt.LeftEdge for a strip alone at a page's far side (both
+    // mirror right to left).
     property int edge: Qt.RightEdge
     readonly property bool leftEdge: edge === Qt.LeftEdge
     property string title
@@ -47,8 +48,8 @@ Item {
             right: frame.leftEdge ? undefined : parent.right
         }
     }
-    // In the strip's margin on that side: the next strip is drawn over
-    // anything past its edge.
+    // In the strip's margin on that side, so in a row the next strip
+    // isn't drawn over it.
     SplitHandle {
         anchors {
             top: parent.top

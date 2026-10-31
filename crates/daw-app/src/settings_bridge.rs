@@ -56,6 +56,8 @@ pub mod qobject {
         #[qproperty(i32, max_autosave_minutes)]
         /// The piano roll plays the keys and notes pressed in it.
         #[qproperty(bool, preview_notes)]
+        /// The Edit page shows the clip's track strip.
+        #[qproperty(bool, edit_strip_shown)]
         type AppSettings = super::AppSettingsRust;
 
         /// Uses `name` or stops using it, and remembers the choice.
@@ -77,6 +79,8 @@ pub mod qobject {
         fn choose_autosave_minutes(self: Pin<&mut AppSettings>, minutes: i32);
         #[qinvokable]
         fn choose_preview_notes(self: Pin<&mut AppSettings>, on: bool);
+        #[qinvokable]
+        fn choose_edit_strip_shown(self: Pin<&mut AppSettings>, on: bool);
 
         /// A size the user gave part of the window under `key`, or
         /// `fallback`. Sizes are in grid units, so they suit any scale.
@@ -104,6 +108,7 @@ pub struct AppSettingsRust {
     autosave_minutes: i32,
     max_autosave_minutes: i32,
     preview_notes: bool,
+    edit_strip_shown: bool,
     general: GeneralSettings,
 }
 
@@ -276,6 +281,15 @@ impl qobject::AppSettings {
         self.as_mut().apply_general(general);
     }
 
+    fn choose_edit_strip_shown(mut self: Pin<&mut Self>, on: bool) {
+        let general = GeneralSettings {
+            edit_strip_shown: on,
+            ..self.general.clone()
+        };
+        settings::save_general_settings(&mut KConfigStore, &general);
+        self.as_mut().apply_general(general);
+    }
+
     fn apply_general(mut self: Pin<&mut Self>, general: GeneralSettings) {
         state::with(|s| {
             s.autosave_every = (general.autosave_minutes > 0)
@@ -284,6 +298,7 @@ impl qobject::AppSettings {
             s.sync_audition();
         });
         self.as_mut().set_preview_notes(general.preview_notes);
+        self.as_mut().set_edit_strip_shown(general.edit_strip_shown);
         let folder = general.project_folder.clone().unwrap_or_default();
         let url = if folder.is_empty() {
             QUrl::default()

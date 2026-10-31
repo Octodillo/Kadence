@@ -5,9 +5,9 @@ import QtQml.Models
 
 import io.github.octodillo.daw
 
-// One channel strip on its own, beside a page's work: the Mixer's row
-// `row` (the Edit page's track), with its width handle on the left. Empty
-// while `row` is -1.
+// One channel strip on its own at a page's far side (the Edit page's
+// track): the Mixer's row `row`, its line and width handle on the side
+// facing the page's work. Empty while `row` is -1.
 Item {
     id: track
 
@@ -46,10 +46,12 @@ Item {
     }
     onRowChanged: choose()
     Component.onCompleted: choose()
-    // A reset (strips came or went) empties the groups.
+    // A reset (strips came or went) empties the groups. The DelegateModel
+    // rebuilds them in its own modelReset handler, which runs after this
+    // one, so choose again once that is done.
     Connections {
         target: Mixer
-        function onModelReset() { track.choose(); }
+        function onModelReset() { Qt.callLater(track.choose); }
     }
 
     Repeater {

@@ -21,6 +21,8 @@ Item {
     property var picked: null
     // Times steps have asked to be run again.
     property int waits: 0
+    // The Edit strip's row before a track is put in front of it.
+    property int stripRow: -1
     // What the export dialog reported last, and where it exported to.
     property var exportMessage: ({})
     property url exportUrl
@@ -458,6 +460,15 @@ Item {
             check(!edit.stripShown && !edit.trackStrip.shown && edit.trackStrip.width === 0, "hide the track strip");
             stripToggle.trigger();
             check(edit.stripShown && edit.trackStrip.shown, "show the track strip again");
+            // A track in front moves the clip's strip a row on; the Mixer
+            // resets its rows, and the strip must survive that.
+            test.stripRow = roll.stripRow;
+            Project.addTrack(1, "Strip Test");
+            for (let i = 0; i < Project.trackCount; i++) {
+                if (Project.trackName(i) === "Strip Test") {
+                    Project.moveTrack(i, 0);
+                }
+            }
             // Dragging the velocity lane's edge up makes it taller, but
             // never so tall the notes lose their last three rows.
             const velocity = window.pageStack.currentItem.velocitySize;
@@ -484,6 +495,20 @@ Item {
             roll.selectAll();
             check(roll.hasSelection, "select all");
             shoot(window.title, "edit");
+        },
+        () => {
+            const edit = window.pageStack.currentItem;
+            const strip = edit.trackStrip.strip;
+            check(edit.roll.stripRow === test.stripRow + 1 && strip !== null && strip.index === edit.roll.stripRow
+                  && strip.name === Project.trackName(edit.roll.stripRow), "the strip follows its track to another row");
+            Project.undo();
+            Project.undo();
+        },
+        () => {
+            const edit = window.pageStack.currentItem;
+            const strip = edit.trackStrip.strip;
+            check(edit.roll.stripRow === test.stripRow && strip !== null && strip.index === test.stripRow,
+                  "the strip follows undo");
         },
         () => {
             const keys = TestHelper.pianoKeySum();
