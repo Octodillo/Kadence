@@ -16,6 +16,7 @@ use cxx_qt_lib::{
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
 use daw_session::catalog::{FORMATS, Filter, PluginKind};
 
+use crate::qt_lists::string_list;
 use crate::settings::{self, KConfigStore};
 use crate::state;
 
@@ -148,14 +149,6 @@ pub struct PluginsRust {
     revision: Option<u64>,
     filter: Filter,
     rows: Vec<PluginDescriptor>,
-}
-
-fn string_list(items: impl IntoIterator<Item = String>) -> QStringList {
-    let mut list = QStringList::default();
-    for s in items {
-        list.append(QString::from(&s));
-    }
-    list
 }
 
 fn same_rows(a: &[PluginDescriptor], b: &[PluginDescriptor]) -> bool {

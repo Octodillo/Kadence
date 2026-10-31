@@ -17,6 +17,7 @@ use crate::mixer::{
     Control, MeterBallistics, MeterDisplay, MixerHandle, StripId, StripInfo, StripKind,
     default_mixer,
 };
+use crate::qt_lists::{list, string_list};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -235,14 +236,6 @@ impl Default for MixerRust {
     }
 }
 
-fn string_list<'a>(items: impl IntoIterator<Item = &'a str>) -> QStringList {
-    let mut list = QStringList::default();
-    for s in items {
-        list.append(QString::from(s));
-    }
-    list
-}
-
 fn kind_name(kind: StripKind) -> &'static str {
     match kind {
         StripKind::Track => "track",
@@ -252,14 +245,15 @@ fn kind_name(kind: StripKind) -> &'static str {
 }
 
 fn flatten(meters: &[MeterDisplay]) -> QList<f64> {
-    let mut list = QList::default();
-    for m in meters {
-        for v in [m.level[0], m.level[1], m.hold[0], m.hold[1]] {
-            list.append(v);
-        }
-        list.append(m.gain_reduction_db.unwrap_or(-1.0));
-    }
-    list
+    list(meters.iter().flat_map(|m| {
+        [
+            m.level[0],
+            m.level[1],
+            m.hold[0],
+            m.hold[1],
+            m.gain_reduction_db.unwrap_or(-1.0),
+        ]
+    }))
 }
 
 fn role(name: &str) -> i32 {
