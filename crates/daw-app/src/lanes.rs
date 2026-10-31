@@ -7,14 +7,11 @@
 //! during playback records over it, as with the mixer's Write Automation
 //! switch).
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::collections::HashSet;
 
-use daw_arrange::{LaneScale, ParamCatalog};
-use daw_core::event::ParamId;
-use daw_devices::{ParamKind, ParamSpec, Taper};
-use daw_model::{AutomationTarget, Device, DeviceSource, LaneId, Project, Track};
+use daw_model::{AutomationTarget, LaneId, Project, Track};
 
+use crate::device_panel::BuiltinParams;
 use crate::state::AppState;
 
 /// What a lane automates, as the header words it.
@@ -52,61 +49,6 @@ pub struct TargetName {
     pub detail: String,
     /// The parameter's name (device parameters only).
     pub param: String,
-}
-
-/// Parameter ranges of the built-in devices, looked up once per kind.
-#[derive(Default)]
-pub struct BuiltinParams {
-    specs: Mutex<HashMap<String, &'static [ParamSpec]>>,
-}
-
-impl BuiltinParams {
-    fn specs(&self, device: &Device) -> &'static [ParamSpec] {
-        let DeviceSource::Builtin { kind } = &device.source else {
-            // Plugins describe their parameters once they are loaded.
-            return &[];
-        };
-        let mut cache = self.specs.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&specs) = cache.get(kind) {
-            return specs;
-        }
-        let specs = daw_devices::param_specs(kind).unwrap_or(&[]);
-        cache.insert(kind.clone(), specs);
-        specs
-    }
-
-    fn spec(&self, device: &Device, param: ParamId) -> Option<ParamSpec> {
-        self.specs(device).iter().find(|p| p.id == param).copied()
-    }
-
-    /// The name of a parameter, for headers.
-    pub fn name(&self, device: &Device, param: ParamId) -> Option<&'static str> {
-        self.spec(device, param).map(|s| s.name)
-    }
-}
-
-impl ParamCatalog for BuiltinParams {
-    fn automatable(&self, device: &Device) -> Vec<ParamId> {
-        self.specs(device)
-            .iter()
-            .filter(|p| p.automatable)
-            .map(|p| p.id)
-            .collect()
-    }
-
-    fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
-        let s = self.spec(device, param)?;
-        Some(LaneScale::Range {
-            min: s.min,
-            max: s.max,
-            log: s.taper == Taper::Log && s.min > 0.0,
-            steps: !matches!(s.kind, ParamKind::Continuous),
-        })
-    }
-
-    fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
-        self.spec(device, param).map(|s| s.default)
-    }
 }
 
 /// Names `target` on `track`.
@@ -277,8 +219,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daw_arrange::{LaneScale, ParamCatalog};
     use daw_model::commands::AddDevice;
-    use daw_model::{Document, TrackKind};
+    use daw_model::{Device, DeviceSource, Document, TrackKind};
 
     fn eq_device() -> Device {
         Device::new(
@@ -291,7 +234,7 @@ mod tests {
 
     #[test]
     fn builtin_params_have_ranges_and_names() {
-        let p = BuiltinParams::default();
+        let p = BuiltinParams;
         let d = eq_device();
         let ids = p.automatable(&d);
         assert!(!ids.is_empty());
@@ -303,6 +246,13 @@ mod tests {
             }
             assert!(p.name(&d, id).is_some());
             assert!(p.default_value(&d, id).is_some());
+            // A lane's height is the device panel's slider position.
+            let desc = p.param(&d, id).expect("described");
+            for n in [0.0, 0.25, 0.5, 1.0] {
+                let v = desc.from_normalized(n);
+                assert_eq!(s.from_norm(n), v);
+                assert!((s.to_norm(v) - desc.to_normalized(v)).abs() < 1e-12);
+            }
         }
         let unknown = Device::new(
             "?",
@@ -327,14 +277,11 @@ mod tests {
             device: d,
         })
         .unwrap();
-        let p = BuiltinParams::default();
+        let p = BuiltinParams;
         let track = doc.project().track(id).unwrap().clone();
         let targets = daw_arrange::automation::lane_targets(
             &track,
-            Some(
-                &(std::sync::Arc::new(BuiltinParams::default())
-                    as std::sync::Arc<dyn ParamCatalog>),
-            ),
+            Some(&(std::sync::Arc::new(BuiltinParams) as std::sync::Arc<dyn ParamCatalog>)),
         );
         let last = *targets.last().unwrap();
         let n = target_name(doc.project(), &p, &track, last);

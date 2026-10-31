@@ -4,12 +4,15 @@
 //! What a device's parameters are comes from a [`ParamSource`]. Built-in
 //! devices describe theirs with [`BuiltinParams`]; plugins add a source of
 //! their own (their parameters are known once the plugin is loaded), and
-//! the panel shows them the same way.
+//! the panel shows them the same way. [`BuiltinParams`] is also the
+//! automation lanes' [`ParamCatalog`], so a parameter has one range, taper
+//! and unit wherever it shows.
 //!
 //! A parameter drag is one undo step: [`DevicePanel::set_value`] runs
 //! [`SetParam`], which merges with the previous edit of the same parameter
 //! until [`DevicePanel::end_gesture`] seals the history.
 
+use daw_arrange::{LaneScale, ParamCatalog};
 use daw_core::event::ParamId;
 use daw_devices::{ParamKind, ParamSpec, ParamUnit, Taper};
 use daw_model::commands::{DeviceField, MoveDevice, SetDevice, SetParam};
@@ -103,18 +106,19 @@ impl ParamDesc {
         if self.is_discrete() { v.round() } else { v }
     }
 
+    /// How values map to a slider or an automation lane's height.
+    pub fn scale(&self) -> LaneScale {
+        LaneScale::Range {
+            min: self.min,
+            max: self.max,
+            log: matches!(self.control, ParamControl::Continuous { log: true }),
+            steps: self.is_discrete(),
+        }
+    }
+
     /// A plain value as a slider position from 0 to 1.
     pub fn to_normalized(&self, value: f64) -> f64 {
-        let v = self.sanitize(value);
-        if self.max <= self.min {
-            return 0.0;
-        }
-        match self.control {
-            ParamControl::Continuous { log: true } => {
-                (v / self.min).ln() / (self.max / self.min).ln()
-            }
-            _ => (v - self.min) / (self.max - self.min),
-        }
+        self.scale().to_norm(self.sanitize(value))
     }
 
     /// How far a recorded take of the parameter may stray from the hand:
@@ -133,16 +137,37 @@ impl ParamDesc {
 
     /// A slider position from 0 to 1 as a plain value.
     pub fn from_normalized(&self, position: f64) -> f64 {
-        let n = if position.is_nan() {
+        if position.is_nan() {
             return self.default;
-        } else {
-            position.clamp(0.0, 1.0)
-        };
-        let v = match self.control {
-            ParamControl::Continuous { log: true } => self.min * (self.max / self.min).powf(n),
-            _ => self.min + n * (self.max - self.min),
-        };
-        self.sanitize(v)
+        }
+        self.sanitize(self.scale().from_norm(position))
+    }
+
+    /// How QML names the unit; it words the value with it.
+    pub fn unit_name(&self) -> &'static str {
+        match self.unit {
+            ParamUnit::None => "",
+            ParamUnit::Decibels => "dB",
+            ParamUnit::Hertz => "Hz",
+            ParamUnit::Milliseconds => "ms",
+            ParamUnit::Percent => "percent",
+            ParamUnit::Semitones => "semitones",
+            ParamUnit::Cents => "cents",
+            ParamUnit::Octaves => "octaves",
+            ParamUnit::Ratio => "ratio",
+            ParamUnit::Pan => "pan",
+        }
+    }
+
+    /// How QML names the kind of control: "continuous", "integer",
+    /// "toggle" or "choice".
+    pub fn control_name(&self) -> &'static str {
+        match self.control {
+            ParamControl::Continuous { .. } => "continuous",
+            ParamControl::Integer => "integer",
+            ParamControl::Toggle => "toggle",
+            ParamControl::Choice(_) => "choice",
+        }
     }
 }
 
@@ -161,7 +186,50 @@ pub trait ParamSource {
 }
 
 /// The built-in devices of `daw-devices`.
+#[derive(Debug, Default)]
 pub struct BuiltinParams;
+
+impl BuiltinParams {
+    fn specs(device: &Device) -> &'static [ParamSpec] {
+        match &device.source {
+            DeviceSource::Builtin { kind } => daw_devices::param_specs(kind).unwrap_or(&[]),
+            // Plugins describe their parameters once they are loaded.
+            _ => &[],
+        }
+    }
+
+    fn spec(device: &Device, param: ParamId) -> Option<&'static ParamSpec> {
+        Self::specs(device).iter().find(|s| s.id == param)
+    }
+
+    /// One parameter of a built-in device.
+    pub fn param(&self, device: &Device, param: ParamId) -> Option<ParamDesc> {
+        Self::spec(device, param).map(ParamDesc::from_spec)
+    }
+
+    /// The name of a parameter, for headers.
+    pub fn name(&self, device: &Device, param: ParamId) -> Option<&'static str> {
+        Self::spec(device, param).map(|s| s.name)
+    }
+}
+
+impl ParamCatalog for BuiltinParams {
+    fn automatable(&self, device: &Device) -> Vec<ParamId> {
+        Self::specs(device)
+            .iter()
+            .filter(|s| s.automatable)
+            .map(|s| s.id)
+            .collect()
+    }
+
+    fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
+        self.param(device, param).map(|p| p.scale())
+    }
+
+    fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
+        Self::spec(device, param).map(|s| s.default)
+    }
+}
 
 impl ParamSource for BuiltinParams {
     fn describe(&self, device: &Device) -> Option<Vec<ParamDesc>> {

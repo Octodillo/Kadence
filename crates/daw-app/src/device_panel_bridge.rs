@@ -13,7 +13,6 @@ use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
     QVector,
 };
-use daw_devices::ParamUnit;
 
 use crate::device_panel::{AppDevicePanel, DeviceView, ParamControl, ParamView};
 
@@ -153,7 +152,7 @@ const ROLES: &[&str] = &[
     "maximum",
     // "continuous", "integer", "toggle" or "choice".
     "control",
-    // See `unit_name`.
+    // See `ParamDesc::unit_name`.
     "unit",
     "choices",
     "isDefault",
@@ -183,31 +182,6 @@ pub struct DevicePanelRust {
     revision: u64,
     view: Option<DeviceView>,
     panel: AppDevicePanel,
-}
-
-/// How QML names a unit; it words the value with it.
-fn unit_name(unit: ParamUnit) -> &'static str {
-    match unit {
-        ParamUnit::None => "",
-        ParamUnit::Decibels => "dB",
-        ParamUnit::Hertz => "Hz",
-        ParamUnit::Milliseconds => "ms",
-        ParamUnit::Percent => "percent",
-        ParamUnit::Semitones => "semitones",
-        ParamUnit::Cents => "cents",
-        ParamUnit::Octaves => "octaves",
-        ParamUnit::Ratio => "ratio",
-        ParamUnit::Pan => "pan",
-    }
-}
-
-fn control_name(control: &ParamControl) -> &'static str {
-    match control {
-        ParamControl::Continuous { .. } => "continuous",
-        ParamControl::Integer => "integer",
-        ParamControl::Toggle => "toggle",
-        ParamControl::Choice(_) => "choice",
-    }
 }
 
 impl qobject::DevicePanel {
@@ -394,8 +368,8 @@ impl qobject::DevicePanel {
             Some("defaultValue") => QVariant::from(&d.default),
             Some("minimum") => QVariant::from(&d.min),
             Some("maximum") => QVariant::from(&d.max),
-            Some("control") => QVariant::from(&QString::from(control_name(&d.control))),
-            Some("unit") => QVariant::from(&QString::from(unit_name(d.unit))),
+            Some("control") => QVariant::from(&QString::from(d.control_name())),
+            Some("unit") => QVariant::from(&QString::from(d.unit_name())),
             Some("choices") => {
                 let mut list = QStringList::default();
                 if let ParamControl::Choice(labels) = &d.control {
