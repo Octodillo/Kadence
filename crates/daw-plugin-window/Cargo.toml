@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+daw-core.workspace = true
 x11rb = "0.13"
 
 [lints]

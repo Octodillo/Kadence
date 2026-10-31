@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use daw_core::meter::PeakMeter;
+use daw_core::plugin::PluginError;
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 use daw_engine::{
     AutomationLane, Curve, EngineConfig, EngineController, EngineError, EngineProcessor, LoopRange,
@@ -136,6 +137,10 @@ pub enum Warning {
     /// the format's own message.
     #[error("the editor of {device} would not open ({detail})")]
     PluginEditorFailed { device: String, detail: String },
+    /// A plugin's own editor would not open because no X11 display can be
+    /// reached: plugin editors are X11 windows (XWayland under Wayland).
+    #[error("the editor of {device} needs an X11 display, and none is reachable")]
+    NoPluginDisplay { device: String },
     /// An audio file could not be streamed; its clips are silent.
     #[error("can't stream {}: {detail}", path.display())]
     CannotStream { path: PathBuf, detail: String },
@@ -152,6 +157,19 @@ pub enum Warning {
     /// so it is left out. Edits never allow this; a damaged project could.
     #[error("routing from track {track} would loop; it is left out")]
     RoutingLoop { track: String },
+}
+
+impl Warning {
+    /// Why `device`'s editor would not open, from the plugin's error.
+    pub fn editor_failed(device: String, e: &PluginError) -> Self {
+        match e {
+            PluginError::NoDisplay(_) => Self::NoPluginDisplay { device },
+            e => Self::PluginEditorFailed {
+                device,
+                detail: e.to_string(),
+            },
+        }
+    }
 }
 
 /// What the running graph was built from, and what was last sent to it.
@@ -676,10 +694,11 @@ impl Session {
     }
 
     /// Opens a device's plugin editor in its own window, titled `title`. An editor that is
-    /// open already stays as it is. The error is the plugin's or the format's own, in English.
-    pub fn open_plugin_editor(&mut self, device: DeviceId, title: &str) -> Result<(), String> {
+    /// open already stays as it is. The error is the plugin's or the format's own;
+    /// [`Warning::editor_failed`] words it for the user.
+    pub fn open_plugin_editor(&mut self, device: DeviceId, title: &str) -> Result<(), PluginError> {
         let Some(l) = self.plugins.live_mut(device).filter(|l| !l.crashed) else {
-            return Err("the plugin is not running".into());
+            return Err(PluginError::Editor("the plugin is not running".into()));
         };
         // Every format leaves an open editor as it is. Asked even when it reads as open: a
         // sandboxed editor the user just closed reads as open until the next tick.
@@ -687,14 +706,10 @@ impl Session {
             p.set_editor_title(title);
             p.open_editor()
         });
-        match opened {
-            Ok(()) => {
-                l.editor_open = true;
-                l.editor_title = Some(title.to_owned());
-                Ok(())
-            }
-            Err(e) => Err(e.to_string()),
-        }
+        opened?;
+        l.editor_open = true;
+        l.editor_title = Some(title.to_owned());
+        Ok(())
     }
 
     /// Closes a device's plugin editor.
