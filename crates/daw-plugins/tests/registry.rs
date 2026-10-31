@@ -141,7 +141,11 @@ fn registry_scans_caches_and_instantiates() {
 
     let mut cache = ScanCache::load(&cache_file);
     assert!(cache.is_empty());
-    let report = registry.scan(&scanner(), &mut cache);
+    let seen = std::sync::Mutex::new(Vec::new());
+    let report = registry.scan_with_progress(&scanner(), &mut cache, &|done, total| {
+        seen.lock().unwrap().push((done, total));
+    });
+    assert_eq!(seen.into_inner().unwrap(), [(0, 1), (1, 1)]);
     assert_eq!((report.scanned, report.cached), (1, 0));
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(registry.plugins().len(), 1);
@@ -150,7 +154,15 @@ fn registry_scans_caches_and_instantiates() {
     // A second scan, from the saved cache, loads nothing: the scanner would fail if it ran.
     let mut cache = ScanCache::load(&cache_file);
     assert_eq!(cache.len(), 1);
-    let report = registry.scan(&sh("exit 1"), &mut cache);
+    let seen = std::sync::Mutex::new(Vec::new());
+    let report = registry.scan_with_progress(&sh("exit 1"), &mut cache, &|done, total| {
+        seen.lock().unwrap().push((done, total));
+    });
+    assert_eq!(
+        seen.into_inner().unwrap(),
+        [(1, 1)],
+        "cached bundles count as done"
+    );
     assert_eq!((report.scanned, report.cached), (0, 1));
     assert_eq!(registry.plugins().len(), 1);
 

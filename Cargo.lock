@@ -489,6 +489,7 @@ dependencies = [
 name = "daw-app"
 version = "0.1.0"
 dependencies = [
+ "assert_no_alloc",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",
@@ -504,7 +505,9 @@ dependencies = [
  "daw-plugin-host",
  "daw-plugins",
  "daw-session",
+ "libc",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
