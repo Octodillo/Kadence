@@ -174,6 +174,7 @@ Column {
                 instrument: header.instrument
                 currentChoice: { header.revision; return Project.trackInstrumentChoice(header.index); }
                 onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
+                onSettingsRequested: DevicePanel.open(Project.trackInstrumentDevice(header.index))
             }
 
             QQC2.ToolButton {

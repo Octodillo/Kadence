@@ -15,6 +15,10 @@ Item {
     property int step: 0
     property Item settingsPage
     property int failures: 0
+    // Made by TestHelper.makeFilesTest().
+    property string filesDir
+    property var browser
+    property var picked: null
     // Times steps have asked to be run again.
     property int waits: 0
     // What the export dialog reported last, and where it exported to.
@@ -153,6 +157,41 @@ Item {
             check(!Automation.expanded(0), "lanes hidden");
         },
         () => {
+            // Tempo and time signature: edits in a row are one undo step.
+            check(Project.bpm === 120 && Project.meterNumerator === 4 && Project.meterDenominator === 4,
+                  "demo starts at 120 bpm in 4/4");
+            Project.setTempo(96);
+            Project.setTempo(98.5);
+            check(Project.bpm === 98.5, "tempo set");
+            check(Project.undoText === "Change Tempo" && Project.undoText in editNames.names, "tempo edit undoes");
+            Project.setTimeSignature(6, 7);
+            check(Project.meterNumerator === 6 && Project.meterDenominator === 4, "time signature set, rounded");
+            check(Project.undoText === "Change Time Signature" && Project.undoText in editNames.names,
+                  "time signature edit undoes");
+            Project.undo();
+            check(Project.meterNumerator === 4 && Project.bpm === 98.5, "undo the time signature");
+            Project.undo();
+            check(Project.bpm === 120, "undo the tempo drag in one step");
+            Project.redo();
+            check(Project.bpm === 98.5, "redo");
+            Project.setTimeSignature(3, 4);
+            // The metronome, with its settings open, for a screenshot.
+            Project.setMetronomeEnabled(true);
+            Project.setCountIn(1);
+            check(Project.metronome && Project.countInBars === 1, "metronome settings");
+            const arrange = window.pageStack.currentItem;
+            arrange.transportBar.openClickSettings();
+        },
+        () => {
+            shoot(window.title, "arrange-metronome");
+            window.pageStack.currentItem.transportBar.closeClickSettings();
+            Project.setMetronomeEnabled(false);
+            Project.setCountIn(0);
+            Project.undo();
+            Project.undo();
+            check(Project.bpm === 120 && Project.meterNumerator === 4, "back to the demo's tempo");
+        },
+        () => {
             const dialog = window.openExport();
             check(dialog.opened || dialog.visible, "open the export dialog");
             check(Exporter.songBars === 12, "demo is twelve bars long");
@@ -215,6 +254,86 @@ Item {
             check(!Mixer.writeAutomation, "writing off");
         },
         () => {
+            // Click the compressor added above: its panel opens.
+            const id = Mixer.insertDevice(0, 0);
+            check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
+            check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
+            check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            // Drag the threshold: one undo step.
+            DevicePanel.setValue(0, -30, true);
+            DevicePanel.setValue(0, -24, true);
+            DevicePanel.endGesture();
+            // Project's properties follow the document on its tick.
+            Project.tick();
+            check(Project.undoText === "Change Parameter", "parameter edit undoes");
+            Project.undo();
+            check(Project.undoText === "Add Automation Lane", "a drag is one undo step");
+            Project.redo();
+            DevicePanel.setDeviceEnabled(false);
+            Project.tick();
+            check(!DevicePanel.switchedOn && Project.undoText === "Bypass Device", "bypass");
+            DevicePanel.setDeviceEnabled(true);
+            check(DevicePanel.switchedOn, "switch back on");
+        },
+        () => {
+            shoot(window.title, "mix-device");
+        },
+        () => {
+            // The demo's Keys track plays the synth: its panel opens too.
+            const keys = 2;
+            check(DevicePanel.open(Mixer.instrumentDevice(keys)), "open the instrument's panel");
+            check(DevicePanel.deviceKind === "daw.synth" && DevicePanel.instrument, "panel shows the synth");
+            DevicePanel.close();
+            check(!DevicePanel.active, "panel closed");
+        },
+        () => {
+            // The plugin browser, as Add Effect opens it.
+            test.browser = window.browsePlugins(2, (format, pluginId, name) => {
+                test.picked = [format, pluginId, name];
+                check(Mixer.addPluginInsert(0, format, pluginId, name), "insert the chosen plugin");
+            });
+            check(test.browser.visible, "plugin browser opens");
+            check(Plugins.scanning || Plugins.hasScanned, "plugin scan started");
+        },
+        () => {
+            // Give the background scan a while (smoke.rs points it at the
+            // test plugin only).
+            if (Plugins.scanning && test.waits < 50) {
+                return false;
+            }
+            // Later steps get their own budget.
+            test.waits = 0;
+            check(Plugins.hasScanned, "plugin scan finished");
+            shoot(window.title, "plugin-browser");
+            if (!window.smokeTest) {
+                return;
+            }
+            // smoke.rs puts the CLAP test plugin in CLAP_PATH; a packaged
+            // smoke test runs with whatever plugins the system has.
+            Plugins.setFilter("test gain", 1, 2);
+            if (Plugins.count === 0) {
+                console.info("smoke test: no test plugin; skipping the plugin checks");
+                return;
+            }
+            console.info("smoke test: checking the test plugin");
+            check(Plugins.count === 1, "search finds it");
+            Plugins.setFilter("test gain", 0, 1);
+            check(Plugins.count === 0, "it is not an instrument");
+            Plugins.setFilter("test gain", 1, 2);
+            test.browser.pick(0);
+            check(test.picked !== null && test.picked[0] === "clap" && test.picked[2] === "DAW Test Gain",
+                  "picking a plugin reports it");
+            check(!test.browser.opened, "the browser closes on a pick");
+        },
+        () => {
+            test.browser.close();
+            if (window.smokeTest && test.picked !== null) {
+                Project.tick();
+                check(Project.undoText === "Add Device", "the plugin was inserted");
+                Project.undo();
+            }
+        },
+        () => {
             window.pageActions[2].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Edit"), "switch to Edit");
             check(TestHelper.openFirstMidiClip(), "open the demo's MIDI clip");
@@ -265,6 +384,80 @@ Item {
             check(refused.context === Project.ExportContext && refused.reason === Project.EmptyRange,
                   "empty range refused");
             window.openExport().close();
+        },
+        () => {
+            // A project with a file outside it and a missing one.
+            filesDir = TestHelper.makeFilesTest();
+            check(filesDir !== "", "make the files test project");
+            const url = "file://" + filesDir + "/Files";
+            const result = Project.openProject(url);
+            check(result.context === undefined, "open the files test project");
+            check(Project.recentProjects.length === 1 && Project.recentProjects[0] === filesDir + "/Files",
+                  "an opened project is recent");
+            check(Project.missingCount === 1 && Project.missingFiles[0] === filesDir + "/moved/snare.wav",
+                  "missing file found");
+            check(Project.missingClipCount(0) === 1, "missing file's clips counted");
+            check(Project.externalCount === 1, "file outside the project found");
+            window.opened(result, url);
+            check(window.relinkDialog.visible, "relink dialog offered");
+        },
+        () => {
+            shoot(window.title, "relink");
+        },
+        () => {
+            check(Project.relink(0, "file://" + filesDir + "/found/snare.wav") === 1, "relink");
+            check(Project.missingCount === 0, "nothing missing after relink");
+            check(!window.relinkDialog.opened, "relink dialog closes when nothing is missing");
+            check(Project.undoText === "Relink Audio" && Project.undoText in editNames.names, "relink undoes");
+            check(Project.externalCount === 2, "both files are outside the project");
+            check(Project.collectFiles() === 2, "collect copies both files");
+            check(Project.externalCount === 0, "nothing outside the project after collect");
+            check(Project.undoText === "Collect Audio Files" && Project.undoText in editNames.names,
+                  "collect undoes");
+            Project.undo();
+            check(Project.externalCount === 2, "undo collect");
+            Project.redo();
+            check(Project.externalCount === 0, "redo collect");
+            // Unsaved changes: replacing the project asks first.
+            check(Project.modified, "collect is an unsaved change");
+            window.fileActions[0].trigger();
+            check(window.unsavedDialog.visible, "New asks about unsaved changes");
+        },
+        () => {
+            shoot(window.title, "unsaved");
+        },
+        () => {
+            window.unsavedDialog.reject();
+            check(Project.trackCount === 1, "cancel keeps the project");
+            window.fileActions[0].trigger();
+            window.unsavedDialog.discarded();
+            check(!window.unsavedDialog.opened, "discard closes the question");
+            check(Project.trackCount === 0 && !Project.modified, "discard makes the new project");
+            check(!TestHelper.fileExists("file://" + filesDir + "/Files/Files.kadence.autosave"),
+                  "discarding removes the autosave");
+        },
+        () => {
+            // The welcome placeholder lists the recent project.
+            shoot(window.title, "welcome");
+            check(TestHelper.offerTestRecovery(), "leave unsaved work behind");
+            Project.tick();
+            check(Project.recoveryCount === 1 && Project.recoveryName(0) === "", "unsaved untitled work offered");
+            window.recoveryDialog.open();
+        },
+        () => {
+            shoot(window.title, "recover");
+        },
+        () => {
+            const result = Project.recoverSession(0);
+            check(result.context === undefined, "recover");
+            check(Project.trackCount === 1 && Project.trackName(0) === "Recovered", "recovered tracks");
+            check(Project.modified && !Project.savedBefore, "recovered work is unsaved");
+            check(Project.recoveryCount === 0 && !window.recoveryDialog.opened, "nothing left to recover");
+            // Open Recent goes through the same question.
+            window.openRecent(0);
+            check(window.unsavedDialog.visible, "Open Recent asks about unsaved changes");
+            window.unsavedDialog.discarded();
+            check(Project.name === "Files" && Project.trackCount === 1, "open recent");
         },
         () => {
             settingsPage = window.openSettings();

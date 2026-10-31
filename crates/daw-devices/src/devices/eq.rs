@@ -32,7 +32,7 @@ pub const LP_ON: ParamId = 12;
 pub const LP_FREQ: ParamId = 13;
 pub const OUTPUT: ParamId = 14;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::toggle(HP_ON, "hp_on", "High-pass", false),
     ParamSpec::new(
         HP_FREQ,

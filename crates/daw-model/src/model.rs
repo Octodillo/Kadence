@@ -365,6 +365,75 @@ impl TempoData {
         }
         Ok(())
     }
+
+    /// Slowest and fastest tempo the UI offers.
+    pub const MIN_BPM: f64 = 20.0;
+    pub const MAX_BPM: f64 = 999.0;
+    /// Largest time signature numerator the UI offers.
+    pub const MAX_NUMERATOR: u8 = 32;
+    /// Largest time signature denominator the UI offers (a 1/32 note).
+    pub const MAX_DENOMINATOR: u8 = 32;
+
+    /// The tempo point in effect at `tick`: the last one at or before it.
+    pub fn tempo_index_at(&self, tick: TickTime) -> usize {
+        self.tempos
+            .iter()
+            .rposition(|p| p.tick <= tick)
+            .unwrap_or(0)
+    }
+
+    /// The time signature point in effect at `tick`.
+    pub fn meter_index_at(&self, tick: TickTime) -> usize {
+        self.meters
+            .iter()
+            .rposition(|m| m.tick <= tick)
+            .unwrap_or(0)
+    }
+
+    /// The tempo of the point in effect at `tick` (where a ramp starts, for
+    /// a ramp).
+    pub fn bpm_at(&self, tick: TickTime) -> f64 {
+        self.tempos
+            .get(self.tempo_index_at(tick))
+            .map_or(120.0, |p| p.bpm)
+    }
+
+    /// The time signature in effect at `tick`, as (numerator, denominator).
+    pub fn meter_at(&self, tick: TickTime) -> (u8, u8) {
+        self.meters
+            .get(self.meter_index_at(tick))
+            .map_or((4, 4), |m| (m.numerator, m.denominator))
+    }
+
+    /// This map with the tempo in effect at `tick` set to `bpm`, clamped to
+    /// [`MIN_BPM`](Self::MIN_BPM)..=[`MAX_BPM`](Self::MAX_BPM). Every
+    /// position stays in ticks, so clips keep their bar and beat.
+    pub fn with_bpm_at(&self, tick: TickTime, bpm: f64) -> Self {
+        let mut out = self.clone();
+        let bpm = if bpm.is_finite() { bpm } else { 120.0 };
+        let i = out.tempo_index_at(tick);
+        if let Some(p) = out.tempos.get_mut(i) {
+            p.bpm = bpm.clamp(Self::MIN_BPM, Self::MAX_BPM);
+        }
+        out
+    }
+
+    /// This map with the time signature in effect at `tick` set to
+    /// `numerator`/`denominator`. The numerator is clamped to
+    /// 1..=[`MAX_NUMERATOR`](Self::MAX_NUMERATOR); the denominator is
+    /// rounded down to a power of two from 1 to
+    /// [`MAX_DENOMINATOR`](Self::MAX_DENOMINATOR).
+    pub fn with_meter_at(&self, tick: TickTime, numerator: u8, denominator: u8) -> Self {
+        let mut out = self.clone();
+        let denominator = denominator.clamp(1, Self::MAX_DENOMINATOR);
+        let denominator = 1 << (7 - denominator.leading_zeros().min(7));
+        let i = out.meter_index_at(tick);
+        if let Some(m) = out.meters.get_mut(i) {
+            m.numerator = numerator.clamp(1, Self::MAX_NUMERATOR);
+            m.denominator = denominator;
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
