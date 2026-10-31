@@ -214,26 +214,30 @@ Rectangle {
         opacity: 0.5
     }
 
-    AddLaneMenu {
+    LazyMenu {
         id: addMenu
-        track: laneHeader.track
-    }
-
-    QQC2.Menu {
-        id: laneMenu
-        AddLaneMenu {
+        menu: AddLaneMenu {
             track: laneHeader.track
         }
-        QQC2.MenuItem {
-            visible: !laneHeader.placeholder
-            text: i18nc("@action:inmenu", "Remove Lane")
-            icon.name: "list-remove"
-            onTriggered: Automation.removeLane(laneHeader.track, laneHeader.lane)
-        }
-        QQC2.MenuItem {
-            text: i18nc("@action:inmenu", "Hide Automation")
-            icon.name: "arrow-down"
-            onTriggered: Automation.setExpanded(laneHeader.track, false)
+    }
+
+    LazyMenu {
+        id: laneMenu
+        menu: QQC2.Menu {
+            AddLaneMenu {
+                track: laneHeader.track
+            }
+            QQC2.MenuItem {
+                visible: !laneHeader.placeholder
+                text: i18nc("@action:inmenu", "Remove Lane")
+                icon.name: "list-remove"
+                onTriggered: Automation.removeLane(laneHeader.track, laneHeader.lane)
+            }
+            QQC2.MenuItem {
+                text: i18nc("@action:inmenu", "Hide Automation")
+                icon.name: "arrow-down"
+                onTriggered: Automation.setExpanded(laneHeader.track, false)
+            }
         }
     }
 

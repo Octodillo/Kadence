@@ -37,50 +37,58 @@ QQC2.ToolButton {
         menu.dismiss();
     }
 
+    // Opens the plugin browser for an instrument. Defined here, not in the
+    // menu: the browser calls back after the menu has closed and unloaded.
+    function browse(): void {
+        applicationWindow().browsePlugins(1, (format, pluginId, name) => {
+            // The browser and this list come from the same scan.
+            Instruments.refresh();
+            const row = Instruments.rowOf(format, pluginId);
+            if (row >= 0)
+                button.chosen(row, Instruments.revision);
+        });
+    }
+
     onClicked: {
         Instruments.refresh();
         menu.popup(button, 0, button.height);
     }
 
-    QQC2.Menu {
+    LazyMenu {
         id: menu
-        QQC2.MenuItem {
-            visible: button.instrument !== ""
-            height: visible ? implicitHeight : 0
-            icon.name: "configure"
-            text: i18nc("@action:inmenu", "Show Instrument Settings")
-            onTriggered: button.settingsRequested()
-        }
-        QQC2.MenuSeparator {
-            visible: button.instrument !== ""
-            height: visible ? implicitHeight : 0
-        }
-        Repeater {
-            model: Instruments
-            delegate: QQC2.MenuItem {
-                required property int index
-                required property string name
-                text: name
-                checkable: true
-                checked: index === button.currentChoice
-                onTriggered: {
-                    // Picking the checked one unchecks it; keep the binding.
-                    checked = Qt.binding(() => index === button.currentChoice);
-                    button.chosen(index, Instruments.revision);
+        menu: QQC2.Menu {
+            QQC2.MenuItem {
+                visible: button.instrument !== ""
+                height: visible ? implicitHeight : 0
+                icon.name: "configure"
+                text: i18nc("@action:inmenu", "Show Instrument Settings")
+                onTriggered: button.settingsRequested()
+            }
+            QQC2.MenuSeparator {
+                visible: button.instrument !== ""
+                height: visible ? implicitHeight : 0
+            }
+            Repeater {
+                model: Instruments
+                delegate: QQC2.MenuItem {
+                    required property int index
+                    required property string name
+                    text: name
+                    checkable: true
+                    checked: index === button.currentChoice
+                    onTriggered: {
+                        // Picking the checked one unchecks it; keep the binding.
+                        checked = Qt.binding(() => index === button.currentChoice);
+                        button.chosen(index, Instruments.revision);
+                    }
                 }
             }
-        }
-        QQC2.MenuSeparator {}
-        QQC2.MenuItem {
-            icon.name: "preferences-plugin"
-            text: i18nc("@action:inmenu", "Browse Plugins…")
-            onTriggered: applicationWindow().browsePlugins(1, (format, pluginId, name) => {
-                // The browser and this list come from the same scan.
-                Instruments.refresh();
-                const row = Instruments.rowOf(format, pluginId);
-                if (row >= 0)
-                    button.chosen(row, Instruments.revision);
-            })
+            QQC2.MenuSeparator {}
+            QQC2.MenuItem {
+                icon.name: "preferences-plugin"
+                text: i18nc("@action:inmenu", "Browse Plugins…")
+                onTriggered: button.browse()
+            }
         }
     }
 }

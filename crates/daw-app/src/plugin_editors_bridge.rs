@@ -26,7 +26,8 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         /// Bumped when an editor opens or closes, from here or by the user
-        /// closing its window; bind to it to keep a button's state fresh.
+        /// closing its window, and when a plugin with an editor starts or
+        /// stops running; bind to it to keep a button's state fresh.
         #[qproperty(i32, revision)]
         type PluginEditors = super::PluginEditorsRust;
 
@@ -64,6 +65,8 @@ pub struct PluginEditorsRust {
     revision: i32,
     /// The open editors at the last refresh.
     open: Vec<daw_model::DeviceId>,
+    /// The plugin devices with an editor at the last refresh.
+    with_editor: Vec<daw_model::DeviceId>,
 }
 
 /// The device whose id reads `id`.
@@ -77,14 +80,19 @@ fn device(s: &state::AppState, id: &QString) -> Option<daw_model::DeviceId> {
         .map(|d| d.id)
 }
 
-/// The plugin devices whose editor is open.
-fn open_editors(s: &state::AppState) -> Vec<daw_model::DeviceId> {
+/// The plugin devices.
+fn plugin_devices(s: &state::AppState) -> impl Iterator<Item = daw_model::DeviceId> + '_ {
     s.doc
         .project()
         .all_tracks()
         .flat_map(|t| t.devices.iter())
         .filter(|d| matches!(d.source, daw_model::DeviceSource::Plugin { .. }))
         .map(|d| d.id)
+}
+
+/// The plugin devices whose editor is open.
+fn open_editors(s: &state::AppState) -> Vec<daw_model::DeviceId> {
+    plugin_devices(s)
         .filter(|&d| s.plugin_editor_open(d))
         .collect()
 }
@@ -123,9 +131,25 @@ impl qobject::PluginEditors {
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
-        let open = state::with(|s| open_editors(s));
-        if open != self.open {
-            self.as_mut().rust_mut().open = open;
+        let closed = |open: &[daw_model::DeviceId]| self.open.iter().any(|d| !open.contains(d));
+        let (open, with_editor) = state::with(|s| {
+            let open = open_editors(s);
+            // The user closed a window: what they set there shows in the
+            // device panel.
+            if closed(&open) {
+                s.plugin_values_epoch += 1;
+            }
+            let with_editor: Vec<_> = plugin_devices(s)
+                .filter(|&d| s.plugin_has_editor(d))
+                .collect();
+            (open, with_editor)
+        });
+        if open != self.open || with_editor != self.with_editor {
+            {
+                let mut this = self.as_mut().rust_mut();
+                this.open = open;
+                this.with_editor = with_editor;
+            }
             let revision = self.revision().wrapping_add(1);
             self.set_revision(revision);
         }
