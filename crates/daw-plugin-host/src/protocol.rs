@@ -39,6 +39,8 @@ pub enum Request {
     LoadState,
     OpenEditor,
     CloseEditor,
+    /// Answered with [`Reply::Ok`].
+    SetEditorTitle(String),
     Shutdown,
 }
 

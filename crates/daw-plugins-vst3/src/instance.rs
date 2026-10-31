@@ -548,6 +548,8 @@ impl Audio {
 pub struct Vst3Instance {
     descriptor: PluginDescriptor,
     editor: Option<Editor>,
+    /// From `set_editor_title`; the plugin's name until then.
+    editor_title: Option<String>,
     /// The same list `process` uses; replaced together with `audio`'s.
     params: Arc<Params>,
     /// Values for ids `params` does not list, from `process` to the controller.
@@ -861,6 +863,7 @@ impl Vst3Instance {
             let mut instance = Vst3Instance {
                 descriptor: d.clone(),
                 editor: None,
+                editor_title: None,
                 params,
                 unknown_rx: Mutex::new(unknown_rx),
                 buses,
@@ -1183,6 +1186,10 @@ impl Vst3Instance {
                 | RestartFlags_::kParamTitlesChanged as i32)
             != 0
         {
+            if flags & (RestartFlags_::kParamValuesChanged as i32) != 0 {
+                // A preset the plugin loaded itself, say.
+                self.handler.mark_state_changed();
+            }
             self.read_params();
             // Gaining the first parameter or losing the last changes the event ports.
             if self.params.list.is_empty() == self.has_params {
@@ -1404,6 +1411,9 @@ impl PluginInstance for Vst3Instance {
             let mut rx = p.unknown_rx.lock().unwrap_or_else(|e| e.into_inner());
             while rx.pop().is_ok() {}
         });
+        // The restarts and edits the load itself caused are not changes of the plugin's own.
+        self.handle_restart();
+        self.handler.take_state_changed();
         Ok(())
     }
 
@@ -1418,14 +1428,35 @@ impl PluginInstance for Vst3Instance {
         if self.editor.is_some() {
             return Ok(());
         }
-        let editor =
-            Editor::open(&self.controller, &self.descriptor.name).map_err(PluginError::Editor)?;
+        let title = self
+            .editor_title
+            .as_deref()
+            .unwrap_or(&self.descriptor.name);
+        let editor = Editor::open(&self.controller, title).map_err(PluginError::Editor)?;
         self.editor = Some(editor);
         Ok(())
     }
 
     fn close_editor(&mut self) {
         self.editor = None;
+    }
+
+    fn is_editor_open(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    fn set_editor_title(&mut self, title: &str) {
+        if self.editor_title.as_deref() == Some(title) {
+            return;
+        }
+        if let Some(editor) = &self.editor {
+            editor.set_title(title);
+        }
+        self.editor_title = Some(title.to_owned());
+    }
+
+    fn take_state_changed(&mut self) -> bool {
+        self.handler.take_state_changed()
     }
 
     fn on_main_thread(&mut self) {
@@ -1696,6 +1727,41 @@ mod tests {
         assert_eq!(gain_heard(&mut q), 0.3);
         // The flushed edit is not applied a second time.
         assert_eq!(gain_heard(&mut p), 0.3);
+    }
+
+    #[test]
+    fn editor_edits_and_dirty_flags_report_a_state_change() {
+        use vst3::Steinberg::Vst::IComponentHandler2Trait;
+        let mut p = instance();
+        assert!(!p.take_state_changed());
+        editor_edit(&p, GAIN, 0.3);
+        assert!(p.take_state_changed());
+        assert!(!p.take_state_changed(), "reported once");
+        unsafe { p.handler.setDirty(1) };
+        assert!(p.take_state_changed());
+        unsafe { p.handler.setDirty(0) };
+        assert!(!p.take_state_changed());
+        // A preset the plugin loaded itself.
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kParamValuesChanged as i32)
+        };
+        main_thread(&mut p);
+        assert!(p.take_state_changed());
+    }
+
+    #[test]
+    fn load_state_is_not_a_change_of_the_plugins_own() {
+        let mut p = instance();
+        let state = p.save_state().unwrap();
+        editor_edit(&p, GAIN, 0.3);
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kParamValuesChanged as i32)
+        };
+        p.load_state(&state).unwrap();
+        main_thread(&mut p);
+        assert!(!p.take_state_changed());
     }
 
     #[test]

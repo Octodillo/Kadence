@@ -65,6 +65,25 @@ pub trait PluginInstance: Node {
     /// Opens the editor as a floating window.
     fn open_editor(&mut self) -> Result<(), PluginError>;
     fn close_editor(&mut self);
+    /// Whether the editor is open. Turns false once the user closes the window, as noticed by
+    /// [`on_main_thread`](Self::on_main_thread). The default never reports one open.
+    fn is_editor_open(&self) -> bool {
+        false
+    }
+    /// The title of the editor's window, from now on: an open window takes it at once, and a
+    /// later [`open_editor`](Self::open_editor) uses it. Until set, the window shows the
+    /// plugin's name. The default ignores it.
+    fn set_editor_title(&mut self, title: &str) {
+        let _ = title;
+    }
+    /// Returns true, once, after the plugin said its state changed on its own (a preset
+    /// loaded or a control moved in its editor), as noticed by
+    /// [`on_main_thread`](Self::on_main_thread). The host can then save the state and record
+    /// it as an edit. [`save_state`](Self::save_state) does not clear it. The default never
+    /// reports a change.
+    fn take_state_changed(&mut self) -> bool {
+        false
+    }
     /// Host idle / main-thread callback pump.
     fn on_main_thread(&mut self) {}
     /// Returns true, once, after the plugin asked for another port layout or latency, as
