@@ -202,6 +202,8 @@ pub struct GeneralSettings {
     pub project_folder: Option<String>,
     /// Minutes between autosaves of a changed project; 0 turns autosave off.
     pub autosave_minutes: u32,
+    /// Whether the piano roll plays the keys and notes pressed in it.
+    pub preview_notes: bool,
 }
 
 impl Default for GeneralSettings {
@@ -209,6 +211,7 @@ impl Default for GeneralSettings {
         Self {
             project_folder: None,
             autosave_minutes: 1,
+            preview_notes: true,
         }
     }
 }
@@ -261,6 +264,7 @@ pub fn load_general_settings(store: &dyn SettingsStore) -> GeneralSettings {
             .and_then(|v| v.parse().ok())
             .filter(|&m| m <= MAX_AUTOSAVE_MINUTES)
             .unwrap_or(defaults.autosave_minutes),
+        preview_notes: read_bool(store, GENERAL, "PreviewNotes", defaults.preview_notes),
     }
 }
 
@@ -275,6 +279,7 @@ pub fn save_general_settings(store: &mut dyn SettingsStore, settings: &GeneralSe
         "AutosaveMinutes",
         &settings.autosave_minutes.to_string(),
     );
+    store.write(GENERAL, "PreviewNotes", &settings.preview_notes.to_string());
     store.sync();
 }
 
@@ -305,6 +310,27 @@ pub fn save_click_settings(store: &mut dyn SettingsStore, click: &ClickSettings)
     );
     store.write(METRONOME, "CountInBars", &click.count_in_bars.to_string());
     store.sync();
+}
+
+const LAYOUT: &str = "Layout";
+
+/// A size the user gave part of the window (a splitter, a column width),
+/// under `key`; `fallback` when none was saved or it isn't a number.
+pub fn load_layout_value(store: &dyn SettingsStore, key: &str, fallback: f64) -> f64 {
+    store
+        .read(LAYOUT, key)
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(fallback)
+}
+
+/// Remembers a size for [`load_layout_value`]; a value that isn't a
+/// number is ignored.
+pub fn save_layout_value(store: &mut dyn SettingsStore, key: &str, value: f64) {
+    if value.is_finite() {
+        store.write(LAYOUT, key, &value.to_string());
+        store.sync();
+    }
 }
 
 const RECENT: &str = "RecentProjects";
@@ -400,6 +426,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn layout_values_fall_back_when_missing_or_broken() {
+        let mut store = MemoryStore::default();
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 7.0);
+        save_layout_value(&mut store, "MixerStripWidth", 9.5);
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 9.5);
+        save_layout_value(&mut store, "MixerStripWidth", f64::NAN);
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 9.5);
+        store.write(LAYOUT, "MixerStripWidth", "wide");
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 7.0);
+        store.write(LAYOUT, "MixerStripWidth", "inf");
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 7.0);
+    }
+
+    #[test]
     fn empty_store_gives_defaults() {
         assert_eq!(
             load_audio_config(&MemoryStore::default()),
@@ -481,6 +521,7 @@ mod tests {
         let s = GeneralSettings {
             project_folder: Some("/home/me/Music/Projects".into()),
             autosave_minutes: 0,
+            preview_notes: false,
         };
         save_general_settings(&mut store, &s);
         assert_eq!(load_general_settings(&store), s);

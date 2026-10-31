@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use daw_arrange::{Arrange, Env};
 use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
-use daw_model::{Document, FormatError, Project};
+use daw_midi::player::Preview;
+use daw_model::{Document, FormatError, Project, TrackId};
 use daw_pianoroll::PianoRoll;
 use daw_plugins::Scanner;
 use daw_session::catalog::PluginCatalog;
@@ -76,6 +77,10 @@ pub struct AppState {
     pub midi: MidiSettings,
     /// How often a changed project is autosaved; `None` turns it off.
     pub autosave_every: Option<Duration>,
+    /// Whether the piano roll plays the notes and keys pressed in it.
+    pub preview_notes: bool,
+    /// The note the piano roll is sounding, and on which track's player.
+    auditioning: Option<(TrackId, Preview)>,
     /// When the last autosave was tried.
     last_autosave: Option<Instant>,
     /// The MIDI inputs last asked of the engine.
@@ -175,6 +180,8 @@ impl AppState {
             master_name: "Master".into(),
             midi: MidiSettings::default(),
             autosave_every: Some(Duration::from_secs(60)),
+            preview_notes: true,
+            auditioning: None,
             last_autosave: None,
             midi_tried: None,
             click: Default::default(),
@@ -801,6 +808,40 @@ impl AppState {
             loop_range,
         };
         f(&mut self.piano, &mut self.doc, &env)
+    }
+
+    /// Plays the note the piano roll is auditioning, if any, through the
+    /// open clip's track (its MIDI player, so the track's instrument and
+    /// effects), ending the one played before. Call after piano roll input.
+    pub fn sync_audition(&mut self) {
+        let project = self.doc.project();
+        let want = self
+            .piano
+            .audition()
+            .filter(|_| self.preview_notes)
+            .and_then(|a| {
+                let (track, _) = project.clip_location(self.piano.clip?)?;
+                Some((track, a))
+            });
+        if want == self.auditioning {
+            return;
+        }
+        let Some(session) = self.engine.session_mut() else {
+            self.auditioning = None;
+            return;
+        };
+        if let Some((track, _)) = self.auditioning
+            && want.is_none_or(|(t, _)| t != track)
+            && let Some(player) = session.midi_player(track)
+        {
+            player.preview(None);
+        }
+        if let Some((track, note)) = want
+            && let Some(player) = session.midi_player(track)
+        {
+            player.preview(Some(note));
+        }
+        self.auditioning = want;
     }
 
     /// Applies what an arrange view gesture asked for.

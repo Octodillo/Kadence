@@ -62,19 +62,42 @@ QQC2.ToolBar {
             spacing: Kirigami.Units.smallSpacing
             height: tempoField.implicitHeight
 
+            // Wide enough for bar 999 and an hour, so the rest of the bar
+            // stays put while the numbers grow (all digits are as wide as
+            // each other with tnum).
             QQC2.Label {
-                Layout.minimumWidth: Kirigami.Units.gridUnit * 4
-                text: Project.countingIn ? i18nc("@info:status the metronome counts in before recording", "Count-in")
-                                         : Project.positionText
+                id: positionLabel
+                readonly property string countInText: i18nc("@info:status the metronome counts in before recording", "Count-in")
+                Layout.minimumWidth: Math.ceil(Math.max(positionMetrics.advanceWidth, countInMetrics.advanceWidth))
+                text: Project.countingIn ? countInText : Project.positionText
                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.4
                 font.features: { "tnum": 1 }
                 Accessible.name: i18nc("@info:accessible", "Playhead position in bars and beats")
+
+                TextMetrics {
+                    id: positionMetrics
+                    font: positionLabel.font
+                    text: "000.00"
+                }
+                TextMetrics {
+                    id: countInMetrics
+                    font: positionLabel.font
+                    text: positionLabel.countInText
+                }
             }
             QQC2.Label {
+                id: timeLabel
+                Layout.minimumWidth: Math.ceil(timeMetrics.advanceWidth)
                 text: Project.timeText
                 font.features: { "tnum": 1 }
                 opacity: 0.7
                 Accessible.name: i18nc("@info:accessible", "Playhead position in minutes and seconds")
+
+                TextMetrics {
+                    id: timeMetrics
+                    font: timeLabel.font
+                    text: "00:00.0"
+                }
             }
         }
 

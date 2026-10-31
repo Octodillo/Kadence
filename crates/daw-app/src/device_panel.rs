@@ -23,7 +23,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use daw_model::{AutomationTarget, Device, DeviceId, DeviceSource, Document, Project, TrackKind};
+use daw_session::PluginStatus;
 
+use crate::double_click::Clicks;
 use crate::message::Message;
 use crate::mixer::Control;
 
@@ -315,11 +317,8 @@ pub struct DevicePanel {
     /// started, and the document revision after its last edit. A reset
     /// right after it (the first click of a double-click moves a slider)
     /// takes it back first.
-    click: Cell<Option<(ParamId, Instant, u64)>>,
+    click: Cell<Option<Clicks<ParamId>>>,
 }
-
-/// How soon after a click a reset counts as the same double-click.
-const DOUBLE_CLICK: Duration = Duration::from_millis(600);
 
 impl Default for DevicePanel {
     fn default() -> Self {
@@ -424,19 +423,20 @@ impl DevicePanel {
         if value == p.value {
             return Ok(());
         }
-        let step = doc.history().position();
+        let (before, undo_len) = (doc.revision(), doc.history().undo_len());
         doc.execute(SetParam {
             device,
             param,
             value: Some(value),
         })
         .map_err(Message::from)?;
-        let started = match self.click.get() {
-            _ if doc.history().position() != step => Instant::now(),
-            Some((p, t, _)) if p == param => t,
-            _ => return Ok(()),
-        };
-        self.click.set(Some((param, started, doc.revision())));
+        self.click.set(Clicks::after_edit(
+            self.click.get(),
+            param,
+            before,
+            undo_len,
+            doc,
+        ));
         Ok(())
     }
 
@@ -464,13 +464,7 @@ impl DevicePanel {
         let Some(device) = self.device else {
             return Ok(());
         };
-        if let Some((p, started, revision)) = self.click.take()
-            && p == param
-            && revision == doc.revision()
-            && started.elapsed() < DOUBLE_CLICK
-        {
-            doc.undo().map_err(Message::from)?;
-        }
+        Clicks::take_back(self.click.take(), param, doc).map_err(Message::from)?;
         let Some(d) = doc
             .project()
             .device_location(device)
@@ -746,6 +740,31 @@ impl AppDevicePanel {
         }
     }
 
+    /// How the open device's plugin is doing, `None` for a built-in device
+    /// (or no device open).
+    pub fn plugin_status(&self) -> Option<PluginStatus> {
+        let device = self.inner.device()?;
+        crate::state::with(|s| s.engine.session()?.plugin_status(device))
+    }
+
+    /// Restarts the open device's crashed plugin with its state; it plays
+    /// again after the next tick. Returns false if it has no sandbox.
+    pub fn reload_plugin(&self) -> bool {
+        let Some(device) = self.inner.device() else {
+            return false;
+        };
+        let reloading = crate::state::with(|s| {
+            s.engine
+                .session_mut()
+                .is_some_and(|session| session.reload_plugin(device))
+        });
+        if reloading {
+            // Its values are read again once it is back.
+            self.plugins.clear();
+        }
+        reloading
+    }
+
     /// Changes whenever the view may have changed from elsewhere.
     pub fn revision(&self) -> u64 {
         self.update_plugins();
@@ -1007,8 +1026,12 @@ mod tests {
         let (mut doc, panel, _, _) = rig(TrackKind::Audio);
         panel.set_value(&mut doc, eq::OUTPUT, -6.0).unwrap();
         panel.end_gesture(&mut doc);
-        // The first click of the double-click jumped the slider.
+        // Long before the double-click.
+        panel.click.set(None);
+        // Both clicks of the double-click moved the slider.
         panel.set_value(&mut doc, eq::OUTPUT, -3.0).unwrap();
+        panel.end_gesture(&mut doc);
+        panel.set_value(&mut doc, eq::OUTPUT, -2.0).unwrap();
         panel.end_gesture(&mut doc);
         panel.reset(&mut doc, eq::OUTPUT).unwrap();
         assert_eq!(value(&doc, &panel, eq::OUTPUT), 0.0);

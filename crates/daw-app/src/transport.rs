@@ -83,6 +83,17 @@ impl AppState {
         }
     }
 
+    /// Stops the transport and cuts off everything still sounding:
+    /// effect tails, held voices, plugins. A plain stop lets them ring out.
+    pub fn silence(&mut self) {
+        self.engine.stop();
+        if let Some(session) = self.engine.session_mut()
+            && let Err(e) = session.silence()
+        {
+            self.report(crate::message::Message::Playback(e));
+        }
+    }
+
     /// Whether the transport is counting in before recording.
     pub fn is_counting_in(&self) -> bool {
         self.engine

@@ -12,6 +12,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector,
 };
+use daw_session::PluginStatus;
 
 use crate::device_panel::{AppDevicePanel, DeviceView, ParamView};
 use crate::qt_lists::string_list;
@@ -64,6 +65,13 @@ pub mod qobject {
         #[qproperty(i32, chain_length, READ, NOTIFY)]
         /// How many parameters (rows) the device shows.
         #[qproperty(i32, param_count, READ, NOTIFY)]
+        /// How the device's plugin is doing: "running", "crashed",
+        /// "missing", "failed" or "unavailable" (no plugin host), and empty
+        /// for a built-in device.
+        #[qproperty(QString, plugin_status, READ, NOTIFY)]
+        /// Why a "failed" plugin would not load, in the plugin's or format's
+        /// own words (English).
+        #[qproperty(QString, plugin_error, READ, NOTIFY)]
         type DevicePanel = super::DevicePanelRust;
 
         /// Opens the device with this id. Returns false if there is none.
@@ -99,6 +107,10 @@ pub mod qobject {
         /// Picks up edits made elsewhere (undo, the mixer).
         #[qinvokable]
         fn refresh(self: Pin<&mut DevicePanel>);
+
+        /// Restarts the device's crashed plugin, with its state.
+        #[qinvokable]
+        fn reload_plugin(self: Pin<&mut DevicePanel>);
     }
 
     unsafe extern "RustQt" {
@@ -178,6 +190,8 @@ pub struct DevicePanelRust {
     chain_index: i32,
     chain_length: i32,
     param_count: i32,
+    plugin_status: QString,
+    plugin_error: QString,
     /// The panel's revision when `view` was read.
     revision: u64,
     view: Option<DeviceView>,
@@ -261,6 +275,36 @@ impl qobject::DevicePanel {
     fn refresh(self: Pin<&mut Self>) {
         if self.panel.revision() != self.revision {
             self.reload();
+        } else {
+            // A crash or a reload changes no revision.
+            self.update_plugin_status();
+        }
+    }
+
+    fn reload_plugin(mut self: Pin<&mut Self>) {
+        if self.panel.reload_plugin() {
+            self.as_mut().update_plugin_status();
+        }
+    }
+
+    fn update_plugin_status(mut self: Pin<&mut Self>) {
+        let plugin = self.panel.plugin_status();
+        let (status, error) = match &plugin {
+            None => ("", ""),
+            Some(PluginStatus::Running) => ("running", ""),
+            Some(PluginStatus::Crashed) => ("crashed", ""),
+            Some(PluginStatus::Missing) => ("missing", ""),
+            Some(PluginStatus::Failed(e)) => ("failed", e.as_str()),
+            Some(PluginStatus::NoLoader) => ("unavailable", ""),
+        };
+        let (status, error) = (QString::from(status), QString::from(error));
+        if self.plugin_error != error {
+            self.as_mut().rust_mut().plugin_error = error;
+            self.as_mut().plugin_error_changed();
+        }
+        if self.plugin_status != status {
+            self.as_mut().rust_mut().plugin_status = status;
+            self.as_mut().plugin_status_changed();
         }
     }
 
@@ -352,6 +396,7 @@ impl qobject::DevicePanel {
             param_count_changed,
             v.map_or(0, |v| v.params.len() as i32)
         );
+        self.as_mut().update_plugin_status();
         update!(active, active_changed, v.is_some());
     }
 
