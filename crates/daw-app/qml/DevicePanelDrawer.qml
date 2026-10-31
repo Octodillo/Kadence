@@ -241,6 +241,7 @@ Kirigami.OverlayDrawer {
         required property list<string> choices
         required property bool isDefault
         required property bool automated
+        required property bool writable
         readonly property string label: deviceNames.name(name)
 
         readonly property string valueText: drawer.valueText(value, control, unit, choices)
@@ -285,8 +286,9 @@ Kirigami.OverlayDrawer {
             id: slider
             Layout.fillWidth: true
             visible: row.control === "continuous"
-            // The lane overrides an edit here, so don't offer one.
-            enabled: !row.automated
+            // The lane overrides an edit here, so don't offer one, unless
+            // a drag during playback writes the lane.
+            enabled: !row.automated || row.writable
             from: 0
             to: 1
             value: row.position
