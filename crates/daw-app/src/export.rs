@@ -125,7 +125,10 @@ impl AppState {
             format: request.format,
             dither: request.dither,
         };
-        let job = ExportJob::start(self.doc.snapshot(), self.root(), path, settings)
+        // A plugin's live state can be newer than the document's.
+        self.store_plugin_states();
+        let loader = self.engine.export_plugin_loader();
+        let job = ExportJob::start(self.doc.snapshot(), self.root(), loader, path, settings)
             .map_err(|e| Message::Export(ExportProblem::Thread(e)))?;
         self.export = Some(job);
         Ok(())
@@ -280,6 +283,7 @@ mod tests {
         render(
             &snapshot,
             Some(root.clone()),
+            None,
             &settings,
             &Progress::default(),
             |planes| {

@@ -61,7 +61,7 @@ impl ScanCache {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        // Named for this process and call, so two writers (the app's scan and a plugin loader's)
+        // Named for this process and call, so two writers (the app's scan, playback's loader, an export's)
         // never write into the same temporary file.
         static SAVES: AtomicU64 = AtomicU64::new(0);
         let n = SAVES.fetch_add(1, Ordering::Relaxed);
