@@ -38,6 +38,9 @@ pub struct AppState {
     pub audio_recording: Option<crate::recording::AudioRecording>,
     /// Automation lane modes and device parameter names.
     pub lanes: crate::lanes::Lanes,
+    /// The mixer and its touch-write takes (the Mix page's faders and the
+    /// device panel's controls record into it).
+    pub mixer: crate::session_mixer::SessionMixer,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -136,6 +139,7 @@ impl AppState {
             export: None,
             audio_recording: None,
             lanes,
+            mixer: Default::default(),
             synced: None,
             view_revision: 0,
             status: None,
@@ -338,6 +342,20 @@ impl AppState {
     /// Runs the plugins' main-thread work and frees what the audio thread
     /// is done with. Called by the UI's refresh timer, about 60 times a
     /// second.
+    /// Records the touch-write takes in progress at the playhead, and
+    /// ends them when playback stops. Called with [`tick_engine`](Self::tick_engine).
+    pub fn tick_mixer(&mut self) {
+        if !self.mixer.recording() {
+            return;
+        }
+        self.mixer.write_lanes.clone_from(&self.lanes.write);
+        let r = self.mixer.tick(&mut self.doc, self.engine.session_mut());
+        self.sync();
+        if let Err(e) = r {
+            self.report(e);
+        }
+    }
+
     pub fn tick_engine(&mut self) {
         let Some(session) = self.engine.session_mut() else {
             return;

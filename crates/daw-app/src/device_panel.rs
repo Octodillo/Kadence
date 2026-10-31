@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use daw_model::{AutomationTarget, Device, DeviceId, DeviceSource, Document, Project, TrackKind};
 
 use crate::message::Message;
+use crate::mixer::Control;
 
 /// What kind of control a parameter gets.
 #[derive(Clone, Debug, PartialEq)]
@@ -611,6 +612,81 @@ impl AppDevicePanel {
         self.update_plugins();
         let doc = crate::state::with(|s| (s.doc_serial << 40) ^ s.doc.revision());
         doc ^ (self.loads.get() << 56)
+    }
+
+    /// Sets a parameter from a control. During playback, when the
+    /// parameter's lane is in write mode (or the mixer writes automation),
+    /// a drag records into the lane instead of changing the stored value,
+    /// as the mixer's faders do.
+    pub fn set_param(&mut self, param: ParamId, value: f64, dragging: bool) {
+        let Some(device) = self.inner.device() else {
+            return;
+        };
+        crate::state::with(|s| {
+            s.end_drag();
+            let r = self.write_param(s, device, param, value, dragging);
+            s.sync();
+            if let Err(e) = r {
+                s.report(e);
+            }
+        });
+    }
+
+    fn write_param(
+        &self,
+        s: &mut crate::state::AppState,
+        device: DeviceId,
+        param: ParamId,
+        value: f64,
+        dragging: bool,
+    ) -> Result<(), Message> {
+        let Some(track) = s
+            .doc
+            .project()
+            .all_tracks()
+            .find(|t| t.devices.iter().any(|d| d.id == device))
+            .map(|t| t.id)
+        else {
+            return Ok(());
+        };
+        let id = crate::session_mixer::strip_id(track);
+        let control = Control::Param { device, param };
+        s.mixer.write_lanes.clone_from(&s.lanes.write);
+        if dragging && !s.mixer.recording_control(id, control) {
+            s.mixer
+                .touch(&mut s.doc, s.engine.session_mut(), id, control, true)?;
+        }
+        let r = if s.mixer.recording_control(id, control) {
+            s.mixer
+                .set(&mut s.doc, s.engine.session_mut(), id, control, value)
+        } else {
+            self.inner.set_value(&mut s.doc, param, value)
+        };
+        if !dragging {
+            s.mixer
+                .release_device(&mut s.doc, s.engine.session_mut(), device)?;
+            self.inner.end_gesture(&mut s.doc);
+        }
+        r
+    }
+
+    /// The user let go of the open device's controls.
+    pub fn end_gesture(&mut self) {
+        let device = self.inner.device();
+        crate::state::with(|s| {
+            s.end_drag();
+            let r = match device {
+                Some(d) => s
+                    .mixer
+                    .release_device(&mut s.doc, s.engine.session_mut(), d),
+                None => Ok(()),
+            };
+            self.inner.end_gesture(&mut s.doc);
+            s.sync();
+            if let Err(e) = r {
+                s.report(e);
+            }
+        });
     }
 
     /// Runs an edit, plays the change and reports errors on the status

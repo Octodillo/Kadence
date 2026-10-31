@@ -6,8 +6,9 @@
 //! [`Session`]. [`AppMixer`] is the same mixer on the app state, as the Mix
 //! page uses it.
 //!
-//! Touch writing: with [`write automation`](SessionMixer::set_write) on, a
-//! fader, pan or send grabbed during playback is recorded with an
+//! Touch writing: with [`write automation`](SessionMixer::set_write) on (or
+//! the control's lane in write mode), a fader, pan, send or device
+//! parameter (from the device panel) grabbed during playback is recorded with an
 //! [`AutomationRecorder`] instead of changing the control's static value.
 //! While held, the control's existing lane is left out of playback so the
 //! user hears the hand, not the old curve. On release the take is merged
@@ -23,12 +24,12 @@ use daw_core::time::{SampleTime, TickTime};
 use daw_engine::nodes::Strip;
 use daw_engine::{AutomationRecorder, Curve, NodeKey};
 use daw_model::commands::{
-    AddDevice, AddLane, Batch, LaneField, RemoveDevice, SendField, SetLane, SetSend, SetTrack,
-    TrackField,
+    AddDevice, AddLane, Batch, LaneField, RemoveDevice, SendField, SetLane, SetParam, SetSend,
+    SetTrack, TrackField,
 };
 use daw_model::{
-    AutomationLane, AutomationPoint, AutomationTarget, Command, Device, DeviceSource, Document,
-    LaneId, Project, SendId, Track, TrackId, TrackKind,
+    AutomationLane, AutomationPoint, AutomationTarget, Command, Device, DeviceId, DeviceSource,
+    Document, LaneId, Project, SendId, Track, TrackId, TrackKind,
 };
 use daw_session::{Session, db_to_gain, effective_mutes};
 
@@ -47,10 +48,12 @@ fn tolerance(control: Control) -> f64 {
     match control {
         Control::Pan => 0.005,
         Control::Volume | Control::Send(_) => 0.2,
+        // Plain values of any range: thin only what is flat.
+        Control::Param { .. } => 1e-6,
     }
 }
 
-fn strip_id(track: TrackId) -> StripId {
+pub(crate) fn strip_id(track: TrackId) -> StripId {
     track.0.as_u128()
 }
 
@@ -224,6 +227,7 @@ impl SessionMixer {
         let value = match control {
             Control::Volume | Control::Send(_) => fader_db(value),
             Control::Pan => value.clamp(-1.0, 1.0),
+            Control::Param { .. } => value,
         };
         if let Some(take) = self
             .takes
@@ -253,6 +257,11 @@ impl SessionMixer {
                     field: SendField::LevelDb(value),
                 })
             }
+            Control::Param { device, param } => Box::new(SetParam {
+                device,
+                param,
+                value: Some(value),
+            }),
         };
         doc.execute_boxed(command).map_err(Message::from)?;
         Ok(())
@@ -381,6 +390,40 @@ impl SessionMixer {
                 }
             })
             .collect()
+    }
+
+    /// Lets go of every parameter of `device` that a take records (the
+    /// device panel's controls were released).
+    pub fn release_device(
+        &mut self,
+        doc: &mut Document,
+        mut session: Option<&mut Session>,
+        device: DeviceId,
+    ) -> Result<(), Message> {
+        let held: Vec<(TrackId, Control)> = self
+            .takes
+            .iter()
+            .filter(|t| matches!(t.control, Control::Param { device: d, .. } if d == device))
+            .map(|t| (t.track, t.control))
+            .collect();
+        let mut r = Ok(());
+        for (track, control) in held {
+            let done = self.touch(doc, session.as_deref_mut(), strip_id(track), control, false);
+            r = r.and(done);
+        }
+        r
+    }
+
+    /// Whether a take is running.
+    pub fn recording(&self) -> bool {
+        !self.takes.is_empty()
+    }
+
+    /// Whether a take for `control` of strip `id` is running.
+    pub fn recording_control(&self, id: StripId, control: Control) -> bool {
+        self.takes
+            .iter()
+            .any(|t| strip_id(t.track) == id && t.control == control)
     }
 
     pub fn write(&self) -> bool {
@@ -583,6 +626,17 @@ fn target_of(track: &Track, control: Control) -> Option<(AutomationTarget, f64)>
             let send = track.sends.iter().find(|s| strip_id(s.target) == target)?;
             Some((AutomationTarget::SendLevel { send: send.id }, send.level_db))
         }
+        Control::Param { device, param } => {
+            let d = track.devices.iter().find(|d| d.id == device)?;
+            let value = d.params.get(&param).copied().or_else(|| {
+                let DeviceSource::Builtin { kind } = &d.source else {
+                    return None;
+                };
+                let specs = daw_devices::param_specs(kind)?;
+                specs.iter().find(|s| s.id == param).map(|s| s.default)
+            })?;
+            Some((AutomationTarget::DeviceParam { device, param }, value))
+        }
     }
 }
 
@@ -603,7 +657,9 @@ fn live_param(project: &Project, session: &Session, take: &Take) -> Option<(Node
             project.send_location(send)?;
             Some((Session::send_key(send), Strip::GAIN, db_to_gain(take.value)))
         }
-        AutomationTarget::DeviceParam { .. } => None,
+        AutomationTarget::DeviceParam { device, param } => {
+            Some((Session::device_key(device), param, take.value))
+        }
     }
 }
 
@@ -692,11 +748,11 @@ fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), Messa
         .map_err(Message::from)
 }
 
-/// [`SessionMixer`] on the app state: the mixer the Mix page shows.
+/// The app state's [`SessionMixer`]: the mixer the Mix page shows. The
+/// mixer itself lives in the state so the device panel records into the
+/// same takes.
 #[derive(Default)]
-pub struct AppMixer {
-    inner: SessionMixer,
-}
+pub struct AppMixer;
 
 impl AppMixer {
     /// Runs `f`, then plays any document change and reports errors on the
@@ -707,8 +763,8 @@ impl AppMixer {
     ) -> R {
         state::with(|s| {
             s.end_drag();
-            self.inner.write_lanes.clone_from(&s.lanes.write);
-            let r = f(&mut self.inner, &mut s.doc, s.engine.session_mut());
+            s.mixer.write_lanes.clone_from(&s.lanes.write);
+            let r = f(&mut s.mixer, &mut s.doc, s.engine.session_mut());
             s.sync();
             r
         })
@@ -727,7 +783,7 @@ impl AppMixer {
 impl MixerHandle for AppMixer {
     fn strips(&self) -> Vec<StripInfo> {
         state::with(|s| {
-            let mut strips = self.inner.strips(s.doc.project(), s.engine.session());
+            let mut strips = s.mixer.strips(s.doc.project(), s.engine.session());
             for (strip, track) in strips.iter_mut().zip(ordered(s.doc.project())) {
                 strip.instrument_choice =
                     instrument_of(track).and_then(|d| s.instruments.position(&d.source));
@@ -775,7 +831,7 @@ impl MixerHandle for AppMixer {
     }
 
     fn effects(&self) -> Vec<EffectChoice> {
-        self.inner.effects()
+        state::with(|s| s.mixer.effects())
     }
 
     fn set_instrument(&mut self, id: StripId, choice: &InstrumentChoice) {
@@ -783,13 +839,12 @@ impl MixerHandle for AppMixer {
     }
 
     fn levels(&mut self) -> Vec<StripLevels> {
-        state::with(|s| self.inner.levels(s.doc.project(), s.engine.session()))
+        state::with(|s| s.mixer.levels(s.doc.project(), s.engine.session()))
     }
 
     fn tick(&mut self, _playing: bool, _seconds: f64) {
-        if !self.inner.takes.is_empty() {
-            self.report(|m, d, s| m.tick(d, s));
-        }
+        // Takes are ticked with the project (see `AppState::tick_mixer`),
+        // whichever page is showing.
     }
 
     fn revision(&self) -> u64 {
@@ -808,7 +863,7 @@ impl MixerHandle for AppMixer {
     }
 
     fn write_automation(&self) -> bool {
-        self.inner.write()
+        state::with(|s| s.mixer.write())
     }
 
     fn touch(&mut self, id: StripId, control: Control, pressed: bool) {
@@ -1100,6 +1155,67 @@ mod tests {
         // One undo step removes the take.
         r.doc.undo().unwrap();
         assert!(r.track("Drums").automation.is_empty());
+    }
+
+    #[test]
+    fn device_params_record_into_a_lane_in_write_mode() {
+        let mut r = rig();
+        let drums = r.track("Drums").id;
+        let eq = Device::new(
+            "EQ",
+            DeviceSource::Builtin {
+                kind: "daw.eq".into(),
+            },
+        );
+        let device = eq.id;
+        r.doc
+            .execute(AddDevice {
+                track: drums,
+                index: 0,
+                device: eq,
+            })
+            .unwrap();
+        let spec = daw_devices::param_specs("daw.eq")
+            .unwrap()
+            .iter()
+            .find(|p| p.automatable && p.kind == daw_devices::ParamKind::Continuous)
+            .copied()
+            .unwrap();
+        let control = Control::Param {
+            device,
+            param: spec.id,
+        };
+        let target = AutomationTarget::DeviceParam {
+            device,
+            param: spec.id,
+        };
+        // The lane is in write mode; the mixer's own switch stays off.
+        let lane = AutomationLane::new(target);
+        let lane_id = lane.id;
+        r.doc.execute(AddLane { track: drums, lane }).unwrap();
+        r.mixer.write_lanes.insert(lane_id);
+        r.sync();
+
+        r.session.play().unwrap();
+        r.run(40);
+        r.touch("Drums", control, true);
+        let (lo, hi) = (spec.min, spec.max);
+        for step in 0..10 {
+            r.set("Drums", control, lo + (hi - lo) * f64::from(step) / 10.0);
+            r.run(4);
+            r.tick();
+        }
+        r.touch("Drums", control, false);
+
+        let drums = r.track("Drums");
+        let d = drums.devices.iter().find(|d| d.id == device).unwrap();
+        assert!(!d.params.contains_key(&spec.id), "stored value untouched");
+        let lane = drums.automation.iter().find(|l| l.id == lane_id).unwrap();
+        assert!(lane.points.len() >= 2, "{:?}", lane.points);
+        let last = lane.points.iter().map(|p| p.value).fold(f64::MIN, f64::max);
+        assert!((last - (lo + (hi - lo) * 0.9)).abs() < 1e-6 * (hi - lo).abs().max(1.0));
+        r.doc.undo().unwrap();
+        assert!(r.track("Drums").automation[0].points.is_empty());
     }
 
     #[test]

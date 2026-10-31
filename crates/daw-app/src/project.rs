@@ -755,6 +755,7 @@ impl qobject::Project {
     fn tick(self: Pin<&mut Self>) {
         state::with(|s| {
             s.tick_engine();
+            s.tick_mixer();
             s.tick_plugins();
             // An update a full player queue refused; the queue has drained.
             if s.engine

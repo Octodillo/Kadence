@@ -204,11 +204,16 @@ pub enum Control {
     Pan,
     /// The send to this strip.
     Send(StripId),
+    /// A parameter of a device on the strip (from the device panel).
+    Param {
+        device: daw_model::DeviceId,
+        param: daw_core::event::ParamId,
+    },
 }
 
 /// The mixer the app runs: the open project's, through the app state.
 pub fn default_mixer() -> Box<dyn MixerHandle> {
-    Box::new(crate::session_mixer::AppMixer::default())
+    Box::new(crate::session_mixer::AppMixer)
 }
 
 /// Built-in devices that process their input: effects and utilities with
