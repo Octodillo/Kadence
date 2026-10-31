@@ -516,9 +516,10 @@ pub(crate) fn graph(
             built.restore.insert((key, param), v);
         }
     }
-    // Not sent yet (a full queue) and not taken over by a lane again.
+    // Not sent yet (a full queue), not taken over by a lane again, and the
+    // device still there.
     for (k, &v) in &old.restore {
-        if !built.automated.contains(k) {
+        if !built.automated.contains(k) && find(&g, k.0).is_some() {
             built.restore.entry(*k).or_insert(v);
         }
     }
@@ -623,8 +624,10 @@ fn automate(
 ///
 /// A built-in device goes back to its default, as when the document's
 /// value is reset. A plugin goes back to what it had before the lane took
-/// over: the value taken when the lane started, else the value last sent
-/// to it, else what it reports now (a lane that plays from the start).
+/// over: the value taken when the lane started (or still waiting to be put
+/// back), else what it had before a take held it by hand, else the value
+/// last sent to it, else what it reports now (a lane that plays from the
+/// start).
 fn rest_value(
     session: &Session,
     project: &Project,
@@ -647,6 +650,8 @@ fn rest_value(
         DeviceSource::Plugin { .. } => old
             .rest
             .get(&(key, param))
+            .or(old.restore.get(&(key, param)))
+            .or(session.pre_live.get(&(key, param)))
             .or(old.params.get(&(key, param)))
             .copied()
             .or_else(|| session.with_plugin(d.id, |p| p.param_value(param)))

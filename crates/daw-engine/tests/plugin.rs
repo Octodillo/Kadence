@@ -502,6 +502,15 @@ fn silence_resets_a_plugin_even_while_the_main_thread_holds_it() {
         }
     }
 
+    // A graph swap in the same cycle hands the reset to the new node.
+    let (swapped, _) = plugin(1);
+    let (mut ctl, mut proc) = engine();
+    send_tail(&mut ctl, &swapped);
+    run(&mut proc, 3);
+    ctl.silence().unwrap();
+    send_tail(&mut ctl, &swapped);
+    assert_eq!(run(&mut proc, 2)[0], ramp(1, 3));
+
     // An unmarked node keeps its state.
     let (plugin, _) = plugin(1);
     let (mut ctl, mut proc) = engine();

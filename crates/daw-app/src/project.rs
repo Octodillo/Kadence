@@ -344,9 +344,7 @@ pub mod qobject {
 
         #[qinvokable]
         fn toggle_play(self: Pin<&mut Project>);
-        /// Stops playback; effects and instruments ring out. Already
-        /// stopped, cuts off everything still sounding, like
-        /// `stop_all_sound`.
+        /// Stops playback; effects and instruments ring out.
         #[qinvokable]
         fn stop(self: Pin<&mut Project>);
         /// Stops playback and recording and cuts off everything still
@@ -1348,12 +1346,8 @@ impl qobject::Project {
 
     fn stop(self: Pin<&mut Self>) {
         self.edit(|s| {
-            let was_playing = s.engine.is_playing();
             s.stop_recording();
             s.engine.stop();
-            if !was_playing {
-                s.silence();
-            }
         });
     }
 
