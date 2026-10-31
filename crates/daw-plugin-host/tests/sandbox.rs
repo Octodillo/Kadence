@@ -183,11 +183,58 @@ fn reports_ports_params_and_latency_from_the_host() {
     assert_eq!(params.len(), 2);
     let gain = params.iter().find(|p| p.id == GAIN).unwrap();
     assert_eq!((gain.min, gain.max, gain.default), (0.0, 2.0, 1.0));
-    assert!(!plugin.has_editor());
+    assert!(plugin.has_editor());
     assert_eq!(plugin.descriptor().id, ID);
     let monitor = plugin.monitor();
     assert_eq!(monitor.status(), SandboxStatus::Running);
     assert_ne!(monitor.pid(), std::process::id());
+}
+
+/// Pumps `plugin` until `done` holds, for what the host reports at its own pace.
+fn pump_until(
+    plugin: &mut SandboxedInstance,
+    mut done: impl FnMut(&mut SandboxedInstance) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        plugin.on_main_thread();
+        if done(plugin) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn opens_the_editor_in_the_host_and_hears_about_it() {
+    let mut plugin = instance();
+    assert!(!plugin.is_editor_open());
+    plugin.set_editor_title("DAW Test Gain — Bass");
+    plugin.open_editor().expect("open the editor");
+    assert!(plugin.is_editor_open());
+    // The test plugin marks its state dirty when its editor shows.
+    pump_until(&mut plugin, |p| p.take_state_changed());
+    assert!(plugin.is_editor_open(), "the host still has it open");
+    // The user closes its window.
+    plugin.load_state(b"DAWC").unwrap();
+    pump_until(&mut plugin, |p| !p.is_editor_open());
+    plugin.open_editor().expect("open the editor again");
+    assert!(plugin.is_editor_open());
+    plugin.close_editor();
+    assert!(!plugin.is_editor_open());
+}
+
+#[test]
+fn a_reload_opens_the_editor_again() {
+    let mut plugin = instance();
+    plugin.open_editor().unwrap();
+    let pid = plugin.monitor().pid();
+    plugin.reload().expect("reload");
+    assert_ne!(plugin.monitor().pid(), pid);
+    assert!(plugin.is_editor_open());
+    // The new host's editor showed, which the test plugin reports as a change.
+    pump_until(&mut plugin, |p| p.take_state_changed());
 }
 
 #[test]

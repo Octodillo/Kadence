@@ -360,13 +360,17 @@ fn sdk_again_editor_opens_in_a_floating_window() {
         .unwrap();
     let mut p = Vst3Format.instantiate(d, SAMPLE_RATE, FRAMES).unwrap();
     assert!(p.has_editor());
+    p.set_editor_title("AGain — Bass");
     p.open_editor().unwrap();
+    assert!(p.is_editor_open());
     for _ in 0..20 {
         p.on_main_thread();
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    p.set_editor_title("AGain — Lead");
     // Opening twice is a no-op, and closing tears the window down.
     p.open_editor().unwrap();
     p.close_editor();
+    assert!(!p.is_editor_open());
     p.on_main_thread();
 }

@@ -20,7 +20,7 @@ use daw_core::time::{MusicalPosition, SampleTime};
 use memmap2::MmapMut;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"KDSB");
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 /// Bytes reserved for [`Header`] at the start of the block.
 const HEADER_BYTES: usize = 192;
 /// `u64` words per event record.
@@ -74,6 +74,15 @@ pub struct Header {
     ///
     /// [`PluginInstance::take_layout_changed`]: daw_core::plugin::PluginInstance::take_layout_changed
     pub layout_changed: AtomicU32,
+    /// Set by the host when the plugin reported, through
+    /// [`PluginInstance::take_state_changed`], that its state changed; taken by the
+    /// application's main thread.
+    ///
+    /// [`PluginInstance::take_state_changed`]: daw_core::plugin::PluginInstance::take_state_changed
+    pub state_changed: AtomicU32,
+    /// Nonzero while the plugin's editor is open, as the host last saw it: before it answers
+    /// a call, and after each main-thread pump.
+    pub editor_open: AtomicU32,
     /// Time-signature numerator in the low byte, denominator in the next.
     time_sig: AtomicU32,
     /// Nonzero when a loop is set.

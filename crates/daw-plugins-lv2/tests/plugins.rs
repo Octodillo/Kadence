@@ -363,16 +363,27 @@ fn editors_open_as_floating_windows() {
         return;
     }
     let _turn = EDITORS.lock().unwrap_or_else(|e| e.into_inner());
+    p.set_editor_title("Balance — Bass");
+    assert!(!p.is_editor_open());
     p.open_editor().unwrap();
+    assert!(p.is_editor_open());
     for _ in 0..20 {
         run(&mut *p, &silence(2), &[], &TransportState::default());
         p.on_main_thread();
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    p.set_editor_title("Balance — Lead");
+    p.on_main_thread();
     p.close_editor();
+    assert!(!p.is_editor_open());
     // And again, to make sure the UI library survives being reopened.
     p.open_editor().unwrap();
+    assert!(p.is_editor_open());
     p.on_main_thread();
+    // A state load is not a change of the plugin's own, whatever the UI writes back.
+    let state = p.save_state().unwrap();
+    p.load_state(&state).unwrap();
+    assert!(!p.take_state_changed());
     drop(p);
 }
 

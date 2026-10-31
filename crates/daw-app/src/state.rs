@@ -55,6 +55,15 @@ pub struct AppState {
     /// Counts documents opened, so views can tell a new document from an
     /// edit (document revisions start over).
     pub doc_serial: u64,
+    /// Plugin devices that reported a state change, and when they last did.
+    /// The change is recorded once the plugin has been quiet a moment, so a
+    /// knob turned in its editor is one undo step.
+    plugin_changes: std::collections::HashMap<daw_model::DeviceId, Instant>,
+    /// How plugin editor windows are titled: `%1` is the device, `%2` the
+    /// track. Set from QML in the user's language.
+    pub editor_title_format: String,
+    /// The master track's name, for editor titles, in the user's language.
+    pub master_name: String,
     /// Which MIDI sources get ports of their own.
     pub midi: MidiSettings,
     /// How often a changed project is autosaved; `None` turns it off.
@@ -151,6 +160,9 @@ impl AppState {
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
+            plugin_changes: std::collections::HashMap::new(),
+            editor_title_format: "%1 — %2".into(),
+            master_name: "Master".into(),
             midi: MidiSettings::default(),
             autosave_every: Some(Duration::from_secs(60)),
             last_autosave: None,
@@ -191,6 +203,206 @@ impl AppState {
         self.prune_lane_modes();
         self.apply_click();
         self.view_revision += 1;
+        self.retitle_editors();
+    }
+
+    /// The title of a plugin device's editor window: the device and its
+    /// track.
+    pub fn editor_title(&self, device: daw_model::DeviceId) -> Option<String> {
+        let project = self.doc.project();
+        let master = project.master.id;
+        let (track, d) = project
+            .all_tracks()
+            .find_map(|t| t.devices.iter().find(|d| d.id == device).map(|d| (t, d)))?;
+        let device_name = match (&d.source, d.name.is_empty()) {
+            (_, false) => d.name.clone(),
+            (daw_model::DeviceSource::Plugin { id, .. }, true) => id.clone(),
+            (daw_model::DeviceSource::Builtin { kind }, true) => kind.clone(),
+        };
+        let track_name = if track.id == master && track.name.is_empty() {
+            self.master_name.clone()
+        } else {
+            track.name.clone()
+        };
+        Some(
+            self.editor_title_format
+                .replacen("%1", &device_name, 1)
+                .replacen("%2", &track_name, 1),
+        )
+    }
+
+    /// Opens a plugin device's own editor window. Returns false, and says
+    /// why in the status line, if it would not open.
+    pub fn open_plugin_editor(&mut self, device: daw_model::DeviceId) -> bool {
+        self.sync();
+        let Some(title) = self.editor_title(device) else {
+            return false;
+        };
+        let opened = match self.engine.session_mut() {
+            Some(session) => {
+                // What the editor starts from, so undoing its first change
+                // goes back here.
+                let baseline = session.plugin_state(device);
+                session
+                    .open_plugin_editor(device, &title)
+                    .map(|()| baseline)
+            }
+            None => Err("audio is not running".into()),
+        };
+        match opened {
+            Ok(baseline) => {
+                if let Some(Ok(state)) = baseline
+                    && self.doc.store_plugin_state(device, Some(state)).is_ok()
+                {
+                    self.sync();
+                }
+                self.touch();
+                true
+            }
+            Err(detail) => {
+                let device = self.device_name(device);
+                self.report(Message::Warning(daw_session::Warning::PluginEditorFailed {
+                    device,
+                    detail,
+                }));
+                false
+            }
+        }
+    }
+
+    fn device_name(&self, device: daw_model::DeviceId) -> String {
+        self.doc
+            .project()
+            .all_tracks()
+            .flat_map(|t| t.devices.iter())
+            .find(|d| d.id == device)
+            .map(|d| d.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Closes a plugin device's editor window; its last changes are
+    /// recorded on the next ticks.
+    pub fn close_plugin_editor(&mut self, device: daw_model::DeviceId) {
+        if let Some(session) = self.engine.session_mut() {
+            session.close_plugin_editor(device);
+        }
+        self.touch();
+    }
+
+    /// Whether a plugin device's editor window is open.
+    pub fn plugin_editor_open(&self, device: daw_model::DeviceId) -> bool {
+        self.engine
+            .session()
+            .is_some_and(|s| s.plugin_editor_open(device))
+    }
+
+    /// Whether a plugin device has an editor window of its own.
+    pub fn plugin_has_editor(&self, device: daw_model::DeviceId) -> bool {
+        self.engine
+            .session()
+            .is_some_and(|s| s.plugin_has_editor(device))
+    }
+
+    /// Keeps open editor windows titled after their device and track, which
+    /// may have been renamed.
+    pub fn retitle_editors(&mut self) {
+        let Some(session) = self.engine.session() else {
+            return;
+        };
+        let open: Vec<daw_model::DeviceId> = self
+            .doc
+            .project()
+            .all_tracks()
+            .flat_map(|t| t.devices.iter())
+            .filter(|d| matches!(d.source, daw_model::DeviceSource::Plugin { .. }))
+            .map(|d| d.id)
+            .filter(|&id| session.plugin_editor_open(id))
+            .collect();
+        for id in open {
+            if let Some(title) = self.editor_title(id)
+                && let Some(session) = self.engine.session_mut()
+            {
+                session.set_plugin_editor_title(id, &title);
+            }
+        }
+    }
+
+    /// Records the state of plugins that reported a change and have been
+    /// quiet since, one "Change Plugin State" step each.
+    fn record_plugin_changes(&mut self, reported: Vec<daw_model::DeviceId>) {
+        const QUIET: Duration = Duration::from_millis(300);
+        let now = Instant::now();
+        for device in reported {
+            self.plugin_changes.insert(device, now);
+        }
+        if self.plugin_changes.is_empty() {
+            return;
+        }
+        let mut due: Vec<daw_model::DeviceId> = self
+            .plugin_changes
+            .iter()
+            .filter(|&(_, &at)| now.duration_since(at) >= QUIET)
+            .map(|(&d, _)| d)
+            .collect();
+        due.sort_by_key(|d| d.0);
+        for device in due {
+            self.plugin_changes.remove(&device);
+            self.record_plugin_state(device);
+        }
+    }
+
+    /// Records every plugin change reported and not recorded yet, without
+    /// waiting for the plugin to go quiet: before an undo, redo or other edit
+    /// would put it in the wrong place in the history, and before saving.
+    pub fn flush_plugin_changes(&mut self) {
+        let mut due: Vec<daw_model::DeviceId> =
+            self.plugin_changes.drain().map(|(d, _)| d).collect();
+        due.sort_by_key(|d| d.0);
+        for device in due {
+            self.record_plugin_state(device);
+        }
+    }
+
+    /// A plugin reported a change that is not an undo step yet: unsaved,
+    /// like any other edit.
+    pub fn has_pending_plugin_changes(&self) -> bool {
+        !self.plugin_changes.is_empty()
+    }
+
+    /// Records a plugin device's state, if it changed, as an undo step.
+    fn record_plugin_state(&mut self, device: daw_model::DeviceId) {
+        // The plugin's state is compared with the document's as the engine
+        // last had it.
+        self.sync();
+        let Some(session) = self.engine.session_mut() else {
+            return;
+        };
+        match session.plugin_state(device) {
+            None => {}
+            Some(Ok(state)) => {
+                // Its own step, not merged into an earlier change of the
+                // same plugin.
+                self.doc.seal();
+                let result = self.doc.execute(daw_model::commands::SetDevice {
+                    id: device,
+                    field: daw_model::commands::DeviceField::State(Some(state)),
+                });
+                self.doc.seal();
+                match result {
+                    // So the next report compares against this state.
+                    Ok(_) => self.sync(),
+                    // Removed since it reported: nothing to keep the state for.
+                    Err(daw_model::ModelError::DeviceNotFound(_)) => {}
+                    Err(e) => self.report(e.into()),
+                }
+            }
+            Some(Err(detail)) => {
+                let device = self.device_name(device);
+                self.report(Message::Warning(
+                    daw_session::Warning::PluginStateNotSaved { device, detail },
+                ));
+            }
+        }
     }
 
     /// Writes an autosave if the document changed. A failure is reported
@@ -407,6 +619,7 @@ impl AppState {
             return;
         };
         let report = session.tick();
+        self.record_plugin_changes(report.state_changed);
         if let Some(w) = report.warnings.into_iter().next() {
             self.report(Message::Warning(w));
         }
@@ -456,6 +669,8 @@ impl AppState {
     /// it. Not an undo step: the plugin changed, not the project, so undo
     /// must not throw a plugin's own changes away.
     pub fn store_plugin_states(&mut self) {
+        // Reported changes become undo steps; only the rest is stored quietly.
+        self.flush_plugin_changes();
         let Some(session) = self.engine.session_mut() else {
             return;
         };
@@ -693,6 +908,8 @@ impl AppState {
         }
         self.doc = doc;
         self.autosave_failed = None;
+        // Changes of the old document's plugins, whose editors closed with them.
+        self.plugin_changes.clear();
         self.doc_serial += 1;
         self.arrange.selection.clear();
         self.arrange.points = None;
