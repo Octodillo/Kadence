@@ -46,6 +46,7 @@ pub mod qobject {
         CollectContext,
         RecoverContext,
         ExportContext,
+        EditorContext,
     }
 
     /// The `reason` of a message map. See `crate::message::Reason` for
@@ -501,6 +502,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Context::Collect => QC::CollectContext,
         Context::Recover => QC::RecoverContext,
         Context::Export => QC::ExportContext,
+        Context::Editor => QC::EditorContext,
     };
     let reason = match f.reason {
         Reason::NotLocalFile => QR::NotLocalFile,

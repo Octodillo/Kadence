@@ -704,7 +704,7 @@ impl plugin::PluginInstance for ClapInstance {
                     Err(e) => {
                         gui.destroy(&handle);
                         self.editor.created = false;
-                        return Err(PluginError::Editor(e));
+                        return Err(e);
                     }
                 };
                 // SAFETY: the window outlives the plugin's GUI: `close_editor` destroys the GUI

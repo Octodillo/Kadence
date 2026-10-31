@@ -74,7 +74,7 @@ QtObject {
             return i18nc("@info %1 is a device name, %2 a message which may be in English",
                          "The plugin interface of “%1” could not be opened (%2).", m.name, m.detail);
         case Project.NoPluginDisplay:
-            return i18nc("@info %1 is a device name",
+            return i18nc("@info %1 is a device name; X11 and XWayland are names",
                          "The plugin interface of “%1” could not be opened: plugin interfaces need an X11 display (XWayland on Wayland), and none is available.", m.name);
         case Project.CannotStream:
             return i18nc("@info %1 is a file path, %2 a message which may be in English",
@@ -188,13 +188,10 @@ QtObject {
                          "Could not add “%1”. %2", m.fileName, why);
         case Project.EditContext:
             return i18nc("@info %1 is the reason, a full sentence", "That edit could not be made. %1", why);
+        case Project.EditorContext:
+            // The reason says what would not open, and why.
+            return why;
         case Project.PlaybackContext:
-            switch (m.reason) {
-            case Project.PluginEditorFailed:
-            case Project.NoPluginDisplay:
-                // Asked for from the device panel; playback is not affected.
-                return why;
-            }
             return i18nc("@info %1 is the reason, a full sentence", "Playback may be incomplete. %1", why);
         case Project.CollectContext:
             return i18nc("@info %1 is the reason, a full sentence",

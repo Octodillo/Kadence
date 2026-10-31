@@ -32,6 +32,8 @@ pub enum Context {
     Recover,
     /// Exporting the song to an audio file.
     Export,
+    /// Opening a plugin's own editor window.
+    Editor,
 }
 
 /// Why, which picks the second sentence.
@@ -250,10 +252,6 @@ pub enum Message {
     Record(RecordProblem),
     /// Another Kadence has the bundle at this path open.
     AlreadyOpen(PathBuf),
-    /// The editor of this device could not open: no X11 display is reachable.
-    NoPluginDisplay {
-        device: String,
-    },
     Export(ExportProblem),
     /// The song was exported to this file, `seconds` long.
     Exported {
@@ -397,9 +395,6 @@ impl Message {
                 },
             },
             Self::AlreadyOpen(path) => Fields::new(C::Open, R::AlreadyOpen).path(path),
-            Self::NoPluginDisplay { device } => {
-                Fields::new(C::Playback, R::NoPluginDisplay).name(device)
-            }
             Self::Export(p) => export_fields(p),
             Self::Exported { path, seconds } => Fields {
                 number: *seconds,
@@ -442,9 +437,12 @@ impl Message {
                         .detail(detail)
                 }
                 Warning::PluginEditorFailed { device, detail } => {
-                    Fields::new(C::Playback, R::PluginEditorFailed)
+                    Fields::new(C::Editor, R::PluginEditorFailed)
                         .name(device)
                         .detail(detail)
+                }
+                Warning::NoPluginDisplay { device } => {
+                    Fields::new(C::Editor, R::NoPluginDisplay).name(device)
                 }
                 Warning::CannotStream { path, detail } => Fields::new(C::Playback, R::CannotStream)
                     .path(path)
@@ -466,6 +464,8 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    use daw_core::plugin::PluginError;
+
     use super::*;
 
     #[test]
@@ -570,13 +570,17 @@ mod tests {
 
     #[test]
     fn no_plugin_display() {
-        let f = Message::NoPluginDisplay {
-            device: "Surge XT".into(),
-        }
-        .fields();
+        let no_display = PluginError::NoDisplay("can't connect".into());
+        let f = Message::Warning(Warning::editor_failed("Surge XT".into(), &no_display)).fields();
         assert_eq!(
             (f.context, f.reason, f.name.as_str()),
-            (Context::Playback, Reason::NoPluginDisplay, "Surge XT")
+            (Context::Editor, Reason::NoPluginDisplay, "Surge XT")
+        );
+        let other = PluginError::Editor("no X11 editor".into());
+        let f = Message::Warning(Warning::editor_failed("Verb".into(), &other)).fields();
+        assert_eq!(
+            (f.context, f.reason, f.name.as_str()),
+            (Context::Editor, Reason::PluginEditorFailed, "Verb")
         );
     }
 

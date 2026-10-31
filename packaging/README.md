@@ -115,12 +115,19 @@ Plugins installed system-wide (`/usr/lib/{clap,lv2,vst3}`) are not visible
 inside the sandbox, so the native packages remain the better choice for
 users with many distro-packaged plugins.
 
+Plugin interfaces are X11 windows (XWayland under Wayland), so the sandbox
+gets the `x11` socket as well as `wayland`: with only `fallback-x11` a
+Wayland session would get no X11, and "Show Plugin Interface" would say that
+no X11 display is available. Kadence's own window still uses Wayland.
+
 ### Submitting to Flathub
 
 Flathub builds from a separate `flathub/io.github.octodillo.daw` repository.
 Copy the manifest there, change the `dir` source to a `git` source with a
 release tag and commit, and commit the generated `cargo-sources.json` next
 to it. Regenerate it whenever `Cargo.lock` changes.
+Flathub's linter rejects `x11` together with `wayland`; ask for an
+exception, with plugin interfaces as the reason.
 
 ## Checking an install
 

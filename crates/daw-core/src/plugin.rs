@@ -50,6 +50,9 @@ pub enum PluginError {
     State(String),
     #[error("editor: {0}")]
     Editor(String),
+    /// The editor needs an X11 display (XWayland under Wayland) and none could be reached.
+    #[error("no X11 display: {0}")]
+    NoDisplay(String),
 }
 
 /// A loaded, activated plugin. It is a graph [`Node`]; the other methods run

@@ -153,6 +153,7 @@ pub enum WireError {
     Load(String),
     State(String),
     Editor(String),
+    NoDisplay(String),
 }
 
 impl From<&PluginError> for WireError {
@@ -161,6 +162,7 @@ impl From<&PluginError> for WireError {
             PluginError::Load(m) => Self::Load(m.clone()),
             PluginError::State(m) => Self::State(m.clone()),
             PluginError::Editor(m) => Self::Editor(m.clone()),
+            PluginError::NoDisplay(m) => Self::NoDisplay(m.clone()),
         }
     }
 }
@@ -171,6 +173,7 @@ impl From<WireError> for PluginError {
             WireError::Load(m) => Self::Load(m),
             WireError::State(m) => Self::State(m),
             WireError::Editor(m) => Self::Editor(m),
+            WireError::NoDisplay(m) => Self::NoDisplay(m),
         }
     }
 }

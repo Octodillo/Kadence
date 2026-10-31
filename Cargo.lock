@@ -504,7 +504,6 @@ dependencies = [
  "daw-model",
  "daw-pianoroll",
  "daw-plugin-host",
- "daw-plugin-window",
  "daw-plugins",
  "daw-session",
  "libc",
@@ -648,6 +647,7 @@ dependencies = [
 name = "daw-plugin-window"
 version = "0.1.0"
 dependencies = [
+ "daw-core",
  "x11rb",
 ]
 
