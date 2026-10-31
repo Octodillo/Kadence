@@ -3,6 +3,7 @@
 //! Needs Qt 6, Kirigami and qqc2-desktop-style installed, which is why the
 //! CI runs this crate on Arch Linux.
 
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -17,6 +18,16 @@ fn plugin_folder() -> &'static Path {
     DIR.get_or_init(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let target = std::env::temp_dir().join("kadence-clap-test-plugin");
+        // Each test runs in its own process, and each builds and copies
+        // the plugin. Take turns, so no process copies the library while
+        // another one's cargo is replacing it.
+        std::fs::create_dir_all(&target).expect("create the plugin target folder");
+        let lock = std::fs::File::create(target.join("kadence-copy.lock"))
+            .expect("create the plugin lock file");
+        // SAFETY: flock only reads the descriptor, which `lock` keeps open
+        // until the end of this closure; closing it releases the lock.
+        let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+        assert_eq!(locked, 0, "lock the plugin target folder");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let status = Command::new(cargo)
             .args([
@@ -33,15 +44,8 @@ fn plugin_folder() -> &'static Path {
             .expect("run cargo");
         assert!(status.success(), "building the test plugin failed");
         let dir = tempdir("plugins");
-        // From deps/, not debug/: every cargo run re-links debug/'s copy,
-        // even when nothing changed, so another test process building at
-        // the same moment can leave it briefly missing. rustc writes the
-        // deps/ copy only when it rebuilds, under cargo's build lock.
         std::fs::copy(
-            target
-                .join("debug")
-                .join("deps")
-                .join("libdaw_clap_test_plugin.so"),
+            target.join("debug").join("libdaw_clap_test_plugin.so"),
             dir.join("test-gain.clap"),
         )
         .expect("copy the test plugin");
