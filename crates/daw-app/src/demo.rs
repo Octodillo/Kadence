@@ -32,8 +32,11 @@ fn pluck(freq: f32, beats: usize) -> AudioData {
 
 /// Builds the demo in a temporary bundle so the audio has somewhere to live.
 pub fn build() -> Result<Document, String> {
+    // Numbered, so tests building it at once don't share a directory.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir()
-        .join(format!("kadence-demo-{}", std::process::id()))
+        .join(format!("kadence-demo-{}-{n}", std::process::id()))
         .join("Demo");
     let _ = std::fs::remove_dir_all(&dir);
     let audio = dir.join("audio");

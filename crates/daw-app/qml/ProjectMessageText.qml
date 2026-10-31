@@ -91,6 +91,34 @@ QtObject {
             return i18nc("@info", "Some MIDI input arrived too fast to be recorded, so the take may be missing notes.");
         case Project.NothingRecorded:
             return i18nc("@info", "The take was outside the song, so nothing was added.");
+        case Project.Exported:
+            return i18ncp("@info %2 is a file path", "Exported %1 second of audio to “%2”.",
+                          "Exported %1 seconds of audio to “%2”.", m.number, m.path);
+        case Project.ExportCancelled:
+            return i18nc("@info", "The export was stopped, so no file was written.");
+        case Project.EmptySong:
+            return i18nc("@info", "The song has no clips yet.");
+        case Project.NoLoop:
+            return i18nc("@info", "No loop is set; choose another range or set a loop first.");
+        case Project.EmptyRange:
+            return i18nc("@info", "The range to export is empty.");
+        case Project.ExportBusy:
+            return i18nc("@info", "Another export is still running.");
+        case Project.DiskTooSlow:
+            return i18nc("@info", "Audio files could not be read from disk fast enough, so the export would have had gaps.");
+        case Project.PluginTooSlow:
+            return i18nc("@info", "A plugin did not keep up, so the export would have had gaps.");
+        case Project.ExportPluginCrashed:
+            return i18nc("@info %1 is a device name",
+                         "The plugin of “%1” stopped working, so the export would have been without it.", m.name);
+        case Project.LatencyChanged:
+            return i18nc("@info", "A plugin changed its delay during the export, which would have shifted the audio. Try again.");
+        case Project.WrongExtension:
+            return i18nc("@info %1 is a file name extension like wav",
+                         "The file name ends in “.%1”, which is not the chosen format.", m.detail);
+        case Project.EncodeFailed:
+            return i18nc("@info %1 is a message which may be in English",
+                         "The audio could not be written (%1).", m.detail);
         case Project.CannotRecordTo:
             return i18nc("@info %1 is a file path, %2 a message which may be in English",
                          "“%1” could not be created (%2).", m.path, m.detail);
@@ -151,6 +179,13 @@ QtObject {
             return i18nc("@info %1 is the reason, a full sentence", "That edit could not be made. %1", why);
         case Project.PlaybackContext:
             return i18nc("@info %1 is the reason, a full sentence", "Playback may be incomplete. %1", why);
+        case Project.ExportContext:
+            switch (m.reason) {
+            case Project.Exported:
+            case Project.ExportCancelled:
+                return why;
+            }
+            return i18nc("@info %1 is the reason, a full sentence", "Could not export the song. %1", why);
         case Project.RecordContext:
             switch (m.reason) {
             case Project.NoInstrumentTrack:

@@ -1,12 +1,14 @@
 //! Test helpers for `--smoke-test` and `--screenshot-dir` (see SelfTest.qml).
 
-use cxx_qt_lib::QString;
+use cxx_qt_lib::{QString, QUrl};
 
 #[cxx_qt::bridge]
 pub mod self_test {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qurl.h");
+        type QUrl = cxx_qt_lib::QUrl;
     }
 
     #[auto_cxx_name]
@@ -51,6 +53,15 @@ pub mod self_test {
         /// The sum of the keys of the piano roll's notes.
         #[qinvokable]
         fn piano_key_sum(self: &TestHelper) -> i32;
+
+        /// A file URL for `name` in a fresh directory of this process's
+        /// own under the temporary directory.
+        #[qinvokable]
+        fn temp_file_url(self: &TestHelper, name: &QString) -> QUrl;
+
+        /// Whether the local file at `url` exists.
+        #[qinvokable]
+        fn file_exists(self: &TestHelper, url: &QUrl) -> bool;
     }
 }
 
@@ -138,5 +149,19 @@ impl self_test::TestHelper {
                 .map(|n| i32::from(n.key))
                 .sum()
         })
+    }
+
+    fn temp_file_url(&self, name: &QString) -> QUrl {
+        let dir = std::env::temp_dir().join(format!("kadence-test-{}", std::process::id()));
+        // A missing directory shows up as a failed export in the test.
+        let _ = std::fs::create_dir_all(&dir);
+        QUrl::from_local_file(&QString::from(
+            dir.join(name.to_string()).display().to_string().as_str(),
+        ))
+    }
+
+    fn file_exists(&self, url: &QUrl) -> bool {
+        url.to_local_file()
+            .is_some_and(|p| std::path::Path::new(&p.to_string()).exists())
     }
 }

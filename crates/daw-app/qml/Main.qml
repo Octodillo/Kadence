@@ -121,6 +121,12 @@ Kirigami.ApplicationWindow {
             icon.name: "document-save-as"
             shortcut: StandardKey.SaveAs
             onTriggered: saveDialog.open()
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Export Song…")
+            icon.name: "document-export"
+            shortcut: "Ctrl+Shift+E"
+            onTriggered: root.openExport()
         }
     ]
 
@@ -285,6 +291,16 @@ Kirigami.ApplicationWindow {
 
     EngineErrorText {
         id: engineError
+    }
+
+    ExportDialog {
+        id: exportDialog
+        onExportFinished: message => root.notify(message)
+    }
+
+    function openExport(): ExportDialog {
+        exportDialog.open();
+        return exportDialog;
     }
 
     ProjectMessageText {
