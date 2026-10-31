@@ -2,7 +2,7 @@ mod support;
 
 use daw_core::event::{Event, EventKind};
 use daw_core::time::SampleTime;
-use daw_midi::player::Captured;
+use daw_midi::player::{Captured, InputGate};
 use daw_midi::sequence::Sequence;
 use support::{Rig, note, simple};
 
@@ -307,4 +307,191 @@ fn reset_ends_a_capture() {
     rig.block(5000, 64, true, &[]);
     let captured: Vec<Captured> = rig.handle.drain_captured().collect();
     assert_eq!(captured, [Captured::Stop { at: SampleTime(64) }]);
+}
+
+fn live(kind: EventKind) -> Event {
+    Event { frame: 0, kind }
+}
+
+fn on(channel: u8, key: u8) -> EventKind {
+    EventKind::NoteOn {
+        channel,
+        key,
+        velocity: 0.7,
+        note_id: -1,
+    }
+}
+
+fn off(channel: u8, key: Option<u8>) -> EventKind {
+    EventKind::NoteOff {
+        channel,
+        key,
+        velocity: 0.0,
+        note_id: -1,
+    }
+}
+
+#[test]
+fn a_closed_gate_drops_live_input_but_ends_notes_it_let_through() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.handle.input(), InputGate::default());
+    let out = rig.block(0, 64, false, &[live(on(0, 60))]);
+    assert_eq!(simple(&out), [(0, 60, true)]);
+
+    rig.handle.set_input(InputGate {
+        open: false,
+        channel: None,
+    });
+    // The held note is ended when the gate closes, and new input is dropped.
+    let out = rig.block(64, 64, false, &[live(on(0, 62))]);
+    assert_eq!(simple(&out), [(64, 60, false)]);
+    // Its real note-off and other messages don't get through.
+    let out = rig.block(
+        128,
+        64,
+        false,
+        &[live(off(0, Some(60))), live(EventKind::Midi([0xB0, 1, 2]))],
+    );
+    assert!(out.is_empty(), "{out:?}");
+    // Nothing is captured while closed, even armed and playing.
+    rig.handle.set_armed(true);
+    rig.block(192, 64, true, &[live(on(0, 64))]);
+    assert!(
+        rig.handle
+            .drain_captured()
+            .all(|c| !matches!(c, Captured::Event { .. }))
+    );
+}
+
+#[test]
+fn a_channel_gate_passes_one_channel() {
+    let mut rig = Rig::new();
+    rig.handle.set_input(InputGate {
+        open: true,
+        channel: Some(2),
+    });
+    assert_eq!(rig.handle.input().channel, Some(2));
+    let out = rig.block(
+        0,
+        64,
+        false,
+        &[
+            live(on(2, 60)),
+            live(on(3, 61)),
+            live(EventKind::Midi([0xB2, 7, 1])),
+            live(EventKind::Midi([0xB5, 7, 1])),
+            // System messages have no channel and pass.
+            live(EventKind::Midi([0xF8, 0, 0])),
+        ],
+    );
+    let kinds: Vec<_> = out.iter().map(|(_, k)| *k).collect();
+    assert_eq!(
+        kinds,
+        [
+            on(2, 60),
+            EventKind::Midi([0xB2, 7, 1]),
+            EventKind::Midi([0xF8, 0, 0])
+        ]
+    );
+    // Switching channel ends the held note on the old one.
+    rig.handle.set_input(InputGate {
+        open: true,
+        channel: Some(3),
+    });
+    let out = rig.block(64, 64, false, &[]);
+    assert_eq!(simple(&out), [(64, 60, false)]);
+}
+
+#[test]
+fn moving_the_gate_ends_every_live_note_on_the_old_channel() {
+    let mut rig = Rig::new();
+    rig.block(0, 64, false, &[live(on(0, 60)), live(on(0, 64))]);
+    // Moving the gate ends both notes; a keyless note-off on the old
+    // channel then has nothing left to end and is dropped like the rest.
+    rig.handle.set_input(InputGate {
+        open: true,
+        channel: Some(5),
+    });
+    let out = rig.block(64, 64, false, &[]);
+    assert_eq!(simple(&out), [(64, 60, false), (64, 64, false)]);
+    let out = rig.block(128, 64, false, &[live(off(0, None))]);
+    assert!(
+        out.is_empty(),
+        "nothing live on channel 0 any more: {out:?}"
+    );
+}
+
+#[test]
+fn a_take_ends_notes_the_gate_cut_off() {
+    let mut rig = Rig::new();
+    rig.handle.set_armed(true);
+    rig.block(0, 64, true, &[live(on(0, 60))]);
+    // Disarming the track (closing its gate) mid-note while recording.
+    rig.handle.set_input(InputGate {
+        open: false,
+        channel: None,
+    });
+    rig.block(64, 64, true, &[]);
+    // The real note-off arrives later and is not recorded twice.
+    rig.block(128, 64, true, &[live(off(0, Some(60)))]);
+    let events: Vec<_> = rig
+        .handle
+        .drain_captured()
+        .filter_map(|c| match c {
+            Captured::Event { time, kind } => Some((time, kind)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (SampleTime(0), on(0, 60)),
+            (SampleTime(64), off(0, Some(60)))
+        ]
+    );
+}
+
+#[test]
+fn a_take_keeps_the_end_of_a_note_that_started_through_the_gate() {
+    let mut rig = Rig::new();
+    rig.handle.set_armed(true);
+    rig.handle.set_input(InputGate {
+        open: true,
+        channel: Some(0),
+    });
+    // A wildcard note-off on another channel would not pass; one that ends
+    // a captured note does, even after the channel filter moved.
+    rig.block(0, 64, true, &[live(on(0, 60))]);
+    let out = rig.block(64, 64, true, &[live(off(0, Some(60)))]);
+    assert_eq!(simple(&out), [(64, 60, false)]);
+    let ends = rig
+        .handle
+        .drain_captured()
+        .filter(|c| {
+            matches!(
+                c,
+                Captured::Event {
+                    kind: EventKind::NoteOff { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(ends, 1);
+}
+
+#[test]
+fn closing_the_gate_lifts_a_held_sustain_pedal() {
+    let mut rig = Rig::new();
+    let pedal_down = EventKind::Midi([0xB0, 64, 127]);
+    rig.block(0, 64, false, &[live(pedal_down)]);
+    rig.handle.set_input(InputGate {
+        open: false,
+        channel: None,
+    });
+    let out = rig.block(64, 64, false, &[]);
+    let kinds: Vec<_> = out.iter().map(|(_, k)| *k).collect();
+    assert_eq!(kinds, [EventKind::Midi([0xB0, 64, 0])]);
+    // Only once.
+    assert!(rig.block(128, 64, false, &[]).is_empty());
 }

@@ -84,6 +84,18 @@ Item {
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
             check(Project.undoText in editNames.names, "undo name has a translation");
+            // Arm it and pick a MIDI input: both undoable, both translated.
+            Project.setTrackArmed(0, true);
+            check(Project.trackArmed(0) && Project.undoText === "Arm Track", "arm a track");
+            Project.setTrackMidiInput(0, "Midi-Bridge:USB Keyboard (capture)", 9);
+            check(Project.trackMidiDevice(0) === "Midi-Bridge:USB Keyboard (capture)"
+                  && Project.trackMidiChannel(0) === 9
+                  && Project.undoText === "Change MIDI Input"
+                  && Project.undoText in editNames.names, "choose a MIDI input");
+            Project.undo();
+            check(Project.trackMidiDevice(0) === "" && Project.trackMidiChannel(0) === -1, "undo the MIDI input");
+            Project.undo();
+            check(!Project.trackArmed(0), "undo arming");
             Project.undo();
             Project.undo();
             check(Project.trackCount === 0, "undo back to empty");
@@ -116,7 +128,16 @@ Item {
             // A slow load can block the event loop past this step's timer,
             // so both timers are overdue at once; refresh before reading.
             Project.tick();
-            check(Project.trackCount === 3, "demo has three tracks");
+            check(Project.trackCount === 4, "demo has three tracks and a bus");
+            // Show an armed instrument track listening to one channel.
+            for (let i = 0; i < Project.trackCount; i++) {
+                if (Project.trackKind(i) === 1) {
+                    Project.setTrackArmed(i, true);
+                    Project.setTrackMidiInput(i, "", 0);
+                    break;
+                }
+            }
+            Project.tick();
             // Peaks load in the background; give them a step, then shoot.
             window.pageStack.currentItem.view.refresh();
             shoot(window.title, "arrange-demo");
@@ -223,8 +244,8 @@ Item {
         },
         () => {
             // The mixer has caught up with the project on its clock.
-            // The demo's three tracks and the master.
-            check(Mixer.levels.length === 4 * 5, "a strip per track");
+            // The demo's three tracks, its reverb bus and the master.
+            check(Mixer.levels.length === 5 * 5, "a strip per track");
             const compressor = Mixer.effectNames.indexOf("Compressor");
             check(compressor >= 0 && Mixer.addInsert(0, compressor), "add a compressor to Bass");
             // Play so the meters have something to show.
@@ -252,6 +273,27 @@ Item {
         () => {
             check(Project.undoText === "Add Automation Lane", "fader move written as automation");
             check(!Mixer.writeAutomation, "writing off");
+            // Routing on Keys (row 2): a send to the reverb bus, tapped
+            // before the fader, and the output through the bus and back.
+            // Project picks up mixer edits on its clock; tick to read them.
+            check(Mixer.addSend(2, 0), "add a send to Reverb");
+            Project.tick();
+            check(Project.undoText === "Add Send", "sends undo");
+            Mixer.setSendPreFader(2, 0, true);
+            Project.tick();
+            check(Project.undoText === "Change Send Tap", "pre-fader send");
+            Mixer.setOutput(2, 1);
+            Project.tick();
+            check(Project.undoText === "Change Track Output", "output to the bus");
+            Project.undo();
+            Mixer.removeSend(1, 0);
+            Project.tick();
+            check(Project.undoText === "Remove Send", "remove Lead's send");
+            Project.undo();
+        },
+        () => {
+            // The mixer has picked up the undo on its clock.
+            shoot(window.title, "mix-routing");
         },
         () => {
             // Click the compressor added above: its panel opens.
@@ -260,6 +302,8 @@ Item {
             check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
             check(DevicePanel.paramCount > 0, "compressor parameters listed");
             // Drag the threshold: one undo step.
+            Project.tick();
+            const before = Project.undoText;
             DevicePanel.setValue(0, -30, true);
             DevicePanel.setValue(0, -24, true);
             DevicePanel.endGesture();
@@ -267,7 +311,7 @@ Item {
             Project.tick();
             check(Project.undoText === "Change Parameter", "parameter edit undoes");
             Project.undo();
-            check(Project.undoText === "Add Automation Lane", "a drag is one undo step");
+            check(Project.undoText === before, "a drag is one undo step");
             Project.redo();
             DevicePanel.setDeviceEnabled(false);
             Project.tick();
@@ -464,7 +508,29 @@ Item {
             check(settingsPage !== null, "open settings");
         },
         () => {
+            check(settingsPage.currentTab === 0, "settings open on General");
+            shoot(settingsPage.Window.window.title, "settings-general");
+            settingsPage.currentTab = 1;
+        },
+        () => {
             shoot(settingsPage.Window.window.title, "settings");
+            settingsPage.currentTab = 2;
+        },
+        () => {
+            // The stub offers two devices and a program: hardware is used
+            // by default, programs only when turned on.
+            const keys = "Midi-Bridge:USB Keyboard (capture)";
+            if (Engine.backendKind === Engine.StubBackend) {
+                check(AppSettings.midiSourceNames.includes(keys), "stub MIDI device listed");
+                check(AppSettings.midiInputNames.includes(keys), "hardware used by default");
+                check(!AppSettings.midiInputNames.includes("Sequencer:out"), "programs not used by default");
+                check(AppSettings.midiLabel(keys) === "USB Keyboard (capture)", "MIDI label without the program");
+                AppSettings.useMidiSource("Sequencer:out", true);
+                check(AppSettings.midiInputNames.includes("Sequencer:out"), "turn a program on");
+                AppSettings.useMidiSource("Sequencer:out", false);
+                check(!AppSettings.midiInputNames.includes("Sequencer:out"), "and off again");
+            }
+            shoot(settingsPage.Window.window.title, "settings-midi");
         },
         () => {
             if (!window.smokeTest) {

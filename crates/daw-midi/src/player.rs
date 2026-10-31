@@ -17,11 +17,14 @@
 //! - **Recording.** While armed and playing, input notes and raw MIDI are
 //!   copied to a queue with their timeline position, along with markers for
 //!   jumps and stops. [`crate::record::Recorder`] turns that into notes.
+//! - **Input gate.** [`PlayerHandle::set_input`] decides which live input
+//!   passes (none, or one channel or all). Live notes that the gate closes
+//!   on are stopped, so nothing hangs.
 //!
 //! `process` never allocates, locks or blocks.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
 use daw_core::event::{Event, EventKind, EventList, NoteId};
@@ -49,11 +52,49 @@ pub enum Captured {
     Stop { at: SampleTime },
 }
 
+/// Which live input a player passes on (and records).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct InputGate {
+    /// Whether live input passes at all.
+    pub open: bool,
+    /// The one channel (0 to 15) that passes, or `None` for all.
+    pub channel: Option<u8>,
+}
+
+impl Default for InputGate {
+    fn default() -> Self {
+        Self {
+            open: true,
+            channel: None,
+        }
+    }
+}
+
+impl InputGate {
+    /// Every input event that a closed gate drops: channel messages on
+    /// another channel, and everything but parameter changes when closed.
+    fn passes(&self, kind: &EventKind) -> bool {
+        let channel = match *kind {
+            EventKind::ParamValue { .. } => return true,
+            EventKind::NoteOn { channel, .. } | EventKind::NoteOff { channel, .. } => Some(channel),
+            EventKind::Midi([status, ..]) if (0x80..0xF0).contains(&status) => Some(status & 0x0F),
+            EventKind::Midi(_) => None,
+        };
+        self.open && (self.channel.is_none() || channel.is_none() || channel == self.channel)
+    }
+}
+
+/// `InputGate::channel` in an atomic: this means every channel.
+const ALL_CHANNELS: u8 = u8::MAX;
+
 #[derive(Debug, Default)]
 struct Shared {
     armed: AtomicBool,
     chase: AtomicBool,
     capture_overflows: AtomicU64,
+    input_open: AtomicBool,
+    input_channel: AtomicU8,
+    end_live: AtomicBool,
 }
 
 /// Creates a player and the handle that controls it. `capture_capacity`
@@ -65,6 +106,8 @@ pub fn midi_player(capture_capacity: usize) -> (MidiPlayer, PlayerHandle) {
     let (capture_tx, capture_rx) = spsc(capture_capacity.max(1));
     let shared = Arc::new(Shared::default());
     shared.chase.store(true, Relaxed);
+    shared.input_open.store(true, Relaxed);
+    shared.input_channel.store(ALL_CHANNELS, Relaxed);
     let player = MidiPlayer {
         seq: Box::new(Sequence::empty()),
         seq_rx,
@@ -76,6 +119,9 @@ pub fn midi_player(capture_capacity: usize) -> (MidiPlayer, PlayerHandle) {
         capturing: false,
         next_note_id: 0,
         capture_tx,
+        live: [0; 16],
+        pedal: 0,
+        captured: [0; 16],
         shared: shared.clone(),
     };
     let handle = PlayerHandle {
@@ -124,6 +170,29 @@ impl PlayerHandle {
         self.shared.chase.store(chase, Relaxed);
     }
 
+    /// Ends every live note (and lifts the sustain pedal) at the next
+    /// block, for when the input it came from is rerouted and its
+    /// note-offs would never arrive.
+    pub fn end_live(&self) {
+        self.shared.end_live.store(true, Relaxed);
+    }
+
+    /// Which live input passes from the next block on.
+    pub fn set_input(&self, gate: InputGate) {
+        self.shared
+            .input_channel
+            .store(gate.channel.map_or(ALL_CHANNELS, |c| c & 0x0F), Relaxed);
+        self.shared.input_open.store(gate.open, Relaxed);
+    }
+
+    pub fn input(&self) -> InputGate {
+        let channel = self.shared.input_channel.load(Relaxed);
+        InputGate {
+            open: self.shared.input_open.load(Relaxed),
+            channel: (channel != ALL_CHANNELS).then_some(channel),
+        }
+    }
+
     /// Takes everything captured so far.
     pub fn drain_captured(&mut self) -> impl Iterator<Item = Captured> + '_ {
         self.capture_rx.drain()
@@ -161,7 +230,85 @@ pub struct MidiPlayer {
     capturing: bool,
     next_note_id: NoteId,
     capture_tx: Producer<Captured>,
+    /// Live input notes passed on and not yet ended: one bit per key, per
+    /// channel.
+    live: [u128; 16],
+    /// Channels whose sustain pedal live input holds down.
+    pedal: u16,
+    /// Live notes captured and not yet ended, like `live`.
+    captured: [u128; 16],
     shared: Arc<Shared>,
+}
+
+/// The channel and value of a sustain pedal (CC 64) message.
+fn sustain(kind: &EventKind) -> Option<(u8, bool)> {
+    match *kind {
+        EventKind::Midi([status, 64, value]) if status & 0xF0 == 0xB0 => {
+            Some((status & 0x0F, value >= 64))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a live note event passes `gate`, given the notes in `held`
+/// (one bit per key, per channel) that passed before; updates `held`. The
+/// end of a note that passed always passes too.
+fn admit_note(held: &mut [u128; 16], gate: &InputGate, kind: &EventKind) -> bool {
+    match *kind {
+        EventKind::NoteOn { channel, key, .. } => {
+            let ok = gate.passes(kind);
+            if ok {
+                held[usize::from(channel & 0x0F)] |= 1 << (key & 0x7F);
+            }
+            ok
+        }
+        EventKind::NoteOff { channel, key, .. } => {
+            let held = &mut held[usize::from(channel & 0x0F)];
+            let was_held = match key {
+                Some(k) => {
+                    let bit = 1 << (k & 0x7F);
+                    let was = *held & bit != 0;
+                    *held &= !bit;
+                    was
+                }
+                None => std::mem::take(held) != 0,
+            };
+            was_held || gate.passes(kind)
+        }
+        _ => gate.passes(kind),
+    }
+}
+
+/// Whether `gate` still lets notes on `channel` through.
+fn channel_open(gate: &InputGate, channel: u8) -> bool {
+    gate.passes(&EventKind::NoteOn {
+        channel,
+        key: 0,
+        velocity: 0.0,
+        note_id: -1,
+    })
+}
+
+/// Calls `f` with a note-off for every note in `held` on a channel `gate`
+/// closed, and forgets them.
+fn close_held(held: &mut [u128; 16], gate: &InputGate, mut f: impl FnMut(EventKind)) {
+    for (channel, keys) in held.iter_mut().enumerate() {
+        let channel = channel as u8;
+        if *keys == 0 || channel_open(gate, channel) {
+            continue;
+        }
+        for key in 0..128u8 {
+            if *keys & (1 << key) != 0 {
+                f(EventKind::NoteOff {
+                    channel,
+                    key: Some(key),
+                    velocity: 0.0,
+                    note_id: -1,
+                });
+            }
+        }
+        *keys = 0;
+    }
 }
 
 fn push(out: &mut EventList, frame: u32, kind: EventKind) {
@@ -181,6 +328,34 @@ impl MidiPlayer {
                 note_id: a.note_id,
             },
         );
+    }
+
+    /// Whether a live input event passes `gate`, keeping track of the
+    /// notes it starts and the sustain pedal.
+    fn admit(&mut self, gate: &InputGate, kind: &EventKind) -> bool {
+        let ok = admit_note(&mut self.live, gate, kind);
+        if ok && let Some((channel, down)) = sustain(kind) {
+            let bit = 1 << channel;
+            if down {
+                self.pedal |= bit;
+            } else {
+                self.pedal &= !bit;
+            }
+        }
+        ok
+    }
+
+    /// Ends the live notes, and lifts the sustain pedal, on channels `gate`
+    /// no longer lets through.
+    fn close_live(&mut self, gate: &InputGate, out: &mut EventList) {
+        close_held(&mut self.live, gate, |kind| push(out, 0, kind));
+        for channel in 0..16u8 {
+            let bit = 1 << channel;
+            if self.pedal & bit != 0 && !channel_open(gate, channel) {
+                push(out, 0, EventKind::Midi([0xB0 | channel, 64, 0]));
+                self.pedal &= !bit;
+            }
+        }
     }
 
     fn all_off(&mut self, out: &mut EventList) {
@@ -321,8 +496,21 @@ impl Node for MidiPlayer {
     fn process(&mut self, ctx: &mut ProcessContext) {
         let out = &mut *ctx.events_out;
         self.receive(out);
+        let gate = InputGate {
+            open: self.shared.input_open.load(Relaxed),
+            channel: Some(self.shared.input_channel.load(Relaxed)).filter(|&c| c != ALL_CHANNELS),
+        };
+        // Live input moved to other sources: their note-offs won't come.
+        let ended = self.shared.end_live.swap(false, Relaxed);
+        let closed = InputGate {
+            open: false,
+            channel: None,
+        };
+        self.close_live(if ended { &closed } else { &gate }, out);
         for e in ctx.events_in.iter() {
-            let _ = out.push(*e);
+            if self.admit(&gate, &e.kind) {
+                let _ = out.push(*e);
+            }
         }
 
         let t = ctx.transport;
@@ -359,20 +547,34 @@ impl Node for MidiPlayer {
                 at: SampleTime(pos),
             });
         }
+        if !self.capturing {
+            self.captured = [0; 16];
+        }
         self.capturing = armed;
 
         if armed {
+            // What reaches the instrument is what gets recorded: notes the
+            // gate let start also end in the take, even if it closed since.
+            let mut captured = self.captured;
+            close_held(&mut captured, if ended { &closed } else { &gate }, |kind| {
+                self.capture(Captured::Event {
+                    time: SampleTime(pos),
+                    kind,
+                })
+            });
             for e in ctx.events_in.iter() {
                 if matches!(
                     e.kind,
                     EventKind::NoteOn { .. } | EventKind::NoteOff { .. } | EventKind::Midi(_)
-                ) {
+                ) && admit_note(&mut captured, &gate, &e.kind)
+                {
                     self.capture(Captured::Event {
                         time: SampleTime(pos + e.frame as i64),
                         kind: e.kind,
                     });
                 }
             }
+            self.captured = captured;
         }
 
         let end = pos + ctx.frames as i64;
