@@ -11,7 +11,7 @@ Loader {
     id: loader
 
     property Component menu
-    readonly property bool opened: item ? item.visible : false
+    readonly property bool opened: item ? (item as QQC2.Menu).visible : false
 
     active: false
     sourceComponent: menu
@@ -19,12 +19,13 @@ Loader {
     // Under `at`, offset by x and y; or at the pointer when `at` is left out.
     function popup(at, x, y): void {
         active = true;
+        const menu = item as QQC2.Menu;
         // Place the menu in the window of whatever holds this loader.
-        item.parent = loader.parent;
+        menu.parent = loader.parent;
         if (at === undefined) {
-            item.popup();
+            menu.popup();
         } else {
-            item.popup(at, x, y);
+            menu.popup(at, x, y);
         }
     }
 

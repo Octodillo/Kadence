@@ -37,6 +37,18 @@ QQC2.ToolButton {
         menu.dismiss();
     }
 
+    // Opens the plugin browser for an instrument. Defined here, not in the
+    // menu: the browser calls back after the menu has closed and unloaded.
+    function browse(): void {
+        applicationWindow().browsePlugins(1, (format, pluginId, name) => {
+            // The browser and this list come from the same scan.
+            Instruments.refresh();
+            const row = Instruments.rowOf(format, pluginId);
+            if (row >= 0)
+                button.chosen(row, Instruments.revision);
+        });
+    }
+
     onClicked: {
         Instruments.refresh();
         menu.popup(button, 0, button.height);
@@ -75,13 +87,7 @@ QQC2.ToolButton {
             QQC2.MenuItem {
                 icon.name: "preferences-plugin"
                 text: i18nc("@action:inmenu", "Browse Plugins…")
-                onTriggered: applicationWindow().browsePlugins(1, (format, pluginId, name) => {
-                    // The browser and this list come from the same scan.
-                    Instruments.refresh();
-                    const row = Instruments.rowOf(format, pluginId);
-                    if (row >= 0)
-                        button.chosen(row, Instruments.revision);
-                })
+                onTriggered: button.browse()
             }
         }
     }
