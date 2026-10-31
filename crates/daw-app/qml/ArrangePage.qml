@@ -22,6 +22,7 @@ Kirigami.Page {
     property list<Kirigami.Action> transportActions
     readonly property alias view: view
     readonly property alias transportBar: transportBar
+    readonly property alias trackHeaders: headers
 
     // The automation lanes' height, dragged at a lane header's lower edge.
     readonly property LayoutSize laneSize: LayoutSize {
@@ -373,8 +374,9 @@ Kirigami.Page {
                         const units = AppSettings.layoutValue(page.trackHeightKey, 0);
                         if (units > 0) {
                             resizeTracks(units * Kirigami.Units.gridUnit, rulerHeight);
+                            // That is the saved height already.
+                            saveTrackHeight.stop();
                         }
-                        saveTrackHeight.armed = true;
                         setDefaultNames(
                             i18nc("@label default name of a new MIDI clip", "MIDI clip"),
                             i18nc("@label default name of audio from a file without a name", "Audio"),
@@ -396,10 +398,8 @@ Kirigami.Page {
 
                     Timer {
                         id: saveTrackHeight
-                        // Not for the height set while starting up.
-                        property bool armed: false
                         interval: 1000
-                        onTriggered: if (armed) AppSettings.setLayoutValue(page.trackHeightKey, view.trackHeight / Kirigami.Units.gridUnit)
+                        onTriggered: AppSettings.setLayoutValue(page.trackHeightKey, view.trackHeight / Kirigami.Units.gridUnit)
                     }
                 }
 

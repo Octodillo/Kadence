@@ -304,6 +304,9 @@ Kirigami.Page {
         // lane (up is taller), double-click for the default.
         SplitHandle {
             visible: roll.hasClip
+            enabled: page.visible
+            // The roll draws the lane's edge itself.
+            lineVisible: false
             x: roll.x
             width: roll.width
             y: roll.y + roll.height - roll.velocityHeight - height / 2

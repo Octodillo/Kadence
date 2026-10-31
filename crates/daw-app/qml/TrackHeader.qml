@@ -30,13 +30,31 @@ Column {
     readonly property bool expanded: revision >= 0 ? Automation.expanded(index) : false
     readonly property int laneCount: revision >= 0 ? Automation.laneCount(index) : 0
 
-    // Where this row starts in the timeline's content, as laid out now.
-    function top(): real {
-        let y = 0;
-        for (let i = 0; i < index; ++i) {
-            y += arrange.rowHeight(i);
+    // How much each of `r` sizes in this row (the track, or the lanes down
+    // to a dragged edge) changes so the edge moves `delta` with the pointer.
+    // Normally the row's top stays put by scrolling past the `above` sizes
+    // above it, which change too. When the view can't scroll that far (the
+    // content, `total` such sizes in all, is `content` tall and fits in
+    // `visible`, or the view would scroll above the top), the scroll stays
+    // at the top, and all `above + r` sizes share the movement.
+    function edgeChange(delta: real, scroll: real, above: int, r: int, total: int, content: real, visible: real): real {
+        const change = delta / r;
+        const to = scroll + above * change;
+        const most = Math.max(0, content + total * change - visible);
+        if (to < 0 || (to > most && most === 0)) {
+            return (delta - scroll) / (above + r);
         }
-        return y;
+        return change;
+    }
+
+    // The view's height below the ruler, which rows scroll in.
+    function visibleHeight(): real {
+        return arrange.height - arrange.rulerHeight;
+    }
+
+    // How many lane rows lie above this row, as laid out now.
+    function lanesAbove(): int {
+        return arrange.laneHeight > 0 ? Math.round((y - index * arrange.trackHeight) / arrange.laneHeight) : 0;
     }
 
     // The list reuses headers that scroll out of view for other tracks. A
@@ -413,12 +431,17 @@ Column {
             anchors.bottom: parent.bottom
             lineVisible: false
             property real from: 0
+            property real scroll: 0
+            property real content: 0
             property real anchorY: 0
             onStarted: {
                 from = row.arrange.trackHeight;
-                anchorY = row.y - row.arrange.scrollY + row.arrange.rulerHeight;
+                scroll = row.arrange.scrollY;
+                content = row.arrange.contentHeight;
+                anchorY = row.y - scroll + row.arrange.rulerHeight;
             }
-            onMoved: (delta, done) => row.arrange.resizeTracks(from + delta, anchorY)
+            onMoved: (delta, done) => row.arrange.resizeTracks(
+                from + row.edgeChange(delta, scroll, row.index, 1, Project.trackCount, content, row.visibleHeight()), anchorY)
             onCanceled: row.arrange.resizeTracks(from, anchorY)
             onReset: row.arrange.resizeTracks(row.arrange.defaultTrackHeight(), row.y - row.arrange.scrollY + row.arrange.rulerHeight)
             Accessible.ignored: true
@@ -446,24 +469,41 @@ Column {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 lineVisible: false
-                ratio: index + 1
-                property real anchorY: 0
+                property real from: 0
+                property real scroll: 0
+                property real content: 0
+                property int above: 0
+                // Lane rows in the whole timeline.
+                property int total: 0
+                function start(): void {
+                    from = row.arrange.laneHeight;
+                    scroll = row.arrange.scrollY;
+                    content = row.arrange.contentHeight;
+                    above = row.lanesAbove();
+                    total = from > 0 ? Math.round((content - Project.trackCount * row.arrange.trackHeight) / from) : 0;
+                }
+                // The track's top stays where it was, as far as the view
+                // scrolls.
                 function keepTop(): void {
-                    row.arrange.scrollTo(row.arrange.scrollX, row.top() - anchorY);
+                    row.arrange.scrollTo(row.arrange.scrollX, Math.max(0, scroll + above * (row.arrange.laneHeight - from)));
                 }
                 onStarted: {
-                    anchorY = row.top() - row.arrange.scrollY;
-                    row.laneSize.begin(row.arrange.laneHeight, Infinity);
+                    start();
+                    row.laneSize.begin(from, Infinity);
                 }
                 onMoved: (delta, done) => {
-                    row.laneSize.drag(delta, done);
+                    row.laneSize.drag(row.edgeChange(delta, scroll, above, index + 1, total, content, row.visibleHeight()), done);
                     keepTop();
                 }
                 onCanceled: {
                     row.laneSize.cancel();
                     keepTop();
                 }
-                onReset: row.laneSize.reset()
+                onReset: {
+                    start();
+                    row.laneSize.reset();
+                    keepTop();
+                }
                 Accessible.ignored: true
             }
         }
