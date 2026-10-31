@@ -6,6 +6,7 @@
 //! state, meters and players) whenever the object is still there.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use daw_core::meter::PeakMeter;
@@ -13,9 +14,7 @@ use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::time::TickTime;
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
-use daw_engine::{
-    AutomationLane, AutomationPoint, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
-};
+use daw_engine::{GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter};
 use daw_model::{
     AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, LaneId, Project,
     ProjectSnapshot, SendId, Track, TrackId, TrackKind, TrackOutput,
@@ -75,6 +74,12 @@ fn tap_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 3)
 }
 
+/// The key of a bus's input: a unity gain stage in front of the strip, for
+/// pre-fader sends from a bus with no devices to tap.
+fn input_key(track: TrackId) -> NodeKey {
+    NodeKey(track.0.as_u128() ^ 4)
+}
+
 /// How many captured input events can wait for the recorder.
 const MIDI_CAPTURE: usize = 4096;
 
@@ -102,12 +107,32 @@ struct TrackShape {
     sends: Vec<(SendId, TrackId, bool)>,
     /// Automation is compiled into the graph, so a lane edit rebuilds it.
     lanes: Vec<daw_model::AutomationLane>,
+    /// Where an instrument track's live MIDI comes from.
+    live: LiveInput,
+}
+
+/// Which external event sources reach an instrument track's MIDI player.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LiveInput {
+    /// Not an instrument track.
+    None,
+    /// Every source.
+    All,
+    /// One source, by engine source index.
+    Source(usize),
+    /// The chosen device is not connected.
+    Missing,
 }
 
 impl Structure {
     /// The shape of `project`, leaving out the automation lanes in
-    /// `suspended`.
-    pub fn of(project: &Project, suspended: &HashSet<LaneId>) -> Self {
+    /// `suspended`. `sources` maps MIDI source port names to engine event
+    /// sources.
+    pub fn of(
+        project: &Project,
+        suspended: &HashSet<LaneId>,
+        sources: &HashMap<String, usize>,
+    ) -> Self {
         Self {
             tracks: project
                 .all_tracks()
@@ -131,6 +156,13 @@ impl Structure {
                         .filter(|l| !suspended.contains(&l.id))
                         .cloned()
                         .collect(),
+                    live: match (&t.kind, &t.midi_input.device) {
+                        (TrackKind::Instrument, None) => LiveInput::All,
+                        (TrackKind::Instrument, Some(d)) => sources
+                            .get(d)
+                            .map_or(LiveInput::Missing, |&i| LiveInput::Source(i)),
+                        _ => LiveInput::None,
+                    },
                 })
                 .collect(),
         }
@@ -142,6 +174,13 @@ impl Structure {
             .flat_map(|t| t.devices.iter())
             .find(|d| d.0 == id)
             .map(|d| &d.1)
+    }
+
+    pub(crate) fn live_input(&self, track: TrackId) -> LiveInput {
+        self.tracks
+            .iter()
+            .find(|t| t.id == track)
+            .map_or(LiveInput::None, |t| t.live)
     }
 
     pub fn has_automation(&self) -> bool {
@@ -299,7 +338,7 @@ pub(crate) fn graph(
                     id
                 }
                 _ => {
-                    let (node, meter, warning) = device_node(d);
+                    let (node, meter, warning) = device_node(d, session.media.root());
                     if let Some(w) = warning {
                         session.warnings.push(w);
                     }
@@ -320,6 +359,27 @@ pub(crate) fn graph(
                 chain.push(id);
             }
         }
+        // A bus taps its pre-fader sends from the end of its devices; with
+        // none switched on, from a unity stage in front of the strip.
+        if chain.is_empty()
+            && track.kind == TrackKind::Bus
+            && track.sends.iter().any(|s| s.pre_fader)
+        {
+            let key = input_key(track.id);
+            let id = match g.reuse(key) {
+                Some(id) => id,
+                None => {
+                    let id = g.add_node(
+                        NodeKind::Bus,
+                        format!("{} input", track.name),
+                        Box::new(Strip::send(STRIP_CHANNELS, 1.0)),
+                    );
+                    g.set_key(id, key);
+                    id
+                }
+            };
+            chain.push(id);
+        }
         for pair in chain.windows(2) {
             g.connect(pair[0], pair[1]);
         }
@@ -339,10 +399,14 @@ pub(crate) fn graph(
             _ => chain.first().copied().unwrap_or(strip),
         };
         heads.insert(track.id, head);
-        // Live MIDI goes through every instrument track's player (which
-        // passes it on) for now; record arming will narrow it down.
+        // Live MIDI goes through the player, which passes on what its
+        // input gate lets through (see `Session::apply_gates`).
         if let Some(player) = midi {
-            g.route_external_events(player);
+            match built.structure.live_input(track.id) {
+                LiveInput::All => g.route_external_events(player),
+                LiveInput::Source(i) => g.route_external_events_from(player, i),
+                LiveInput::None | LiveInput::Missing => {}
+            }
             // The first device even when it is switched off: switching the
             // instrument off silences it, and it still gets the note-offs
             // of notes that were sounding.
@@ -354,30 +418,29 @@ pub(crate) fn graph(
         }
     }
 
+    // Commands and loading never let routing loop, but the engine would
+    // refuse the whole graph if it did, so a route that would close a loop
+    // is left out and reported instead.
+    let mut routes = Routes::default();
     for track in snapshot.tracks.iter() {
         let target = match track.output {
             TrackOutput::Master => master,
             TrackOutput::Bus(b) => b,
         };
         if let Some(&head) = heads.get(&target) {
+            if !routes.add(track.id, target) {
+                session.warnings.push(Warning::RoutingLoop {
+                    track: track.name.clone(),
+                });
+                continue;
+            }
             g.connect(strips[&track.id], head);
         }
     }
     for track in snapshot.all_tracks() {
         for s in &track.sends {
-            let Some(&head) = heads.get(&s.target) else {
-                continue;
-            };
-            let tap = if s.pre_fader {
-                // Before the fader: the end of the device chain. A track with
-                // nothing before its strip has no pre-fader signal.
-                match pre_fader.get(&track.id) {
-                    Some(&n) => n,
-                    None => continue,
-                }
-            } else {
-                strips[&track.id]
-            };
+            // Every send gets its node, connected or not, so its level and
+            // automation always have somewhere to go.
             let key = send_key(s.id);
             let node = match g.reuse(key) {
                 Some(id) => {
@@ -396,6 +459,26 @@ pub(crate) fn graph(
                     id
                 }
             };
+            let Some(&head) = heads.get(&s.target) else {
+                continue;
+            };
+            let tap = if s.pre_fader {
+                // Before the fader: the end of the device chain. A track with
+                // nothing before its strip (an instrument track without
+                // devices) has no pre-fader signal.
+                match pre_fader.get(&track.id) {
+                    Some(&n) => n,
+                    None => continue,
+                }
+            } else {
+                strips[&track.id]
+            };
+            if !routes.add(track.id, s.target) {
+                session.warnings.push(Warning::RoutingLoop {
+                    track: track.name.clone(),
+                });
+                continue;
+            }
             g.connect(tap, node);
             g.connect(node, head);
         }
@@ -421,8 +504,35 @@ pub(crate) fn graph(
     };
     g.connect(click, g.master());
 
-    automate(session, snapshot, &mut g, &strips);
+    automate(session, snapshot, &mut g, &strips, &mut built);
+    // A lane that stopped playing (switched off, removed, emptied) left
+    // its last value behind: send the control's own value again.
+    for k in old.automated.difference(&built.automated) {
+        built.params.remove(k);
+    }
     (g, built)
+}
+
+/// The routes between tracks added to a graph so far.
+#[derive(Default)]
+struct Routes(HashMap<TrackId, Vec<TrackId>>);
+
+impl Routes {
+    /// Adds a route from `from` to `to` unless it would close a loop.
+    fn add(&mut self, from: TrackId, to: TrackId) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![to];
+        while let Some(t) = stack.pop() {
+            if t == from {
+                return false;
+            }
+            if seen.insert(t) {
+                stack.extend(self.0.get(&t).into_iter().flatten().copied());
+            }
+        }
+        self.0.entry(from).or_default().push(to);
+        true
+    }
 }
 
 /// Copies what was last sent to a reused node, so only real changes are
@@ -453,6 +563,7 @@ fn automate(
     project: &Project,
     g: &mut GraphDesc,
     strips: &HashMap<TrackId, NodeId>,
+    built: &mut Built,
 ) {
     for t in project.all_tracks() {
         for lane in t
@@ -471,16 +582,10 @@ fn automate(
                 }
             };
             let Some(node) = node else { continue };
-            let points = session
-                .engine_lane(&lane.points)
-                .points()
-                .iter()
-                .map(|p| AutomationPoint {
-                    value: to_value(p.value),
-                    ..*p
-                })
-                .collect();
-            g.automate(node, param, AutomationLane::new(points));
+            if let Some(key) = g.key(node) {
+                built.automated.insert((key, param));
+            }
+            g.automate(node, param, session.playback_lane(lane, to_value));
         }
     }
 }
@@ -511,6 +616,25 @@ pub(crate) fn params(project: &Project) -> Vec<((NodeKey, u32), f64)> {
             for (&p, &v) in &d.params {
                 out.push(((device_key(d.id), p), v));
             }
+        }
+    }
+    out
+}
+
+/// The default of every built-in device parameter the project leaves at
+/// its default. A parameter returned to its default (`SetParam` with
+/// `None`) is no longer in [`params`], so the session sends it this.
+pub(crate) fn param_defaults(project: &Project) -> Vec<((NodeKey, u32), f64)> {
+    let mut out = Vec::new();
+    for d in project.all_tracks().flat_map(|t| t.devices.iter()) {
+        let DeviceSource::Builtin { kind } = &d.source else {
+            continue;
+        };
+        let Some(specs) = daw_devices::param_specs(kind) else {
+            continue;
+        };
+        for s in specs.iter().filter(|s| !d.params.contains_key(&s.id)) {
+            out.push(((device_key(d.id), s.id), s.default));
         }
     }
     out
@@ -650,6 +774,25 @@ fn join_contiguous(set: &mut ClipSet) {
     }
 }
 
+/// Restores a built-in device's saved state. A sampler's relative sample
+/// paths are relative to `root`.
+fn load_device_state(
+    dev: &mut dyn daw_devices::Device,
+    data: &[u8],
+    root: Option<&Path>,
+) -> Result<(), daw_devices::StateError> {
+    let Some(sampler) = dev.as_any_mut().downcast_mut::<daw_devices::Sampler>() else {
+        return dev.load_state(data);
+    };
+    sampler.load_state_with(data, |path| {
+        let path = match root {
+            Some(root) if path.is_relative() => root.join(path),
+            _ => path.to_path_buf(),
+        };
+        daw_devices::SampleBuffer::load(&path).ok().map(Arc::new)
+    })
+}
+
 /// The node of a plugin device: a fresh node of its loaded plugin, or a
 /// bypass when it can't play.
 fn plugin_node(
@@ -683,13 +826,18 @@ fn plugin_node(
 
 /// The engine node for a model device, its gain reduction meter if it has
 /// one, and a warning if it can't be made.
-fn device_node(d: &Device) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
+///
+/// Samplers find relative sample paths in `root`, the project bundle.
+fn device_node(
+    d: &Device,
+    root: Option<&Path>,
+) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
     match &d.source {
         DeviceSource::Builtin { kind } => match daw_devices::create(kind) {
             Some(mut dev) => {
                 let mut warning = None;
                 if let Some(state) = &d.state
-                    && let Err(e) = dev.load_state(&state.0)
+                    && let Err(e) = load_device_state(dev.as_mut(), &state.0, root)
                 {
                     warning = Some(Warning::DeviceStateRejected {
                         device: d.name.clone(),

@@ -23,18 +23,18 @@ use daw_core::time::{SampleTime, TickTime};
 use daw_engine::nodes::Strip;
 use daw_engine::{AutomationRecorder, Curve, NodeKey};
 use daw_model::commands::{
-    AddDevice, AddLane, Batch, LaneField, RemoveDevice, SendField, SetLane, SetSend, SetTrack,
-    TrackField,
+    AddDevice, AddLane, AddSend, Batch, LaneField, RemoveDevice, RemoveSend, SendField, SetLane,
+    SetSend, SetTrack, TrackField,
 };
 use daw_model::{
     AutomationLane, AutomationPoint, AutomationTarget, Command, Device, DeviceSource, Document,
-    LaneId, Project, SendId, Track, TrackId, TrackKind,
+    LaneId, Project, Send, SendId, Track, TrackId, TrackKind, TrackOutput,
 };
 use daw_session::{Session, db_to_gain, effective_mutes};
 
 use crate::mixer::{
-    Control, EffectChoice, InsertInfo, MAX_DB, MixerHandle, SILENT_DB, SendInfo, StripId,
-    StripInfo, StripKind, StripLevels, effect_choices,
+    Control, EffectChoice, InsertInfo, MAX_DB, MixerHandle, RouteTarget, SILENT_DB, SendInfo,
+    StripId, StripInfo, StripKind, StripLevels, effect_choices,
 };
 use crate::state;
 
@@ -81,6 +81,9 @@ struct Take {
 /// session itself, since it changes playback without changing the document.
 pub struct SessionMixer {
     write: bool,
+    /// Lanes in write mode (set from the track headers): their controls
+    /// record even with `write` off.
+    pub write_lanes: HashSet<LaneId>,
     takes: Vec<Take>,
     effects: Vec<EffectChoice>,
 }
@@ -89,6 +92,7 @@ impl Default for SessionMixer {
     fn default() -> Self {
         Self {
             write: false,
+            write_lanes: HashSet::new(),
             takes: Vec::new(),
             effects: effect_choices(),
         }
@@ -140,9 +144,44 @@ fn insert_info(d: &Device, session: Option<&Session>) -> InsertInfo {
         DeviceSource::Plugin { id, .. } => id.clone(),
     };
     InsertInfo {
+        uid: d.id.to_string(),
         device_id,
+        enabled: d.enabled,
         name: d.name.clone(),
         has_gain_reduction: session.is_some_and(|s| s.device_meter(d.id).is_some()),
+    }
+}
+
+fn route_target(track: &Track) -> RouteTarget {
+    RouteTarget {
+        id: strip_id(track.id),
+        name: track.name.clone(),
+    }
+}
+
+/// Which buses each track can route to without a loop.
+struct Routing<'a> {
+    /// Each bus with every track its audio reaches.
+    buses: Vec<(&'a Arc<Track>, HashSet<TrackId>)>,
+}
+
+impl<'a> Routing<'a> {
+    fn of(project: &'a Project) -> Self {
+        let buses = project
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Bus)
+            .map(|b| (b, project.downstream(b.id)))
+            .collect();
+        Self { buses }
+    }
+
+    /// Buses `source` can feed: not itself, nor any it is fed by.
+    fn targets(&self, source: TrackId) -> impl Iterator<Item = &'a Arc<Track>> + '_ {
+        self.buses
+            .iter()
+            .filter(move |(b, reach)| b.id != source && !reach.contains(&source))
+            .map(|(b, _)| *b)
     }
 }
 
@@ -151,6 +190,8 @@ impl SessionMixer {
     /// plays the project.
     pub fn strips(&self, project: &Project, session: Option<&Session>) -> Vec<StripInfo> {
         let silenced = effective_mutes(project);
+        let routing = Routing::of(project);
+        let master = &project.master;
         let held = |track: TrackId, control: Control| {
             self.takes
                 .iter()
@@ -195,11 +236,126 @@ impl SessionMixer {
                             level_db: held(t.id, Control::Send(target))
                                 .unwrap_or(s.level_db)
                                 .max(SILENT_DB),
+                            pre_fader: s.pre_fader,
                         }
                     })
                     .collect(),
+                output: match t.output {
+                    _ if t.kind == TrackKind::Master => None,
+                    TrackOutput::Master => Some(route_target(master)),
+                    TrackOutput::Bus(b) => project.track(b).map(|b| route_target(b)),
+                },
+                output_choices: if t.kind == TrackKind::Master {
+                    Vec::new()
+                } else {
+                    std::iter::once(master)
+                        .chain(routing.targets(t.id))
+                        .map(|b| route_target(b))
+                        .collect()
+                },
+                send_choices: if t.kind == TrackKind::Master {
+                    Vec::new()
+                } else {
+                    routing
+                        .targets(t.id)
+                        .filter(|b| t.sends.iter().all(|s| s.target != b.id))
+                        .map(|b| route_target(b))
+                        .collect()
+                },
             })
             .collect()
+    }
+
+    /// Adds a send from the strip to bus `target`, at 0 dB after the fader.
+    pub fn add_send(&mut self, doc: &mut Document, id: StripId, target: StripId) -> bool {
+        let project = doc.project();
+        let (Some(track), Some(bus)) = (find(project, id), find(project, target)) else {
+            return false;
+        };
+        if bus.kind != TrackKind::Bus || send_to(track, target).is_some() {
+            return false;
+        }
+        let command = AddSend {
+            track: track.id,
+            send: Send::new(bus.id),
+        };
+        let added = doc.execute(command).is_ok();
+        doc.seal();
+        added
+    }
+
+    /// Removes the strip's send to `target` and its automation. A take
+    /// running on it is written first.
+    pub fn remove_send(
+        &mut self,
+        doc: &mut Document,
+        session: Option<&mut Session>,
+        id: StripId,
+        target: StripId,
+    ) -> Result<(), Message> {
+        let Some(track) = find(doc.project(), id) else {
+            return Ok(());
+        };
+        let Some(send) = send_to(track, target) else {
+            return Ok(());
+        };
+        let track = track.id;
+        let mut result = Ok(());
+        if let Some(i) = self
+            .takes
+            .iter()
+            .position(|t| t.track == track && t.control == Control::Send(target))
+        {
+            let take = self.takes.remove(i);
+            if let Some(session) = session {
+                result = self.end(doc, session, take);
+            }
+        }
+        let r = doc.execute(RemoveSend::new(send));
+        doc.seal();
+        result.and(r.map(|_| ()).map_err(Message::from))
+    }
+
+    /// Taps the strip's send to `target` before or after the fader.
+    pub fn set_send_pre_fader(
+        &mut self,
+        doc: &mut Document,
+        id: StripId,
+        target: StripId,
+        pre_fader: bool,
+    ) -> Result<(), Message> {
+        let Some(send) = find(doc.project(), id).and_then(|t| send_to(t, target)) else {
+            return Ok(());
+        };
+        let r = doc.execute(SetSend {
+            id: send,
+            field: SendField::PreFader(pre_fader),
+        });
+        doc.seal();
+        r.map(|_| ()).map_err(Message::from)
+    }
+
+    /// Routes the strip's output to `target`: a bus, or the master.
+    pub fn set_output(
+        &mut self,
+        doc: &mut Document,
+        id: StripId,
+        target: StripId,
+    ) -> Result<(), Message> {
+        let project = doc.project();
+        let (Some(track), Some(to)) = (find(project, id), find(project, target)) else {
+            return Ok(());
+        };
+        let output = match to.kind {
+            TrackKind::Master => TrackOutput::Master,
+            _ => TrackOutput::Bus(to.id),
+        };
+        if track.kind == TrackKind::Master || track.output == output {
+            return Ok(());
+        }
+        let r = doc.execute(SetTrack::new(track.id, TrackField::Output(output)));
+        doc.seal();
+        r.map(|_| ()).map_err(Message::from)
     }
 
     /// Moves a control: records it while a take for it runs, otherwise
@@ -415,19 +571,22 @@ impl SessionMixer {
             .takes
             .iter()
             .position(|t| t.track == track.id && t.control == control);
+        let armed = |m: &Self| {
+            m.write
+                || target_of(&track, control)
+                    .and_then(|(target, _)| lane_of(&track, target))
+                    .is_some_and(|l| l.enabled && m.write_lanes.contains(&l.id))
+        };
         match (pressed, running) {
-            (true, None) if self.write && session.is_playing() => {
+            (true, None) if armed(self) && session.is_playing() => {
                 let Some((target, value)) = target_of(&track, control) else {
                     return Ok(());
                 };
                 // Start from what is heard: the lane's value, if it has one.
+                let now = session.samples_to_ticks(session.controller().position());
                 let value = lane_of(&track, target)
                     .filter(|l| l.enabled)
-                    .and_then(|l| {
-                        session
-                            .engine_lane(&l.points)
-                            .value_at(session.controller().position())
-                    })
+                    .and_then(|l| l.value_at(now))
                     .unwrap_or(value);
                 let mut take = Take {
                     track: track.id,
@@ -437,16 +596,15 @@ impl SessionMixer {
                     value,
                 };
                 record(&mut take, session);
-                self.takes.push(take);
-                self.suspend(doc, session)?;
-                if let Some((key, param, v)) =
-                    live_param(doc.project(), session, self.takes.last().expect("pushed"))
-                {
+                // Hold the take's value before the lane stops playing, so
+                // the graph without it never plays the static value.
+                if let Some((key, param, v)) = live_param(doc.project(), session, &take) {
                     session
                         .set_live_param(key, param, Some(v))
                         .map_err(Message::from)?;
                 }
-                Ok(())
+                self.takes.push(take);
+                self.suspend(doc, session)
             }
             (false, running) => {
                 let mut r = Ok(());
@@ -699,6 +857,7 @@ impl AppMixer {
     ) -> R {
         state::with(|s| {
             s.end_drag();
+            self.inner.write_lanes.clone_from(&s.lanes.write);
             let r = f(&mut self.inner, &mut s.doc, s.engine.session_mut());
             s.sync();
             r
@@ -745,6 +904,22 @@ impl MixerHandle for AppMixer {
 
     fn set_send_level(&mut self, id: StripId, target: StripId, db: f64) {
         self.report(|m, d, s| m.set(d, s, id, Control::Send(target), db));
+    }
+
+    fn add_send(&mut self, id: StripId, target: StripId) -> bool {
+        self.edit(|m, d, _| m.add_send(d, id, target))
+    }
+
+    fn remove_send(&mut self, id: StripId, target: StripId) {
+        self.report(|m, d, s| m.remove_send(d, s, id, target));
+    }
+
+    fn set_send_pre_fader(&mut self, id: StripId, target: StripId, pre_fader: bool) {
+        self.report(|m, d, _| m.set_send_pre_fader(d, id, target, pre_fader));
+    }
+
+    fn set_output(&mut self, id: StripId, target: StripId) {
+        self.report(|m, d, _| m.set_output(d, id, target));
     }
 
     fn add_insert(&mut self, id: StripId, device_id: &str) -> bool {
@@ -1251,5 +1426,122 @@ mod tests {
             lane.points
         );
         assert_eq!(lane.points[0].value, 0.0, "static pan before the take");
+    }
+
+    fn strip(r: &Rig, name: &str) -> StripInfo {
+        r.mixer
+            .strips(r.doc.project(), Some(&r.session))
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap()
+    }
+
+    fn names(targets: &[RouteTarget]) -> Vec<&str> {
+        targets.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    /// The rig plus a second bus, "Delay".
+    fn two_buses() -> Rig {
+        let mut r = rig();
+        let delay = Track::new(TrackKind::Bus, "Delay");
+        r.doc
+            .execute(daw_model::commands::AddTrack::new(3, delay))
+            .unwrap();
+        r.sync();
+        r
+    }
+
+    #[test]
+    fn sends_are_added_tapped_and_removed_as_commands() {
+        let mut r = two_buses();
+        let keys = r.id("Keys");
+        assert_eq!(names(&strip(&r, "Keys").send_choices), ["Reverb", "Delay"]);
+        // Drums already sends to Reverb.
+        assert_eq!(names(&strip(&r, "Drums").send_choices), ["Delay"]);
+        let delay = r.id("Delay");
+        assert!(r.mixer.add_send(&mut r.doc, keys, delay));
+        assert!(
+            !r.mixer.add_send(&mut r.doc, keys, delay),
+            "one send per bus"
+        );
+        r.sync();
+        let s = strip(&r, "Keys");
+        assert_eq!(s.sends.len(), 1);
+        assert_eq!(s.sends[0].target_name, "Delay");
+        assert!(!s.sends[0].pre_fader);
+        assert_eq!(names(&s.send_choices), ["Reverb"]);
+
+        r.mixer
+            .set_send_pre_fader(&mut r.doc, keys, delay, true)
+            .unwrap();
+        assert!(r.track("Keys").sends[0].pre_fader);
+        r.mixer
+            .remove_send(&mut r.doc, Some(&mut r.session), keys, delay)
+            .unwrap();
+        r.sync();
+        assert!(r.track("Keys").sends.is_empty());
+
+        // Each is its own undo step.
+        r.doc.undo().unwrap();
+        assert!(r.track("Keys").sends[0].pre_fader);
+        r.doc.undo().unwrap();
+        assert!(!r.track("Keys").sends[0].pre_fader);
+        r.doc.undo().unwrap();
+        assert!(r.track("Keys").sends.is_empty());
+        // Sends go only to buses.
+        let drums = r.id("Drums");
+        assert!(!r.mixer.add_send(&mut r.doc, keys, drums));
+        let master = r.id("");
+        assert!(!r.mixer.add_send(&mut r.doc, keys, master));
+    }
+
+    #[test]
+    fn outputs_route_to_buses_and_back() {
+        let mut r = two_buses();
+        let keys = r.id("Keys");
+        let s = strip(&r, "Keys");
+        assert_eq!(s.output.as_ref().unwrap().name, "");
+        assert_eq!(names(&s.output_choices), ["", "Reverb", "Delay"]);
+        let delay = r.id("Delay");
+        r.mixer.set_output(&mut r.doc, keys, delay).unwrap();
+        r.sync();
+        assert_eq!(
+            r.track("Keys").output,
+            daw_model::TrackOutput::Bus(r.track("Delay").id)
+        );
+        assert_eq!(strip(&r, "Keys").output.unwrap().name, "Delay");
+        let master = r.id("");
+        r.mixer.set_output(&mut r.doc, keys, master).unwrap();
+        assert_eq!(r.track("Keys").output, daw_model::TrackOutput::Master);
+        r.doc.undo().unwrap();
+        r.doc.undo().unwrap();
+        assert_eq!(r.track("Keys").output, daw_model::TrackOutput::Master);
+        assert_eq!(
+            r.doc.history().undo_label().as_deref(),
+            Some("Add Track"),
+            "two steps, both undone"
+        );
+        // The master has nowhere to go but the hardware.
+        let m = strip(&r, "");
+        assert!(m.output.is_none() && m.output_choices.is_empty() && m.send_choices.is_empty());
+    }
+
+    #[test]
+    fn routing_choices_leave_out_loops() {
+        let mut r = two_buses();
+        let reverb = r.id("Reverb");
+        let delay = r.id("Delay");
+        // Reverb -> Delay, so Delay can't send or output to Reverb.
+        r.mixer.set_output(&mut r.doc, reverb, delay).unwrap();
+        r.sync();
+        let d = strip(&r, "Delay");
+        assert_eq!(names(&d.output_choices), [""]);
+        assert!(d.send_choices.is_empty());
+        // Reverb doesn't offer itself.
+        assert_eq!(names(&strip(&r, "Reverb").output_choices), ["", "Delay"]);
+        // Going around the choices is refused too, and nothing changes.
+        assert!(!r.mixer.add_send(&mut r.doc, delay, reverb));
+        assert!(r.mixer.set_output(&mut r.doc, delay, reverb).is_err());
+        assert_eq!(r.track("Delay").output, daw_model::TrackOutput::Master);
     }
 }

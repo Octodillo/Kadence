@@ -4,50 +4,56 @@
 //! instrument and mixer code and the undoable model commands its views
 //! send: a project bundle, an imported audio clip on an audio track, a MIDI
 //! clip with notes on an instrument track (which starts with the synth), a
-//! tempo change, effect inserts, a bus fed by a send, and volume
-//! automation. Then it checks undo and redo, renders the song offline,
-//! swaps the instrument to the sampler and back, saves, reopens a moved
-//! copy, and checks that what comes out is music-shaped: not silent, each
-//! part audible where it should be, and the same after the round trip.
+//! tempo change, effect inserts (one of them a CLAP plugin running in its
+//! sandbox host), a bus fed by a send, and volume automation. Then it checks
+//! undo and redo, plays the song live, exports it to WAV and FLAC the way the
+//! app's Export Song does, swaps the instrument to the sampler and back,
+//! saves, reopens a moved copy, and checks that what comes out is
+//! music-shaped: not silent, each part audible where it should be, and the
+//! same after the round trip.
 //!
 //! No Qt runs here; it lives in this crate because the track, instrument
-//! and mixer code it drives does.
+//! and mixer code it drives does. The plugin is `daw-clap-test-plugin`, a
+//! gain, built with the sandbox host the first time the test needs them.
 //!
 //! CI runs this as its own step; set `KADENCE_SMOKE_OUT` to a directory to
-//! keep the rendered WAV.
+//! keep the exported files.
 //!
 //! Features still on open pull requests have hooks marked `TODO(#n)`; extend
 //! this test when they merge:
-//! * #95 sends from the mixer: add the keys' send there.
-//! * #98 device parameters: set the reverb through the device panel's
-//!   commands, and check bypass.
-//! * #91 plugin devices: add the CLAP test plugin as an insert and check it
-//!   is loaded (no `PluginNotLoaded` warning) and audible.
-//! * #96 export: replace [`render`] and the WAV writing with the app's export
-//!   to WAV and FLAC.
+//! * #98 device parameters: set the reverb and the plugin's gain through the
+//!   device panel's commands, and check bypass.
 //! * #108 automation lanes: also automate a device parameter and a send
 //!   level the way the arrange view writes them.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_app::instrument::{self, InstrumentChoices};
 use daw_app::mixer::{Control, StripId};
 use daw_app::session_mixer::SessionMixer;
 use daw_core::event::EventList;
+use daw_core::plugin::PluginFormatKind;
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
-use daw_media::{AudioData, WavFormat, decode_file, write_wav};
+use daw_media::{AudioData, FileFormat, FlacBits, WavFormat, decode_file, write_wav};
 use daw_model::bundle::to_json;
 use daw_model::commands::{
-    AddClip, AddLane, AddNotes, AddSend, ClipField, RemoveSend, SetClip, SetParam, SetTempo,
+    AddClip, AddLane, AddNotes, ClipField, RemoveDevice, RemoveSend, SetClip, SetParam, SetTempo,
 };
 use daw_model::{
-    AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, DeviceSource,
-    Document, Fade, FadeShape, MeterPoint, MidiClip, Note, Project, Send, SendId, TempoData,
-    TempoPoint, Track, TrackId, TrackKind,
+    AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, DeviceId,
+    DeviceSource, Document, Fade, FadeShape, MeterPoint, MidiClip, Note, Project, SendId,
+    TempoData, TempoPoint, Track, TrackId, TrackKind,
 };
-use daw_session::{Session, SessionConfig};
+use daw_plugin_host::{HostLauncher, SandboxConfig};
+use daw_session::export::{
+    ExportJob, ExportSettings, LoaderFactory, Progress, RenderSettings, offline_sandbox, song_end,
+};
+use daw_session::{PluginStatus, SandboxLoader, Session, SessionConfig};
 
 #[global_allocator]
 static ALLOC: AllocDisabler = AllocDisabler;
@@ -58,15 +64,25 @@ const BPM: f64 = 100.0;
 /// Samples per beat at [`BPM`].
 const BEAT: usize = (RATE * 60.0 / BPM) as usize;
 /// Undo steps [`make_song`] makes.
-const EDITS: usize = 14;
-/// The song is four bars of 4/4.
-const SONG_BEATS: usize = 16;
+const EDITS: usize = 16;
+/// The song's clips end after three bars of 4/4.
+const SONG_END_BEATS: usize = 12;
+/// The export's tail, a fourth bar for the reverb to ring on.
+const TAIL_BEATS: usize = 4;
+/// The test plugin, a gain, and its gain parameter.
+const PLUGIN_ID: &str = "org.daw.test.gain";
+const GAIN: u32 = 1;
+/// The latency the test plugin reports (`daw_clap_test_plugin::LATENCY`).
+/// It doesn't actually delay, so a render that compensates for it plays the
+/// plugin's track this much early.
+const PLUGIN_LATENCY: usize = 32;
 
 /// What the test needs to find again after building the song.
 struct Song {
     doc: Document,
     keys: TrackId,
     keys_send: SendId,
+    plugin: DeviceId,
     instruments: InstrumentChoices,
     mixer: SessionMixer,
     /// The project file of the new, empty project.
@@ -179,6 +195,26 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     .unwrap();
     doc.seal();
     assert!(mixer.add_insert(&mut doc, strip(pluck), "daw.eq"));
+    // After the EQ, the CLAP test plugin at half gain, added the way the
+    // mixer's plugin browser adds it.
+    assert!(mixer.add_plugin_insert(
+        &mut doc,
+        strip(pluck),
+        PluginFormatKind::Clap,
+        PLUGIN_ID,
+        "Test Gain",
+    ));
+    let added = &doc.project().track(pluck).unwrap().devices;
+    assert_eq!(added.len(), 2, "the plugin goes after the EQ");
+    let plugin_id = added[1].id;
+    // TODO(#98): set this through the device panel.
+    doc.execute(SetParam {
+        device: plugin_id,
+        param: GAIN,
+        value: Some(0.5),
+    })
+    .unwrap();
+    doc.seal();
     mixer
         .set(&mut doc, None, strip(pluck), Control::Pan, -0.2)
         .unwrap();
@@ -225,11 +261,16 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     })
     .unwrap();
     doc.seal();
-    // TODO(#95): add the send from the mixer.
-    let send = Send::new(bus);
-    let keys_send = send.id;
-    doc.execute(AddSend { track: keys, send }).unwrap();
-    doc.seal();
+    // The keys' send into the reverb bus, added from the keys' strip.
+    let choices = mixer
+        .strips(doc.project(), None)
+        .into_iter()
+        .find(|s| s.id == strip(keys))
+        .unwrap()
+        .send_choices;
+    assert!(choices.iter().any(|c| c.id == strip(bus)), "{choices:?}");
+    assert!(mixer.add_send(&mut doc, strip(keys), strip(bus)));
+    let keys_send = doc.project().track(keys).unwrap().sends[0].id;
 
     // Volume automation: full level for the first chord, -12 dB from the
     // second on.
@@ -240,11 +281,11 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     doc.execute(AddLane { track: keys, lane }).unwrap();
     doc.seal();
 
-    // TODO(#91): add the CLAP test plugin as an insert.
     Song {
         doc,
         keys,
         keys_send,
+        plugin: plugin_id,
         empty,
         instruments,
         mixer,
@@ -264,31 +305,170 @@ fn point(beat: f64, db: f64) -> AutomationPoint {
     }
 }
 
-/// Renders the whole song offline from the start, as stereo.
-// TODO(#96): use the app's export instead.
+/// Builds the test plugin and the sandbox host into their own target
+/// directory (shared with daw-session's plugin tests) and returns a folder
+/// holding only the plugin, and the host binary. The app is its own sandbox
+/// host, which a test binary can't be.
+fn plugin_binaries() -> &'static (PathBuf, PathBuf) {
+    static PATHS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+    PATHS.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let target = root.join("target").join("clap-test-plugin");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = Command::new(cargo)
+            .args([
+                "build",
+                "--quiet",
+                "--package",
+                "daw-clap-test-plugin",
+                "--package",
+                "daw-plugin-host",
+                "--bin",
+                "daw-plugin-host",
+                "--lib",
+                "--target-dir",
+            ])
+            .arg(&target)
+            .current_dir(&root)
+            .status()
+            .expect("run cargo");
+        assert!(status.success(), "building the test plugin and host failed");
+        // One folder for every run; the copy is renamed into place so a
+        // plugin another run has loaded is never overwritten.
+        let dir = target.join("song-plugins");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = target.join("debug").join("libdaw_clap_test_plugin.so");
+        let tmp = dir.join(format!(".test-gain-{}", std::process::id()));
+        std::fs::copy(&lib, &tmp).expect("copy the test plugin");
+        std::fs::rename(&tmp, dir.join("test-gain.clap")).unwrap();
+        (dir, target.join("debug").join("daw-plugin-host"))
+    })
+}
+
+/// A plugin loader that finds only the test plugin, set up for playback or,
+/// with [`offline_sandbox`], for an export, as the app's engine sets up its
+/// own.
+fn plugin_loader(adjust: fn(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
+    let (plugins, host) = plugin_binaries();
+    let mut config = SandboxConfig::new(HostLauncher::new(host, Vec::<String>::new()));
+    // CI machines are slow and the host is a debug build. An export's
+    // offline_sandbox replaces this with the hang timeout.
+    config.process_timeout = Some(Duration::from_secs(5));
+    config.rt_priority = None;
+    let mut loader = SandboxLoader::new(adjust(config));
+    let registry = loader.registry_mut();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![plugins.clone()]);
+    registry.set_search_paths(PluginFormatKind::Lv2, vec![]);
+    registry.set_search_paths(PluginFormatKind::Vst3, vec![]);
+    loader
+}
+
+/// The whole song, from the top to the end of its last clip as Export
+/// Song's default range, plus a bar of tail (the dialog's default is 2 s).
+fn render_settings(doc: &Document) -> RenderSettings {
+    let end = song_end(doc.project());
+    assert_eq!(
+        end,
+        beats(SONG_END_BEATS as f64),
+        "the song ends with its last clip"
+    );
+    RenderSettings {
+        start: TickTime(0),
+        end,
+        tail_seconds: (TAIL_BEATS * BEAT) as f64 / RATE,
+        sample_rate: RATE as u32,
+    }
+}
+
+/// Renders the song offline through the export's render, with plugins.
 fn render(doc: &mut Document) -> AudioData {
+    let loader: Box<dyn daw_session::PluginLoader> = Box::new(plugin_loader(offline_sandbox));
+    let mut channels = vec![Vec::new(), Vec::new()];
+    let warnings = daw_session::export::render(
+        &doc.snapshot(),
+        doc.bundle().map(|b| b.root().to_path_buf()),
+        Some(loader),
+        &render_settings(doc),
+        &Progress::default(),
+        |planes| {
+            for (c, p) in channels.iter_mut().zip(planes) {
+                c.extend_from_slice(p);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(warnings, [], "the song renders without warnings");
+    assert_eq!(channels[0].len(), (SONG_END_BEATS + TAIL_BEATS) * BEAT);
+    AudioData {
+        sample_rate: RATE as u32,
+        channels,
+    }
+}
+
+/// Exports the song to `path` the way the app's Export Song does: a snapshot of
+/// the saved project, rendered on the export's own thread with a plugin
+/// loader made there.
+fn export(doc: &mut Document, path: PathBuf, format: FileFormat) {
+    let factory: LoaderFactory = Box::new(|| Some(Box::new(plugin_loader(offline_sandbox))));
+    let job = ExportJob::start(
+        doc.snapshot(),
+        doc.bundle().map(|b| b.root().to_path_buf()),
+        Some(factory),
+        path,
+        ExportSettings {
+            render: render_settings(doc),
+            format,
+            dither: false,
+        },
+    )
+    .unwrap();
+    let report = job.wait().unwrap();
+    assert_eq!(report.warnings, [], "the song exports without warnings");
+    assert_eq!(report.frames, ((SONG_END_BEATS + TAIL_BEATS) * BEAT) as u64);
+}
+
+/// Plays the first `n` beats live, the way the audio thread does, ticking
+/// the session as the app's timer would, and checks the plugin runs and
+/// nothing allocates. Then stores the plugins' states in the document, as
+/// the app does before saving.
+fn play(doc: &mut Document, plugin: DeviceId, n: usize) -> AudioData {
     let (mut session, mut proc) = Session::new(config());
     session.set_root(doc.bundle().map(|b| b.root().to_path_buf()));
+    session.set_plugin_loader(Some(Box::new(plugin_loader(|c| c))));
     session.sync(&doc.snapshot()).unwrap();
     assert_eq!(session.warnings(), &[], "the song plays without warnings");
+    assert_eq!(session.plugin_status(plugin), Some(PluginStatus::Running));
     session.locate(TickTime(0)).unwrap();
     session.play().unwrap();
 
-    let frames = SONG_BEATS * BEAT;
+    let frames = n * BEAT;
     let mut channels = vec![Vec::with_capacity(frames), Vec::with_capacity(frames)];
     let mut l = vec![0.0; BLOCK];
     let mut r = vec![0.0; BLOCK];
     let events = EventList::with_capacity(0);
-    let mut done = 0;
-    while done < frames {
-        let n = BLOCK.min(frames - done);
+    while channels[0].len() < frames {
+        let n = BLOCK.min(frames - channels[0].len());
         let mut outs: [&mut [f32]; 2] = [&mut l[..n], &mut r[..n]];
         let before = violation_count();
         assert_no_alloc(|| proc.process(n, &[], &mut outs, &events));
         assert_eq!(violation_count(), before, "process allocated");
         channels[0].extend_from_slice(&l[..n]);
         channels[1].extend_from_slice(&r[..n]);
-        done += n;
+        let report = session.tick();
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.warnings, [], "the song plays without warnings");
+    }
+    let states = session.plugin_states();
+    assert_eq!(states.len(), 1, "the plugin has a state to save");
+    for s in states {
+        assert_eq!(s.device, plugin);
+        let state = s.state.unwrap();
+        // The test plugin's state is its gain.
+        let mut gain = b"DAWT".to_vec();
+        gain.extend_from_slice(&0.5f64.to_le_bytes());
+        assert_eq!(&*state.0, &gain[..], "the plugin took the gain parameter");
+        doc.store_plugin_state(s.device, Some(state)).unwrap();
     }
     AudioData {
         sample_rate: RATE as u32,
@@ -317,6 +497,7 @@ fn make_save_reload_and_render_a_song() {
         mut doc,
         keys,
         keys_send,
+        plugin,
         empty,
         instruments,
         mut mixer,
@@ -337,17 +518,49 @@ fn make_save_reload_and_render_a_song() {
     while doc.redo().unwrap().is_some() {}
     assert_eq!(to_json(doc.project()).unwrap(), made, "redo restores it");
 
-    // Render and check each part of the song is where it should be.
+    // Play the first bar live, which also stores the plugin's state, and
+    // save.
+    let live = play(&mut doc, plugin, SONG_END_BEATS + TAIL_BEATS);
     doc.save().unwrap();
-    let song = render(&mut doc);
-    // Written before checking it, so a failing run leaves it to listen to.
-    // TODO(#96): export through the app's export (WAV and FLAC).
+
+    // Export to WAV and FLAC, as Export Song does with the saved project.
+    // Written before checking them, so a failing run leaves them to listen
+    // to.
     let wav = bundle.join("Smoke Song.wav");
-    write_wav(&wav, &song, WavFormat::Float32).unwrap();
-    if let Some(out) = std::env::var_os("KADENCE_SMOKE_OUT") {
-        std::fs::create_dir_all(&out).unwrap();
-        std::fs::copy(&wav, Path::new(&out).join("smoke-song.wav")).unwrap();
-    }
+    let flac = bundle.join("Smoke Song.flac");
+    let keep = |file: &Path, name: &str| {
+        if let Some(out) = std::env::var_os("KADENCE_SMOKE_OUT") {
+            let out = Path::new(&out);
+            std::fs::create_dir_all(out).unwrap();
+            std::fs::copy(file, out.join(name)).unwrap();
+        }
+    };
+    export(&mut doc, wav.clone(), FileFormat::Wav(WavFormat::Float32));
+    keep(&wav, "smoke-song.wav");
+    export(&mut doc, flac.clone(), FileFormat::Flac(FlacBits::B24));
+    keep(&flac, "smoke-song.flac");
+
+    // The WAV holds the render, exactly; the FLAC to within its 24 bits.
+    let song = render(&mut doc);
+    let read = decode_file(&wav).unwrap();
+    assert_eq!(read.sample_rate, RATE as u32);
+    assert_eq!(read.channels, song.channels, "the WAV holds the render");
+    let read = decode_file(&flac).unwrap();
+    assert_eq!(read.sample_rate, RATE as u32);
+    assert_eq!(read.channels.len(), 2, "the FLAC is stereo");
+    assert_eq!(read.channels[0].len(), song.channels[0].len());
+    let error = read
+        .channels
+        .iter()
+        .flatten()
+        .zip(song.channels.iter().flatten())
+        .fold(0f32, |m, (a, b)| m.max((a - b.clamp(-1.0, 1.0)).abs()));
+    assert!(
+        error < 2.0 / 8_388_608.0,
+        "the FLAC holds the render ({error})"
+    );
+
+    // Check each part of the song is where it should be.
     let all = song.channels.iter().flatten();
     assert!(all.clone().all(|x| x.is_finite()), "no NaN or infinity");
     let peak = all.fold(0f32, |m, x| m.max(x.abs()));
@@ -356,10 +569,16 @@ fn make_save_reload_and_render_a_song() {
 
     let pluck = rms(&song, 0.1, 3.0);
     assert!(pluck > 0.01, "the audio clip plays in bar 1 ({pluck})");
-    assert!(
-        song.channels[0][1..64].iter().any(|&x| x != 0.0),
-        "the render starts at the top of the song"
-    );
+    // Live playback is the export, delayed by the plugin's latency (which
+    // the export leaves out), sample for sample give or take rounding in
+    // the different block sizes.
+    let lag = live
+        .channels
+        .iter()
+        .zip(&song.channels)
+        .flat_map(|(l, s)| l[PLUGIN_LATENCY..].iter().zip(s))
+        .fold(0f32, |m, (l, s)| m.max((l - s).abs()));
+    assert!(lag < 1e-5, "playback and export agree (off by {lag})");
     // The source repeats every beat, so the end of its last beat would
     // match the end of its first without the fade out.
     let (first, last) = (rms(&song, 0.5, 1.0), rms(&song, 3.5, 4.0));
@@ -386,6 +605,27 @@ fn make_save_reload_and_render_a_song() {
     );
     let tail = rms(&song, 12.5, 15.5);
     eprintln!("pluck {pluck:.4}, chord {loud:.4} then {quiet:.4}, reverb tail {tail:.5}");
+
+    // The plugin halves the pluck: without it, bar 1 is twice as loud.
+    doc.execute(RemoveDevice::new(plugin)).unwrap();
+    let unplugged = render(&mut doc);
+    doc.undo().unwrap();
+    // Without it there is no latency to compensate either: the export
+    // starts at the top of the song with or without plugins.
+    let off = (0..2)
+        .flat_map(|c| {
+            let (u, s) = (&unplugged.channels[c], &song.channels[c]);
+            (0..4 * BEAT - PLUGIN_LATENCY).map(move |i| (u[i + PLUGIN_LATENCY] - 2.0 * s[i]).abs())
+        })
+        .fold(0f32, f32::max);
+    assert!(
+        off < 1e-6,
+        "the plugin plays in the export at half gain, and the export skips its latency (off by {off})"
+    );
+    assert!(
+        unplugged.channels[0][..64].iter().any(|&x| x != 0.0),
+        "the export starts at the top of the song"
+    );
 
     // The tail in bar 4 comes from the send into the reverb bus: without
     // the send it (nearly) goes away.
@@ -436,11 +676,6 @@ fn make_save_reload_and_render_a_song() {
     doc.undo().unwrap();
     assert!(!doc.is_modified(), "one undo puts the synth back");
     assert_eq!(render(&mut doc).channels, song.channels);
-
-    // The exported file holds the render.
-    let read = decode_file(&wav).unwrap();
-    assert_eq!(read.sample_rate, RATE as u32);
-    assert_eq!(read.channels, song.channels, "the WAV holds the render");
 
     // Reopen from disk, from a copy of the bundle somewhere else, so
     // nothing depends on absolute paths.

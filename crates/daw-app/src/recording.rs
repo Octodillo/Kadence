@@ -62,6 +62,40 @@ fn unsaved_recordings_dir() -> PathBuf {
     data.join("kadence").join("recordings")
 }
 
+/// The instrument track that hears live MIDI while none is armed: the one
+/// recording goes to, else the selected track, else the open clip's track,
+/// else the first instrument track. Unlike [`target`] it ignores the
+/// playhead, so live input doesn't jump between tracks (cutting held
+/// notes) as playback crosses the open clip.
+pub fn input_focus(state: &AppState) -> Option<TrackId> {
+    if let Some(rec) = &state.recording {
+        return Some(rec.track);
+    }
+    let project = state.doc.project();
+    let is_instrument = |id: TrackId| {
+        project
+            .track(id)
+            .is_some_and(|t| t.kind == TrackKind::Instrument)
+    };
+    let open = state
+        .piano
+        .clip
+        .and_then(|c| project.clip_location(c))
+        .map(|(track, _)| track);
+    state
+        .arrange
+        .selected_track
+        .filter(|&t| is_instrument(t))
+        .or(open.filter(|&t| is_instrument(t)))
+        .or_else(|| {
+            project
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Instrument)
+                .map(|t| t.id)
+        })
+}
+
 /// Whether any audio or instrument track is armed.
 fn anything_armed(project: &Project) -> bool {
     project

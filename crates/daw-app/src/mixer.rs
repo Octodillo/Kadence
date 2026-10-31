@@ -21,8 +21,12 @@ pub enum StripKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InsertInfo {
+    /// The model device's id, for the device panel.
+    pub uid: String,
     /// Built-in device id, such as `daw.compressor`.
     pub device_id: String,
+    /// Switched on; off is bypassed.
+    pub enabled: bool,
     pub name: String,
     pub has_gain_reduction: bool,
 }
@@ -32,6 +36,16 @@ pub struct SendInfo {
     pub target: StripId,
     pub target_name: String,
     pub level_db: f64,
+    /// Taps the signal before the fader.
+    pub pre_fader: bool,
+}
+
+/// A strip audio can be routed to: a bus or the master (whose name is empty
+/// unless the user named it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteTarget {
+    pub id: StripId,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +70,14 @@ pub struct StripInfo {
     /// The effects, after the instrument.
     pub inserts: Vec<InsertInfo>,
     pub sends: Vec<SendInfo>,
+    /// Where the strip's output goes; `None` on the master.
+    pub output: Option<RouteTarget>,
+    /// What the output can be switched to without a loop: the master, then
+    /// buses. Includes the current output.
+    pub output_choices: Vec<RouteTarget>,
+    /// Buses a new send can go to: those that don't already have a send
+    /// from this strip and wouldn't loop back into it.
+    pub send_choices: Vec<RouteTarget>,
 }
 
 /// Meter readings since the last call to [`MixerHandle::levels`].
@@ -156,6 +178,12 @@ pub trait MixerHandle {
     fn set_muted(&mut self, id: StripId, muted: bool);
     fn set_soloed(&mut self, id: StripId, soloed: bool);
     fn set_send_level(&mut self, id: StripId, target: StripId, db: f64);
+    /// Adds a send to bus `target`, at 0 dB after the fader.
+    fn add_send(&mut self, id: StripId, target: StripId) -> bool;
+    fn remove_send(&mut self, id: StripId, target: StripId);
+    fn set_send_pre_fader(&mut self, id: StripId, target: StripId, pre_fader: bool);
+    /// Routes the strip's output to `target`, a bus or the master.
+    fn set_output(&mut self, id: StripId, target: StripId);
     /// Appends a built-in effect to the strip's insert chain.
     fn add_insert(&mut self, id: StripId, device_id: &str) -> bool;
     /// Appends a plugin to the strip's insert chain, as a device called

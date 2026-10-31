@@ -46,6 +46,8 @@ pub mod qobject {
         /// Height of the bar ruler across the top.
         #[qproperty(f64, ruler_height)]
         #[qproperty(f64, track_height)]
+        /// Height of one automation lane under a track; set from QML.
+        #[qproperty(f64, lane_height)]
         /// Scroll offsets and content size, for scroll bars and the track
         /// header list.
         #[qproperty(f64, scroll_x)]
@@ -103,9 +105,20 @@ pub mod qobject {
         #[qinvokable]
         fn drop_file(self: Pin<&mut ArrangeView>, url: &QUrl, x: f64, y: f64) -> bool;
 
+        /// The height of track row `row`: the track and its shown lanes.
+        #[qinvokable]
+        fn row_height(self: &ArrangeView, row: i32) -> f64;
+        /// The row a track header dragged to content-y `y` lands on.
+        #[qinvokable]
+        fn row_at_content(self: &ArrangeView, y: f64) -> i32;
+
         /// A context menu was asked for; `on_clip` tells which one.
         #[qsignal]
         fn context_menu_requested(self: Pin<&mut ArrangeView>, x: f64, y: f64, on_clip: bool);
+        /// A context menu was asked for on an automation lane; `on_point`
+        /// when over a point (it is then selected).
+        #[qsignal]
+        fn automation_menu_requested(self: Pin<&mut ArrangeView>, x: f64, y: f64, on_point: bool);
         /// A clip was double-clicked: open it in the editor.
         #[qsignal]
         fn clip_activated(self: Pin<&mut ArrangeView>);
@@ -136,6 +149,7 @@ pub struct ArrangeViewRust {
     negative_color: QColor,
     ruler_height: f64,
     track_height: f64,
+    lane_height: f64,
     scroll_x: f64,
     scroll_y: f64,
     content_width: f64,
@@ -164,6 +178,7 @@ impl Default for ArrangeViewRust {
             negative_color: to_qcolor(p.negative),
             ruler_height: 24.0,
             track_height: 64.0,
+            lane_height: 40.0,
             scroll_x: 0.0,
             scroll_y: 0.0,
             content_width: 0.0,
@@ -235,6 +250,7 @@ pub(crate) fn cursor_shape(c: Cursor) -> i32 {
         Cursor::ResizeHorizontal => 6,
         Cursor::ResizeVertical => 5,
         Cursor::Pointing => 13,
+        Cursor::Crosshair => 2,
     }
 }
 
@@ -267,9 +283,13 @@ impl qobject::ArrangeView {
         let (w, h) = (self.width(), self.height());
         let palette = self.palette();
         let ruler = self.ruler_height;
+        let lane_height = self.lane_height;
         let (scene, geometry) = state::with(|s| {
             s.arrange.palette = palette;
             s.arrange.ruler_height = ruler;
+            // Unclamped (but never zero), so rows stay level with the lane
+            // headers, which use the property as it is.
+            s.arrange.lane_height = lane_height.max(1.0);
             let project = s.doc.project().clone();
             s.arrange.resize(&project, w, h);
             s.arrange.peaks.poll();
@@ -326,9 +346,22 @@ impl qobject::ArrangeView {
             self.as_mut().clip_activated();
         }
         if let Some(hit) = menu {
-            let on_clip = matches!(hit, Hit::Clip { .. });
             let (px, py) = self.rust().last_press;
-            self.context_menu_requested(px, py, on_clip);
+            match hit {
+                Hit::Automation {
+                    lane: Some(_),
+                    point,
+                    ..
+                } => {
+                    self.automation_menu_requested(px, py, point.is_some());
+                }
+                // The empty row of a track without lanes: the headers add them.
+                Hit::Automation { lane: None, .. } => {}
+                _ => {
+                    let on_clip = matches!(hit, Hit::Clip { .. });
+                    self.context_menu_requested(px, py, on_clip);
+                }
+            }
         }
     }
 
@@ -415,6 +448,29 @@ impl qobject::ArrangeView {
             s.touch();
         });
         self.refresh();
+    }
+
+    fn row_height(&self, row: i32) -> f64 {
+        let Ok(row) = usize::try_from(row) else {
+            return self.track_height;
+        };
+        state::with(|s| {
+            let project = s.doc.project().clone();
+            s.arrange.relayout(&project);
+            if row < project.tracks.len() {
+                s.arrange.row_height(row)
+            } else {
+                s.arrange.track_height
+            }
+        })
+    }
+
+    fn row_at_content(&self, y: f64) -> i32 {
+        state::with(|s| {
+            let project = s.doc.project().clone();
+            s.arrange.relayout(&project);
+            s.arrange.row_at_content(y, project.tracks.len()) as i32
+        })
     }
 
     fn drop_file(mut self: Pin<&mut Self>, url: &QUrl, x: f64, y: f64) -> bool {

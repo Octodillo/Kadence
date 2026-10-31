@@ -24,9 +24,22 @@ mod stats;
 
 pub use alloc::RtAllocCounter;
 pub use cycle::BackendCycle;
-pub use dummy::{DummyBackend, MidiInjector, MidiTap, Pacing};
+pub(crate) use cycle::{MidiInputs, MidiInputsControl, midi_inputs};
+pub use dummy::{DummyBackend, DummySystem, MidiInjector, MidiTap, Pacing};
 pub use jack_backend::JackBackend;
 pub use stats::BackendStats;
+
+/// Most MIDI input ports [`AudioBackend::add_midi_input`] adds at once.
+pub const MAX_MIDI_INPUTS: usize = 32;
+
+/// A MIDI input port made by [`AudioBackend::add_midi_input`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MidiInputPort {
+    /// Its events are in [`BackendCycle::midi_inputs`]`[slot]`.
+    pub slot: usize,
+    /// Full name, `client:port`, as passed to [`AudioBackend::connect`].
+    pub name: String,
+}
 
 /// The process callback a backend calls once per audio period.
 pub type ProcessCallback = Box<dyn FnMut(&mut BackendCycle) + Send>;
@@ -178,6 +191,27 @@ pub trait AudioBackend: Send {
     /// UI timer.
     fn stats(&self) -> BackendStats;
 
+    /// Registers another MIDI input port, `name` on this client, while open
+    /// or running, so MIDI from different sources stays apart. Its events
+    /// arrive in [`BackendCycle::midi_inputs`] from a cycle soon after. The
+    /// port lasts until [`remove_midi_input`](Self::remove_midi_input) or
+    /// [`close`](Self::close), across `stop` and `start`.
+    fn add_midi_input(&mut self, name: &str) -> Result<MidiInputPort, BackendError>;
+
+    /// Unregisters a port made by [`add_midi_input`](Self::add_midi_input).
+    /// Its slot may be given to a later port.
+    fn remove_midi_input(&mut self, slot: usize) -> Result<(), BackendError>;
+
+    /// The ports made by [`add_midi_input`](Self::add_midi_input) that are
+    /// still there.
+    fn midi_inputs(&self) -> Vec<MidiInputPort>;
+
+    /// Finishes removals the audio thread has caught up with since
+    /// [`remove_midi_input`](Self::remove_midi_input), such as
+    /// unregistering ports. Call it now and then (the host does on every
+    /// MIDI refresh).
+    fn collect_removed(&mut self) {}
+
     /// How late our ports are against the hardware, as the audio system
     /// reports it now. Recording uses it to line takes up with what the
     /// player heard. Zero when the backend doesn't know.
@@ -200,6 +234,23 @@ impl Latency {
     /// The round trip: input plus output.
     pub fn total(&self) -> u32 {
         self.input.saturating_add(self.output)
+    }
+}
+
+/// The short name for a port made from `name`: JACK separates client and
+/// port with `:`, so that becomes `-`, and the length is capped.
+pub fn port_short_name(name: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c == ':' || c.is_control() { '-' } else { c })
+        .take(MAX_CHARS)
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "midi_in".into()
+    } else {
+        trimmed.to_owned()
     }
 }
 

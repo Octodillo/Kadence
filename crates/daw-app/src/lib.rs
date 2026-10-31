@@ -6,8 +6,11 @@
 //! second, non-Qt front end can reuse the same engine API ([`engine`]).
 
 pub mod arrange_view;
+pub mod automation_bridge;
 pub mod bridge;
 mod demo;
+pub mod device_panel;
+pub mod device_panel_bridge;
 pub mod engine;
 pub mod export;
 // `Exporter.start` takes the export dialog's fields one by one.
@@ -16,6 +19,7 @@ pub mod export_bridge;
 mod ffi;
 pub mod instrument;
 pub mod instruments_bridge;
+pub mod lanes;
 pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;
@@ -27,6 +31,7 @@ mod recording;
 pub mod recovery;
 pub mod session_mixer;
 pub mod settings;
+pub mod settings_bridge;
 pub mod state;
 mod test_helper;
 mod transport;

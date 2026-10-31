@@ -51,6 +51,11 @@ pub use plugins::{
 };
 pub use tempo::tempo_map;
 
+/// Length of the straight pieces a curved automation segment is played
+/// as, in samples, and the most pieces one segment gets.
+const PIECE_SAMPLES: i64 = 256;
+const MAX_PIECES: i64 = 256;
+
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub engine: EngineConfig,
@@ -139,6 +144,10 @@ pub enum Warning {
     /// A track's clips did not reach the engine; the next sync retries.
     #[error("clip update for track {track} was dropped")]
     ClipsDropped { track: String },
+    /// A track's output or send would have made audio loop back into it,
+    /// so it is left out. Edits never allow this; a damaged project could.
+    #[error("routing from track {track} would loop; it is left out")]
+    RoutingLoop { track: String },
 }
 
 /// What the running graph was built from, and what was last sent to it.
@@ -148,6 +157,8 @@ pub(crate) struct Built {
     pub players: HashMap<TrackId, PlayerHandle>,
     /// Last value sent per (node, param), so unchanged values aren't resent.
     pub params: HashMap<(NodeKey, u32), f64>,
+    /// Parameters an automation lane drives in this graph.
+    pub automated: HashSet<(NodeKey, u32)>,
     /// The clips each player was last given, to spot clip edits.
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Gain reduction meters of devices that have one.
@@ -181,6 +192,16 @@ pub struct Session {
     suspended: HashSet<LaneId>,
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
+    /// MIDI source port names, by the engine event source their own port
+    /// feeds. Tracks that pick one of these devices get only its events.
+    midi_sources: HashMap<String, usize>,
+    /// `midi_sources` changed since the graph was built.
+    midi_sources_changed: bool,
+    /// Each instrument track's arm state and channel filter, as of the
+    /// last sync, for [`apply_gates`](Self::apply_gates).
+    gates: Vec<(TrackId, bool, Option<u8>)>,
+    /// The track that takes live MIDI when none is armed.
+    input_focus: Option<TrackId>,
     metronome: MetronomeSettings,
     /// The tick the playhead was last sent to. Until playback moves it,
     /// this is where it is, even before the audio thread says so.
@@ -236,6 +257,10 @@ impl Session {
             master: None,
             suspended: HashSet::new(),
             live: HashMap::new(),
+            midi_sources: HashMap::new(),
+            midi_sources_changed: false,
+            gates: Vec::new(),
+            input_focus: None,
             metronome: MetronomeSettings::default(),
             parked: None,
             offline: None,
@@ -263,10 +288,58 @@ impl Session {
     /// Whether the last sync couldn't send everything (a player's queue was
     /// full) and should run again even if the document hasn't changed.
     pub fn wants_sync(&self) -> bool {
-        self.built.as_ref().is_some_and(|b| {
-            b.midi.keys().any(|t| !b.midi_clips.contains_key(t))
-                || b.players.keys().any(|t| !b.clips.contains_key(t))
-        })
+        self.midi_sources_changed
+            || self.built.as_ref().is_some_and(|b| {
+                b.midi.keys().any(|t| !b.midi_clips.contains_key(t))
+                    || b.players.keys().any(|t| !b.clips.contains_key(t))
+            })
+    }
+
+    /// Tells the session which engine event source each MIDI device's own
+    /// port feeds (see [`host::AudioHost`]). A track whose MIDI input names
+    /// a device takes only that source; one naming a device not in `sources`
+    /// takes nothing. Takes effect on the next [`sync`](Self::sync), which
+    /// [`wants_sync`](Self::wants_sync) asks for.
+    pub fn set_midi_sources(&mut self, sources: HashMap<String, usize>) {
+        if sources != self.midi_sources {
+            self.midi_sources = sources;
+            self.midi_sources_changed = true;
+        }
+    }
+
+    pub fn midi_sources(&self) -> &HashMap<String, usize> {
+        &self.midi_sources
+    }
+
+    /// The instrument track that takes live MIDI while no track is armed
+    /// (the selected one, say). With neither, every instrument track does.
+    pub fn set_input_focus(&mut self, track: Option<TrackId>) {
+        if self.input_focus != track {
+            self.input_focus = track;
+            self.apply_gates();
+        }
+    }
+
+    /// Opens the input gate of each instrument track that should hear live
+    /// MIDI: the armed ones, else the focus track, else all of them.
+    fn apply_gates(&mut self) {
+        let Some(built) = self.built.as_mut() else {
+            return;
+        };
+        let any_armed = self.gates.iter().any(|&(_, armed, _)| armed);
+        let focus = self
+            .input_focus
+            .filter(|f| self.gates.iter().any(|(t, _, _)| t == f));
+        for &(track, armed, channel) in &self.gates {
+            let open = if any_armed {
+                armed
+            } else {
+                focus.is_none_or(|f| f == track)
+            };
+            if let Some(player) = built.midi.get(&track) {
+                player.set_input(daw_midi::player::InputGate { open, channel });
+            }
+        }
     }
 
     /// The MIDI player of an instrument track, for record arming and
@@ -332,7 +405,8 @@ impl Session {
             }
         }
         self.last = Some(snapshot.clone());
-        let structure = build::Structure::of(snapshot, &self.suspended);
+        let structure = build::Structure::of(snapshot, &self.suspended, &self.midi_sources);
+        let sources_changed = std::mem::take(&mut self.midi_sources_changed);
         // Automation is in samples, so a tempo change re-times it.
         let rebuild = std::mem::take(&mut self.force_rebuild)
             || self.built.as_ref().is_none_or(|b| {
@@ -340,6 +414,11 @@ impl Session {
             });
         if rebuild {
             let old = self.built.take().unwrap_or_default();
+            let old_live: Vec<(TrackId, build::LiveInput)> = old
+                .midi
+                .keys()
+                .map(|&t| (t, old.structure.live_input(t)))
+                .collect();
             let (desc, built) = build::graph(self, snapshot, structure, old);
             // Kept only once the engine has the graph: a refused graph's players never
             // ran, so the next build must not take their handles for the running ones.
@@ -351,6 +430,15 @@ impl Session {
                 return Err(e.into());
             }
             self.retry = None;
+            // A track whose live MIDI now comes from elsewhere would never
+            // get the note-offs of what it holds.
+            for (track, was) in old_live {
+                if (sources_changed || built.structure.live_input(track) != was)
+                    && let Some(player) = built.midi.get(&track)
+                {
+                    player.end_live();
+                }
+            }
             self.built = Some(built);
             let ids: HashSet<DeviceId> = snapshot
                 .all_tracks()
@@ -362,6 +450,13 @@ impl Session {
             self.plugins.retain(|id| ids.contains(&id));
         }
         self.sync_plugin_states(snapshot);
+        self.gates = snapshot
+            .tracks
+            .iter()
+            .filter(|t| t.kind == daw_model::TrackKind::Instrument)
+            .map(|t| (t.id, t.armed, t.midi_input.channel))
+            .collect();
+        self.apply_gates();
         self.send_params(snapshot)?;
         self.send_clips(snapshot, tempo_changed);
         self.apply_inputs(snapshot);
@@ -698,6 +793,48 @@ impl Session {
         )
     }
 
+    /// A lane as the engine plays it, values turned into the engine's unit
+    /// by `to_value`. The engine only steps or ramps in straight lines, so
+    /// curved segments are played as short straight pieces, and so is
+    /// every ramp on a level (drawn in dB from
+    /// [`LEVEL_FLOOR_DB`](daw_model::LEVEL_FLOOR_DB) up, which the engine
+    /// would otherwise ramp in linear gain). What plays then follows the
+    /// line the arrange view draws.
+    pub fn playback_lane(
+        &self,
+        lane: &daw_model::AutomationLane,
+        to_value: fn(f64) -> f64,
+    ) -> AutomationLane {
+        let dense = lane.target.is_level();
+        let floor = lane.target.ramp_floor();
+        let mut out = Vec::with_capacity(lane.points.len());
+        for (i, p) in lane.points.iter().enumerate() {
+            let time = self.ticks_to_samples(p.tick);
+            let next = lane.points.get(i + 1);
+            let ramp = !p.step && next.is_some_and(|n| n.value != p.value);
+            out.push(daw_engine::AutomationPoint {
+                time,
+                value: to_value(p.value),
+                curve: if p.step { Curve::Step } else { Curve::Linear },
+            });
+            let Some(next) = next.filter(|_| ramp && (dense || p.curve != 0.0)) else {
+                continue;
+            };
+            let span = self.ticks_to_samples(next.tick).0 - time.0;
+            let pieces = (span / PIECE_SAMPLES).clamp(1, MAX_PIECES);
+            for k in 1..pieces {
+                let x = k as f64 / pieces as f64;
+                let tick = TickTime(p.tick.0 + ((next.tick.0 - p.tick.0) as f64 * x) as i64);
+                out.push(daw_engine::AutomationPoint {
+                    time: self.ticks_to_samples(tick),
+                    value: to_value(p.towards(next.value, x, floor)),
+                    curve: Curve::Linear,
+                });
+            }
+        }
+        AutomationLane::new(out)
+    }
+
     /// Sets the click. Takes effect at once, without a graph rebuild: the
     /// metronome is always in the graph and only its parameters change.
     /// When a parameter can't be sent (a full queue), the error says so and
@@ -726,6 +863,16 @@ impl Session {
         for ((key, param), value) in build::params(snapshot).into_iter().chain(metronome) {
             let value = self.live.get(&(key, param)).copied().unwrap_or(value);
             if built.params.get(&(key, param)) != Some(&value) {
+                self.controller.set_param_by_key(key, param, value)?;
+                built.params.insert((key, param), value);
+            }
+        }
+        // Only parameters that were sent another value: one the document
+        // never set keeps what the device has, which may come from its
+        // saved state.
+        for ((key, param), value) in build::param_defaults(snapshot) {
+            let value = self.live.get(&(key, param)).copied().unwrap_or(value);
+            if built.params.get(&(key, param)).is_some_and(|&v| v != value) {
                 self.controller.set_param_by_key(key, param, value)?;
                 built.params.insert((key, param), value);
             }

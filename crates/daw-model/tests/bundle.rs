@@ -382,3 +382,74 @@ fn thousand_track_project_loads_fast() {
     eprintln!("1,000 tracks: {size} bytes, loaded in {took:?}");
     assert!(took.as_secs_f64() < 1.0, "load took {took:?}");
 }
+
+#[test]
+fn older_tracks_get_default_arm_and_midi_input() {
+    let mut song = sample_project();
+    let mut v: Value = serde_json::from_str(&bundle::to_json(&song).unwrap()).unwrap();
+    v["version"] = 2.into();
+    for t in v["project"]["tracks"].as_array_mut().unwrap() {
+        let t = t.as_object_mut().unwrap();
+        t.remove("armed");
+        t.remove("midi_input");
+    }
+    let p = bundle::from_json(&v.to_string()).unwrap();
+    assert_eq!(p.tracks, song.tracks);
+    assert!(
+        p.tracks
+            .iter()
+            .all(|t| !t.armed && t.midi_input == MidiInput::default())
+    );
+
+    // Both round-trip.
+    let t = std::sync::Arc::make_mut(&mut song.tracks[0]);
+    t.armed = true;
+    t.midi_input = MidiInput {
+        device: Some("Midi-Bridge:Keys (capture)".into()),
+        channel: Some(9),
+    };
+    let p = bundle::from_json(&bundle::to_json(&song).unwrap()).unwrap();
+    assert_eq!(p.tracks, song.tracks);
+
+    // A channel out of range is refused on load.
+    let mut v: Value = serde_json::from_str(&bundle::to_json(&song).unwrap()).unwrap();
+    v["project"]["tracks"][0]["midi_input"]["channel"] = 16.into();
+    assert!(bundle::from_json(&v.to_string()).is_err());
+}
+
+#[test]
+fn arming_and_midi_input_are_undoable_track_edits() {
+    let mut doc = Document::new(sample_project());
+    let id = doc.project().tracks[0].id;
+    doc.execute(SetTrack::new(id, TrackField::Armed(true)))
+        .unwrap();
+    assert_eq!(doc.history().undo_label().as_deref(), Some("Arm Track"));
+    let input = MidiInput {
+        device: None,
+        channel: Some(0),
+    };
+    doc.execute(SetTrack::new(id, TrackField::MidiInput(input.clone())))
+        .unwrap();
+    assert_eq!(
+        doc.history().undo_label().as_deref(),
+        Some("Change MIDI Input")
+    );
+    let track = doc.project().track(id).unwrap();
+    assert!(track.armed);
+    assert_eq!(track.midi_input, input);
+    assert!(
+        doc.execute(SetTrack::new(
+            id,
+            TrackField::MidiInput(MidiInput {
+                device: None,
+                channel: Some(16),
+            })
+        ))
+        .is_err()
+    );
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    let track = doc.project().track(id).unwrap();
+    assert!(!track.armed);
+    assert_eq!(track.midi_input, MidiInput::default());
+}

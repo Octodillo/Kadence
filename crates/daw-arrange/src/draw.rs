@@ -2,7 +2,7 @@
 
 use daw_core::time::{TempoMap, TickTime};
 use daw_midi::grid::{LineKind, Meter};
-use daw_model::{AudioClip, Clip, ClipContent, Project, Track};
+use daw_model::{AudioClip, AutomationLane, Clip, ClipContent, Project, Track};
 
 use crate::scene::{Align, Palette, Prim, Rect, Rgba, Scene, TRACK_COLORS};
 use crate::snap::{MIN_LINE_SPACING, adaptive_grid, bar_stride};
@@ -13,6 +13,8 @@ const LABEL_SPACING: f64 = 48.0;
 const CLIP_RADIUS: f64 = 3.0;
 /// Segments a fade curve is drawn with.
 const FADE_SEGMENTS: usize = 24;
+/// Pieces a curved automation segment is drawn with.
+const CURVE_SEGMENTS: usize = 16;
 /// Clips shorter than this get no name header.
 const HEADER_MIN_HEIGHT: f64 = 28.0;
 const HEADER_HEIGHT: f64 = 16.0;
@@ -35,9 +37,10 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
 
     // Track lanes, alternating like a list view, the selected one tinted.
     let rows = project.tracks.len();
-    let first = (a.scroll_y / a.track_height).floor().max(0.0) as usize;
-    let last = (((a.scroll_y + lanes.h) / a.track_height).ceil() as usize).min(rows);
+    let first = a.row_at_content(a.scroll_y, rows);
+    let last = (a.row_at_content(a.scroll_y + lanes.h, rows) + 1).min(rows);
     let line = pal.background.mix(pal.text, 0.15);
+    let lane_fill = pal.background.mix(pal.text, 0.04);
     for row in first..last {
         let y = a.row_y(row);
         let fill = if a.selected_track == Some(project.tracks[row].id) {
@@ -49,6 +52,11 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
         };
         s.rect(Rect::new(0.0, y, w, a.track_height), fill);
         s.hline(y + a.track_height - 0.5, 0.0, w, line, 1.0);
+        for i in 0..a.lanes_shown(&project.tracks[row]) {
+            let r = a.lane_rect(row, i);
+            s.rect(r, lane_fill);
+            s.hline(r.bottom() - 0.5, 0.0, w, line.mix(pal.background, 0.4), 1.0);
+        }
     }
 
     let loop_x = env
@@ -73,6 +81,11 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
                 continue;
             }
             draw_clip(&mut s, a, env, row, clip, color);
+        }
+        for (i, lane) in track.automation.iter().enumerate() {
+            if a.expanded.contains(&track.id) {
+                draw_lane(&mut s, a, track, row, i, lane, color);
+            }
         }
     }
     if let Some(r) = a.rubber_band() {
@@ -266,6 +279,108 @@ fn draw_clip(s: &mut Scene, a: &mut Arrange, env: &Env, row: usize, clip: &Clip,
                 s.rect(Rect::new(x0, y, (x1 - x0).max(1.0), nh.max(1.0)), ink);
             }
         }
+    }
+    s.pop_clip();
+}
+
+/// An automation lane: its curve, or the control's own value as a faint
+/// line when it has no points, and its points.
+fn draw_lane(
+    s: &mut Scene,
+    a: &Arrange,
+    track: &Track,
+    row: usize,
+    index: usize,
+    lane: &AutomationLane,
+    color: Rgba,
+) {
+    let pal = a.palette;
+    let r = a.lane_rect(row, index);
+    if r.bottom() < a.ruler_height || r.y > a.height {
+        return;
+    }
+    let scale = a.lane_scale(track, lane.target);
+    let ink = if lane.enabled {
+        pal.background.mix(color, 0.9)
+    } else {
+        pal.disabled_text
+    };
+    s.push(Prim::PushClip(r));
+    let Some(first) = lane.points.first() else {
+        let y = a.norm_to_y(&r, scale.to_norm(a.static_value(track, lane.target)));
+        s.hline(y, 0.0, a.width, ink.with_alpha(0.5), 1.0);
+        s.pop_clip();
+        return;
+    };
+    let line = |s: &mut Scene, x0: f64, y0: f64, x1: f64, y1: f64| {
+        s.push(Prim::Line {
+            x0,
+            y0,
+            x1,
+            y1,
+            color: ink,
+            width: 1.5,
+        });
+    };
+    let pos = |p| a.point_pos(&r, scale, p);
+    let (x0, y0) = pos(first);
+    if x0 > 0.0 {
+        line(s, 0.0, y0, x0.min(a.width), y0);
+    }
+    for pair in lane.points.windows(2) {
+        let (p, q) = (&pair[0], &pair[1]);
+        let ((xa, ya), (xb, yb)) = (pos(p), pos(q));
+        if xb < 0.0 || xa > a.width {
+            continue;
+        }
+        if p.step {
+            line(s, xa, ya, xb, ya);
+            line(s, xb, ya, xb, yb);
+        } else if (p.curve == 0.0 && scale.is_linear()) || (xb - xa) < 4.0 {
+            line(s, xa, ya, xb, yb);
+        } else {
+            let floor = lane.target.ramp_floor();
+            let at = |k: usize| {
+                let x = k as f64 / CURVE_SEGMENTS as f64;
+                // The value moves along the shape as it plays; heights
+                // follow the scale.
+                let v = p.towards(q.value, x, floor);
+                (xa + (xb - xa) * x, a.norm_to_y(&r, scale.to_norm(v)))
+            };
+            for k in 0..CURVE_SEGMENTS {
+                let ((x1, y1), (x2, y2)) = (at(k), at(k + 1));
+                line(s, x1, y1, x2, y2);
+            }
+        }
+    }
+    let last = lane.points.last().unwrap_or(first);
+    let (xl, yl) = pos(last);
+    if xl < a.width {
+        line(s, xl.max(0.0), yl, a.width, yl);
+    }
+    let sel = a
+        .points
+        .as_ref()
+        .filter(|(l, _)| *l == lane.id)
+        .map(|(_, s)| s);
+    let half = a.point_px() / 2.0;
+    for (i, p) in lane.points.iter().enumerate() {
+        let (x, y) = pos(p);
+        if x < -half || x > a.width + half {
+            continue;
+        }
+        let selected = sel.is_some_and(|s| s.contains(&i));
+        s.push(Prim::RoundRect {
+            r: Rect::new(x - half, y - half, 2.0 * half, 2.0 * half),
+            radius: 1.0,
+            fill: if selected {
+                pal.highlight
+            } else {
+                pal.background
+            },
+            stroke: if selected { pal.highlight } else { ink },
+            stroke_width: 1.0,
+        });
     }
     s.pop_clip();
 }

@@ -18,6 +18,7 @@ QtObject {
         "Arm Track": i18nc("@item:inmenu name of an edit", "Arm Track"),
         "Bypass Device": i18nc("@item:inmenu name of an edit", "Bypass Device"),
         "Change Clip Gain": i18nc("@item:inmenu name of an edit", "Change Clip Gain"),
+        "Change MIDI Input": i18nc("@item:inmenu name of an edit", "Change MIDI Input"),
         "Change Fade In": i18nc("@item:inmenu name of an edit", "Change Fade In"),
         "Change Fade Out": i18nc("@item:inmenu name of an edit", "Change Fade Out"),
         "Change Fade Shape": i18nc("@item:inmenu name of an edit", "Change Fade Shape"),
