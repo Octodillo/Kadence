@@ -51,6 +51,11 @@ pub use plugins::{
 };
 pub use tempo::tempo_map;
 
+/// Length of the straight pieces a curved automation segment is played
+/// as, in samples, and the most pieces one segment gets.
+const PIECE_SAMPLES: i64 = 256;
+const MAX_PIECES: i64 = 256;
+
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub engine: EngineConfig,
@@ -148,6 +153,8 @@ pub(crate) struct Built {
     pub players: HashMap<TrackId, PlayerHandle>,
     /// Last value sent per (node, param), so unchanged values aren't resent.
     pub params: HashMap<(NodeKey, u32), f64>,
+    /// Parameters an automation lane drives in this graph.
+    pub automated: HashSet<(NodeKey, u32)>,
     /// The clips each player was last given, to spot clip edits.
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Gain reduction meters of devices that have one.
@@ -698,6 +705,48 @@ impl Session {
         )
     }
 
+    /// A lane as the engine plays it, values turned into the engine's unit
+    /// by `to_value`. The engine only steps or ramps in straight lines, so
+    /// curved segments are played as short straight pieces, and so is
+    /// every ramp on a level (drawn in dB from
+    /// [`LEVEL_FLOOR_DB`](daw_model::LEVEL_FLOOR_DB) up, which the engine
+    /// would otherwise ramp in linear gain). What plays then follows the
+    /// line the arrange view draws.
+    pub fn playback_lane(
+        &self,
+        lane: &daw_model::AutomationLane,
+        to_value: fn(f64) -> f64,
+    ) -> AutomationLane {
+        let dense = lane.target.is_level();
+        let floor = lane.target.ramp_floor();
+        let mut out = Vec::with_capacity(lane.points.len());
+        for (i, p) in lane.points.iter().enumerate() {
+            let time = self.ticks_to_samples(p.tick);
+            let next = lane.points.get(i + 1);
+            let ramp = !p.step && next.is_some_and(|n| n.value != p.value);
+            out.push(daw_engine::AutomationPoint {
+                time,
+                value: to_value(p.value),
+                curve: if p.step { Curve::Step } else { Curve::Linear },
+            });
+            let Some(next) = next.filter(|_| ramp && (dense || p.curve != 0.0)) else {
+                continue;
+            };
+            let span = self.ticks_to_samples(next.tick).0 - time.0;
+            let pieces = (span / PIECE_SAMPLES).clamp(1, MAX_PIECES);
+            for k in 1..pieces {
+                let x = k as f64 / pieces as f64;
+                let tick = TickTime(p.tick.0 + ((next.tick.0 - p.tick.0) as f64 * x) as i64);
+                out.push(daw_engine::AutomationPoint {
+                    time: self.ticks_to_samples(tick),
+                    value: to_value(p.towards(next.value, x, floor)),
+                    curve: Curve::Linear,
+                });
+            }
+        }
+        AutomationLane::new(out)
+    }
+
     /// Sets the click. Takes effect at once, without a graph rebuild: the
     /// metronome is always in the graph and only its parameters change.
     /// When a parameter can't be sent (a full queue), the error says so and
@@ -726,6 +775,16 @@ impl Session {
         for ((key, param), value) in build::params(snapshot).into_iter().chain(metronome) {
             let value = self.live.get(&(key, param)).copied().unwrap_or(value);
             if built.params.get(&(key, param)) != Some(&value) {
+                self.controller.set_param_by_key(key, param, value)?;
+                built.params.insert((key, param), value);
+            }
+        }
+        // Only parameters that were sent another value: one the document
+        // never set keeps what the device has, which may come from its
+        // saved state.
+        for ((key, param), value) in build::param_defaults(snapshot) {
+            let value = self.live.get(&(key, param)).copied().unwrap_or(value);
+            if built.params.get(&(key, param)).is_some_and(|&v| v != value) {
                 self.controller.set_param_by_key(key, param, value)?;
                 built.params.insert((key, param), value);
             }

@@ -36,6 +36,8 @@ pub struct AppState {
     pub export: Option<daw_session::export::ExportJob>,
     /// The audio takes in progress.
     pub audio_recording: Option<crate::recording::AudioRecording>,
+    /// Automation lane modes and device parameter names.
+    pub lanes: crate::lanes::Lanes,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -121,15 +123,19 @@ impl AppState {
     }
 
     pub(crate) fn with_engine(engine: Box<dyn EngineHandle>) -> Self {
+        let lanes = crate::lanes::Lanes::default();
+        let mut arrange = Arrange::new();
+        arrange.params = Some(lanes.params.clone());
         let mut s = Self {
             doc: Document::new(Project::default()),
             engine,
-            arrange: Arrange::new(),
+            arrange,
             piano: PianoRoll::new(),
             instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
             export: None,
             audio_recording: None,
+            lanes,
             synced: None,
             view_revision: 0,
             status: None,
@@ -170,6 +176,7 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        self.prune_lane_modes();
         self.apply_click();
         self.view_revision += 1;
     }
@@ -624,6 +631,8 @@ impl AppState {
         self.autosave_failed = None;
         self.doc_serial += 1;
         self.arrange.selection.clear();
+        self.arrange.points = None;
+        self.arrange.expanded.clear();
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;
         self.arrange.scroll_y = 0.0;

@@ -81,6 +81,9 @@ struct Take {
 /// session itself, since it changes playback without changing the document.
 pub struct SessionMixer {
     write: bool,
+    /// Lanes in write mode (set from the track headers): their controls
+    /// record even with `write` off.
+    pub write_lanes: HashSet<LaneId>,
     takes: Vec<Take>,
     effects: Vec<EffectChoice>,
 }
@@ -89,6 +92,7 @@ impl Default for SessionMixer {
     fn default() -> Self {
         Self {
             write: false,
+            write_lanes: HashSet::new(),
             takes: Vec::new(),
             effects: effect_choices(),
         }
@@ -140,7 +144,9 @@ fn insert_info(d: &Device, session: Option<&Session>) -> InsertInfo {
         DeviceSource::Plugin { id, .. } => id.clone(),
     };
     InsertInfo {
+        uid: d.id.to_string(),
         device_id,
+        enabled: d.enabled,
         name: d.name.clone(),
         has_gain_reduction: session.is_some_and(|s| s.device_meter(d.id).is_some()),
     }
@@ -415,19 +421,22 @@ impl SessionMixer {
             .takes
             .iter()
             .position(|t| t.track == track.id && t.control == control);
+        let armed = |m: &Self| {
+            m.write
+                || target_of(&track, control)
+                    .and_then(|(target, _)| lane_of(&track, target))
+                    .is_some_and(|l| l.enabled && m.write_lanes.contains(&l.id))
+        };
         match (pressed, running) {
-            (true, None) if self.write && session.is_playing() => {
+            (true, None) if armed(self) && session.is_playing() => {
                 let Some((target, value)) = target_of(&track, control) else {
                     return Ok(());
                 };
                 // Start from what is heard: the lane's value, if it has one.
+                let now = session.samples_to_ticks(session.controller().position());
                 let value = lane_of(&track, target)
                     .filter(|l| l.enabled)
-                    .and_then(|l| {
-                        session
-                            .engine_lane(&l.points)
-                            .value_at(session.controller().position())
-                    })
+                    .and_then(|l| l.value_at(now))
                     .unwrap_or(value);
                 let mut take = Take {
                     track: track.id,
@@ -437,16 +446,15 @@ impl SessionMixer {
                     value,
                 };
                 record(&mut take, session);
-                self.takes.push(take);
-                self.suspend(doc, session)?;
-                if let Some((key, param, v)) =
-                    live_param(doc.project(), session, self.takes.last().expect("pushed"))
-                {
+                // Hold the take's value before the lane stops playing, so
+                // the graph without it never plays the static value.
+                if let Some((key, param, v)) = live_param(doc.project(), session, &take) {
                     session
                         .set_live_param(key, param, Some(v))
                         .map_err(Message::from)?;
                 }
-                Ok(())
+                self.takes.push(take);
+                self.suspend(doc, session)
             }
             (false, running) => {
                 let mut r = Ok(());
@@ -699,6 +707,7 @@ impl AppMixer {
     ) -> R {
         state::with(|s| {
             s.end_drag();
+            self.inner.write_lanes.clone_from(&s.lanes.write);
             let r = f(&mut self.inner, &mut s.doc, s.engine.session_mut());
             s.sync();
             r

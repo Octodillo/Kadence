@@ -106,6 +106,8 @@ pub trait Device: Node {
 /// A catalog entry: what the device is and how to make one.
 pub struct DeviceEntry {
     pub info: &'static DeviceInfo,
+    /// The device's parameters, as [`Device::param_specs`] returns them.
+    pub params: &'static [ParamSpec],
     pub create: fn() -> Box<dyn Device>,
 }
 
@@ -120,34 +122,42 @@ impl std::fmt::Debug for DeviceEntry {
 static CATALOG: &[DeviceEntry] = &[
     DeviceEntry {
         info: &devices::utility::INFO,
+        params: devices::utility::PARAMS,
         create: || Box::new(Utility::new()),
     },
     DeviceEntry {
         info: &devices::metronome::INFO,
+        params: devices::metronome::PARAMS,
         create: || Box::new(Metronome::new()),
     },
     DeviceEntry {
         info: &devices::sampler::INFO,
+        params: devices::sampler::PARAMS,
         create: || Box::new(Sampler::new()),
     },
     DeviceEntry {
         info: &devices::synth::INFO,
+        params: devices::synth::PARAMS,
         create: || Box::new(Synth::new()),
     },
     DeviceEntry {
         info: &devices::eq::INFO,
+        params: devices::eq::PARAMS,
         create: || Box::new(ParametricEq::new()),
     },
     DeviceEntry {
         info: &devices::compressor::INFO,
+        params: devices::compressor::PARAMS,
         create: || Box::new(Compressor::new()),
     },
     DeviceEntry {
         info: &devices::delay::INFO,
+        params: devices::delay::PARAMS,
         create: || Box::new(Delay::new()),
     },
     DeviceEntry {
         info: &devices::reverb::INFO,
+        params: devices::reverb::PARAMS,
         create: || Box::new(Reverb::new()),
     },
 ];
@@ -163,6 +173,11 @@ pub fn create(id: &str) -> Option<Box<dyn Device>> {
         .iter()
         .find(|e| e.info.id == id)
         .map(|e| (e.create)())
+}
+
+/// The parameters of the device with this id, without creating one.
+pub fn param_specs(id: &str) -> Option<&'static [ParamSpec]> {
+    CATALOG.iter().find(|e| e.info.id == id).map(|e| e.params)
 }
 
 /// Implements the boilerplate parts of [`Device`] for a struct with
@@ -209,6 +224,9 @@ mod tests {
         for e in devices() {
             let d = create(e.info.id).expect("creatable");
             assert_eq!(d.info().id, e.info.id);
+            let keys = |specs: &[ParamSpec]| specs.iter().map(|s| s.key).collect::<Vec<_>>();
+            assert_eq!(keys(d.param_specs()), keys(e.params));
+            assert_eq!(keys(param_specs(e.info.id).unwrap()), keys(e.params));
         }
         assert!(create("nope").is_none());
     }

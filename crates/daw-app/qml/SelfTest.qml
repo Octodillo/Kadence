@@ -122,6 +122,41 @@ Item {
             shoot(window.title, "arrange-demo");
         },
         () => {
+            // Show the Bass and Keys lanes, then add a point to Bass's
+            // volume lane with a click.
+            const v = window.pageStack.currentItem.view;
+            check(Automation.laneCount(0) === 1 && Automation.laneKind(0, 0) === 0, "demo Bass has a volume lane");
+            check(Automation.laneMode(0, 0) === 1, "lanes read by default");
+            Automation.setExpanded(0, true);
+            Automation.setExpanded(2, true);
+            check(Automation.expanded(0) && v.rowHeight(0) === v.trackHeight + v.laneHeight, "Bass shows its lane");
+            const y = v.rulerHeight + v.trackHeight + v.laneHeight / 2;
+            v.press(v.width * 0.45, y, 1, 0);
+            v.release(v.width * 0.45, y, 0);
+            Project.tick();
+            check(Project.undoText === "Edit Automation", "click adds an automation point");
+            check(Project.undoText in editNames.names, "automation edit has a translation");
+            check(Automation.targetCount(0) >= 1 && Automation.targetKind(0, 0) === 1, "Pan can get a lane");
+            Automation.setLaneMode(0, 0, 0);
+            Project.tick();
+            check(Automation.laneMode(0, 0) === 0 && Project.undoText === "Toggle Automation", "lane off");
+            Automation.setLaneMode(0, 0, 2);
+            check(Automation.laneMode(0, 0) === 2, "lane in write mode");
+            Automation.setLaneMode(0, 0, 1);
+            Project.undo();
+            Project.undo();
+            Project.undo();
+            v.refresh();
+        },
+        () => {
+            shoot(window.title, "arrange-automation");
+        },
+        () => {
+            Automation.setExpanded(0, false);
+            Automation.setExpanded(2, false);
+            check(!Automation.expanded(0), "lanes hidden");
+        },
+        () => {
             // Tempo and time signature: edits in a row are one undo step.
             check(Project.bpm === 120 && Project.meterNumerator === 4 && Project.meterDenominator === 4,
                   "demo starts at 120 bpm in 4/4");
@@ -217,6 +252,39 @@ Item {
         () => {
             check(Project.undoText === "Add Automation Lane", "fader move written as automation");
             check(!Mixer.writeAutomation, "writing off");
+        },
+        () => {
+            // Click the compressor added above: its panel opens.
+            const id = Mixer.insertDevice(0, 0);
+            check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
+            check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
+            check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            // Drag the threshold: one undo step.
+            DevicePanel.setValue(0, -30, true);
+            DevicePanel.setValue(0, -24, true);
+            DevicePanel.endGesture();
+            // Project's properties follow the document on its tick.
+            Project.tick();
+            check(Project.undoText === "Change Parameter", "parameter edit undoes");
+            Project.undo();
+            check(Project.undoText === "Add Automation Lane", "a drag is one undo step");
+            Project.redo();
+            DevicePanel.setDeviceEnabled(false);
+            Project.tick();
+            check(!DevicePanel.switchedOn && Project.undoText === "Bypass Device", "bypass");
+            DevicePanel.setDeviceEnabled(true);
+            check(DevicePanel.switchedOn, "switch back on");
+        },
+        () => {
+            shoot(window.title, "mix-device");
+        },
+        () => {
+            // The demo's Keys track plays the synth: its panel opens too.
+            const keys = 2;
+            check(DevicePanel.open(Mixer.instrumentDevice(keys)), "open the instrument's panel");
+            check(DevicePanel.deviceKind === "daw.synth" && DevicePanel.instrument, "panel shows the synth");
+            DevicePanel.close();
+            check(!DevicePanel.active, "panel closed");
         },
         () => {
             // The plugin browser, as Add Effect opens it.

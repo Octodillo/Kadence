@@ -38,7 +38,7 @@ pub const VELOCITY: ParamId = 5;
 pub const MODE_ONE_SHOT: f64 = 0.0;
 pub const MODE_KEY_MAPPED: f64 = 1.0;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::choice(MODE, "mode", "Mode", &["One-shot", "Key-mapped"], 1),
     ParamSpec::new(GAIN, "gain", "Gain", -70.0, 12.0, 0.0, ParamUnit::Decibels),
     ParamSpec::new(
