@@ -30,11 +30,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
-use daw_app::device_panel::{BuiltinParams, DevicePanel, PluginParams};
+use daw_app::device_panel::{BuiltinParams, DevicePanel, ParamSource, PluginParams};
 use daw_app::instrument::{self, InstrumentChoices};
 use daw_app::mixer::{Control, StripId};
 use daw_app::session_mixer::SessionMixer;
-use daw_arrange::automation::SILENCE_DB;
+use daw_arrange::automation::lane_targets;
 use daw_arrange::{Arrange, PointShape, Pointer};
 use daw_core::event::EventList;
 use daw_core::plugin::PluginFormatKind;
@@ -65,11 +65,12 @@ const BPM: f64 = 100.0;
 /// Samples per beat at [`BPM`].
 const BEAT: usize = (RATE * 60.0 / BPM) as usize;
 /// Undo steps [`make_song`] makes. A drag in the device panel is one; a
-/// lane is one to add and two per point (click, then its shape).
-const EDITS: usize = 25;
+/// lane is one to add, one per point, and one for the first point's shape.
+const EDITS: usize = 23;
 /// The song's clips end after three bars of 4/4.
 const SONG_END_BEATS: usize = 12;
-/// The export's tail, a fourth bar for the reverb to ring on.
+/// The export's tail, a fourth bar for the second chord's reverb to ring
+/// on.
 const TAIL_BEATS: usize = 4;
 /// The test plugin, a gain, and its gain parameter.
 const PLUGIN_ID: &str = "org.daw.test.gain";
@@ -143,7 +144,9 @@ fn strip(track: TrackId) -> StripId {
 ///
 /// Bar 1: the audio track's pluck. Bars 2 and 3: the same chord twice on
 /// the instrument track, the second 12 dB quieter through volume
-/// automation. Bar 4: only the reverb tail the keys send to the bus.
+/// automation. Bar 4: only the reverb tail of the second chord, which the
+/// keys send to the bus 6 dB down through send automation (the first
+/// chord's has died away by then).
 fn make_song(bundle: &Path, source: &Path) -> Song {
     let mut doc = Document::new(Project::new("Smoke Song"));
     doc.save_as(bundle).unwrap();
@@ -226,12 +229,21 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         session.set_root(doc.bundle().map(|b| b.root().to_path_buf()));
         session.set_plugin_loader(Some(Box::new(plugin_loader(|c| c))));
         session.sync(&doc.snapshot()).unwrap();
-        assert!(plugin_params.update(Some(&session), Some(plugin_id), doc.revision()));
+        assert!(
+            plugin_params.update(Some(&session), Some(plugin_id), doc.revision()),
+            "the device panel can describe the loaded plugin: {:?}",
+            session.plugin_status(plugin_id)
+        );
     }
+    let device = &doc.project().track(pluck).unwrap().devices[1];
+    assert_eq!(
+        plugin_params.current(device, GAIN),
+        Some(1.0),
+        "the panel reads the plugin's own gain from the plugin"
+    );
     panel.open(plugin_id);
     let view = panel.view(doc.project()).unwrap();
-    let gain = view.params.iter().find(|p| p.desc.id == GAIN).unwrap();
-    assert_eq!(gain.value, 1.0, "the panel shows the plugin's own gain");
+    assert!(view.params.iter().any(|p| p.desc.id == GAIN));
     for value in [0.8, 0.65, 0.5] {
         panel.set_value(&mut doc, GAIN, value).unwrap();
     }
@@ -287,7 +299,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
 
     // Automation drawn in the arrange view: the keys' volume at full level
     // for the first chord and -12 dB from the second on, and their send
-    // cut from the second chord on, so only the first reaches the reverb.
+    // 6 dB down from the second chord on.
     let mut arrange = Arrange::new();
     arrange.resize(doc.project(), 1000.0, 600.0);
     draw_lane(
@@ -302,7 +314,7 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         &mut doc,
         keys,
         AutomationTarget::SendLevel { send: keys_send },
-        &[(0.0, 0.0), (8.0, SILENCE_DB)],
+        &[(0.0, 0.0), (8.0, -6.0)],
     );
 
     Song {
@@ -323,9 +335,9 @@ fn builtin_source(kind: &str) -> DeviceSource {
     DeviceSource::Builtin { kind: kind.into() }
 }
 
-/// Adds a lane for `target` on `track` in the arrange view and clicks in
-/// its `points` (beat, value), each holding until the next, as the user
-/// does. Returns the lane.
+/// Adds a lane for `target` (one the track's Add Lane menu offers) on
+/// `track` in the arrange view and clicks in its `points` (beat, value),
+/// each holding until the next, as the user does. Returns the lane.
 fn draw_lane(
     arrange: &mut Arrange,
     doc: &mut Document,
@@ -333,6 +345,11 @@ fn draw_lane(
     target: AutomationTarget,
     points: &[(f64, f64)],
 ) -> LaneId {
+    let t = doc.project().track(track).unwrap();
+    assert!(
+        lane_targets(t, None).contains(&target),
+        "{target:?} is offered"
+    );
     assert!(arrange.add_lane(doc, track, target).document);
     let project = doc.project();
     let row = project.tracks.iter().position(|t| t.id == track).unwrap();
@@ -346,7 +363,13 @@ fn draw_lane(
         // A pixel late: the click snaps to the beat.
         assert!(arrange.press(doc, Pointer::left(x + 1.0, y)).document);
         arrange.release(doc, Pointer::left(x + 1.0, y));
-        assert!(arrange.set_point_shape(doc, PointShape::Step).document);
+        // The first point is a ramp; later ones take the shape of the one
+        // before.
+        let points = &doc.project().track(track).unwrap().automation[index].points;
+        if points.len() == 1 {
+            assert!(!points[0].step);
+            assert!(arrange.set_point_shape(doc, PointShape::Step).document);
+        }
     }
     let drawn = &doc.project().track(track).unwrap().automation[index].points;
     assert_eq!(drawn.len(), points.len());
@@ -675,20 +698,19 @@ fn make_save_reload_and_render_a_song() {
         "the export starts at the top of the song"
     );
 
-    // Bypassing the plugin in the device panel lets the pluck through at
-    // full level (the plugin keeps its latency, so compare levels).
+    // Bypassing the plugin in the device panel takes it out, latency and
+    // all: the song sounds as it does without it.
     panel.open(plugin);
     panel.set_enabled(&mut doc, false).unwrap();
     let bypassed = render(&mut doc);
     doc.undo().unwrap();
-    let ratio = rms(&bypassed, 0.1, 3.0) / pluck;
     assert!(
-        (ratio - 2.0).abs() < 0.01,
-        "bypass takes the plugin out (x{ratio} bypassed)"
+        bypassed.channels == unplugged.channels,
+        "bypass takes the plugin out"
     );
 
-    // The send lane keeps the second chord out of the reverb: with the
-    // lane off, the tail in bar 4 is louder.
+    // The send lane sends the second chord 6 dB down: with the lane off,
+    // its tail in bar 4 is twice as loud, and nothing before it changes.
     assert!(
         arrange
             .set_lane_enabled(&mut doc, send_lane, false)
@@ -697,33 +719,40 @@ fn make_save_reload_and_render_a_song() {
     let unlaned = render(&mut doc);
     doc.undo().unwrap();
     let full_tail = rms(&unlaned, 12.5, 15.5);
-    let (quiet, sent) = (rms(&song, 8.5, 11.0), rms(&unlaned, 8.5, 11.0));
     eprintln!(
-        "pluck {pluck:.4}, chord {loud:.4} then {sent:.4} ({quiet:.4} dry), \
-         reverb tail {full_tail:.5} ({tail:.5} from the first chord)"
+        "pluck {pluck:.4}, chord {loud:.4} then {:.4}, reverb tail {tail:.5} \
+         ({full_tail:.5} with the send lane off)",
+        rms(&song, 8.5, 11.0)
     );
+    let ratio = tail / full_tail;
     assert!(
-        full_tail > 1.5 * tail && sent > 1.2 * quiet,
-        "the send lane cuts the send from the second chord (tail {tail}, lane off \
-         {full_tail}; chord {quiet}, lane off {sent})"
+        (0.47..0.53).contains(&ratio),
+        "the send lane sends the second chord 6 dB down (tail x{ratio})"
     );
-    // With both chords sent, they differ by the volume lane: -12 dB is
-    // 0.25, and the reverb tail of the first chord adds a little.
-    let ratio = sent / rms(&unlaned, 4.5, 7.0);
+    let at = |beat: f64| (beat * BEAT as f64) as usize;
+    for c in 0..2 {
+        assert!(
+            song.channels[c][..at(8.0)] == unlaned.channels[c][..at(8.0)],
+            "the send lane leaves the first chord alone"
+        );
+    }
+    // With both chords sent alike, they differ by the volume lane: -12 dB
+    // is 0.25, and the reverb tail of the first chord adds a little.
+    let ratio = rms(&unlaned, 8.5, 11.0) / rms(&unlaned, 4.5, 7.0);
     assert!(
         (0.2..0.32).contains(&ratio),
         "the volume lane turns the second chord down ({ratio})"
     );
 
-    // That tail comes from the send into the reverb bus: without the send
+    // The tail comes from the send into the reverb bus: without the send
     // it goes away.
     doc.execute(RemoveSend::new(keys_send)).unwrap();
     let dry = render(&mut doc);
     doc.undo().unwrap();
     let dry_tail = rms(&dry, 12.5, 15.5);
     assert!(
-        full_tail > 5e-4 && full_tail > 4.0 * dry_tail,
-        "the send feeds the reverb bus (tail {full_tail}, without the send {dry_tail})"
+        tail > 2.5e-4 && tail > 4.0 * dry_tail,
+        "the send feeds the reverb bus (tail {tail}, without the send {dry_tail})"
     );
     assert!(!doc.is_modified(), "undo returns to the saved state");
 
@@ -747,7 +776,6 @@ fn make_save_reload_and_render_a_song() {
     assert!(keys_part < 1e-4, "an empty sampler is silent ({keys_part})");
     // Up to the MIDI clip at beat 4 nothing changes; the synth sounds
     // right from there.
-    let at = |beat: f64| (beat * BEAT as f64) as usize;
     for c in 0..2 {
         assert_eq!(
             swapped.channels[c][..at(4.0)],
