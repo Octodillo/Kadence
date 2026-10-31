@@ -507,8 +507,14 @@ impl PianoRoll {
                 let hit = lane.hit_test(&v, &targets, lx, STEM_TOLERANCE);
                 let out = match hit {
                     Some(i) => {
+                        // Every note on the stem: a chord's stems coincide.
+                        let x = v.note_rect(&targets[i].data()).x;
                         let mut all = targets.clone();
-                        all[i].velocity = lane.y_to_velocity(ly);
+                        for n in &mut all {
+                            if v.note_rect(&n.data()).x == x {
+                                n.velocity = lane.y_to_velocity(ly);
+                            }
+                        }
                         self.execute_edit(doc, all)
                     }
                     None => outcome_view(),
@@ -664,15 +670,19 @@ impl PianoRoll {
                 lane.draw_line(&v, &mut targets, last, (lx, ly));
                 // The pressed stem follows the pointer even when it is not
                 // exactly over it, while it stays within reach.
-                let grabbed = grabbed.filter(|id| {
-                    targets.iter_mut().find(|n| n.id == *id).is_some_and(|n| {
-                        let near = (v.note_rect(&n.data()).x - lx).abs() <= STEM_TOLERANCE;
-                        if near {
+                // The whole stem moves, as for a chord.
+                let stem = grabbed
+                    .and_then(|id| targets.iter().find(|n| n.id == id))
+                    .map(|n| v.note_rect(&n.data()).x)
+                    .filter(|x| (x - lx).abs() <= STEM_TOLERANCE);
+                if let Some(x) = stem {
+                    for n in &mut targets {
+                        if v.note_rect(&n.data()).x == x {
                             n.velocity = lane.y_to_velocity(ly);
                         }
-                        near
-                    })
-                });
+                    }
+                }
+                let grabbed = grabbed.filter(|_| stem.is_some());
                 self.gesture = Some(Gesture::Velocity {
                     last: (lx, ly),
                     ids,
@@ -726,6 +736,8 @@ impl PianoRoll {
             return Outcome::default();
         }
         self.gesture = None;
+        // The second press auditioned the note this may delete.
+        self.audition = None;
         let project = doc.project();
         let Some((c, _)) = self.clip(project) else {
             return Outcome::default();

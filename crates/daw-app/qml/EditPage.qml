@@ -170,7 +170,11 @@ Kirigami.Page {
             checked: AppSettings.previewNotes
             enabled: page.visible
             tooltip: i18nc("@info:tooltip", "Play keys and notes through the track's instrument as you press or move them")
-            onToggled: AppSettings.choosePreviewNotes(checked)
+            onToggled: {
+                AppSettings.choosePreviewNotes(checked);
+                // Toggling replaced the binding; follow the setting again.
+                checked = Qt.binding(() => AppSettings.previewNotes);
+            }
         }
     ]
 

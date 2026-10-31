@@ -572,3 +572,18 @@ fn preview_bypasses_a_closed_gate_and_is_not_recorded() {
         "{captured:?}"
     );
 }
+
+#[test]
+fn a_silent_preview_velocity_still_sounds() {
+    let mut rig = Rig::new();
+    rig.handle.preview(Some(daw_midi::player::Preview {
+        key: 60,
+        channel: 0,
+        velocity: 0.0,
+    }));
+    let out = rig.block(0, 64, false, &[]);
+    match out.as_slice() {
+        [(0, EventKind::NoteOn { velocity, .. })] => assert!(*velocity > 0.0),
+        other => panic!("unexpected {other:?}"),
+    }
+}

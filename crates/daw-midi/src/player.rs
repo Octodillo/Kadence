@@ -104,7 +104,8 @@ pub struct Preview {
 /// count from bit 20 so asking for the same note again retriggers it.
 fn pack_preview(serial: u32, preview: Option<Preview>) -> u32 {
     let note = preview.map_or(0, |p| {
-        let velocity = (p.velocity.clamp(0.0, 1.0) * 127.0).round() as u32;
+        // At least 1: a note-on at velocity 0 is a note-off to instruments.
+        let velocity = ((p.velocity.clamp(0.0, 1.0) * 127.0).round() as u32).max(1);
         u32::from(p.key & 0x7F) | u32::from(p.channel & 0x0F) << 8 | velocity << 12 | 1 << 19
     });
     serial << 20 | note

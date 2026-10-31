@@ -372,6 +372,33 @@ fn dragging_near_a_stem_sets_its_velocity() {
 }
 
 #[test]
+fn grabbing_a_chord_stem_moves_the_whole_chord() {
+    let mut r = Rig::new(vec![n(0, Q / 2, 60), n(0, Q / 2, 64), n(Q, Q / 2, 62)]);
+    let vel = r.pr.velocity_rect();
+    let lane_top = vel.y + 4.0;
+    let lane_h = vel.h - 4.0;
+    let x = r.x(0) + 4.0;
+    r.drag((x, lane_top), (x, lane_top + lane_h * 0.5));
+    let v: Vec<f64> = r.notes().iter().map(|d| d.velocity).collect();
+    assert!(
+        (v[0] - 0.5).abs() < 0.02 && (v[1] - 0.5).abs() < 0.02,
+        "{v:?}"
+    );
+    assert_eq!(v[2], 0.8);
+}
+
+#[test]
+fn double_click_delete_stops_the_audition() {
+    let mut r = Rig::new(vec![n(0, Q, 60)]);
+    let (x, y) = (r.x(Q / 2), r.y(60));
+    r.press(x, y);
+    assert!(r.pr.audition().is_some());
+    r.pr.double_click(&mut r.doc, Pointer::left(x, y));
+    assert!(r.notes().is_empty());
+    assert_eq!(r.pr.audition(), None);
+}
+
+#[test]
 fn ruler_click_locates_snapped() {
     let mut r = Rig::new(vec![]);
     let env_tempo = r.tempo.clone();
