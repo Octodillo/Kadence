@@ -33,8 +33,15 @@ fn plugin_folder() -> &'static Path {
             .expect("run cargo");
         assert!(status.success(), "building the test plugin failed");
         let dir = tempdir("plugins");
+        // From deps/, not debug/: every cargo run re-links debug/'s copy,
+        // even when nothing changed, so another test process building at
+        // the same moment can leave it briefly missing. rustc writes the
+        // deps/ copy only when it rebuilds, under cargo's build lock.
         std::fs::copy(
-            target.join("debug").join("libdaw_clap_test_plugin.so"),
+            target
+                .join("debug")
+                .join("deps")
+                .join("libdaw_clap_test_plugin.so"),
             dir.join("test-gain.clap"),
         )
         .expect("copy the test plugin");
