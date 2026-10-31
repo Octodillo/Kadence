@@ -68,7 +68,12 @@ Kirigami.OverlayDrawer {
         interval: 100
         repeat: true
         running: drawer.visible
-        onTriggered: DevicePanel.refresh()
+        onTriggered: {
+            // Before the panel, so a window the user just closed shows
+            // the values they set there.
+            PluginEditors.refresh();
+            DevicePanel.refresh();
+        }
     }
 
     // A parameter value with its unit, in the user's language.
@@ -191,6 +196,34 @@ Kirigami.OverlayDrawer {
                         QQC2.ToolTip.visible: hovered
                         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                         onClicked: DevicePanel.moveBy(1)
+                    }
+                    // The plugin's own window, for plugins that have one.
+                    QQC2.ToolButton {
+                        objectName: "showPluginInterface"
+                        icon.name: "preferences-plugin"
+                        display: QQC2.AbstractButton.IconOnly
+                        text: checked
+                              ? i18nc("@action:button close the plugin's own window", "Hide Plugin Interface")
+                              : i18nc("@action:button open the plugin's own window", "Show Plugin Interface")
+                        // `revision` in the expression: a bare statement is
+                        // compiled away, and the binding would not re-read.
+                        visible: PluginEditors.revision >= 0 && DevicePanel.active
+                                 && PluginEditors.hasEditor(DevicePanel.deviceId)
+                        checkable: true
+                        checked: PluginEditors.revision >= 0 && PluginEditors.isOpen(DevicePanel.deviceId)
+                        QQC2.ToolTip.text: text
+                        QQC2.ToolTip.visible: hovered
+                        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        onToggled: {
+                            if (checked) {
+                                PluginEditors.show(DevicePanel.deviceId);
+                            } else {
+                                PluginEditors.close(DevicePanel.deviceId);
+                            }
+                            // Back to what the plugin says, whatever happened.
+                            checked = Qt.binding(() => PluginEditors.revision >= 0
+                                                       && PluginEditors.isOpen(DevicePanel.deviceId));
+                        }
                     }
                 }
             }
