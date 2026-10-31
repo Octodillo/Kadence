@@ -60,7 +60,10 @@ impl ScanCache {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        // Unique per writer: two loaders (playback and an export) may save at once.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
         std::fs::rename(tmp, path)
     }
