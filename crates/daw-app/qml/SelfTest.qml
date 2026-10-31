@@ -309,6 +309,7 @@ Item {
             check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
             check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
             check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            check(!PluginEditors.hasEditor(id), "a built-in device has no plugin interface");
             // Drag the threshold: one undo step.
             Project.tick();
             const before = Project.undoText;
