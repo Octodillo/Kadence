@@ -32,6 +32,8 @@ const QML_FILES: &[&str] = &[
     "qml/TrackHeader.qml",
     "qml/RecoveryDialog.qml",
     "qml/RelinkDialog.qml",
+    "qml/PluginBrowser.qml",
+    "qml/PluginSettings.qml",
     "qml/ExportDialog.qml",
     "qml/InstrumentButton.qml",
 ];
@@ -79,6 +81,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/mixer_bridge.rs",
+        "src/plugins_bridge.rs",
         "src/instruments_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",

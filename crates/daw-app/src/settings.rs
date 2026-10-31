@@ -131,6 +131,30 @@ impl SettingsStore for MemoryStore {
     }
 }
 
+const PLUGINS: &str = "Plugins";
+
+/// Folders the user added to the plugin search, one path per line.
+pub fn load_plugin_folders(store: &dyn SettingsStore) -> Vec<PathBuf> {
+    store
+        .read(PLUGINS, "ExtraFolders")
+        .map(|v| {
+            v.lines()
+                .filter(|l| !l.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_plugin_folders(store: &mut dyn SettingsStore, folders: &[PathBuf]) {
+    let value: Vec<String> = folders
+        .iter()
+        .map(|f| f.to_string_lossy().into_owned())
+        .collect();
+    store.write(PLUGINS, "ExtraFolders", &value.join("\n"));
+    store.sync();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +255,19 @@ mod tests {
         add_recent(&mut store, Path::new("/a"));
         let odd = Path::new(std::ffi::OsStr::from_bytes(b"/so\xffng"));
         assert_eq!(add_recent(&mut store, odd), vec![PathBuf::from("/a")]);
+    }
+
+    #[test]
+    fn plugin_folders_round_trip() {
+        let mut store = MemoryStore::default();
+        assert!(load_plugin_folders(&store).is_empty());
+        let folders = vec![
+            PathBuf::from("/opt/plugins"),
+            PathBuf::from("/home/a b/clap"),
+        ];
+        save_plugin_folders(&mut store, &folders);
+        assert_eq!(load_plugin_folders(&store), folders);
+        save_plugin_folders(&mut store, &[]);
+        assert!(load_plugin_folders(&store).is_empty());
     }
 }
