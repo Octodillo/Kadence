@@ -70,7 +70,9 @@ Kadence has three pages, switched from the sidebar on the left:
 
 **Play**/**Stop** (Space) and **Record** (R) are on the toolbar of the
 Arrange and Edit pages, and **Loop** (Ctrl+L) on the Arrange page's.
-**Go to Start** (Home) is in the sidebar. Under the Arrange page's toolbar,
+**Go to Start** (Home) is in the sidebar, with **Stop All Sound**
+(Shift+Space): **Stop** lets reverb and delay tails ring out, and **Stop All
+Sound** cuts them off. Under the Arrange page's toolbar,
 the transport bar shows the position in bars and beats, the tempo and time
 signature, and the metronome.
 
@@ -147,11 +149,15 @@ master.
 - **Add Effect** adds a built-in effect (EQ, compressor, delay, reverb,
   utility) or a plugin. Click an effect to open its device panel, where you
   set its parameters, bypass it or move it. Double-click a control to reset
-  it.
+  it. For a plugin, **Show Plugin Interface** opens its own window, and
+  **Reload Plugin** starts it again if it crashed.
 - **Add Send** sends the track to a bus. **Pre** sends before the fader
   instead of after it.
 - The output button at the bottom chooses where the track goes: the master
   or a bus.
+- Drag the edge of a strip to make strips wider or narrower, and the handle
+  above the fader to give the effects more or less room. The metronome has
+  a strip of its own for its volume.
 
 ### Automation
 
