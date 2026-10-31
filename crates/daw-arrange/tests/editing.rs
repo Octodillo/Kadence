@@ -363,6 +363,18 @@ fn escape_cancels_a_drag() {
 }
 
 #[test]
+fn touch_pans_on_empty_lanes_only() {
+    let mut r = Rig::new();
+    r.audio(0, BAR, BAR, 0);
+    let p = r.doc.project();
+    let y = r.y(0);
+    assert!(r.arrange.touch_pans(p, r.x(BAR / 2), y));
+    assert!(!r.arrange.touch_pans(p, r.x(BAR + BAR / 2), y));
+    assert!(!r.arrange.touch_pans(p, 10.0, 5.0));
+    assert!(r.arrange.touch_pans(p, 10.0, 399.0));
+}
+
+#[test]
 fn zoom_and_scroll_stay_in_range() {
     let mut r = Rig::new();
     let p = r.doc.project().clone();
