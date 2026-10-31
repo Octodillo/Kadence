@@ -33,13 +33,30 @@ fn plugin_folder() -> &'static Path {
             .expect("run cargo");
         assert!(status.success(), "building the test plugin failed");
         let dir = tempdir("plugins");
-        std::fs::copy(
-            target.join("debug").join("libdaw_clap_test_plugin.so"),
-            dir.join("test-gain.clap"),
-        )
-        .expect("copy the test plugin");
+        copy_built(
+            &target.join("debug").join("libdaw_clap_test_plugin.so"),
+            &dir.join("test-gain.clap"),
+        );
         dir
     })
+}
+
+/// Copies a file cargo built. Other test processes run the same build, and
+/// cargo removes and re-links its output even when it is up to date, so the
+/// file can be missing for a moment.
+fn copy_built(from: &Path, to: &Path) {
+    for _ in 0..50 {
+        match std::fs::copy(from, to) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => {
+                result.unwrap_or_else(|e| panic!("copy {}: {e}", from.display()));
+                return;
+            }
+        }
+    }
+    panic!("{} stayed missing after the build", from.display());
 }
 
 fn kadence(config_home: &Path) -> Command {
