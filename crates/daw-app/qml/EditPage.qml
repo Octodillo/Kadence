@@ -11,6 +11,10 @@ import io.github.octodillo.daw
 Kirigami.Page {
     id: page
 
+    // The velocity lane height asked for (dragged, or remembered); the
+    // lane gets less when the window is too short for it.
+    property real velocityPreference: AppSettings.layoutValue("VelocityLaneHeight", Kirigami.Units.gridUnit * 4)
+
     property list<Kirigami.Action> transportActions
     readonly property alias roll: roll
 
@@ -216,8 +220,9 @@ Kirigami.Page {
             }
             rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
             keyboardWidth: Kirigami.Units.gridUnit * 3
-            // Resized with the handle above the velocity lane.
-            velocityHeight: AppSettings.layoutValue("VelocityLaneHeight", Kirigami.Units.gridUnit * 4)
+            // Resized with the handle above the velocity lane, and never so
+            // tall that the notes get less than three rows' worth.
+            velocityHeight: Math.round(Math.max(velocityHandle.minimum, Math.min(velocityHandle.maximum, page.velocityPreference)))
             backgroundColor: Kirigami.Theme.backgroundColor
             alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
             textColor: Kirigami.Theme.textColor
@@ -288,7 +293,7 @@ Kirigami.Page {
             size: roll.velocityHeight
             minimum: Kirigami.Units.gridUnit * 2
             maximum: Math.max(minimum, roll.height - roll.rulerHeight - Kirigami.Units.gridUnit * 3)
-            onResizing: (size) => roll.velocityHeight = Math.round(size)
+            onResizing: (size) => page.velocityPreference = size
             onResized: AppSettings.setLayoutValue("VelocityLaneHeight", roll.velocityHeight)
             Accessible.ignored: true
         }

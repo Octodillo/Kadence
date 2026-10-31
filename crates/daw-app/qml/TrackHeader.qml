@@ -28,6 +28,15 @@ Column {
     readonly property bool expanded: revision >= 0 ? Automation.expanded(index) : false
     readonly property int laneCount: revision >= 0 ? Automation.laneCount(index) : 0
 
+    // Where this row starts in the timeline's content, as laid out now.
+    function top(): real {
+        let y = 0;
+        for (let i = 0; i < index; ++i) {
+            y += arrange.rowHeight(i);
+        }
+        return y;
+    }
+
     // The list reuses headers that scroll out of view for other tracks. A
     // hidden item keeps its focus and open menus, so close them, or the
     // next track shown here would be renamed, moved or deleted instead.
@@ -377,14 +386,16 @@ Column {
         }
 
         // Drag the lower edge to make every track taller or shorter (the
-        // timeline has one track height).
+        // timeline has one track height). This row's top stays put, so the
+        // edge follows the pointer.
         ResizeHandle {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             size: row.arrange.trackHeight
-            onResizing: (size) => row.arrange.resizeTracks(size)
-            onResized: AppSettings.setLayoutValue("ArrangeTrackHeight", row.arrange.trackHeight)
+            property real anchorY: 0
+            onStarted: anchorY = row.y - row.arrange.scrollY + row.arrange.rulerHeight
+            onResizing: (size) => row.arrange.resizeTracks(size, anchorY)
             Accessible.ignored: true
         }
     }
@@ -401,15 +412,23 @@ Column {
             lane: index < row.laneCount ? index : -1
             revision: row.revision
 
-            // Drag the lower edge to resize every automation lane.
+            // Drag the lower edge to resize every automation lane. This
+            // track's top stays put and the lanes above the edge share the
+            // movement, so the edge follows the pointer.
             ResizeHandle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 size: row.arrange.laneHeight
-                minimum: Kirigami.Units.gridUnit * 1.5
-                maximum: Kirigami.Units.gridUnit * 12
-                onResizing: (size) => row.arrange.laneHeight = Math.round(size)
+                minimum: row.arrange.minimumLaneHeight
+                maximum: row.arrange.maximumLaneHeight
+                divisor: index + 1
+                property real anchorY: 0
+                onStarted: anchorY = row.top() - row.arrange.scrollY
+                onResizing: (size) => {
+                    row.arrange.laneHeight = Math.round(size);
+                    row.arrange.scrollTo(row.arrange.scrollX, row.top() - anchorY);
+                }
                 onResized: AppSettings.setLayoutValue("AutomationLaneHeight", row.arrange.laneHeight)
                 Accessible.ignored: true
             }

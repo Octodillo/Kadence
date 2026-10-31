@@ -82,11 +82,12 @@ Item {
             // Dragging a header's lower edge resizes every track.
             const v = arrange.view;
             const before = v.trackHeight;
-            v.resizeTracks(before + 20);
-            check(v.trackHeight === before + 20 && v.rowHeight(0) === before + 20, "resize tracks");
-            v.resizeTracks(1);
+            const target = before > 40 ? before - 10 : before + 10;
+            v.resizeTracks(target, v.rulerHeight);
+            check(v.trackHeight === target && v.rowHeight(0) === target, "resize tracks");
+            v.resizeTracks(1, v.rulerHeight);
             check(v.trackHeight >= 24, "tracks keep a minimum height");
-            v.resizeTracks(before);
+            v.resizeTracks(before, v.rulerHeight);
             check(v.trackHeight === before, "resize tracks back");
             // Double-click the first lane: a one-bar MIDI clip appears.
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);

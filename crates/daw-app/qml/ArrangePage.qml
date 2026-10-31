@@ -320,7 +320,13 @@ Kirigami.Page {
                     }
                     rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
                     // Resized by dragging a lane header's lower edge.
-                    laneHeight: Math.round(AppSettings.layoutValue("AutomationLaneHeight", Kirigami.Units.gridUnit * 2.2))
+                    readonly property real minimumLaneHeight: Math.round(Kirigami.Units.gridUnit * 1.5)
+                    readonly property real maximumLaneHeight: Kirigami.Units.gridUnit * 12
+                    laneHeight: Math.round(Math.max(minimumLaneHeight, Math.min(maximumLaneHeight,
+                        AppSettings.layoutValue("AutomationLaneHeight", Kirigami.Units.gridUnit * 2.2))))
+                    // Remember the track height however it changed (a
+                    // header's edge, zooming), once it settles.
+                    onTrackHeightChanged: saveTrackHeight.restart()
                     backgroundColor: Kirigami.Theme.backgroundColor
                     alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
                     textColor: Kirigami.Theme.textColor
@@ -335,11 +341,12 @@ Kirigami.Page {
                     onTextColorChanged: refresh()
                     onHighlightColorChanged: refresh()
                     Component.onCompleted: {
-                        // The height a track header was last dragged to.
+                        // The track height last time.
                         const tracks = AppSettings.layoutValue("ArrangeTrackHeight", 0);
                         if (tracks > 0) {
-                            resizeTracks(tracks);
+                            resizeTracks(tracks, rulerHeight);
                         }
+                        saveTrackHeight.armed = true;
                         setDefaultNames(
                             i18nc("@label default name of a new MIDI clip", "MIDI clip"),
                             i18nc("@label default name of audio from a file without a name", "Audio"),
@@ -358,6 +365,14 @@ Kirigami.Page {
 
                     Accessible.role: Accessible.Canvas
                     Accessible.name: i18nc("@info:accessible", "Timeline")
+
+                    Timer {
+                        id: saveTrackHeight
+                        // Not for the height set while starting up.
+                        property bool armed: false
+                        interval: 1000
+                        onTriggered: if (armed) AppSettings.setLayoutValue("ArrangeTrackHeight", view.trackHeight)
+                    }
                 }
 
                 MouseArea {
