@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use daw_model::{AutomationTarget, Device, DeviceId, DeviceSource, Document, Project, TrackKind};
+use daw_session::PluginStatus;
 
 use crate::message::Message;
 use crate::mixer::Control;
@@ -668,6 +669,31 @@ impl AppDevicePanel {
         if changed {
             self.loads.set(self.loads.get() + 1);
         }
+    }
+
+    /// How the open device's plugin is doing, `None` for a built-in device
+    /// (or no device open).
+    pub fn plugin_status(&self) -> Option<PluginStatus> {
+        let device = self.inner.device()?;
+        crate::state::with(|s| s.engine.session()?.plugin_status(device))
+    }
+
+    /// Restarts the open device's crashed plugin with its state; it plays
+    /// again after the next tick. Returns false if it has no sandbox.
+    pub fn reload_plugin(&self) -> bool {
+        let Some(device) = self.inner.device() else {
+            return false;
+        };
+        let reloading = crate::state::with(|s| {
+            s.engine
+                .session_mut()
+                .is_some_and(|session| session.reload_plugin(device))
+        });
+        if reloading {
+            // Its values are read again once it is back.
+            self.plugins.clear();
+        }
+        reloading
     }
 
     /// Changes whenever the view may have changed from elsewhere.
