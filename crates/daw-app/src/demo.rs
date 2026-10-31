@@ -77,14 +77,14 @@ pub fn build() -> Result<Document, String> {
     drums.automation.push(swell);
     let mut leads = Track::new(TrackKind::Audio, "Lead");
     leads.color = Some(Color(0xf6, 0x74, 0x00));
-    // A faded, quieter take so the screenshots show fades and clip gain.
-    let mut take2 = audio_clip("Lead take 2", "lead.wav", 6, 2, 12_000);
-    if let ClipContent::Audio(a) = &mut Arc::make_mut(&mut take2).content {
+    // Faded and quieter, in view, so the screenshots show fades and clip gain.
+    let mut lead = audio_clip("Lead", "lead.wav", 2, 2, 0);
+    if let ClipContent::Audio(a) = &mut Arc::make_mut(&mut lead).content {
         a.gain_db = -4.0;
         a.fade_in = Fade::new(TickTime(BAR / 2), FadeShape::EqualPower);
         a.fade_out = Fade::new(TickTime(BAR), FadeShape::SCurve);
     }
-    leads.clips = vec![audio_clip("Lead", "lead.wav", 2, 2, 0), take2];
+    leads.clips = vec![lead, audio_clip("Lead take 2", "lead.wav", 6, 2, 12_000)];
     let mut keys = Track::new(TrackKind::Instrument, "Keys");
     keys.color = Some(Color(0x9b, 0x59, 0xb6));
     keys.devices.push(Device::new(
