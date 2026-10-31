@@ -164,6 +164,8 @@ impl Header {
                 start_beats: f(&self.loop_start_beats),
                 end_beats: f(&self.loop_end_beats),
             }),
+            // Only the metronome uses it; plugins see a stopped transport.
+            count_in: None,
         }
     }
 }

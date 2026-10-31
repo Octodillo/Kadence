@@ -62,6 +62,11 @@ pub struct AppState {
     pub editor_title_format: String,
     /// The master track's name, for editor titles, in the user's language.
     pub master_name: String,
+    /// The metronome and count-in.
+    pub(crate) click: crate::settings::ClickSettings,
+    /// The document revision right after the last tempo change and when it
+    /// was made, so the next one in a row merges into it.
+    pub(crate) tempo_edit: Option<(u64, Instant)>,
     /// Where the recent list is kept: in memory until [`AppState::start_session`]
     /// hands over the real config, so tests never touch it.
     settings: Box<dyn SettingsStore>,
@@ -121,9 +126,13 @@ pub fn with<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
 
 impl AppState {
     fn new() -> Self {
+        Self::with_engine(default_engine())
+    }
+
+    pub(crate) fn with_engine(engine: Box<dyn EngineHandle>) -> Self {
         let mut s = Self {
             doc: Document::new(Project::default()),
-            engine: default_engine(),
+            engine,
             arrange: Arrange::new(),
             piano: PianoRoll::new(),
             instruments: crate::instrument::InstrumentChoices::builtin(),
@@ -140,6 +149,8 @@ impl AppState {
             plugin_changes: std::collections::HashMap::new(),
             editor_title_format: "%1 — %2".into(),
             master_name: "Master".into(),
+            click: Default::default(),
+            tempo_edit: None,
             settings: Box::new(MemoryStore::default()),
             recent: Vec::new(),
             scratch: None,
@@ -171,6 +182,7 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        self.apply_click();
         self.view_revision += 1;
         self.retitle_editors();
     }

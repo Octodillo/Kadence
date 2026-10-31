@@ -741,3 +741,347 @@ fn fades_shape_a_streamed_clip() {
     }
     assert!((out[2 * b + 100] - 0.25).abs() < 1e-5);
 }
+
+#[test]
+fn metronome_turns_on_and_off_without_a_rebuild() {
+    let mut rig = Rig::new(f64::INFINITY);
+    rig.session.play().unwrap();
+    assert_eq!(peak(&rig.run(BEAT as usize)), 0.0, "off by default");
+    let swaps = rig.session.controller().graphs_swapped();
+    let on = daw_session::MetronomeSettings {
+        enabled: true,
+        volume_db: -6.0,
+    };
+    rig.session.set_metronome(on).unwrap();
+    // The beat at sample 24 000 clicks.
+    let loud = peak(&rig.run(BEAT as usize));
+    assert!(loud > 0.1, "{loud}");
+    rig.session
+        .set_metronome(daw_session::MetronomeSettings {
+            volume_db: -26.0,
+            ..on
+        })
+        .unwrap();
+    let quiet = peak(&rig.run(BEAT as usize));
+    assert!((quiet / loud - 0.1).abs() < 0.02, "{quiet} vs {loud}");
+    rig.session
+        .set_metronome(daw_session::MetronomeSettings {
+            enabled: false,
+            ..on
+        })
+        .unwrap();
+    assert_eq!(peak(&rig.run(2 * BEAT as usize)[1000..]), 0.0);
+    assert_eq!(rig.session.controller().graphs_swapped(), swaps);
+
+    // The setting outlives a rebuild.
+    rig.session.set_metronome(on).unwrap();
+    rig.doc
+        .execute(AddTrack::new(1, Track::new(TrackKind::Bus, "Bus")))
+        .unwrap();
+    rig.sync();
+    assert!(peak(&rig.run(2 * BEAT as usize)) > 0.1);
+}
+
+#[test]
+fn count_in_holds_playback_and_clicks() {
+    let mut rig = Rig::new(f64::INFINITY);
+    dc_file(rig.dir(), "a.wav", 4 * BEAT as usize, 0.5);
+    rig.add_clip("a.wav", 0, 4);
+    // Metronome off: the count-in clicks anyway, then playback is silent
+    // but for the clip.
+    rig.session.play_with_count_in(1).unwrap();
+    let count_in = rig.run(4 * BEAT as usize);
+    assert_eq!(rig.session.controller().position(), SampleTime(0));
+    // Four clicks, and no clip audio between them.
+    for beat in 0..4 {
+        let at = beat * BEAT as usize;
+        assert!(peak(&count_in[at..at + 2000]) > 0.1, "click {beat}");
+        assert!(count_in[at + 20_000].abs() < 1e-3, "nothing else at {beat}");
+    }
+    let after = rig.run(BEAT as usize);
+    assert!(!rig.session.is_counting_in());
+    assert!((after[12_000] - 0.5).abs() < 1e-3, "{}", after[12_000]);
+    assert_eq!(rig.session.controller().position(), SampleTime(BEAT));
+}
+
+#[test]
+fn recording_waits_for_the_count_in() {
+    let (mut rig, track, _) = synth_rig();
+    rig.session.midi_player(track).unwrap().set_armed(true);
+    rig.session.play_with_count_in(1).unwrap();
+    let note = |key| {
+        let mut e = EventList::with_capacity(1);
+        e.push(daw_core::event::Event {
+            frame: 10,
+            kind: daw_core::event::EventKind::NoteOn {
+                channel: 0,
+                key,
+                velocity: 0.8,
+                note_id: -1,
+            },
+        })
+        .unwrap();
+        e
+    };
+    let play = |rig: &mut Rig, key| {
+        let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
+        rig.proc
+            .process(BLOCK, &[], &mut [&mut l[..], &mut r[..]], &note(key));
+    };
+    // Played during the count-in: heard, not recorded.
+    play(&mut rig, 40);
+    rig.run(4 * BEAT as usize - BLOCK);
+    assert_eq!(rig.session.controller().position(), SampleTime(0));
+    // Played right after it: recorded there.
+    play(&mut rig, 41);
+    let captured: Vec<_> = rig
+        .session
+        .midi_player(track)
+        .unwrap()
+        .drain_captured()
+        .collect();
+    let notes: Vec<_> = captured
+        .iter()
+        .filter_map(|c| match c {
+            daw_midi::player::Captured::Event { time, kind } => Some((*time, *kind)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 1, "{captured:?}");
+    assert_eq!(notes[0].0, SampleTime(10));
+    assert!(matches!(
+        notes[0].1,
+        daw_core::event::EventKind::NoteOn { key: 41, .. }
+    ));
+}
+
+#[test]
+fn a_tempo_change_keeps_clips_on_their_beat() {
+    let mut rig = Rig::new(f64::INFINITY);
+    dc_file(rig.dir(), "a.wav", 48_000, 0.5);
+    // At beat 2: one second in at 120 bpm.
+    rig.add_clip("a.wav", 2, 1);
+    let mut tempo = rig.doc.project().tempo.clone();
+    tempo.tempos[0].bpm = 60.0;
+    rig.doc.execute(SetTempo { tempo }).unwrap();
+    rig.sync();
+    rig.session.play().unwrap();
+    let out = rig.run(3 * 48_000);
+    // Still at beat 2, which is now two seconds in.
+    assert!(out[..95_000].iter().all(|&x| x == 0.0));
+    assert!((out[100_000] - 0.5).abs() < 1e-3);
+    rig.doc.undo().unwrap();
+    rig.sync();
+    assert_eq!(
+        rig.session.ticks_to_samples(TickTime(2 * PPQ)),
+        SampleTime(48_000)
+    );
+}
+
+#[test]
+fn a_stopped_playhead_keeps_its_beat_through_a_tempo_change() {
+    let mut rig = Rig::new(f64::INFINITY);
+    rig.session.locate(TickTime(4 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    assert_eq!(rig.session.music().bar, 1);
+    let mut tempo = rig.doc.project().tempo.clone();
+    tempo.tempos[0].bpm = 60.0;
+    rig.doc.execute(SetTempo { tempo }).unwrap();
+    rig.sync();
+    rig.run(BLOCK);
+    assert_eq!(rig.session.controller().position(), SampleTime(4 * 48_000));
+    let music = rig.session.music();
+    assert_eq!((music.bar, music.beats), (1, 4.0));
+}
+
+/// The project's tempo set to `bpm`, synced, with no audio run after.
+fn set_bpm(rig: &mut Rig, bpm: f64) {
+    let mut tempo = rig.doc.project().tempo.clone();
+    tempo.tempos[0].bpm = bpm;
+    rig.doc.execute(SetTempo { tempo }).unwrap();
+    rig.sync();
+}
+
+#[test]
+fn tempo_edits_before_the_audio_thread_catches_up_keep_the_beat() {
+    let mut rig = Rig::new(f64::INFINITY);
+    rig.session.locate(TickTime(16 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    // A locate the audio thread hasn't applied, then a tempo change: the
+    // playhead goes where it was sent, not back to where it was.
+    rig.session.locate(TickTime(0)).unwrap();
+    set_bpm(&mut rig, 60.0);
+    rig.run(BLOCK);
+    assert_eq!(rig.session.position(), TickTime(0));
+    // Several changes between two audio blocks (a fast drag).
+    rig.session.locate(TickTime(16 * PPQ)).unwrap();
+    rig.run(BLOCK);
+    for bpm in [70.0, 80.0, 90.0] {
+        set_bpm(&mut rig, bpm);
+    }
+    rig.run(BLOCK);
+    assert_eq!(rig.session.position(), TickTime(16 * PPQ));
+}
+
+#[test]
+fn a_faster_tempo_while_looping_keeps_the_playhead_in_the_loop() {
+    let mut rig = Rig::new(f64::INFINITY);
+    // Bars 1 and 2, playing from beat 6.
+    rig.session
+        .set_loop(Some((TickTime(0), TickTime(8 * PPQ))))
+        .unwrap();
+    rig.session.locate(TickTime(6 * PPQ)).unwrap();
+    rig.session.play().unwrap();
+    rig.run(BLOCK);
+    set_bpm(&mut rig, 240.0);
+    rig.run(2 * BEAT as usize);
+    let at = rig.session.position();
+    assert!(at < TickTime(8 * PPQ), "{at:?} left the loop");
+}
+
+/// An audio track playing a steady 0.5 through `kinds` (built-in device
+/// ids), in that order. Returns the rig and the devices' ids.
+fn effect_rig(kinds: &[&str]) -> (Rig, Vec<daw_model::DeviceId>) {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 8 * BEAT as usize, 0.5);
+    rig.add_clip("a.wav", 0, 8);
+    let mut ids = Vec::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        let device = daw_model::Device::new(
+            *kind,
+            daw_model::DeviceSource::Builtin {
+                kind: (*kind).into(),
+            },
+        );
+        ids.push(device.id);
+        rig.doc
+            .execute(daw_model::commands::AddDevice {
+                track: rig.track,
+                index: i,
+                device,
+            })
+            .unwrap();
+    }
+    rig.sync();
+    rig.session.play().unwrap();
+    (rig, ids)
+}
+
+/// The level the track settles at: the last sample of a beat's run.
+fn settled(rig: &mut Rig) -> f32 {
+    *rig.run(BEAT as usize).last().unwrap()
+}
+
+#[test]
+fn device_param_edits_play_without_a_rebuild_and_reset_to_default() {
+    use daw_devices::devices::eq;
+    use daw_model::commands::SetParam;
+    let (mut rig, ids) = effect_rig(&["daw.eq"]);
+    let eq = ids[0];
+    let before = settled(&mut rig);
+    assert!((before - 0.5).abs() < 1e-3, "{before}");
+    let swaps = rig.session.controller().graphs_swapped();
+
+    let set = |rig: &mut Rig, value: Option<f64>| {
+        rig.doc
+            .execute(SetParam {
+                device: eq,
+                param: eq::OUTPUT,
+                value,
+            })
+            .unwrap();
+        rig.sync();
+    };
+    set(&mut rig, Some(-6.0));
+    // A separate gesture, so undo doesn't merge it with the reset.
+    rig.doc.seal();
+    let cut = settled(&mut rig);
+    assert!((cut - 0.5 * 10f32.powf(-6.0 / 20.0)).abs() < 1e-3, "{cut}");
+
+    // Back to the default (no value in the document): heard at once.
+    set(&mut rig, None);
+    let reset = settled(&mut rig);
+    assert!((reset - before).abs() < 1e-4, "{reset}");
+
+    // Undo brings the edit back the same way.
+    rig.doc.undo().unwrap();
+    rig.sync();
+    let undone = settled(&mut rig);
+    assert!((undone - cut).abs() < 1e-4, "{undone}");
+    assert_eq!(
+        rig.session.controller().graphs_swapped(),
+        swaps,
+        "parameter edits don't rebuild the graph"
+    );
+}
+
+#[test]
+fn compressor_threshold_changes_the_output() {
+    use daw_devices::devices::compressor;
+    let (mut rig, ids) = effect_rig(&["daw.compressor"]);
+    // 0.5 is about -6 dBFS, above the default -18 dB threshold.
+    let squeezed = settled(&mut rig);
+    rig.doc
+        .execute(daw_model::commands::SetParam {
+            device: ids[0],
+            param: compressor::THRESHOLD,
+            value: Some(0.0),
+        })
+        .unwrap();
+    rig.sync();
+    rig.run(BEAT as usize); // Let the release finish.
+    let open = settled(&mut rig);
+    assert!(
+        open > squeezed * 1.5,
+        "a higher threshold compresses less: {squeezed} -> {open}"
+    );
+}
+
+#[test]
+fn bypass_and_reorder_keep_device_state() {
+    use daw_devices::devices::{eq, utility};
+    use daw_model::commands::{DeviceField, MoveDevice, SetDevice, SetParam};
+    let (mut rig, ids) = effect_rig(&["daw.eq", "daw.utility"]);
+    let (eq_id, util) = (ids[0], ids[1]);
+    rig.doc
+        .execute(SetParam {
+            device: eq_id,
+            param: eq::OUTPUT,
+            value: Some(-6.0),
+        })
+        .unwrap();
+    rig.doc
+        .execute(SetParam {
+            device: util,
+            param: utility::GAIN,
+            value: Some(6.0),
+        })
+        .unwrap();
+    rig.sync();
+    let both = settled(&mut rig);
+    assert!((both - 0.5).abs() < 2e-3, "-6 then +6 dB: {both}");
+
+    let set_enabled = |rig: &mut Rig, id, on| {
+        rig.doc
+            .execute(SetDevice {
+                id,
+                field: DeviceField::Enabled(on),
+            })
+            .unwrap();
+        rig.sync();
+    };
+    set_enabled(&mut rig, eq_id, false);
+    let bypassed = settled(&mut rig);
+    assert!(
+        (bypassed - 0.5 * 10f32.powf(6.0 / 20.0)).abs() < 2e-3,
+        "only the utility: {bypassed}"
+    );
+    set_enabled(&mut rig, eq_id, true);
+    // Moving keeps each device's settings: still -6 + 6 dB.
+    rig.doc.execute(MoveDevice::new(eq_id, 1)).unwrap();
+    rig.sync();
+    let devices: Vec<_> = rig.doc.project().track(rig.track).unwrap().devices.clone();
+    assert_eq!(devices[1].id, eq_id);
+    let moved = settled(&mut rig);
+    assert!((moved - 0.5).abs() < 2e-3, "{moved}");
+}

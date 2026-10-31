@@ -59,7 +59,7 @@ const DIVISION_LABELS: &[&str] = &[
     "1/16 triplet",
 ];
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::toggle(SYNC, "sync", "Tempo Sync", true),
     ParamSpec::choice(DIVISION, "division", "Division", DIVISION_LABELS, 2),
     ParamSpec::new(
