@@ -45,6 +45,7 @@ pub mod qobject {
         CollectContext,
         RecoverContext,
         ExportContext,
+        EditorContext,
     }
 
     /// The `reason` of a message map. See `crate::message::Reason` for
@@ -73,6 +74,7 @@ pub mod qobject {
         PluginCrashed,
         PluginStateNotSaved,
         PluginEditorFailed,
+        NoPluginDisplay,
         CannotStream,
         CannotRead,
         NotesDropped,
@@ -499,6 +501,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Context::Collect => QC::CollectContext,
         Context::Recover => QC::RecoverContext,
         Context::Export => QC::ExportContext,
+        Context::Editor => QC::EditorContext,
     };
     let reason = match f.reason {
         Reason::NotLocalFile => QR::NotLocalFile,
@@ -523,6 +526,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::PluginCrashed => QR::PluginCrashed,
         Reason::PluginStateNotSaved => QR::PluginStateNotSaved,
         Reason::PluginEditorFailed => QR::PluginEditorFailed,
+        Reason::NoPluginDisplay => QR::NoPluginDisplay,
         Reason::CannotStream => QR::CannotStream,
         Reason::CannotRead => QR::CannotRead,
         Reason::NotesDropped => QR::NotesDropped,

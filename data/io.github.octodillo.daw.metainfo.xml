@@ -12,14 +12,58 @@
       plays back multitrack audio and MIDI, hosts CLAP, LV2 and VST3 plugins,
       and talks to PipeWire or JACK.
     </p>
-    <p>Kadence is in early development.</p>
+    <ul>
+      <li>Record audio and MIDI with a count-in and a metronome</li>
+      <li>Arrange clips with fades, clip gain, loops and automation</li>
+      <li>Edit notes in the piano roll, with quantize and humanize</li>
+      <li>Mix with built-in effects, plugins, sends and buses</li>
+      <li>Export the song to WAV or FLAC</li>
+    </ul>
+    <p>
+      Every plugin runs in a process of its own, so a plugin that crashes
+      doesn't take the song with it.
+    </p>
   </description>
   <developer id="io.github.octodillo">
     <name>Octodillo</name>
   </developer>
+  <screenshots>
+    <screenshot type="default" environment="plasma">
+      <caption>Arranging a song with automation lanes</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/arrange-light.png</image>
+    </screenshot>
+    <screenshot environment="plasma:dark">
+      <caption>Arranging a song with automation lanes</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/arrange-dark.png</image>
+    </screenshot>
+    <screenshot environment="plasma">
+      <caption>Editing notes in the piano roll</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/edit-light.png</image>
+    </screenshot>
+    <screenshot environment="plasma:dark">
+      <caption>Editing notes in the piano roll</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/edit-dark.png</image>
+    </screenshot>
+    <screenshot environment="plasma">
+      <caption>Mixing, with the device panel open</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/mix-light.png</image>
+    </screenshot>
+    <screenshot environment="plasma:dark">
+      <caption>Mixing, with the device panel open</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/mix-dark.png</image>
+    </screenshot>
+    <screenshot environment="plasma">
+      <caption>Exporting the song</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/export-light.png</image>
+    </screenshot>
+    <screenshot environment="plasma:dark">
+      <caption>Exporting the song</caption>
+      <image type="source" width="1980" height="1260">https://raw.githubusercontent.com/Octodillo/Kadence/v0.1.0/data/screenshots/export-dark.png</image>
+    </screenshot>
+  </screenshots>
   <launchable type="desktop-id">io.github.octodillo.daw.desktop</launchable>
-  <url type="homepage">https://github.com/Octodillo/daw</url>
-  <url type="bugtracker">https://github.com/Octodillo/daw/issues</url>
+  <url type="homepage">https://github.com/Octodillo/Kadence</url>
+  <url type="bugtracker">https://github.com/Octodillo/Kadence/issues</url>
   <categories>
     <category>AudioVideo</category>
     <category>Audio</category>
@@ -27,8 +71,37 @@
   <provides>
     <binary>kadence</binary>
   </provides>
+  <url type="help">https://github.com/Octodillo/Kadence/blob/main/docs/user-guide.md</url>
+  <url type="vcs-browser">https://github.com/Octodillo/Kadence</url>
   <releases>
-    <release version="0.1.0" date="2026-10-29" type="development"/>
+    <release version="0.1.0" date="2026-10-31" type="stable">
+      <url type="details">https://github.com/Octodillo/Kadence/releases/tag/v0.1.0</url>
+      <description>
+        <p>The first release. Kadence can record, arrange, edit, mix and export a song:</p>
+        <ul>
+          <li>Audio and MIDI recording onto armed tracks, with a count-in and a metronome</li>
+          <li>An arrange view with fades, clip gain, loops and automation lanes</li>
+          <li>A piano roll with quantize, humanize and transpose</li>
+          <li>Instrument tracks with the built-in synth, the sampler or a plugin instrument</li>
+          <li>A mixer with effects, sends, buses and output routing</li>
+          <li>CLAP, VST3 and LV2 plugins, each in its own process</li>
+          <li>Tempo, time signature and tap tempo</li>
+          <li>Export to WAV or FLAC</li>
+          <li>Backups, crash recovery and relinking of moved audio files</li>
+        </ul>
+      </description>
+    </release>
   </releases>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <branding>
+    <color type="primary" scheme_preference="light">#93cee9</color>
+    <color type="primary" scheme_preference="dark">#1d6a96</color>
+  </branding>
   <content_rating type="oars-1.1"/>
 </component>

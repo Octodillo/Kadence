@@ -141,7 +141,7 @@ struct X11 {
 
 impl X11 {
     /// A `fixed` UI may not be resized by the user (see `UiInfo::fixed_size`).
-    fn open(title: &str, fixed: bool) -> Result<Self, String> {
+    fn open(title: &str, fixed: bool) -> Result<Self, PluginError> {
         // The size is a placeholder until the UI asks for one or makes its widget.
         Ok(Self {
             host: HostWindow::new(title, 400, 300, fixed)?,
@@ -306,7 +306,7 @@ impl Editor {
                 // nothing refers to the controller any more.
                 let c = unsafe { Box::from_raw(controller) };
                 Err((
-                    PluginError::Editor(e),
+                    e,
                     UiEnds {
                         to_dsp: c.to_dsp,
                         from_dsp,
@@ -328,15 +328,15 @@ impl Editor {
             Box<FeatureStore>,
             Option<*mut ExternalWidget>,
         ),
-        String,
+        PluginError,
     > {
-        let library = ui_library(&info.binary)?;
+        let library = ui_library(&info.binary).map_err(PluginError::Editor)?;
         type DescriptorFn = unsafe extern "C" fn(u32) -> *const LV2UI_Descriptor;
         // SAFETY: `lv2ui_descriptor` has this signature in every LV2 UI binary.
         let lookup: DescriptorFn = unsafe {
             *library
                 .get::<DescriptorFn>(b"lv2ui_descriptor\0")
-                .map_err(|e| e.to_string())?
+                .map_err(|e| PluginError::Editor(e.to_string()))?
         };
         let descriptor = (0..)
             .map(|i| {
@@ -349,7 +349,9 @@ impl Editor {
                 let uri = unsafe { std::ffi::CStr::from_ptr((*d).URI) };
                 uri.to_bytes() == info.uri.as_bytes()
             })
-            .ok_or_else(|| format!("{} is not in {}", info.uri, info.binary.display()))?;
+            .ok_or_else(|| {
+                PluginError::Editor(format!("{} is not in {}", info.uri, info.binary.display()))
+            })?;
 
         // The UI's callbacks reach the controller through its pointer at any
         // time we call into the UI, so it is only ever touched through short
@@ -442,19 +444,21 @@ impl Editor {
             .collect();
         ptrs.push(std::ptr::null());
 
-        let plugin_uri = CString::new(host.plugin_uri).map_err(|e| e.to_string())?;
+        let plugin_uri =
+            CString::new(host.plugin_uri).map_err(|e| PluginError::Editor(e.to_string()))?;
         let mut bundle = info.bundle.to_string_lossy().into_owned();
         if !bundle.ends_with('/') {
             bundle.push('/');
         }
-        let bundle = CString::new(bundle).map_err(|e| e.to_string())?;
+        let bundle = CString::new(bundle).map_err(|e| PluginError::Editor(e.to_string()))?;
         let mut widget: *mut c_void = std::ptr::null_mut();
         // SAFETY: `descriptor` came from the library, which stays loaded; every
         // pointer handed over outlives the UI (the feature store, the
         // controller and the strings are kept until cleanup; the UI copies
         // `plugin_uri`/`bundle_path` per the LV2 UI spec... and we keep the
         // feature array alive in `store` too).
-        let instantiate = unsafe { (*descriptor).instantiate }.ok_or("UI has no instantiate")?;
+        let instantiate = unsafe { (*descriptor).instantiate }
+            .ok_or_else(|| PluginError::Editor("UI has no instantiate".into()))?;
         let handle = unsafe {
             instantiate(
                 descriptor,
@@ -469,7 +473,10 @@ impl Editor {
         store._strings.push(plugin_uri);
         store._strings.push(bundle);
         if handle.is_null() {
-            return Err(format!("{} failed to instantiate", info.uri));
+            return Err(PluginError::Editor(format!(
+                "{} failed to instantiate",
+                info.uri
+            )));
         }
         let external = match parent {
             Some(_) => {
@@ -484,7 +491,7 @@ impl Editor {
                 if let Some(cleanup) = unsafe { (*descriptor).cleanup } {
                     unsafe { cleanup(handle) };
                 }
-                return Err("external UI returned no widget".into());
+                return Err(PluginError::Editor("external UI returned no widget".into()));
             }
             None => Some(widget.cast::<ExternalWidget>()),
         };

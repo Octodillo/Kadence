@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use daw_core::plugin::PluginError;
 use daw_plugin_window::{HostWindow, WindowEvent};
 use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait, ViewType};
@@ -65,12 +66,12 @@ impl Editor {
         unsafe { view.isPlatformTypeSupported(kPlatformTypeX11EmbedWindowID) == kResultTrue }
     }
 
-    pub fn open(controller: &ComPtr<IEditController>, title: &str) -> Result<Editor, String> {
+    pub fn open(controller: &ComPtr<IEditController>, title: &str) -> Result<Editor, PluginError> {
         let view = unsafe { ComPtr::from_raw(controller.createView(ViewType::kEditor)) }
-            .ok_or("plugin has no editor")?;
+            .ok_or_else(|| PluginError::Editor("plugin has no editor".into()))?;
         unsafe {
             if view.isPlatformTypeSupported(kPlatformTypeX11EmbedWindowID) != kResultTrue {
-                return Err("editor does not support X11".into());
+                return Err(PluginError::Editor("editor does not support X11".into()));
             }
         }
         let mut rect = ViewRect {
@@ -100,7 +101,7 @@ impl Editor {
                 // Drops the frame's reference, so the window goes with ours even if the
                 // plugin still holds the frame.
                 *frame.window.lock().unwrap() = None;
-                return Err("editor failed to attach".into());
+                return Err(PluginError::Editor("editor failed to attach".into()));
             }
         }
         window.show();

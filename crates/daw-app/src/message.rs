@@ -32,6 +32,8 @@ pub enum Context {
     Recover,
     /// Exporting the song to an audio file.
     Export,
+    /// Opening a plugin's own editor window.
+    Editor,
 }
 
 /// Why, which picks the second sentence.
@@ -82,6 +84,8 @@ pub enum Reason {
     PluginStateNotSaved,
     /// The plugin of device `name` would not show its editor; `detail`.
     PluginEditorFailed,
+    /// The editor of device `name` needs an X11 display and none is reachable.
+    NoPluginDisplay,
     /// Audio file `path` cannot be streamed; `detail`.
     CannotStream,
     /// Audio file `path` cannot be read.
@@ -433,9 +437,12 @@ impl Message {
                         .detail(detail)
                 }
                 Warning::PluginEditorFailed { device, detail } => {
-                    Fields::new(C::Playback, R::PluginEditorFailed)
+                    Fields::new(C::Editor, R::PluginEditorFailed)
                         .name(device)
                         .detail(detail)
+                }
+                Warning::NoPluginDisplay { device } => {
+                    Fields::new(C::Editor, R::NoPluginDisplay).name(device)
                 }
                 Warning::CannotStream { path, detail } => Fields::new(C::Playback, R::CannotStream)
                     .path(path)
@@ -457,6 +464,8 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
+    use daw_core::plugin::PluginError;
+
     use super::*;
 
     #[test]
@@ -557,6 +566,22 @@ mod tests {
         })
         .fields();
         assert_eq!(f.path.as_deref(), Some(Path::new("/a.wav")));
+    }
+
+    #[test]
+    fn no_plugin_display() {
+        let no_display = PluginError::NoDisplay("can't connect".into());
+        let f = Message::Warning(Warning::editor_failed("Surge XT".into(), &no_display)).fields();
+        assert_eq!(
+            (f.context, f.reason, f.name.as_str()),
+            (Context::Editor, Reason::NoPluginDisplay, "Surge XT")
+        );
+        let other = PluginError::Editor("no X11 editor".into());
+        let f = Message::Warning(Warning::editor_failed("Verb".into(), &other)).fields();
+        assert_eq!(
+            (f.context, f.reason, f.name.as_str()),
+            (Context::Editor, Reason::PluginEditorFailed, "Verb")
+        );
     }
 
     #[test]

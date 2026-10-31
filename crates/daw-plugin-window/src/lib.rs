@@ -9,6 +9,8 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use daw_core::plugin::PluginError;
+
 /// The x11rb the window's API speaks, so its users depend on the same version.
 pub use x11rb;
 
@@ -59,12 +61,16 @@ impl HostWindow {
     ///
     /// Besides its own window events the window reports its children's (substructure), so a
     /// host hears an embedded editor resize itself.
-    pub fn new(title: &str, width: u32, height: u32, fixed: bool) -> Result<Self, String> {
-        let (conn, screen) = x11rb::connect(None).map_err(|e| format!("no X display: {e}"))?;
-        let err = |e: &dyn std::fmt::Display| e.to_string();
+    ///
+    /// Fails with [`PluginError::NoDisplay`] when no X display can be reached (a Wayland session
+    /// without XWayland, or a Flatpak without the `x11` socket).
+    pub fn new(title: &str, width: u32, height: u32, fixed: bool) -> Result<Self, PluginError> {
+        let (conn, screen) =
+            x11rb::connect(None).map_err(|e| PluginError::NoDisplay(e.to_string()))?;
+        let err = |e: &dyn std::fmt::Display| PluginError::Editor(e.to_string());
         let screen = &conn.setup().roots[screen];
         let (root, black) = (screen.root, screen.black_pixel);
-        let atom = |name: &str| -> Result<Atom, String> {
+        let atom = |name: &str| -> Result<Atom, PluginError> {
             Ok(conn
                 .intern_atom(false, name.as_bytes())
                 .map_err(|e| err(&e))?

@@ -117,12 +117,12 @@ int runApplication(rust::Slice<const uint8_t> args, rust::Str version)
                      KAboutLicense::GPL_V3,
                      i18n("© 2026 The Kadence developers"));
     about.setLicense(KAboutLicense::GPL_V3, KAboutLicense::OrLaterVersions);
-    about.setHomepage(QStringLiteral("https://github.com/Octodillo/daw"));
-    about.setBugAddress(QByteArrayLiteral("https://github.com/Octodillo/daw/issues"));
+    about.setHomepage(QStringLiteral("https://github.com/Octodillo/Kadence"));
+    about.setBugAddress(QByteArrayLiteral("https://github.com/Octodillo/Kadence/issues"));
     about.setOrganizationDomain(QByteArrayLiteral("octodillo.github.io"));
     about.setDesktopFileName(QStringLiteral("io.github.octodillo.daw"));
     about.addAuthor(i18n("The Kadence developers"), QString(), QString(),
-                    QStringLiteral("https://github.com/Octodillo/daw"));
+                    QStringLiteral("https://github.com/Octodillo/Kadence"));
     about.setTranslator(i18nc("NAME OF TRANSLATORS", "Your names"),
                         i18nc("EMAIL OF TRANSLATORS", "Your emails"));
     KAboutData::setApplicationData(about);
