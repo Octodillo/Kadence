@@ -5,7 +5,7 @@ use daw_arrange::snap::{MIN_LINE_SPACING, adaptive_grid};
 use daw_arrange::{Env, Prim, Rect, Scene};
 use daw_core::time::TickTime;
 use daw_midi::EditNote;
-use daw_midi::grid::LineKind;
+use daw_midi::grid::{LineKind, Meter};
 use daw_model::Project;
 
 use crate::{PianoRoll, is_black, note_name};
@@ -52,25 +52,9 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
         );
     }
 
-    // Grid lines.
     let ppt = pr.view.px_per_tick();
     let range = pr.view.visible(n.w);
-    let color = |k: LineKind| match k {
-        LineKind::Bar => pal.background.mix(pal.text, 0.25),
-        LineKind::Beat => pal.background.mix(pal.text, 0.13),
-        LineKind::Step => pal.background.mix(pal.text, 0.06),
-    };
-    if let Some(grid) = adaptive_grid(ppt, MIN_LINE_SPACING) {
-        for l in grid.lines(range.clone(), &meter) {
-            let kind = if meter.bar_at(l.tick).start == l.tick {
-                LineKind::Bar
-            } else {
-                l.kind
-            };
-            let x = n.x + pr.view.tick_to_x(l.tick).round() + 0.5;
-            s.vline(x, n.y, vel.bottom(), color(kind), 1.0);
-        }
-    }
+    pr.draw_grid_lines(&mut s, &meter, n.y, vel.bottom());
 
     // Notes, selected ones in the highlight colour. Velocity sets opacity.
     if let Some((_, m)) = clip {
@@ -172,6 +156,8 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
         s.push(Prim::PopClip);
     }
 
+    pr.draw_lanes(&mut s, project);
+
     // Keyboard strip. Keys are light and dark whatever the colour scheme,
     // taken from the scheme's own darkest and lightest colours.
     let kb = Rect::new(0.0, n.y, pr.keyboard_width, n.h);
@@ -260,12 +246,35 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
     // Playhead.
     let x = n.x + pr.view.tick_to_x(env.playhead);
     if (n.x - 2.0..w + 2.0).contains(&x) {
-        s.vline(x, 0.0, vel.bottom(), pal.highlight, 2.0);
+        s.vline(x, 0.0, pr.lanes_rect().bottom(), pal.highlight, 2.0);
     }
     s
 }
 
 impl PianoRoll {
+    /// Bar, beat and step lines from `top` to `bottom`, at this zoom.
+    pub(crate) fn draw_grid_lines(&self, s: &mut Scene, meter: &Meter, top: f64, bottom: f64) {
+        let pal = self.palette;
+        let n = self.notes_rect();
+        let color = |k: LineKind| match k {
+            LineKind::Bar => pal.background.mix(pal.text, 0.25),
+            LineKind::Beat => pal.background.mix(pal.text, 0.13),
+            LineKind::Step => pal.background.mix(pal.text, 0.06),
+        };
+        let Some(grid) = adaptive_grid(self.view.px_per_tick(), MIN_LINE_SPACING) else {
+            return;
+        };
+        for l in grid.lines(self.view.visible(n.w), meter) {
+            let kind = if meter.bar_at(l.tick).start == l.tick {
+                LineKind::Bar
+            } else {
+                l.kind
+            };
+            let x = n.x + self.view.tick_to_x(l.tick).round() + 0.5;
+            s.vline(x, top, bottom, color(kind), 1.0);
+        }
+    }
+
     /// Keys with a visible row, lowest first.
     pub fn visible_keys(&self) -> std::ops::RangeInclusive<u8> {
         let v = self.grid_view(TickTime(0));

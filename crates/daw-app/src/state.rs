@@ -167,11 +167,13 @@ impl AppState {
         let lanes = crate::lanes::Lanes::default();
         let mut arrange = Arrange::new();
         arrange.params = Some(lanes.params.clone());
+        let mut piano = PianoRoll::new();
+        piano.params = Some(lanes.params.clone());
         let mut s = Self {
             doc: Document::new(Project::default()),
             engine,
             arrange,
-            piano: PianoRoll::new(),
+            piano,
             instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
             export: None,
@@ -773,8 +775,11 @@ impl AppState {
     /// Calls `f` with the arrange view, the document and an [`Env`].
     /// Ends an arrange drag in progress before an edit from elsewhere (undo,
     /// a menu), so the drag doesn't merge with it or touch what it removed.
+    /// Ends the drags in progress in the arrange view and the piano roll
+    /// before another edit.
     pub fn end_drag(&mut self) {
         self.arrange.end_drag(&mut self.doc);
+        self.piano.end_drag(&mut self.doc);
     }
 
     pub fn with_arrange<R>(&mut self, f: impl FnOnce(&mut Arrange, &mut Document, &Env) -> R) -> R {

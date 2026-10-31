@@ -687,46 +687,10 @@ Kirigami.Page {
     }
 
     // On an automation lane: the selected points' shape.
-    QQC2.Menu {
+    PointMenu {
         id: pointMenu
-        // The selected points' shape, -1 when the menu is for the lane.
-        property int shape: -1
-
-        QQC2.MenuItem {
-            text: i18nc("@action:inmenu automation segment shape", "Linear")
-            enabled: pointMenu.shape >= 0
-            checkable: true
-            checked: pointMenu.shape === 0
-            onTriggered: Automation.setPointShape(0)
-        }
-        QQC2.MenuItem {
-            text: i18nc("@action:inmenu automation segment shape", "Step")
-            enabled: pointMenu.shape >= 0
-            checkable: true
-            checked: pointMenu.shape === 1
-            onTriggered: Automation.setPointShape(1)
-        }
-        QQC2.MenuItem {
-            text: i18nc("@action:inmenu automation segment shape", "Slow Start")
-            enabled: pointMenu.shape >= 0
-            checkable: true
-            checked: pointMenu.shape === 2
-            onTriggered: Automation.setPointShape(2)
-        }
-        QQC2.MenuItem {
-            text: i18nc("@action:inmenu automation segment shape", "Fast Start")
-            enabled: pointMenu.shape >= 0
-            checkable: true
-            checked: pointMenu.shape === 3
-            onTriggered: Automation.setPointShape(3)
-        }
-        QQC2.MenuSeparator {}
-        QQC2.MenuItem {
-            text: i18nc("@action:inmenu", "Delete Point")
-            icon.name: "edit-delete"
-            enabled: pointMenu.shape >= 0
-            onTriggered: Automation.deletePoints()
-        }
+        onShapeChosen: (shape) => Automation.setPointShape(shape)
+        onDeleteChosen: Automation.deletePoints()
     }
 
     QQC2.Menu {

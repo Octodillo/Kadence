@@ -490,6 +490,22 @@ Item {
             check(!edit.stripShown && !edit.trackStrip.shown && edit.trackStrip.width === 0, "hide the track strip");
             stripToggle.trigger();
             check(edit.stripShown && edit.trackStrip.shown, "show the track strip again");
+            // Under the velocity lane: the clip's track's automation lanes,
+            // named beside them, toggled from the toolbar.
+            const lanes = roll.laneCount;
+            Automation.addLane(roll.trackIndex, 0);
+            roll.refresh();
+            check(roll.laneCount === lanes + 1 && roll.lanesHeight > 0
+                  && roll.lanesHeight <= roll.laneCount * roll.laneHeight,
+                  "the Edit page shows the track's automation lanes");
+            const lanesToggle = edit.editActions[23];
+            lanesToggle.trigger();
+            check(!edit.lanesShown && roll.lanesHeight === 0, "hide the automation lanes");
+            lanesToggle.trigger();
+            check(edit.lanesShown && roll.lanesHeight > 0, "show the automation lanes again");
+            Project.undo();
+            roll.refresh();
+            check(roll.laneCount === lanes, "undo removes the lane");
             // A track in front moves the clip's strip a row on; the Mixer
             // resets its rows, and the strip must survive that.
             test.stripRow = roll.stripRow;
@@ -518,7 +534,7 @@ Item {
             const notes = TestHelper.pianoNoteCount();
             check(notes === 12, "demo clip has 12 notes");
             // Double-click empty space low in the grid: a note is added.
-            roll.doubleClick(roll.width * 0.8, roll.height - roll.velocityHeight - 20, 0);
+            roll.doubleClick(roll.width * 0.8, roll.height - roll.lanesHeight - roll.velocityHeight - 20, 0);
             check(TestHelper.pianoNoteCount() === notes + 1, "double-click adds a note");
             Project.undo();
             check(TestHelper.pianoNoteCount() === notes, "undo removes it");
@@ -529,6 +545,12 @@ Item {
         () => {
             const edit = window.pageStack.currentItem;
             const strip = edit.trackStrip.strip;
+            // The strip is chosen again just after each Mixer reset, which
+            // the Mixer's own clock can trigger at any moment.
+            if ((strip === null || strip.index !== edit.roll.stripRow) && test.waits < 10) {
+                return false;
+            }
+            test.waits = 0;
             check(edit.roll.stripRow === test.stripRow + 1,
                   "the clip's track moved a row on (" + test.stripRow + " to " + edit.roll.stripRow + ")");
             check(strip !== null && strip.index === edit.roll.stripRow

@@ -36,6 +36,7 @@ Kirigami.Page {
         maximumUnits: 60
     }
     readonly property bool stripShown: AppSettings.editStripShown
+    readonly property bool lanesShown: AppSettings.editLanesShown
     readonly property alias roll: roll
     readonly property alias trackStrip: trackStrip
 
@@ -156,7 +157,7 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Delete")
             icon.name: "edit-delete"
             shortcut: StandardKey.Delete
-            enabled: page.visible && roll.hasSelection
+            enabled: page.visible && (roll.hasSelection || roll.hasPoints)
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.deleteSelection()
         },
@@ -213,6 +214,19 @@ Kirigami.Page {
                 // Toggling replaced the binding; follow the setting again.
                 checked = Qt.binding(() => AppSettings.previewNotes);
             }
+        },
+        Kirigami.Action {
+            text: i18nc("@action:button", "Automation")
+            icon.name: "draw-bezier-curves"
+            checkable: true
+            checked: page.lanesShown
+            enabled: page.visible
+            tooltip: i18nc("@info:tooltip", "Show the automation lanes of the clip's track under the notes")
+            onToggled: {
+                AppSettings.chooseEditLanesShown(checked);
+                // Toggling replaced the binding; follow the setting again.
+                checked = Qt.binding(() => page.lanesShown);
+            }
         }
     ]
 
@@ -242,7 +256,8 @@ Kirigami.Page {
         page.editActions[19],
         page.editActions[20],
         page.editActions[21],
-        page.editActions[22]
+        page.editActions[22],
+        page.editActions[23]
     ]
 
     // The strip's row follows the project, so while the strip is on
@@ -301,8 +316,10 @@ Kirigami.Page {
             }
             rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
             keyboardWidth: Kirigami.Units.gridUnit * 3
-            readonly property real maximumVelocityHeight: Math.max(page.velocitySize.minimumPixels, height - rulerHeight - Kirigami.Units.gridUnit * 3)
+            readonly property real maximumVelocityHeight: Math.max(page.velocitySize.minimumPixels, height - rulerHeight - lanesHeight - Kirigami.Units.gridUnit * 3)
             velocityHeight: Math.round(Math.min(page.velocitySize.pixels, maximumVelocityHeight))
+            lanesShown: page.lanesShown
+            laneHeight: Math.round(Kirigami.Units.gridUnit * 2.5)
             backgroundColor: Kirigami.Theme.backgroundColor
             alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
             textColor: Kirigami.Theme.textColor
@@ -314,12 +331,18 @@ Kirigami.Page {
             onWidthChanged: refresh()
             onHeightChanged: refresh()
             onVelocityHeightChanged: refresh()
+            onLanesShownChanged: refresh()
+            onLaneHeightChanged: refresh()
             onBackgroundColorChanged: refresh()
             onTextColorChanged: refresh()
             onHighlightColorChanged: refresh()
             Component.onCompleted: refresh()
 
             onContextMenuRequested: (x, y) => noteMenu.popup(roll, x, y)
+            onLaneMenuRequested: (x, y, onPoint) => {
+                pointMenu.shape = onPoint ? roll.pointShape() : -1;
+                pointMenu.popup(roll, x, y);
+            }
 
             Accessible.role: Accessible.Canvas
             Accessible.name: i18nc("@info:accessible", "Piano roll")
@@ -371,12 +394,54 @@ Kirigami.Page {
             lineVisible: false
             x: roll.x
             width: roll.width
-            y: roll.y + roll.height - roll.velocityHeight - height / 2
+            y: roll.y + roll.height - roll.lanesHeight - roll.velocityHeight - height / 2
             onStarted: page.velocitySize.begin(roll.velocityHeight, roll.maximumVelocityHeight)
             onMoved: (delta, done) => page.velocitySize.drag(-delta, done)
             onCanceled: page.velocitySize.cancel()
             onReset: page.velocitySize.reset()
             Accessible.ignored: true
+        }
+
+        // What each automation lane under the velocity lane controls, beside
+        // it in the keyboard's column.
+        Column {
+            x: roll.x
+            y: roll.y + roll.height - roll.lanesHeight
+            width: roll.keyboardWidth
+            height: roll.lanesHeight
+            visible: roll.hasClip && roll.lanesHeight > 0
+            clip: true
+
+            Repeater {
+                model: roll.hasClip ? roll.laneCount : 0
+
+                QQC2.Label {
+                    required property int index
+                    readonly property int revision: Project.revision + Automation.revision
+                    width: roll.keyboardWidth
+                    // Rows share the space when many lanes would not fit.
+                    height: roll.lanesHeight / Math.max(1, roll.laneCount)
+                    leftPadding: Kirigami.Units.smallSpacing
+                    rightPadding: Kirigami.Units.smallSpacing
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                    font: Kirigami.Theme.smallFont
+                    text: revision >= 0 && roll.trackIndex >= 0
+                        ? laneName.text(Automation.laneKind(roll.trackIndex, index),
+                                        Automation.laneDetail(roll.trackIndex, index),
+                                        Automation.laneParam(roll.trackIndex, index))
+                        : ""
+                    QQC2.ToolTip.text: text
+                    QQC2.ToolTip.visible: tip.hovered && truncated
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    HoverHandler {
+                        id: tip
+                    }
+                }
+            }
+        }
+        LaneName {
+            id: laneName
         }
 
         // Two-finger zoom on touch screens.
@@ -424,16 +489,23 @@ Kirigami.Page {
                 right: parent.right
                 bottom: hbar.top
                 topMargin: roll.rulerHeight
-                bottomMargin: roll.velocityHeight
+                bottomMargin: roll.velocityHeight + roll.lanesHeight
             }
             orientation: Qt.Vertical
             policy: QQC2.ScrollBar.AsNeeded
             visible: roll.hasClip
-            readonly property real rows: Math.max(1, roll.height - roll.rulerHeight - roll.velocityHeight)
+            readonly property real rows: Math.max(1, roll.height - roll.rulerHeight - roll.velocityHeight - roll.lanesHeight)
             size: roll.contentHeight > rows ? rows / roll.contentHeight : 1
             position: roll.contentHeight > 0 ? roll.scrollY / roll.contentHeight : 0
             onPositionChanged: if (pressed) roll.scrollTo(roll.scrollX, position * roll.contentHeight)
         }
+    }
+
+    // On an automation lane: the selected points' shape.
+    PointMenu {
+        id: pointMenu
+        onShapeChosen: (shape) => roll.setPointShape(shape)
+        onDeleteChosen: roll.deletePoints()
     }
 
     QQC2.Menu {
