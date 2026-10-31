@@ -356,6 +356,7 @@ fn plugin_params_follow_automation() {
         curve: 0.0,
         step: true,
     });
+    let id = lane.id;
     rig.doc
         .execute(AddLane {
             track: rig.track,
@@ -364,6 +365,27 @@ fn plugin_params_follow_automation() {
         .unwrap();
     rig.sync();
     rig.settles_at(LEVEL * 0.25);
+
+    // Overwritten by hand for a while (touch write), then playing again: the
+    // value from before the lane is still what it goes back to.
+    let key = Session::device_key(rig.device);
+    rig.session.set_suspended_lanes([id].into());
+    rig.session.set_live_param(key, GAIN, Some(0.6)).unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 0.6);
+    rig.session.set_live_param(key, GAIN, None).unwrap();
+    rig.session.set_suspended_lanes(Default::default());
+    rig.sync();
+    rig.settles_at(LEVEL * 0.25);
+
+    // Without the lane, the plugin goes back to the value it had before.
+    rig.doc
+        .execute(daw_model::commands::RemoveLane::new(id))
+        .unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL);
+    let value = rig.session.with_plugin(rig.device, |p| p.param_value(GAIN));
+    assert_eq!(value, Some(1.0));
 }
 
 #[test]
@@ -947,4 +969,83 @@ fn a_plugin_crashing_mid_export_fails_it() {
         ) || matches!(result, Err(ExportError::PluginTooSlow(_))),
         "{result:?}"
     );
+}
+
+/// A step lane holding the test plugin's gain at `value`, added to the rig.
+fn gain_lane(rig: &mut Rig, value: f64) -> daw_model::LaneId {
+    let mut lane = AutomationLane::new(AutomationTarget::DeviceParam {
+        device: rig.device,
+        param: GAIN,
+    });
+    lane.points.push(AutomationPoint {
+        tick: TickTime(0),
+        value,
+        curve: 0.0,
+        step: true,
+    });
+    let id = lane.id;
+    rig.doc
+        .execute(AddLane {
+            track: rig.track,
+            lane,
+        })
+        .unwrap();
+    rig.sync();
+    id
+}
+
+fn remove_lane(rig: &mut Rig, id: daw_model::LaneId) {
+    rig.doc
+        .execute(daw_model::commands::RemoveLane::new(id))
+        .unwrap();
+    rig.sync();
+}
+
+#[test]
+fn a_removed_lane_goes_back_after_a_save_moves_the_project() {
+    let mut rig = Rig::new();
+    let id = gain_lane(&mut rig, 0.25);
+    rig.settles_at(LEVEL * 0.25);
+    // Saving a new project moves its root, which rebuilds everything.
+    let saved = rig.dir.path().join("saved");
+    std::fs::create_dir_all(&saved).unwrap();
+    rig.session.set_root(Some(saved));
+    rig.sync();
+    rig.settles_at(LEVEL * 0.25);
+    remove_lane(&mut rig, id);
+    rig.settles_at(LEVEL);
+}
+
+#[test]
+fn a_lane_written_by_hand_goes_back_to_the_value_before_the_take() {
+    let mut rig = Rig::new();
+    // A take with no lane yet holds the gain while the knob moves...
+    let key = Session::device_key(rig.device);
+    rig.session.set_live_param(key, GAIN, Some(0.4)).unwrap();
+    rig.session.set_live_param(key, GAIN, Some(0.6)).unwrap();
+    rig.settles_at(LEVEL * 0.6);
+    // ...and ends as a lane in the document.
+    rig.session.set_live_param(key, GAIN, None).unwrap();
+    let id = gain_lane(&mut rig, 0.25);
+    rig.settles_at(LEVEL * 0.25);
+    remove_lane(&mut rig, id);
+    rig.settles_at(LEVEL);
+}
+
+#[test]
+fn a_state_loaded_under_a_lane_is_what_removing_it_goes_back_to() {
+    let mut rig = Rig::new();
+    let id = gain_lane(&mut rig, 0.25);
+    rig.settles_at(LEVEL * 0.25);
+    // A preset loaded while the lane plays (or an undone state change).
+    rig.doc
+        .execute(SetDevice {
+            id: rig.device,
+            field: DeviceField::State(Some(gain_state(0.75).into())),
+        })
+        .unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 0.25);
+    remove_lane(&mut rig, id);
+    rig.settles_at(LEVEL * 0.75);
 }
