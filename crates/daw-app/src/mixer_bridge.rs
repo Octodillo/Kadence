@@ -37,6 +37,7 @@ pub mod qobject {
         type QVector_i32 = cxx_qt_lib::QVector<i32>;
         include!("cxx-qt-lib/qlist.h");
         type QList_f64 = cxx_qt_lib::QList<f64>;
+        type QList_bool = cxx_qt_lib::QList<bool>;
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qstringlist.h");
@@ -97,6 +98,13 @@ pub mod qobject {
         ) -> bool;
         #[qinvokable]
         fn remove_insert(self: Pin<&mut Mixer>, row: i32, insert: i32);
+        /// The id of an insert's device, for `DevicePanel.open`; empty if
+        /// there is none.
+        #[qinvokable]
+        fn insert_device(self: &Mixer, row: i32, insert: i32) -> QString;
+        /// The id of the strip's instrument device; empty if it has none.
+        #[qinvokable]
+        fn instrument_device(self: &Mixer, row: i32) -> QString;
         /// Swaps the strip's instrument for row `choice` of `Instruments`
         /// at its `revision`.
         #[qinvokable]
@@ -168,6 +176,7 @@ const ROLES: &[&str] = &[
     "instrument",
     "instrumentChoice",
     "inserts",
+    "insertsEnabled",
     "insertMeters",
     "sends",
     "sendLevels",
@@ -438,6 +447,23 @@ impl qobject::Mixer {
         }
     }
 
+    fn insert_device(&self, row: i32, insert: i32) -> QString {
+        let uid = usize::try_from(row)
+            .ok()
+            .zip(usize::try_from(insert).ok())
+            .and_then(|(r, i)| self.strips.get(r)?.inserts.get(i))
+            .map_or("", |i| i.uid.as_str());
+        QString::from(uid)
+    }
+
+    fn instrument_device(&self, row: i32) -> QString {
+        let uid = usize::try_from(row)
+            .ok()
+            .and_then(|r| self.strips.get(r)?.instrument.as_ref())
+            .map_or("", |i| i.uid.as_str());
+        QString::from(uid)
+    }
+
     fn set_instrument(mut self: Pin<&mut Self>, row: i32, choice: i32, revision: i32) {
         let choice = crate::instruments_bridge::choice_at(choice, revision);
         if let (Some(id), Some(choice)) = (self.strip_id(row), choice) {
@@ -570,6 +596,13 @@ impl qobject::Mixer {
             ),
             Some("inserts") => {
                 QVariant::from(&string_list(s.inserts.iter().map(|i| i.name.as_str())))
+            }
+            Some("insertsEnabled") => {
+                let mut on = QList::<bool>::default();
+                for i in &s.inserts {
+                    on.append(i.enabled);
+                }
+                QVariant::from(&on)
             }
             Some("insertMeters") => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
             Some("sends") => {

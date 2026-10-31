@@ -140,7 +140,9 @@ fn insert_info(d: &Device, session: Option<&Session>) -> InsertInfo {
         DeviceSource::Plugin { id, .. } => id.clone(),
     };
     InsertInfo {
+        uid: d.id.to_string(),
         device_id,
+        enabled: d.enabled,
         name: d.name.clone(),
         has_gain_reduction: session.is_some_and(|s| s.device_meter(d.id).is_some()),
     }

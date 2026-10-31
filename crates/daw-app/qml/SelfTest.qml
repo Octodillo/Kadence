@@ -240,6 +240,39 @@ Item {
             shoot(window.title, "mix-routing");
         },
         () => {
+            // Click the compressor added above: its panel opens.
+            const id = Mixer.insertDevice(0, 0);
+            check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
+            check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
+            check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            // Drag the threshold: one undo step.
+            DevicePanel.setValue(0, -30, true);
+            DevicePanel.setValue(0, -24, true);
+            DevicePanel.endGesture();
+            // Project's properties follow the document on its tick.
+            Project.tick();
+            check(Project.undoText === "Change Parameter", "parameter edit undoes");
+            Project.undo();
+            check(Project.undoText === "Add Automation Lane", "a drag is one undo step");
+            Project.redo();
+            DevicePanel.setDeviceEnabled(false);
+            Project.tick();
+            check(!DevicePanel.switchedOn && Project.undoText === "Bypass Device", "bypass");
+            DevicePanel.setDeviceEnabled(true);
+            check(DevicePanel.switchedOn, "switch back on");
+        },
+        () => {
+            shoot(window.title, "mix-device");
+        },
+        () => {
+            // The demo's Keys track plays the synth: its panel opens too.
+            const keys = 2;
+            check(DevicePanel.open(Mixer.instrumentDevice(keys)), "open the instrument's panel");
+            check(DevicePanel.deviceKind === "daw.synth" && DevicePanel.instrument, "panel shows the synth");
+            DevicePanel.close();
+            check(!DevicePanel.active, "panel closed");
+        },
+        () => {
             // The plugin browser, as Add Effect opens it.
             test.browser = window.browsePlugins(2, (format, pluginId, name) => {
                 test.picked = [format, pluginId, name];

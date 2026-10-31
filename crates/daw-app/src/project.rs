@@ -302,6 +302,10 @@ pub mod qobject {
         /// The name of the track's instrument; empty when it has none.
         #[qinvokable]
         fn track_instrument(self: &Project, index: i32) -> QString;
+        /// The id of the track's instrument device, for `DevicePanel.open`;
+        /// empty when it has none.
+        #[qinvokable]
+        fn track_instrument_device(self: &Project, index: i32) -> QString;
         /// The row in `Instruments` of the track's instrument, or -1.
         #[qinvokable]
         fn track_instrument_choice(self: &Project, index: i32) -> i32;
@@ -1211,6 +1215,15 @@ impl qobject::Project {
             track_at(s, index)
                 .and_then(|t| instrument::instrument_of(t))
                 .map(|d| QString::from(d.name.as_str()))
+        })
+        .unwrap_or_default()
+    }
+
+    fn track_instrument_device(&self, index: i32) -> QString {
+        state::with(|s| {
+            track_at(s, index)
+                .and_then(|t| instrument::instrument_of(t))
+                .map(|d| QString::from(d.id.to_string().as_str()))
         })
         .unwrap_or_default()
     }

@@ -22,7 +22,7 @@ pub const ACCENT: ParamId = 2;
 pub const PITCH: ParamId = 3;
 pub const PLAYBACK: ParamId = 4;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::new(
         VOLUME,
         "volume",
