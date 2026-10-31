@@ -32,6 +32,9 @@ const QML_FILES: &[&str] = &[
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
     "qml/TrackHeader.qml",
+    "qml/LaneHeader.qml",
+    "qml/AddLaneMenu.qml",
+    "qml/LaneName.qml",
     "qml/TransportBar.qml",
     "qml/RecoveryDialog.qml",
     "qml/RelinkDialog.qml",
@@ -84,6 +87,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/mixer_bridge.rs",
+        "src/automation_bridge.rs",
         "src/device_panel_bridge.rs",
         "src/plugins_bridge.rs",
         "src/instruments_bridge.rs",

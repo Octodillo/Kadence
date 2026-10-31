@@ -626,7 +626,7 @@ impl qobject::Project {
                 s.loop_range().is_some(),
                 format!("{}.{}", bar + 1, beat + 1),
                 format!("{}:{:04.1}", (secs / 60.0).floor() as i64, secs % 60.0),
-                !s.arrange.selection.is_empty(),
+                !s.arrange.selection.is_empty() || s.arrange.points_selected(p),
                 s.arrange.audio_selected(p),
                 selected,
                 s.status.clone(),
