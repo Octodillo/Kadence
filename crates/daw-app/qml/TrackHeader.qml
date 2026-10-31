@@ -375,6 +375,18 @@ Column {
                 menu.popup();
             }
         }
+
+        // Drag the lower edge to make every track taller or shorter (the
+        // timeline has one track height).
+        ResizeHandle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            size: row.arrange.trackHeight
+            onResizing: (size) => row.arrange.resizeTracks(size)
+            onResized: AppSettings.setLayoutValue("ArrangeTrackHeight", row.arrange.trackHeight)
+            Accessible.ignored: true
+        }
     }
 
     // The lanes' headers, one per lane row the timeline shows.
@@ -388,6 +400,19 @@ Column {
             track: row.index
             lane: index < row.laneCount ? index : -1
             revision: row.revision
+
+            // Drag the lower edge to resize every automation lane.
+            ResizeHandle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                size: row.arrange.laneHeight
+                minimum: Kirigami.Units.gridUnit * 1.5
+                maximum: Kirigami.Units.gridUnit * 12
+                onResizing: (size) => row.arrange.laneHeight = Math.round(size)
+                onResized: AppSettings.setLayoutValue("AutomationLaneHeight", row.arrange.laneHeight)
+                Accessible.ignored: true
+            }
         }
     }
 }

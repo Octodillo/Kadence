@@ -319,7 +319,8 @@ Kirigami.Page {
                         bottom: hbar.top
                     }
                     rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
-                    laneHeight: Math.round(Kirigami.Units.gridUnit * 2.2)
+                    // Resized by dragging a lane header's lower edge.
+                    laneHeight: Math.round(AppSettings.layoutValue("AutomationLaneHeight", Kirigami.Units.gridUnit * 2.2))
                     backgroundColor: Kirigami.Theme.backgroundColor
                     alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
                     textColor: Kirigami.Theme.textColor
@@ -334,6 +335,11 @@ Kirigami.Page {
                     onTextColorChanged: refresh()
                     onHighlightColorChanged: refresh()
                     Component.onCompleted: {
+                        // The height a track header was last dragged to.
+                        const tracks = AppSettings.layoutValue("ArrangeTrackHeight", 0);
+                        if (tracks > 0) {
+                            resizeTracks(tracks);
+                        }
                         setDefaultNames(
                             i18nc("@label default name of a new MIDI clip", "MIDI clip"),
                             i18nc("@label default name of audio from a file without a name", "Audio"),

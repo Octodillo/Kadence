@@ -79,8 +79,16 @@ Item {
             check(Project.trackCount === 1, "add instrument track");
             check(Project.trackName(0) === i18nc("@item default track name, %1 is a number", "Instrument %1", 1),
                   "default track name worded in QML");
-            // Double-click the first lane: a one-bar MIDI clip appears.
+            // Dragging a header's lower edge resizes every track.
             const v = arrange.view;
+            const before = v.trackHeight;
+            v.resizeTracks(before + 20);
+            check(v.trackHeight === before + 20 && v.rowHeight(0) === before + 20, "resize tracks");
+            v.resizeTracks(1);
+            check(v.trackHeight >= 24, "tracks keep a minimum height");
+            v.resizeTracks(before);
+            check(v.trackHeight === before, "resize tracks back");
+            // Double-click the first lane: a one-bar MIDI clip appears.
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
             check(Project.undoText in editNames.names, "undo name has a translation");

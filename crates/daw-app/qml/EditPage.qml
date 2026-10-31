@@ -216,7 +216,8 @@ Kirigami.Page {
             }
             rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
             keyboardWidth: Kirigami.Units.gridUnit * 3
-            velocityHeight: Kirigami.Units.gridUnit * 4
+            // Resized with the handle above the velocity lane.
+            velocityHeight: AppSettings.layoutValue("VelocityLaneHeight", Kirigami.Units.gridUnit * 4)
             backgroundColor: Kirigami.Theme.backgroundColor
             alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
             textColor: Kirigami.Theme.textColor
@@ -227,6 +228,7 @@ Kirigami.Page {
 
             onWidthChanged: refresh()
             onHeightChanged: refresh()
+            onVelocityHeightChanged: refresh()
             onBackgroundColorChanged: refresh()
             onTextColorChanged: refresh()
             onHighlightColorChanged: refresh()
@@ -273,6 +275,22 @@ Kirigami.Page {
             Keys.onEscapePressed: roll.cancelDrag()
             Keys.onLeftPressed: (e) => roll.nudge(-1)
             Keys.onRightPressed: (e) => roll.nudge(1)
+        }
+
+        // Between the notes and the velocity lane: drag to resize the lane.
+        ResizeHandle {
+            id: velocityHandle
+            visible: roll.hasClip
+            x: roll.x
+            width: roll.width
+            y: roll.y + roll.height - roll.velocityHeight - height / 2
+            growsUp: true
+            size: roll.velocityHeight
+            minimum: Kirigami.Units.gridUnit * 2
+            maximum: Math.max(minimum, roll.height - roll.rulerHeight - Kirigami.Units.gridUnit * 3)
+            onResizing: (size) => roll.velocityHeight = Math.round(size)
+            onResized: AppSettings.setLayoutValue("VelocityLaneHeight", roll.velocityHeight)
+            Accessible.ignored: true
         }
 
         // Two-finger zoom on touch screens.

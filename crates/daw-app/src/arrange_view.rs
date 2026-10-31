@@ -97,6 +97,10 @@ pub mod qobject {
         fn wheel(self: Pin<&mut ArrangeView>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32);
         #[qinvokable]
         fn pinch(self: Pin<&mut ArrangeView>, scale: f64, x: f64);
+        /// Makes every track row `height` pixels tall (clamped), keeping
+        /// the top row in place: dragging a track header's lower edge.
+        #[qinvokable]
+        fn resize_tracks(self: Pin<&mut ArrangeView>, height: f64);
         /// From the scroll bars.
         #[qinvokable]
         fn scroll_to(self: Pin<&mut ArrangeView>, x: f64, y: f64);
@@ -430,6 +434,20 @@ impl qobject::ArrangeView {
             s.arrange.pinch(&project, scale, x)
         });
         self.after(out);
+    }
+
+    fn resize_tracks(self: Pin<&mut Self>, height: f64) {
+        if !height.is_finite() || height <= 0.0 {
+            return;
+        }
+        let ruler = self.ruler_height;
+        state::with(|s| {
+            let project = s.doc.project().clone();
+            let factor = height / s.arrange.track_height.max(1.0);
+            s.arrange.zoom_tracks(&project, factor, ruler);
+            s.touch();
+        });
+        self.refresh();
     }
 
     fn scroll_to(self: Pin<&mut Self>, x: f64, y: f64) {

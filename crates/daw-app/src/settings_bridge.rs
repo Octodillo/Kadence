@@ -72,6 +72,15 @@ pub mod qobject {
         fn choose_project_folder(self: Pin<&mut AppSettings>, url: &QUrl);
         #[qinvokable]
         fn choose_autosave_minutes(self: Pin<&mut AppSettings>, minutes: i32);
+
+        /// A remembered layout size (splitter position, row height) under
+        /// `key`, or `fallback` when none is saved.
+        #[qinvokable]
+        fn layout_value(self: &AppSettings, key: &QString, fallback: f64) -> f64;
+        /// Remembers a layout size; call it when a drag ends, not on every
+        /// move, since it writes the config file.
+        #[qinvokable]
+        fn set_layout_value(self: Pin<&mut AppSettings>, key: &QString, value: f64);
     }
 
     impl cxx_qt::Initialize for AppSettings {}
@@ -260,6 +269,14 @@ impl qobject::AppSettings {
         };
         settings::save_general_settings(&mut KConfigStore, &general);
         self.as_mut().apply_general(general);
+    }
+
+    fn layout_value(&self, key: &QString, fallback: f64) -> f64 {
+        settings::load_layout_value(&KConfigStore, &key.to_string(), fallback)
+    }
+
+    fn set_layout_value(self: Pin<&mut Self>, key: &QString, value: f64) {
+        settings::save_layout_value(&mut KConfigStore, &key.to_string(), value);
     }
 
     fn apply_general(mut self: Pin<&mut Self>, general: GeneralSettings) {

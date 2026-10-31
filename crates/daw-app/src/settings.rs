@@ -395,6 +395,25 @@ pub fn save_plugin_folders(store: &mut dyn SettingsStore, folders: &[PathBuf]) {
     store.sync();
 }
 
+const LAYOUT: &str = "Layout";
+
+/// A remembered size in the window layout (a splitter position, a row
+/// height), or `fallback` when none is saved or it isn't a finite number.
+pub fn load_layout_value(store: &dyn SettingsStore, key: &str, fallback: f64) -> f64 {
+    store
+        .read(LAYOUT, key)
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(fallback)
+}
+
+pub fn save_layout_value(store: &mut dyn SettingsStore, key: &str, value: f64) {
+    if value.is_finite() {
+        store.write(LAYOUT, key, &value.to_string());
+        store.sync();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,5 +613,20 @@ mod tests {
         assert_eq!(load_plugin_folders(&store), folders);
         save_plugin_folders(&mut store, &[]);
         assert!(load_plugin_folders(&store).is_empty());
+    }
+
+    #[test]
+    fn layout_values_round_trip() {
+        let mut store = MemoryStore::default();
+        assert_eq!(load_layout_value(&store, "VelocityLaneHeight", 48.0), 48.0);
+        save_layout_value(&mut store, "VelocityLaneHeight", 72.5);
+        assert_eq!(load_layout_value(&store, "VelocityLaneHeight", 48.0), 72.5);
+        // Not a number: keep what was there.
+        save_layout_value(&mut store, "VelocityLaneHeight", f64::NAN);
+        assert_eq!(load_layout_value(&store, "VelocityLaneHeight", 48.0), 72.5);
+        store.write(LAYOUT, "Broken", "tall");
+        assert_eq!(load_layout_value(&store, "Broken", 10.0), 10.0);
+        store.write(LAYOUT, "Infinite", "inf");
+        assert_eq!(load_layout_value(&store, "Infinite", 10.0), 10.0);
     }
 }
