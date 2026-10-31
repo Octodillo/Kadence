@@ -14,6 +14,7 @@ use crate::{
     AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
     PortFilter, PortInfo, PortKind, ProcessCallback, midi,
 };
+use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
 const AUDIO_TYPE: &str = jack::jack_sys::FLOAT_MONO_AUDIO;
 const MIDI_TYPE: &str = jack::jack_sys::RAW_MIDI_TYPE;
@@ -36,6 +37,8 @@ pub struct JackBackend {
     /// Auto-connect has run since `open`. Later starts restore `links`
     /// instead, so ports the user unplugged stay unplugged.
     auto_connected: bool,
+    /// Adds and removes the ports of [`AudioBackend::add_midi_input`].
+    extra: Option<MidiInputsControl<Port<MidiIn>>>,
     /// Make the next `start` fail the way `jack_activate` failing does.
     #[cfg(test)]
     fail_next_activation: bool,
@@ -45,7 +48,7 @@ pub struct JackBackend {
 enum State {
     #[default]
     Closed,
-    Open(Client, Ports),
+    Open(Client, Box<Ports>),
     Running(jack::AsyncClient<Notifications, Processor>),
 }
 
@@ -54,6 +57,7 @@ struct Ports {
     audio_out: Vec<Port<AudioOut>>,
     midi_in: Option<Port<MidiIn>>,
     midi_out: Option<Port<MidiOut>>,
+    extra: MidiInputs<Port<MidiIn>>,
 }
 
 impl JackBackend {
@@ -62,15 +66,31 @@ impl JackBackend {
     }
 
     fn client(&self) -> Result<&Client, BackendError> {
-        match &self.state {
-            State::Closed => Err(BackendError::NotOpen),
-            State::Open(c, _) => Ok(c),
-            State::Running(a) => Ok(a.as_client()),
+        client_of(&self.state)
+    }
+
+    /// Unregisters the extra MIDI inputs the audio thread has let go of.
+    fn unregister_removed(&mut self) {
+        let (Ok(client), Some(extra)) = (client_of(&self.state), self.extra.as_mut()) else {
+            return;
+        };
+        for port in extra.take_removed() {
+            if let Err(e) = client.unregister_port(port) {
+                log::debug!("could not unregister a MIDI input: {e}");
+            }
         }
     }
 
+    /// While stopped, the extra MIDI inputs take changes at once.
+    fn apply_extra_now(&mut self) {
+        if let State::Open(_, ports) = &mut self.state {
+            ports.extra.begin_cycle();
+        }
+        self.unregister_removed();
+    }
+
     /// Full names of our ports, each with whether it is an output.
-    fn our_ports(client: &Client, cfg: &BackendConfig) -> Vec<(String, bool)> {
+    fn our_ports(&self, client: &Client, cfg: &BackendConfig) -> Vec<(String, bool)> {
         let me = client.name();
         let mut v = Vec::new();
         v.extend((1..=cfg.audio_inputs).map(|i| (format!("{me}:audio_in_{i}"), false)));
@@ -81,13 +101,16 @@ impl JackBackend {
         if cfg.midi_output {
             v.push((format!("{me}:midi_out"), true));
         }
+        if let Some(extra) = &self.extra {
+            v.extend(extra.names().map(|(_, n)| (n.to_owned(), false)));
+        }
         v
     }
 
     /// Every live connection of our ports, as (output, input) pairs.
-    fn live_links(client: &Client, cfg: &BackendConfig) -> Vec<(String, String)> {
+    fn live_links(&self, client: &Client, cfg: &BackendConfig) -> Vec<(String, String)> {
         let mut links = Vec::new();
-        for (name, is_output) in Self::our_ports(client, cfg) {
+        for (name, is_output) in self.our_ports(client, cfg) {
             let Some(port) = client.port_by_name(&name) else {
                 continue;
             };
@@ -169,6 +192,14 @@ impl JackBackend {
     }
 }
 
+fn client_of(state: &State) -> Result<&Client, BackendError> {
+    match state {
+        State::Closed => Err(BackendError::NotOpen),
+        State::Open(c, _) => Ok(c),
+        State::Running(a) => Ok(a.as_client()),
+    }
+}
+
 fn connect_error(e: jack::Error) -> BackendError {
     BackendError::Connect(match e {
         jack::Error::ClientError(status) if status.contains(ClientStatus::SERVER_FAILED) => {
@@ -210,11 +241,13 @@ impl AudioBackend for JackBackend {
         }
 
         let port_err = |name: String| move |_| BackendError::Port(name);
+        let (extra, extra_control) = midi_inputs(cfg.midi_capacity);
         let mut ports = Ports {
             audio_in: Vec::new(),
             audio_out: Vec::new(),
             midi_in: None,
             midi_out: None,
+            extra,
         };
         for i in 1..=cfg.audio_inputs {
             let name = format!("audio_in_{i}");
@@ -250,8 +283,9 @@ impl AudioBackend for JackBackend {
         self.shared = Arc::new(SharedStats::new());
         self.shared.sample_rate.store(client.sample_rate(), Relaxed);
         self.shared.buffer_size.store(client.buffer_size(), Relaxed);
-        self.state = State::Open(client, ports);
+        self.state = State::Open(client, Box::new(ports));
         self.cfg = Some(cfg);
+        self.extra = Some(extra_control);
         self.links.clear();
         self.auto_connected = false;
         Ok(())
@@ -259,7 +293,7 @@ impl AudioBackend for JackBackend {
 
     fn start(&mut self, cb: ProcessCallback) -> Result<(), BackendError> {
         let (client, ports) = match std::mem::take(&mut self.state) {
-            State::Open(c, p) => (c, p),
+            State::Open(c, p) => (c, *p),
             other @ State::Running(_) => {
                 self.state = other;
                 return Err(BackendError::AlreadyRunning);
@@ -310,6 +344,7 @@ impl AudioBackend for JackBackend {
                 // On any other error the crate dropped, and so closed, the
                 // client. Either way the ports are gone.
                 self.cfg = None;
+                self.extra = None;
                 self.links.clear();
                 return Err(BackendError::Other(format!(
                     "could not activate the JACK client ({e}); the backend is closed and must be opened again"
@@ -344,13 +379,14 @@ impl AudioBackend for JackBackend {
                 if let Some(cfg) = &self.cfg
                     && !self.shared.server_gone.load(Relaxed)
                 {
-                    self.links = Self::live_links(active.as_client(), cfg);
+                    self.links = self.live_links(active.as_client(), cfg);
                 }
                 let (client, _, processor) = active
                     .deactivate()
                     .map_err(|e| BackendError::Other(format!("could not deactivate: {e}")))?;
                 // The callback drops here, on the caller's thread.
-                self.state = State::Open(client, processor.ports);
+                self.state = State::Open(client, Box::new(processor.ports));
+                self.apply_extra_now();
             }
             other => self.state = other,
         }
@@ -361,6 +397,7 @@ impl AudioBackend for JackBackend {
         self.stop()?;
         self.state = State::Closed;
         self.cfg = None;
+        self.extra = None;
         self.links.clear();
         Ok(())
     }
@@ -472,6 +509,67 @@ impl AudioBackend for JackBackend {
                 .disconnect_ports_by_name(from, to)
                 .map_err(|e| err(e.to_string())),
         }
+    }
+
+    fn add_midi_input(&mut self, name: &str) -> Result<MidiInputPort, BackendError> {
+        self.unregister_removed();
+        let client = client_of(&self.state)?;
+        let extra = self.extra.as_mut().ok_or(BackendError::NotOpen)?;
+        let slot = extra.free_slot().ok_or_else(|| {
+            BackendError::Config(format!("at most {} MIDI inputs", crate::MAX_MIDI_INPUTS))
+        })?;
+        let port = client
+            .register_port(name, MidiIn::default())
+            .map_err(|_| BackendError::Port(name.into()))?;
+        let full = match port.name() {
+            Ok(full) => full,
+            Err(e) => {
+                let _ = client.unregister_port(port);
+                return Err(BackendError::Other(e.to_string()));
+            }
+        };
+        if let Err(port) = extra.add(slot, full.clone(), port) {
+            let _ = client.unregister_port(port);
+            return Err(BackendError::Other(
+                "the audio thread has not caught up with earlier port changes".into(),
+            ));
+        }
+        self.apply_extra_now();
+        Ok(MidiInputPort { slot, name: full })
+    }
+
+    fn collect_removed(&mut self) {
+        self.unregister_removed();
+    }
+
+    fn remove_midi_input(&mut self, slot: usize) -> Result<(), BackendError> {
+        let extra = self.extra.as_mut().ok_or(BackendError::NotOpen)?;
+        let name = extra
+            .names()
+            .find(|&(s, _)| s == slot)
+            .map(|(_, n)| n.to_owned())
+            .ok_or_else(|| BackendError::Config(format!("no MIDI input in slot {slot}")))?;
+        if !extra.remove(slot) {
+            return Err(BackendError::Other(
+                "the audio thread has not caught up with earlier port changes".into(),
+            ));
+        }
+        // Links saved while stopped would fail to come back.
+        self.links.retain(|(a, b)| *a != name && *b != name);
+        self.apply_extra_now();
+        Ok(())
+    }
+
+    fn midi_inputs(&self) -> Vec<MidiInputPort> {
+        self.extra.as_ref().map_or_else(Vec::new, |extra| {
+            extra
+                .names()
+                .map(|(slot, name)| MidiInputPort {
+                    slot,
+                    name: name.to_owned(),
+                })
+                .collect()
+        })
     }
 
     fn stats(&self) -> BackendStats {
@@ -619,11 +717,22 @@ impl Processor {
                 }
             }
         }
+        let extra = &mut self.ports.extra;
+        extra.begin_cycle();
+        for (port, list) in extra.ports.iter().zip(&mut extra.lists) {
+            let Some(port) = port else { continue };
+            for m in port.iter(ps) {
+                if let Some(e) = midi::decode(m.time, m.bytes) {
+                    push_or_count(list, e, &mut dropped);
+                }
+            }
+        }
 
         let frame_time = self.frame_time;
         let sample_rate = f64::from(self.shared.sample_rate.load(Relaxed));
         let xruns = self.shared.xruns.load(Relaxed);
         let (cb, midi_in, midi_out) = (&mut self.cb, &self.midi_in, &mut self.midi_out);
+        let midi_inputs = &self.ports.extra.lists[..];
         self.bufs.run(
             self.ports.audio_in.iter().map(|p| p.as_slice(ps)),
             self.ports.audio_out.iter_mut().map(|p| p.as_mut_slice(ps)),
@@ -635,6 +744,7 @@ impl Processor {
                     audio_in,
                     audio_out,
                     midi_in,
+                    midi_inputs,
                     midi_out,
                     xruns,
                 })

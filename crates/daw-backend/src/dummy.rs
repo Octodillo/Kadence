@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use crate::{
     AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
     PortFilter, PortInfo, PortKind, ProcessCallback, midi,
 };
+use crate::{MAX_MIDI_INPUTS, MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
 const DEFAULT_RATE: u32 = 48_000;
 const DEFAULT_FRAMES: u32 = 256;
@@ -78,6 +79,57 @@ impl MidiTap {
     }
 }
 
+#[derive(Debug)]
+struct World {
+    /// Other clients' ports, as `list_ports` shows them.
+    others: Vec<PortInfo>,
+    connections: BTreeSet<(String, String)>,
+}
+
+/// The pretend system around a [`DummyBackend`]: other clients' ports, to
+/// add and remove the way devices are plugged in and out.
+#[derive(Clone, Debug)]
+pub struct DummySystem(Arc<Mutex<World>>);
+
+impl DummySystem {
+    fn world(&self) -> std::sync::MutexGuard<'_, World> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Another client's port appears. `name` is the full `client:port`.
+    pub fn add_port(
+        &self,
+        name: &str,
+        kind: PortKind,
+        direction: PortDirection,
+        is_physical: bool,
+    ) {
+        let mut w = self.world();
+        w.others.retain(|p| p.name != name);
+        w.others.push(PortInfo {
+            name: name.into(),
+            kind,
+            direction,
+            is_physical,
+            is_ours: false,
+        });
+    }
+
+    /// Another client's port goes away, and its connections with it.
+    pub fn remove_port(&self, name: &str) {
+        let mut w = self.world();
+        w.others.retain(|p| p.name != name);
+        w.connections.retain(|(a, b)| a != name && b != name);
+    }
+
+    /// Current connections as `(output, input)` pairs.
+    pub fn connections(&self) -> Vec<(String, String)> {
+        self.world().connections.iter().cloned().collect()
+    }
+}
+
 /// A backend with no audio hardware: it runs the callback from an ordinary
 /// thread, feeds silence to the inputs and throws the outputs away. It
 /// pretends to be a system with two capture and two playback ports and one
@@ -90,10 +142,19 @@ pub struct DummyBackend {
     loopback: Option<Latency>,
     cfg: Option<BackendConfig>,
     shared: Arc<SharedStats>,
-    connections: BTreeSet<(String, String)>,
+    /// Other clients' ports and every connection, shared with
+    /// [`DummySystem`] handles.
+    world: Arc<Mutex<World>>,
     midi_in_rx: Option<Consumer<RawMessage>>,
     midi_out_tx: Option<Producer<RawMessage>>,
     running: Option<Running>,
+    /// The extra MIDI inputs while stopped; the worker has them while
+    /// running.
+    extra: Option<MidiInputs<Consumer<RawMessage>>>,
+    extra_control: Option<MidiInputsControl<Consumer<RawMessage>>>,
+    /// The sending ends of the extra inputs, by slot, until taken by
+    /// [`DummyBackend::midi_input_injector`].
+    extra_tx: Vec<Option<Producer<RawMessage>>>,
 }
 
 struct Running {
@@ -110,10 +171,67 @@ impl DummyBackend {
             loopback: None,
             cfg: None,
             shared: Arc::new(SharedStats::new()),
-            connections: BTreeSet::new(),
+            world: Arc::new(Mutex::new(World {
+                others: Self::system_ports(),
+                connections: BTreeSet::new(),
+            })),
             midi_in_rx: None,
             midi_out_tx: None,
             running: None,
+            extra: None,
+            extra_control: None,
+            extra_tx: (0..MAX_MIDI_INPUTS).map(|_| None).collect(),
+        }
+    }
+
+    /// The pretend system: two capture and two playback ports, and one MIDI
+    /// port each way.
+    fn system_ports() -> Vec<PortInfo> {
+        use PortDirection::{Input, Output};
+        use PortKind::{Audio, Midi};
+        let port = |name: String, kind, direction| PortInfo {
+            name: format!("{SYSTEM}:{name}"),
+            kind,
+            direction,
+            is_physical: true,
+            is_ours: false,
+        };
+        let mut v = Vec::new();
+        for i in 1..=2 {
+            v.push(port(format!("capture_{i}"), Audio, Output));
+            v.push(port(format!("playback_{i}"), Audio, Input));
+        }
+        v.push(port("midi_capture_1".into(), Midi, Output));
+        v.push(port("midi_playback_1".into(), Midi, Input));
+        v
+    }
+
+    /// A handle on the pretend system's other ports, for tests to plug
+    /// devices in and out while the backend is in use elsewhere.
+    pub fn system(&self) -> DummySystem {
+        DummySystem(self.world.clone())
+    }
+
+    fn world(&self) -> std::sync::MutexGuard<'_, World> {
+        self.world
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The sending end of the port in `slot` made by
+    /// [`add_midi_input`](AudioBackend::add_midi_input). Each port has one;
+    /// later calls return `None`.
+    pub fn midi_input_injector(&mut self, slot: usize) -> Option<MidiInjector> {
+        self.extra_tx.get_mut(slot)?.take().map(MidiInjector)
+    }
+
+    /// While stopped, the extra MIDI inputs take changes at once.
+    fn apply_extra_now(&mut self) {
+        if let Some(extra) = &mut self.extra {
+            extra.begin_cycle();
+        }
+        if let Some(control) = &mut self.extra_control {
+            control.take_removed().for_each(drop);
         }
     }
 
@@ -170,37 +288,42 @@ impl DummyBackend {
     }
 
     fn all_ports(&self) -> Vec<PortInfo> {
-        let mut v = Vec::new();
-        let mut add = |client: &str, name: String, kind, direction, ours: bool| {
+        let mut v = self.world().others.clone();
+        let mut add = |client: &str, name: String, kind, direction| {
             v.push(PortInfo {
                 name: format!("{client}:{name}"),
                 kind,
                 direction,
-                is_physical: !ours,
-                is_ours: ours,
+                is_physical: false,
+                is_ours: true,
             })
         };
         use PortDirection::{Input, Output};
         use PortKind::{Audio, Midi};
-        for i in 1..=2 {
-            add(SYSTEM, format!("capture_{i}"), Audio, Output, false);
-            add(SYSTEM, format!("playback_{i}"), Audio, Input, false);
-        }
-        add(SYSTEM, "midi_capture_1".into(), Midi, Output, false);
-        add(SYSTEM, "midi_playback_1".into(), Midi, Input, false);
         if let Some(cfg) = &self.cfg {
             let me = cfg.client_name.as_str();
             for i in 1..=cfg.audio_inputs {
-                add(me, format!("audio_in_{i}"), Audio, Input, true);
+                add(me, format!("audio_in_{i}"), Audio, Input);
             }
             for i in 1..=cfg.audio_outputs {
-                add(me, format!("audio_out_{i}"), Audio, Output, true);
+                add(me, format!("audio_out_{i}"), Audio, Output);
             }
             if cfg.midi_input {
-                add(me, "midi_in".into(), Midi, Input, true);
+                add(me, "midi_in".into(), Midi, Input);
             }
             if cfg.midi_output {
-                add(me, "midi_out".into(), Midi, Output, true);
+                add(me, "midi_out".into(), Midi, Output);
+            }
+        }
+        if let Some(control) = &self.extra_control {
+            for (_, name) in control.names() {
+                v.push(PortInfo {
+                    name: name.to_owned(),
+                    kind: Midi,
+                    direction: Input,
+                    is_physical: false,
+                    is_ours: true,
+                });
             }
         }
         v
@@ -228,7 +351,7 @@ impl DummyBackend {
             .chain(pick(false, Audio, Output).zip(pick(true, Audio, Input)))
             .chain(pick(false, Midi, Output).zip(pick(true, Midi, Input)))
             .collect();
-        self.connections.extend(pairs);
+        self.world().connections.extend(pairs);
     }
 }
 
@@ -257,7 +380,11 @@ impl AudioBackend for DummyBackend {
         self.shared = Arc::new(SharedStats::new());
         self.shared.sample_rate.store(rate, Relaxed);
         self.shared.buffer_size.store(frames, Relaxed);
-        self.connections.clear();
+        self.world().connections.clear();
+        let (extra, control) = midi_inputs(cfg.midi_capacity);
+        self.extra = Some(extra);
+        self.extra_control = Some(control);
+        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
         self.cfg = Some(cfg);
         Ok(())
     }
@@ -295,6 +422,7 @@ impl AudioBackend for DummyBackend {
             } else {
                 None
             },
+            extra: self.extra.take().ok_or(BackendError::NotOpen)?,
             frame_time: 0,
         };
         let stop = Arc::new(AtomicBool::new(false));
@@ -331,10 +459,13 @@ impl AudioBackend for DummyBackend {
         let Worker {
             midi_in_rx,
             midi_out_tx,
+            extra,
             ..
         } = worker;
         self.midi_in_rx = self.midi_in_rx.take().or(midi_in_rx);
         self.midi_out_tx = self.midi_out_tx.take().or(midi_out_tx);
+        self.extra = Some(extra);
+        self.apply_extra_now();
         if panicked {
             return Err(BackendError::Other("the process callback panicked".into()));
         }
@@ -344,7 +475,10 @@ impl AudioBackend for DummyBackend {
     fn close(&mut self) -> Result<(), BackendError> {
         self.stop()?;
         self.cfg = None;
-        self.connections.clear();
+        self.world().connections.clear();
+        self.extra = None;
+        self.extra_control = None;
+        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
         Ok(())
     }
 
@@ -386,13 +520,13 @@ impl AudioBackend for DummyBackend {
         if a.kind != b.kind {
             return Err(err("port types differ".into()));
         }
-        self.connections.insert((from.into(), to.into()));
+        self.world().connections.insert((from.into(), to.into()));
         Ok(())
     }
 
     fn disconnect(&mut self, from: &str, to: &str) -> Result<(), BackendError> {
         self.cfg()?;
-        if self.connections.remove(&(from.into(), to.into())) {
+        if self.world().connections.remove(&(from.into(), to.into())) {
             Ok(())
         } else {
             Err(BackendError::Connection {
@@ -405,6 +539,58 @@ impl AudioBackend for DummyBackend {
 
     fn stats(&self) -> BackendStats {
         self.shared.snapshot()
+    }
+
+    fn add_midi_input(&mut self, name: &str) -> Result<MidiInputPort, BackendError> {
+        let me = self.cfg()?.client_name.clone();
+        let full = format!("{me}:{name}");
+        if name.is_empty() || name.contains(':') || self.port(&full).is_ok() {
+            return Err(BackendError::Port(name.into()));
+        }
+        let control = self.extra_control.as_mut().ok_or(BackendError::NotOpen)?;
+        let slot = control.free_slot().ok_or_else(|| {
+            BackendError::Config(format!("at most {MAX_MIDI_INPUTS} MIDI inputs"))
+        })?;
+        let (tx, rx) = spsc(RING_CAPACITY);
+        if control.add(slot, full.clone(), rx).is_err() {
+            return Err(BackendError::Other(
+                "the audio thread has not caught up with earlier port changes".into(),
+            ));
+        }
+        self.extra_tx[slot] = Some(tx);
+        self.apply_extra_now();
+        Ok(MidiInputPort { slot, name: full })
+    }
+
+    fn remove_midi_input(&mut self, slot: usize) -> Result<(), BackendError> {
+        let control = self.extra_control.as_mut().ok_or(BackendError::NotOpen)?;
+        let name = control
+            .names()
+            .find(|&(s, _)| s == slot)
+            .map(|(_, n)| n.to_owned())
+            .ok_or_else(|| BackendError::Config(format!("no MIDI input in slot {slot}")))?;
+        if !control.remove(slot) {
+            return Err(BackendError::Other(
+                "the audio thread has not caught up with earlier port changes".into(),
+            ));
+        }
+        self.extra_tx[slot] = None;
+        self.world()
+            .connections
+            .retain(|(a, b)| *a != name && *b != name);
+        self.apply_extra_now();
+        Ok(())
+    }
+
+    fn midi_inputs(&self) -> Vec<MidiInputPort> {
+        self.extra_control.as_ref().map_or_else(Vec::new, |c| {
+            c.names()
+                .map(|(slot, name)| MidiInputPort {
+                    slot,
+                    name: name.to_owned(),
+                })
+                .collect()
+        })
     }
 
     fn latency(&self) -> Latency {
@@ -464,10 +650,8 @@ impl Loopback {
 
 impl DummyBackend {
     /// Current connections as `(output, input)` pairs.
-    pub fn connections(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.connections
-            .iter()
-            .map(|(a, b)| (a.as_str(), b.as_str()))
+    pub fn connections(&self) -> Vec<(String, String)> {
+        self.world().connections.iter().cloned().collect()
     }
 }
 
@@ -491,6 +675,7 @@ struct Worker {
     midi_out: EventList,
     midi_in_rx: Option<Consumer<RawMessage>>,
     midi_out_tx: Option<Producer<RawMessage>>,
+    extra: MidiInputs<Consumer<RawMessage>>,
     frame_time: u64,
     loopback: Option<Loopback>,
 }
@@ -540,9 +725,20 @@ impl Worker {
         if let Some(l) = &mut self.loopback {
             l.read(&mut self.inputs, frames as usize);
         }
+        let extra = &mut self.extra;
+        extra.begin_cycle();
+        for (rx, list) in extra.ports.iter_mut().zip(&mut extra.lists) {
+            let Some(rx) = rx else { continue };
+            while let Some(m) = rx.pop() {
+                if let Some(e) = midi::decode(0, m.as_bytes()) {
+                    push_or_count(list, e, &mut dropped);
+                }
+            }
+        }
         let xruns = self.shared.xruns.load(Relaxed);
         let (frame_time, sample_rate) = (self.frame_time, self.sample_rate);
         let (cb, midi_in, midi_out) = (&mut self.cb, &self.midi_in, &mut self.midi_out);
+        let midi_inputs = &self.extra.lists[..];
         self.bufs.run(
             self.inputs.iter().map(|b| &b[..frames as usize]),
             self.outputs.iter_mut().map(|b| &mut b[..frames as usize]),
@@ -554,6 +750,7 @@ impl Worker {
                     audio_in,
                     audio_out,
                     midi_in,
+                    midi_inputs,
                     midi_out,
                     xruns,
                 })

@@ -61,6 +61,54 @@ struct Source {
     delay: Option<usize>,
 }
 
+/// Which external events a step gets.
+#[derive(Default)]
+enum External {
+    #[default]
+    None,
+    /// Every source.
+    All,
+    /// These sources, by index.
+    Sources(Vec<usize>),
+}
+
+impl External {
+    fn of(routes: &[(NodeId, Option<usize>)], node: usize) -> Self {
+        let mut sources = Vec::new();
+        for &(id, source) in routes {
+            if id.0 as usize != node {
+                continue;
+            }
+            match source {
+                None => return Self::All,
+                Some(s) if !sources.contains(&s) => sources.push(s),
+                Some(_) => {}
+            }
+        }
+        if sources.is_empty() {
+            Self::None
+        } else {
+            Self::Sources(sources)
+        }
+    }
+
+    /// The lists of `external` this step reads. The last list holds the
+    /// sources that have none of their own, so only `All` reads it.
+    fn lists<'a>(&'a self, external: &'a [EventList]) -> impl Iterator<Item = &'a EventList> {
+        let own = external.len().saturating_sub(1);
+        let (all, some): (&[EventList], &[usize]) = match self {
+            Self::None => (&[], &[]),
+            Self::All => (external, &[]),
+            Self::Sources(s) => (&[], s),
+        };
+        all.iter().chain(
+            some.iter()
+                .filter(move |&&i| i < own)
+                .map(move |&i| &external[i]),
+        )
+    }
+}
+
 pub(crate) struct Step {
     id: NodeId,
     kind: NodeKind,
@@ -77,7 +125,7 @@ pub(crate) struct Step {
     outputs: Vec<f32>,
     sources: Vec<Source>,
     event_sources: Vec<usize>,
-    external_events: bool,
+    external_events: External,
     events_in: EventList,
     events_out: EventList,
     params: EventList,
@@ -152,7 +200,7 @@ impl CompiledGraph {
                 return Err(CompileError::NoEventInput(e.to));
             }
         }
-        for &id in &desc.external_events {
+        for &(id, _) in &desc.external_events {
             if !ports[check(id)?].event_in {
                 return Err(CompileError::NoEventInput(id));
             }
@@ -236,7 +284,7 @@ impl CompiledGraph {
                     outputs: vec![0.0; n_out * mf],
                     sources: Vec::new(),
                     event_sources: Vec::new(),
-                    external_events: external_events.iter().any(|e| e.0 as usize == i),
+                    external_events: External::of(&external_events, i),
                     events_in: EventList::with_capacity(if ports.event_in {
                         event_capacity
                     } else {
@@ -398,7 +446,7 @@ impl CompiledGraph {
         frames: usize,
         audio_in: &[&[f32]],
         offset: usize,
-        external: &EventList,
+        external: &[EventList],
     ) {
         debug_assert!(frames <= self.max_frames);
         let mf = self.max_frames;
@@ -452,8 +500,8 @@ impl CompiledGraph {
                 // added below (a lost note-off hangs the note), so leave room
                 // for them.
                 let mut reserve = 0;
-                if step.external_events {
-                    reserve += external.len();
+                for list in step.external_events.lists(external) {
+                    reserve += list.len();
                 }
                 for &src in &step.event_sources {
                     reserve += done[src].events_out.len();
@@ -467,8 +515,8 @@ impl CompiledGraph {
                     lane.emit(*param, now, frames, &mut step.events_in, limit);
                 }
             }
-            if step.external_events {
-                for e in external.iter() {
+            for list in step.external_events.lists(external) {
+                for e in list.iter() {
                     let _ = step.events_in.push(*e);
                 }
             }
