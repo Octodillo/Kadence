@@ -50,6 +50,7 @@ const QML_FILES: &[&str] = &[
     "qml/PluginSettings.qml",
     "qml/ExportDialog.qml",
     "qml/InstrumentButton.qml",
+    "qml/LazyMenu.qml",
 ];
 
 /// Ask qmake (`QMAKE`, else `qmake6`, else `qmake`) for a Qt install path.

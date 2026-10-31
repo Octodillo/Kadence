@@ -243,8 +243,13 @@ Item {
             check(window.pageStack.currentItem.title === i18nc("@title", "Mix"), "switch to Mix");
         },
         () => {
-            // The mixer has caught up with the project on its clock.
+            // The mixer catches up with the project on its own clock, which
+            // a loaded machine can take a few ticks for.
             // The demo's three tracks, its reverb bus and the master.
+            if (Mixer.levels.length !== 5 * 5 && test.waits < 25) {
+                return false;
+            }
+            test.waits = 0;
             check(Mixer.levels.length === 5 * 5, "a strip per track");
             const compressor = Mixer.effectNames.indexOf("Compressor");
             check(compressor >= 0 && Mixer.addInsert(0, compressor), "add a compressor to Bass");
@@ -252,8 +257,16 @@ Item {
             window.playAction.trigger();
         },
         () => {
+            // The engine swaps in the new graph on its own time, and a busy
+            // machine (CI runs several app instances at once) can take more
+            // than one step to bring the compressor's meter up.
+            const metered = Mixer.levels.some((v, i) => i % 5 < 4 && v > 0) && Mixer.levels[0 * 5 + 4] >= 0;
+            if (!metered && test.waits < 25) {
+                return false;
+            }
+            test.waits = 0;
             check(Project.undoText === "Add Device", "mixer edits undo");
-            check(Mixer.levels.some(v => v > 0), "meters move while playing");
+            check(Mixer.levels.some((v, i) => i % 5 < 4 && v > 0), "meters move while playing");
             check(Mixer.levels[0 * 5 + 4] >= 0, "compressor gain reduction metered");
             Mixer.setSoloed(0, true);
             check(Mixer.anySoloed, "solo");
@@ -301,6 +314,7 @@ Item {
             check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
             check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
             check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            check(!PluginEditors.hasEditor(id), "a built-in device has no plugin interface");
             // Drag the threshold: one undo step.
             Project.tick();
             const before = Project.undoText;
