@@ -18,13 +18,14 @@ Rectangle {
     property int revision: 0
 
     readonly property bool placeholder: lane < 0
-    readonly property string laneText: {
-        revision;
-        return placeholder ? "" : laneName.text(Automation.laneKind(track, lane),
-                                                 Automation.laneDetail(track, lane),
-                                                 Automation.laneParam(track, lane));
-    }
-    readonly property int mode: { revision; return placeholder ? 1 : Automation.laneMode(track, lane); }
+    // `revision >= 0 ?` makes the bindings depend on it (the QML compiler
+    // drops a bare `revision;` statement).
+    readonly property string laneText: revision >= 0 && !placeholder
+        ? laneName.text(Automation.laneKind(track, lane),
+                        Automation.laneDetail(track, lane),
+                        Automation.laneParam(track, lane))
+        : ""
+    readonly property int mode: revision >= 0 && !placeholder ? Automation.laneMode(track, lane) : 1
 
     // Closes the lane's menus, if open.
     function dismiss(): void {

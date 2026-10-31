@@ -67,6 +67,8 @@ pub fn run_host_child(
         plugin: Arc::new(Mutex::new(None)),
         audio: None,
         layout_changed: Cell::new(false),
+        state_changed: Cell::new(false),
+        editor_open: Cell::new(false),
         rt_priority: None,
     };
     let result = host.run();
@@ -115,6 +117,10 @@ struct Host<'a> {
     audio: Option<AudioThread>,
     /// The plugin asked to be prepared again, and the application has not been told yet.
     layout_changed: Cell<bool>,
+    /// The plugin reported a state change, and the application has not been told yet.
+    state_changed: Cell<bool>,
+    /// Whether the plugin's editor is open, as last seen.
+    editor_open: Cell<bool>,
     rt_priority: Option<i32>,
 }
 
@@ -140,11 +146,14 @@ impl Host<'_> {
                         blob = Vec::new();
                     }
                     let latency = lock(&self.plugin).as_ref().map_or(0, |p| p.latency());
+                    // Before the reply, so the application sees an editor it opened as open.
+                    if !shutdown {
+                        self.publish_layout_change();
+                    }
                     write_frame(&self.stream, &Response { latency, reply }, &blob)?;
                     if shutdown {
                         return Ok(());
                     }
-                    self.publish_layout_change();
                 }
                 Ok(None) => {}
                 // The application closed the socket: it is done with us, or it died.
@@ -154,9 +163,7 @@ impl Host<'_> {
             if last_pump.elapsed() >= PUMP_INTERVAL {
                 if let Some(p) = self.lock_inside().as_mut() {
                     p.on_main_thread();
-                    if p.take_layout_changed() {
-                        self.layout_changed.set(true);
-                    }
+                    self.note(p.as_mut());
                 }
                 self.publish_layout_change();
                 last_pump = Instant::now();
@@ -164,19 +171,36 @@ impl Host<'_> {
         }
     }
 
+    /// Picks up what the plugin reported since the last call.
+    fn note(&self, p: &mut dyn PluginInstance) {
+        if p.take_layout_changed() {
+            self.layout_changed.set(true);
+        }
+        if p.take_state_changed() {
+            self.state_changed.set(true);
+        }
+        self.editor_open.set(p.is_editor_open());
+    }
+
     /// Tells the application, through the audio block, that the plugin wants to be prepared
-    /// again. Without a block yet, it waits for one.
+    /// again or changed its state, and whether its editor is open. Without a block yet, the
+    /// reports wait for one.
     fn publish_layout_change(&self) {
-        if self.layout_changed.get()
-            && let Some(audio) = &self.audio
-        {
-            audio
-                .shm
-                .header()
-                .layout_changed
-                .store(1, Ordering::Release);
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        let header = audio.shm.header();
+        if self.layout_changed.get() {
+            header.layout_changed.store(1, Ordering::Release);
             self.layout_changed.set(false);
         }
+        if self.state_changed.get() {
+            header.state_changed.store(1, Ordering::Release);
+            self.state_changed.set(false);
+        }
+        header
+            .editor_open
+            .store(u32::from(self.editor_open.get()), Ordering::Release);
     }
 
     /// Locks the plugin for the main thread, flagged in the audio block while held, unless
@@ -194,7 +218,11 @@ impl Host<'_> {
         // Calls that can take long make audio cycles skip (output silence) rather than wait.
         let slow = matches!(
             request,
-            Request::SaveState | Request::LoadState | Request::OpenEditor | Request::CloseEditor
+            Request::SaveState
+                | Request::LoadState
+                | Request::OpenEditor
+                | Request::CloseEditor
+                | Request::SetEditorTitle(_)
         );
         // A split plugin's audio never waits for this thread, so there is nothing to flag.
         let busy = self
@@ -263,6 +291,10 @@ impl Host<'_> {
                 p.close_editor();
                 Ok(Reply::Ok)
             }),
+            Request::SetEditorTitle(title) => self.with_plugin(|p| {
+                p.set_editor_title(&title);
+                Ok(Reply::Ok)
+            }),
             Request::Shutdown => Ok(Reply::Ok),
         };
         match result {
@@ -279,9 +311,7 @@ impl Host<'_> {
             Some(p) => {
                 let result = f(p.as_mut());
                 // Loading state, say, can change the plugin's layout.
-                if p.take_layout_changed() {
-                    self.layout_changed.set(true);
-                }
+                self.note(p.as_mut());
                 result
             }
             None => Err(PluginError::Load("no plugin loaded".into())),
@@ -307,10 +337,14 @@ impl Host<'_> {
                         PluginError::Load(format!("cannot map the audio block: {e}"))
                     })?);
                 // A change reported on the old block and not yet taken carries over.
-                if let Some(old) = &old
-                    && old.header().layout_changed.load(Ordering::Acquire) != 0
-                {
-                    new.header().layout_changed.store(1, Ordering::Release);
+                if let Some(old) = &old {
+                    let (old, fresh) = (old.header(), new.header());
+                    if old.layout_changed.load(Ordering::Acquire) != 0 {
+                        fresh.layout_changed.store(1, Ordering::Release);
+                    }
+                    if old.state_changed.load(Ordering::Acquire) != 0 {
+                        fresh.state_changed.store(1, Ordering::Release);
+                    }
                 }
                 Some(new)
             }
@@ -768,6 +802,8 @@ mod tests {
             plugin: plugin.clone(),
             audio: Some(AudioThread::start(shm.clone(), plugin, None)),
             layout_changed: Cell::new(false),
+            state_changed: Cell::new(false),
+            editor_open: Cell::new(false),
             rt_priority: None,
         };
         // The host pumps between reads; close the socket once it has pumped at least once.
@@ -804,6 +840,8 @@ mod tests {
                     plugin: plugin.clone(),
                     audio: Some(AudioThread::start(shm.clone(), plugin.clone(), None)),
                     layout_changed: Cell::new(false),
+                    state_changed: Cell::new(false),
+                    editor_open: Cell::new(false),
                     rt_priority: None,
                 };
                 host.run().unwrap();
@@ -910,6 +948,8 @@ mod tests {
             plugin: Arc::new(Mutex::new(None)),
             audio: None,
             layout_changed: Cell::new(false),
+            state_changed: Cell::new(false),
+            editor_open: Cell::new(false),
             rt_priority: None,
         };
         for (value, want) in [
