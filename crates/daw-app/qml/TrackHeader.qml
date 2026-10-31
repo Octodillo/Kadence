@@ -37,6 +37,7 @@ Column {
         menu.dismiss();
         inputMenu.dismiss();
         instrumentButton.dismiss();
+        midiInputButton.dismiss();
         for (let i = 0; i < lanes.count; ++i) {
             lanes.itemAt(i).dismiss();
         }
@@ -195,6 +196,7 @@ Column {
             }
 
             MidiInputButton {
+                id: midiInputButton
                 Layout.alignment: Qt.AlignVCenter
                 visible: header.kind === 1
                 trackIndex: header.index
