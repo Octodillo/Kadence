@@ -930,6 +930,7 @@ impl AppState {
         self.plugin_changes.clear();
         self.doc_serial += 1;
         self.arrange.selection.clear();
+        self.arrange.hovered = None;
         self.arrange.points = None;
         self.arrange.expanded.clear();
         self.arrange.selected_track = None;
