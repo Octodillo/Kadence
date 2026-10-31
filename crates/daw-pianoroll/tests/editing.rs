@@ -41,7 +41,9 @@ impl Rig {
         pr.snap = Snap::Fixed(Grid::note(16));
         pr.resize(800.0, 600.0);
         pr.open(doc.project(), cid);
-        // Put tick 0 at the left edge and key 72 at the top for easy maths.
+        // Put tick 0 at the left edge and key 72 at the top for easy maths,
+        // at the default row height whatever opening fitted.
+        pr.key_height = PianoRoll::new().key_height;
         pr.view.scroll_x = 0.0;
         pr.scroll_y = (127.0 - 72.0) * pr.key_height;
         Self {
@@ -406,4 +408,20 @@ fn clicking_the_drawn_stem_top_keeps_the_velocity() {
     r.press(x, top);
     r.pr.release(&mut r.doc, Pointer::left(x, top));
     assert!((r.notes()[0].velocity - 0.8).abs() < 1e-6);
+}
+
+#[test]
+fn opening_a_clip_shows_all_its_notes() {
+    let notes = vec![n(0, Q, 48), n(Q, Q, 60), n(2 * Q, Q, 84)];
+    let r = Rig::new(notes.clone());
+    let mut pr = PianoRoll::new();
+    // Opened before the item has a size, as the Edit page does.
+    pr.open(r.doc.project(), r.clip);
+    pr.fit_if_pending(r.doc.project());
+    pr.resize(800.0, 400.0);
+    pr.fit_if_pending(r.doc.project());
+    let visible = pr.visible_keys();
+    for key in [48, 60, 84] {
+        assert!(visible.contains(&key), "{key} not in {visible:?}");
+    }
 }
