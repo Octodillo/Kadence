@@ -222,7 +222,11 @@ impl AudioHost {
 
     /// A port for `source`, named after it and unique among ours.
     fn add_midi_link(&mut self, source: &str) -> Result<MidiLink, BackendError> {
-        let base = daw_backend::port_short_name(source.split_once(':').map_or(source, |(_, p)| p));
+        let physical = self
+            .midi_sources()
+            .iter()
+            .any(|s| s.name == source && s.is_physical);
+        let base = midi_port_base(source, physical);
         let taken: Vec<String> = self
             .backend
             .midi_inputs()
@@ -430,4 +434,18 @@ impl Drop for AudioHost {
         // Stop the callback (and drop the processor) before the session.
         let _ = self.backend.close();
     }
+}
+
+/// The name for our port that listens to `source`. Hardware ports name
+/// the device in the port part, and their client is a bridge shared by
+/// every device (`system`, `Midi-Bridge`, `a2j`), so only the port part is
+/// kept. A program's port part is often generic (`out`, `midi_out`), so its
+/// client name is kept in front: `seq:out` becomes `seq out`.
+fn midi_port_base(source: &str, physical: bool) -> String {
+    let name = match source.split_once(':') {
+        Some((_, port)) if physical => port.to_owned(),
+        Some((client, port)) => format!("{client} {port}"),
+        None => source.to_owned(),
+    };
+    daw_backend::port_short_name(&name)
 }

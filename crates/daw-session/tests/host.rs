@@ -63,7 +63,7 @@ fn a_chosen_source_gets_its_own_port_and_comes_back_after_unplugging() {
     let failed = host.set_midi_inputs(&["keys:out".into(), "seq:out".into()]);
     assert!(failed.is_empty(), "{failed:?}");
     assert!(linked(&system, "keys:out", "Kadence:out"));
-    assert!(linked(&system, "seq:out", "Kadence:out 2"));
+    assert!(linked(&system, "seq:out", "Kadence:seq out"));
     assert!(!linked(&system, "keys:out", "Kadence:midi_in"));
     let sources = host.session().midi_sources().clone();
     assert_eq!(sources.len(), 2);
@@ -99,7 +99,8 @@ fn a_source_that_is_not_there_yet_is_connected_when_it_appears() {
     assert_eq!(host.midi_inputs(), [("pads:out".into(), false)]);
     system.add_port("pads:out", PortKind::Midi, PortDirection::Output, true);
     assert!(host.refresh_midi());
-    assert!(linked(&system, "pads:out", "Kadence:out"));
+    // Not there when its port was made, so it counts as a program.
+    assert!(linked(&system, "pads:out", "Kadence:pads out"));
 }
 
 #[test]
@@ -113,4 +114,33 @@ fn a_source_replugged_between_polls_is_connected_again() {
     assert!(!linked(&system, "keys:out", "Kadence:out"));
     host.refresh_midi();
     assert!(linked(&system, "keys:out", "Kadence:out"));
+}
+
+#[test]
+fn ports_for_programs_keep_the_client_name_and_stay_unique() {
+    let (mut host, system) = host();
+    system.add_port("synth:out", PortKind::Midi, PortDirection::Output, false);
+    system.add_port("arp:out", PortKind::Midi, PortDirection::Output, false);
+    // A second piece of hardware whose port part matches the first's.
+    system.add_port("usb:out", PortKind::Midi, PortDirection::Output, true);
+    let failed = host.set_midi_inputs(&[
+        "synth:out".into(),
+        "arp:out".into(),
+        "keys:out".into(),
+        "usb:out".into(),
+    ]);
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(linked(&system, "synth:out", "Kadence:synth out"));
+    assert!(linked(&system, "arp:out", "Kadence:arp out"));
+    assert!(linked(&system, "keys:out", "Kadence:out"));
+    assert!(linked(&system, "usb:out", "Kadence:out 2"));
+    let mut names: Vec<_> = host
+        .backend()
+        .midi_inputs()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 4, "{names:?}");
 }
