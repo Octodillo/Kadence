@@ -14,6 +14,11 @@ import io.github.octodillo.daw
 Kirigami.Page {
     id: page
 
+    // Touch drags on the timeline pan and edit; the page row must not take
+    // them for swiping between pages (the timeline lets touches be stolen
+    // so a pinch can take over).
+    Kirigami.ColumnView.preventStealing: true
+
     property list<Kirigami.Action> transportActions
     readonly property alias view: view
     readonly property alias transportBar: transportBar
@@ -299,6 +304,22 @@ Kirigami.Page {
                     WheelHandler {
                         onWheel: (event) => page.forwardWheel(event, 0, event.y + view.rulerHeight)
                     }
+
+                    // A finger dragged up or down the headers scrolls the
+                    // tracks, as on the timeline.
+                    DragHandler {
+                        target: null
+                        acceptedDevices: PointerDevice.TouchScreen
+                        xAxis.enabled: false
+                        property real last: 0
+                        onActiveChanged: last = 0
+                        onActiveTranslationChanged: {
+                            if (active) {
+                                view.wheel(0, centroid.position.y + view.rulerHeight, 0, activeTranslation.y - last, 0);
+                                last = activeTranslation.y;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -363,21 +384,80 @@ Kirigami.Page {
                     cursorShape: view.cursorShape
                     activeFocusOnTab: true
 
+                    // Touch: a finger on empty lane space scrolls the view
+                    // (the clips follow it); on a clip or the ruler it edits
+                    // as a mouse would. Holding still opens the context menu.
+                    // A pen works like a mouse.
+                    property bool panning: false
+                    // Whether the finger has moved further than a tap.
+                    property bool moved: false
+                    property point last
+                    property point start
+
+                    function holdMenu(): void {
+                        if (panning) {
+                            panning = false;
+                        } else {
+                            view.cancelDrag();
+                        }
+                        view.press(start.x, start.y, Qt.RightButton, 0);
+                        view.release(start.x, start.y, 0);
+                    }
+
                     onPressed: (m) => {
                         forceActiveFocus();
+                        start = Qt.point(m.x, m.y);
+                        last = start;
+                        moved = false;
+                        // A second finger must be able to take the touch
+                        // over for the pinch; a mouse drag keeps its grab.
+                        preventStealing = !touchPoint.active;
+                        if (touchPoint.active) {
+                            hold.restart();
+                            if (m.button === Qt.LeftButton && view.touchPans(m.x, m.y)) {
+                                panning = true;
+                                return;
+                            }
+                        }
                         view.press(m.x, m.y, m.button, m.modifiers);
                     }
                     onPositionChanged: (m) => {
-                        if (pressed) {
-                            view.motion(m.x, m.y, m.modifiers);
-                        } else {
+                        if (!pressed) {
                             view.hover(m.x, m.y);
+                            return;
+                        }
+                        if (!moved && Math.hypot(m.x - start.x, m.y - start.y) > Qt.styleHints.startDragDistance) {
+                            moved = true;
+                            hold.stop();
+                        }
+                        if (panning) {
+                            // Follow the finger the touch began with: while a
+                            // second one lands, the mouse position Qt makes
+                            // from the touch can jump between them.
+                            // Once that finger lifts, stop: the other one
+                            // is somewhere else entirely.
+                            if (touchPoint.active) {
+                                const at = touchPoint.point.position;
+                                view.wheel(at.x, at.y, at.x - last.x, at.y - last.y, 0);
+                                last = at;
+                            }
+                        } else {
+                            view.motion(m.x, m.y, m.modifiers);
                         }
                     }
-                    // Off the timeline: no clip is hovered.
-                    onExited: if (!pressed) view.hover(-1, -1)
                     onReleased: (m) => {
-                        view.release(m.x, m.y, m.modifiers);
+                        hold.stop();
+                        if (panning) {
+                            panning = false;
+                            if (!moved) {
+                                // A tap on empty space: select or deselect
+                                // as a click would.
+                                view.press(start.x, start.y, Qt.LeftButton, 0);
+                                view.release(start.x, start.y, 0);
+                            }
+                        } else {
+                            view.release(m.x, m.y, m.modifiers);
+                        }
                         // The drag may have ended over another clip, or
                         // off the timeline (no exit comes after release).
                         if (containsMouse) {
@@ -386,12 +466,32 @@ Kirigami.Page {
                             view.hover(-1, -1);
                         }
                     }
+                    // Off the timeline: no clip is hovered.
+                    onExited: if (!pressed) view.hover(-1, -1)
                     onDoubleClicked: (m) => view.doubleClick(m.x, m.y, m.modifiers)
-                    onCanceled: view.cancelDrag()
+                    onCanceled: {
+                        hold.stop();
+                        panning = false;
+                        view.cancelDrag();
+                    }
                     onWheel: (w) => {
                         page.forwardWheel(w, w.x, w.y);
                         // The content moved under the pointer.
                         view.hover(w.x, w.y);
+                    }
+
+                    // Whether the press under way is a finger. Watches only:
+                    // the MouseArea still gets the press, as a mouse event.
+                    PointHandler {
+                        id: touchPoint
+                        acceptedDevices: PointerDevice.TouchScreen
+                    }
+
+                    // A long press with a finger opens the context menu.
+                    Timer {
+                        id: hold
+                        interval: Qt.styleHints.mousePressAndHoldInterval
+                        onTriggered: pointer.holdMenu()
                     }
 
                     Keys.onEscapePressed: view.cancelDrag()

@@ -275,6 +275,9 @@ impl daw_core::plugin::PluginProcessor for FakeProcessor {
     fn process(&mut self, ctx: &mut ProcessContext) {
         count_frames(&self.count, self.outputs, ctx);
     }
+    fn reset(&mut self) {
+        self.count.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }
@@ -351,6 +354,11 @@ impl Node for FakePlugin {
 
     fn latency(&self) -> u32 {
         self.latency
+    }
+
+    /// Starts the counter over.
+    fn reset(&mut self) {
+        self.count.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

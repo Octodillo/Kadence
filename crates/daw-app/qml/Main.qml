@@ -81,6 +81,16 @@ Kirigami.ApplicationWindow {
         onTriggered: Project.toggleRecord()
     }
 
+    // Stop leaves reverb and delay tails ringing; this cuts them off.
+    Kirigami.Action {
+        id: stopAllSoundAction
+        text: i18nc("@action", "Stop All Sound")
+        icon.name: "media-playback-stop"
+        shortcut: root.buttonHasKeyboardFocus ? "" : "Shift+Space"
+        tooltip: i18nc("@info:tooltip", "Stop playback and cut off every effect tail and held note")
+        onTriggered: Project.stopAllSound()
+    }
+
     Kirigami.Action {
         id: goToStartAction
         text: i18nc("@action", "Go to Start")
@@ -456,6 +466,7 @@ Kirigami.ApplicationWindow {
             root.historyActions[0],
             root.historyActions[1],
             goToStartAction,
+            stopAllSoundAction,
             separatorAction,
             arrangeAction,
             mixAction,
