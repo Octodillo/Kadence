@@ -40,6 +40,9 @@ fn binaries() -> &'static (PathBuf, PathBuf) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let target = root.join("target").join("clap-test-plugin");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        // The same build as every other test that uses this target directory: a
+        // different package set unifies features differently and rebuilds the
+        // plugin while another test process is copying or loading it.
         let status = Command::new(cargo)
             .args([
                 "build",

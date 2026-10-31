@@ -414,6 +414,9 @@ fn plugin_binaries() -> &'static (PathBuf, PathBuf) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let target = root.join("target").join("clap-test-plugin");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        // The same build as every other test that uses this target directory: a
+        // different package set unifies features differently and rebuilds the
+        // plugin while another test process is copying or loading it.
         let status = Command::new(cargo)
             .args([
                 "build",
@@ -432,41 +435,16 @@ fn plugin_binaries() -> &'static (PathBuf, PathBuf) {
             .status()
             .expect("run cargo");
         assert!(status.success(), "building the test plugin and host failed");
-        // Copies, since other test binaries run the same build at the same
-        // time, and cargo removes and re-links its outputs even when they
-        // are up to date. One folder for every run; each copy is renamed
-        // into place so a file another run has loaded is never overwritten.
+        // One folder for every run; the copy is renamed into place so a
+        // plugin another run has loaded is never overwritten.
         let dir = target.join("song-plugins");
-        let plugins = dir.join("plugins");
-        std::fs::create_dir_all(&plugins).unwrap();
-        let debug = target.join("debug");
-        copy_built(
-            &debug.join("libdaw_clap_test_plugin.so"),
-            &plugins.join("test-gain.clap"),
-        );
-        let host = dir.join("daw-plugin-host");
-        copy_built(&debug.join("daw-plugin-host"), &host);
-        (plugins, host)
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = target.join("debug").join("libdaw_clap_test_plugin.so");
+        let tmp = dir.join(format!(".test-gain-{}", std::process::id()));
+        std::fs::copy(&lib, &tmp).expect("copy the test plugin");
+        std::fs::rename(&tmp, dir.join("test-gain.clap")).unwrap();
+        (dir, target.join("debug").join("daw-plugin-host"))
     })
-}
-
-/// Copies a file cargo built to `to`, through a temporary name. The source
-/// can be missing for a moment while another process's cargo re-links it.
-fn copy_built(from: &Path, to: &Path) {
-    let tmp = to.with_file_name(format!(".copy-{}", std::process::id()));
-    for _ in 0..50 {
-        match std::fs::copy(from, &tmp) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            result => {
-                result.unwrap_or_else(|e| panic!("copy {}: {e}", from.display()));
-                std::fs::rename(&tmp, to).unwrap();
-                return;
-            }
-        }
-    }
-    panic!("{} stayed missing after the build", from.display());
 }
 
 /// A plugin loader that finds only the test plugin, set up for playback or,
