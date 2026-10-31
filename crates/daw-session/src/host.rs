@@ -86,6 +86,10 @@ pub struct AudioHost {
     /// The MIDI sources the user picked, in order.
     midi_wanted: Vec<String>,
     midi: Vec<MidiLink>,
+    /// Whether each MIDI source seen so far is hardware, so its port keeps
+    /// the same name when it is made again while the source is unplugged
+    /// (after a restart).
+    midi_physical: HashMap<String, bool>,
 }
 
 /// Engine event source 0 is the general `midi_in` port; the port in backend
@@ -178,6 +182,7 @@ impl AudioHost {
             last_error: None,
             midi_wanted: Vec::new(),
             midi: Vec::new(),
+            midi_physical: HashMap::new(),
         })
     }
 
@@ -222,15 +227,25 @@ impl AudioHost {
 
     /// A port for `source`, named after it and unique among ours.
     fn add_midi_link(&mut self, source: &str) -> Result<MidiLink, BackendError> {
-        let physical = self
-            .midi_sources()
-            .iter()
-            .any(|s| s.name == source && s.is_physical);
+        for s in self.midi_sources() {
+            self.midi_physical.insert(s.name, s.is_physical);
+        }
+        // A source never seen counts as a program.
+        let physical = self.midi_physical.get(source).copied().unwrap_or(false);
         let base = midi_port_base(source, physical);
+        // Every port of ours, not only the MIDI inputs: a hardware source
+        // named like `x:audio_in_1` must not take an audio port's name.
+        let all = PortFilter {
+            kind: None,
+            direction: None,
+            physical_only: false,
+        };
         let taken: Vec<String> = self
             .backend
-            .midi_inputs()
+            .list_ports(&all)
+            .unwrap_or_default()
             .into_iter()
+            .filter(|p| p.is_ours)
             .map(|p| {
                 p.name
                     .split_once(':')
@@ -239,7 +254,7 @@ impl AudioHost {
             .collect();
         let mut name = base.clone();
         let mut n = 2;
-        while taken.contains(&name) || name == "midi_in" {
+        while taken.contains(&name) || name == "midi_in" || name == "midi_out" {
             name = format!("{base} {n}");
             n += 1;
         }
@@ -333,10 +348,12 @@ impl AudioHost {
         let playing = self.session.is_playing();
         let tempo = self.session.tempo().clone();
         let midi = std::mem::take(&mut self.midi_wanted);
+        let physical = std::mem::take(&mut self.midi_physical);
         // Saved while the old engine still plays them; restored at the new rate.
         let plugins = self.session.take_plugins();
         let _ = self.backend.close();
         *self = Self::start(config);
+        self.midi_physical = physical;
         self.session.set_plugins(plugins);
         self.set_midi_inputs(&midi);
         // Positions are in ticks: map them with the project's tempo, not the

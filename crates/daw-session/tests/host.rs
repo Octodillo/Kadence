@@ -144,3 +144,34 @@ fn ports_for_programs_keep_the_client_name_and_stay_unique() {
     names.dedup();
     assert_eq!(names.len(), 4, "{names:?}");
 }
+
+#[test]
+fn a_hardware_port_named_like_one_of_ours_gets_another_name() {
+    let (mut host, system) = host();
+    system.add_port(
+        "box:audio_in_1",
+        PortKind::Midi,
+        PortDirection::Output,
+        true,
+    );
+    system.add_port("box:midi_out", PortKind::Midi, PortDirection::Output, true);
+    let failed = host.set_midi_inputs(&["box:audio_in_1".into(), "box:midi_out".into()]);
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(linked(&system, "box:audio_in_1", "Kadence:audio_in_1 2"));
+    assert!(linked(&system, "box:midi_out", "Kadence:midi_out 2"));
+}
+
+#[test]
+fn an_unplugged_device_keeps_its_port_name_when_picked_again() {
+    let (mut host, system) = host();
+    assert!(host.set_midi_inputs(&["keys:out".into()]).is_empty());
+    assert!(linked(&system, "keys:out", "Kadence:out"));
+    // Its port goes and is made again while the device is away (as after a
+    // restart): it is still known to be hardware.
+    host.set_midi_inputs(&[]);
+    system.remove_port("keys:out");
+    assert!(host.set_midi_inputs(&["keys:out".into()]).is_empty());
+    system.add_port("keys:out", PortKind::Midi, PortDirection::Output, true);
+    assert!(host.refresh_midi());
+    assert!(linked(&system, "keys:out", "Kadence:out"));
+}
