@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use daw_arrange::automation::{SILENCE_DB, lane_targets};
+use daw_arrange::automation::{SILENCE_DB, lane_targets, static_value};
 use daw_arrange::{Arrange, Env, Hit, LaneScale, ParamCatalog, PointShape, Pointer, Prim, Snap};
 use daw_core::event::ParamId;
 use daw_core::time::{PPQ, SegmentTempoMap, TickTime};
@@ -202,8 +202,31 @@ fn dragging_from_an_empty_spot_adds_and_moves_one_point() {
     let at = Pointer::left(r.x(BAR), r.y(0, 0, 0.5));
     r.arrange.press(&mut r.doc, at);
     assert_eq!(r.points(lane).len(), 1);
+    // The front end grabs the pointer (and stops following the playhead).
+    assert!(r.arrange.dragging());
     r.arrange.cancel(&mut r.doc);
     assert!(r.points(lane).is_empty());
+    assert!(!r.arrange.dragging());
+}
+
+#[test]
+fn a_press_ends_a_drag_whose_release_was_lost() {
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Volume);
+    let tempo = r.tempo.clone();
+    // A point drag whose release never comes, then a press on the ruler.
+    let on_lane = Pointer::left(r.x(BAR), r.y(0, 0, 0.5));
+    let on_ruler = Pointer::left(r.x(BAR), 1.0);
+    let away = Pointer::left(r.x(3 * BAR), r.y(0, 0, 1.0));
+    r.arrange.press(&mut r.doc, on_lane);
+    r.arrange.press(&mut r.doc, on_ruler);
+    assert_eq!(r.arrange.lanes.dragging(), None);
+    r.arrange.release(&mut r.doc, on_ruler);
+    // Plain motion afterwards edits nothing.
+    let before = r.points(lane);
+    r.arrange.motion(&mut r.doc, &env(&tempo), away);
+    assert_eq!(r.points(lane), before);
+    assert!(!r.arrange.dragging());
 }
 
 #[test]
@@ -405,7 +428,7 @@ fn targets_list_what_has_no_lane_yet() {
     let track = r.doc.project().track(r.tracks[0]).unwrap().clone();
     assert_eq!(lane_targets(&track, r.arrange.params.as_ref()).len(), 4);
     // A log-scaled parameter lane, drawn at its default with no points.
-    assert_eq!(r.arrange.static_value(&track, eq), 1000.0);
+    assert_eq!(static_value(r.arrange.params.as_ref(), &track, eq), 1000.0);
     r.click(r.x(BAR), r.y(0, 0, 0.5));
     let v = r.points(lane)[0].value;
     assert!((v - 632.46).abs() < 5.0, "{v}");
@@ -502,7 +525,7 @@ fn undo_and_cancel_drop_a_point_selection_they_made_stale() {
     assert_eq!(r.points(lane).len(), 2);
     let tempo = r.tempo.clone();
     r.arrange.scene(&r.doc.project().clone(), &env(&tempo));
-    assert!(r.arrange.lanes.selection(r.doc.project()).is_none());
+    assert_eq!(r.arrange.lanes.selected_lane(), None);
 
     // Edits made here keep it.
     r.click(r.x(4 * BAR), r.y(0, 0, 0.5));

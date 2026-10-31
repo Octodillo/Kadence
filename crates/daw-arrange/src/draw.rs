@@ -4,6 +4,7 @@ use daw_core::time::{TempoMap, TickTime};
 use daw_midi::grid::{LineKind, Meter};
 use daw_model::{AudioClip, Clip, ClipContent, Project, Track};
 
+use crate::automation::static_value;
 use crate::scene::{Align, Palette, Prim, Rect, Rgba, Scene, TRACK_COLORS};
 use crate::snap::{MIN_LINE_SPACING, adaptive_grid, bar_stride};
 use crate::{Arrange, Env, Peaks};
@@ -82,11 +83,12 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
         }
         if a.expanded.contains(&track.id) {
             for (i, lane) in track.automation.iter().enumerate() {
-                let frame = a.frame_at(project, track, row, i, lane.target);
-                if frame.rect.bottom() < a.ruler_height || frame.rect.y > a.height {
+                let r = a.lane_rect(row, i);
+                if r.bottom() < a.ruler_height || r.y > a.height {
                     continue;
                 }
-                let resting = a.static_value(track, lane.target);
+                let frame = a.frame_at(track, row, i, lane.target);
+                let resting = static_value(a.params.as_ref(), track, lane.target);
                 a.lanes.draw(&mut s, &frame, &pal, lane, resting, color);
             }
         }

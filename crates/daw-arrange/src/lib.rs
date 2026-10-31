@@ -36,7 +36,7 @@ use daw_model::{
 pub use automation::{LaneScale, ParamCatalog, PointShape};
 use commands::{Group, PlaceClip, TrimClip};
 pub use draw::track_color;
-pub use lane_editor::{LaneEditor, LaneFrame};
+pub use lane_editor::{LaneEditor, LaneFrame, LaneGrid};
 pub use peaks::{PeakPool, Peaks};
 pub use scene::{Palette, Prim, Rect, Rgba, Scene};
 pub use snap::Snap;
@@ -543,7 +543,7 @@ impl Arrange {
         };
         let track = &project.tracks[row];
         if y >= self.row_y(row) + self.track_height {
-            return self.lane_hit(project, track, row, x, y, tick);
+            return self.lane_hit(track, row, x, y, tick);
         }
         // Later clips paint over earlier ones, so look from the end.
         for clip in track.clips.iter().rev() {
@@ -612,7 +612,7 @@ impl Arrange {
 
     /// Whether a drag is in progress (the front end should grab the pointer).
     pub fn dragging(&self) -> bool {
-        self.drag.is_some()
+        self.drag.is_some() || self.lanes.dragging().is_some()
     }
 
     /// The fade and gain handles of an audio clip on track row `row`, or
@@ -786,6 +786,8 @@ impl Arrange {
     // Pointer input
 
     pub fn press(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        // At most one drag at a time: one whose release got lost ends here.
+        self.end_drag(doc);
         self.relayout(doc.project());
         let project = doc.project();
         let hit = self.hit(project, p.x, p.y);
@@ -855,14 +857,16 @@ impl Arrange {
     }
 
     pub fn motion(&mut self, doc: &mut Document, env: &Env, p: Pointer) -> Outcome {
-        self.relayout(doc.project());
         if let Some(lane) = self.lanes.dragging() {
+            self.relayout(doc.project());
             let frame = self.lane_frame(doc.project(), lane);
-            return self.lanes.drag(doc, frame.as_ref(), p);
+            let grid = self.lane_grid(doc.project());
+            return self.lanes.drag(doc, frame.as_ref(), &grid, p);
         }
         let Some(drag) = self.drag.clone() else {
             return Outcome::default();
         };
+        self.relayout(doc.project());
         match drag {
             Drag::Pending { start, hit } => {
                 if (p.x - start.x).hypot(p.y - start.y) < DRAG_THRESHOLD {

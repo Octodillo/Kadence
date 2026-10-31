@@ -12,7 +12,7 @@ use daw_model::{
     TrackId, TrackKind,
 };
 
-use crate::lane_editor::{LaneFrame, lane_of};
+use crate::lane_editor::{LaneFrame, LaneGrid, lane_of};
 use crate::scene::Rect;
 use crate::{Arrange, Button, Hit, Outcome, Pointer};
 
@@ -255,16 +255,6 @@ impl Arrange {
     // -----------------------------------------------------------------------
     // Lanes: ranges, values and geometry
 
-    /// How `target` on `track` maps to heights.
-    pub fn lane_scale(&self, track: &Track, target: AutomationTarget) -> LaneScale {
-        lane_scale(self.params.as_ref(), track, target)
-    }
-
-    /// The value `target` has when no lane plays.
-    pub fn static_value(&self, track: &Track, target: AutomationTarget) -> f64 {
-        static_value(self.params.as_ref(), track, target)
-    }
-
     /// The rectangle lane row `index` of track row `row` covers.
     pub fn lane_rect(&self, row: usize, index: usize) -> Rect {
         Rect::new(0.0, self.lane_y(row, index), self.width, self.lane_height)
@@ -273,7 +263,6 @@ impl Arrange {
     /// The frame of lane row `index` of track row `row`, for `target`.
     pub(crate) fn frame_at(
         &self,
-        project: &Project,
         track: &Track,
         row: usize,
         index: usize,
@@ -281,10 +270,16 @@ impl Arrange {
     ) -> LaneFrame {
         LaneFrame {
             view: self.view,
+            rect: self.lane_rect(row, index),
+            scale: lane_scale(self.params.as_ref(), track, target),
+        }
+    }
+
+    /// The grid lane edits snap to.
+    pub fn lane_grid(&self, project: &Project) -> LaneGrid {
+        LaneGrid {
             snap: self.snap,
             meter: self.meter(project),
-            rect: self.lane_rect(row, index),
-            scale: self.lane_scale(track, target),
         }
     }
 
@@ -296,14 +291,13 @@ impl Arrange {
         }
         let row = project.tracks.iter().position(|x| x.id == t.id)?;
         let index = t.automation.iter().position(|x| x.id == lane)?;
-        Some(self.frame_at(project, t, row, index, l.target))
+        Some(self.frame_at(t, row, index, l.target))
     }
 
     /// The automation part of [`hit`](Self::hit): `y` is below the clips of
     /// track row `row`.
     pub(crate) fn lane_hit(
         &self,
-        project: &Project,
         track: &Track,
         row: usize,
         x: f64,
@@ -314,10 +308,7 @@ impl Arrange {
             .floor()
             .max(0.0) as usize;
         let lane = track.automation.get(index);
-        let point = lane.and_then(|l| {
-            self.frame_at(project, track, row, index, l.target)
-                .point_at(l, x, y)
-        });
+        let point = lane.and_then(|l| self.frame_at(track, row, index, l.target).point_at(l, x, y));
         Hit::Automation {
             track: track.id,
             row,
@@ -330,11 +321,7 @@ impl Arrange {
     /// A press on a lane row (see [`press`](Self::press)).
     pub(crate) fn press_lane(&mut self, doc: &mut Document, p: Pointer, hit: Hit) -> Outcome {
         let Hit::Automation {
-            track,
-            row,
-            lane,
-            point,
-            ..
+            track, lane, point, ..
         } = hit
         else {
             return Outcome::default();
@@ -349,15 +336,13 @@ impl Arrange {
                 ..Outcome::view()
             };
         };
+        // A hit lane's track is expanded, so its frame is there.
         let project = doc.project();
-        let frame = project.track(track).and_then(|t| {
-            let index = t.automation.iter().position(|x| x.id == lane)?;
-            Some(self.frame_at(project, t, row, index, t.automation[index].target))
-        });
-        let Some(frame) = frame else {
+        let Some(frame) = self.lane_frame(project, lane) else {
             return Outcome::view();
         };
-        let o = self.lanes.press(doc, &frame, p, lane, point);
+        let grid = self.lane_grid(project);
+        let o = self.lanes.press(doc, &frame, &grid, p, lane, point);
         Outcome {
             context_menu: menu,
             ..o
@@ -367,13 +352,15 @@ impl Arrange {
     // -----------------------------------------------------------------------
     // Commands on lanes and points
 
-    /// Deletes the selected automation points.
+    /// Deletes the selected automation points. Unlike calling the lane
+    /// editor directly, this also ends a clip drag in progress.
     pub fn delete_points(&mut self, doc: &mut Document) -> Outcome {
         self.end_drag(doc);
         self.lanes.delete_points(doc)
     }
 
-    /// Gives the segments after the selected points `shape`.
+    /// Gives the segments after the selected points `shape`. Unlike calling
+    /// the lane editor directly, this also ends a clip drag in progress.
     pub fn set_point_shape(&mut self, doc: &mut Document, shape: PointShape) -> Outcome {
         self.end_drag(doc);
         self.lanes.set_point_shape(doc, shape)

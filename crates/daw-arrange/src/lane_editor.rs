@@ -3,8 +3,9 @@
 //! under its notes).
 //!
 //! A view hands the editor a [`LaneFrame`] for the lane it is working on:
-//! where the lane is on screen, how times map to x and snap, and how the
-//! lane's values map to heights. The editor keeps what belongs to lanes
+//! where the lane is on screen, how times map to x, and how the lane's
+//! values map to heights. Presses and drags also take the [`LaneGrid`]
+//! that edits snap to. The editor keeps what belongs to lanes
 //! rather than to the view: the selected points and the drag in progress.
 //!
 //! A click on a lane adds a point there and drags it; a point can be
@@ -33,12 +34,29 @@ const CURVE_PX: f64 = 40.0;
 /// Straight pieces a curved segment is drawn with.
 const CURVE_SEGMENTS: usize = 16;
 
+/// The grid lane edits snap to. Kept apart from [`LaneFrame`] so drawing
+/// and hit tests, which never snap, don't build a [`Meter`].
+#[derive(Clone, Debug)]
+pub struct LaneGrid {
+    pub snap: Snap,
+    pub meter: Meter,
+}
+
+impl LaneGrid {
+    /// `tick` on the grid at `frame`'s zoom, unless `free` (Shift held).
+    fn apply(&self, frame: &LaneFrame, tick: TickTime, free: bool) -> TickTime {
+        if free {
+            tick
+        } else {
+            self.snap.apply(tick, frame.view.px_per_tick(), &self.meter)
+        }
+    }
+}
+
 /// Where a lane is drawn and how it maps time and values there.
 #[derive(Clone, Debug)]
 pub struct LaneFrame {
     pub view: TimelineView,
-    pub snap: Snap,
-    pub meter: Meter,
     /// The lane's rectangle; its width is the timeline's.
     pub rect: Rect,
     pub scale: LaneScale,
@@ -56,7 +74,7 @@ impl LaneFrame {
 
     /// The y of height `n` (0 to 1).
     pub fn norm_to_y(&self, n: f64) -> f64 {
-        self.rect.bottom() - self.pad() - n * (self.rect.h - 2.0 * self.pad())
+        self.rect.bottom() - self.pad() - n * self.span()
     }
 
     /// The height (0 to 1) at `y`.
@@ -72,15 +90,6 @@ impl LaneFrame {
     /// Where point `p` is drawn.
     pub fn point_pos(&self, p: &AutomationPoint) -> (f64, f64) {
         (self.view.tick_to_x(p.tick), self.value_y(p.value))
-    }
-
-    /// `tick` on the grid, unless `free` (Shift held).
-    fn snap(&self, tick: TickTime, free: bool) -> TickTime {
-        if free {
-            tick
-        } else {
-            self.snap.apply(tick, self.view.px_per_tick(), &self.meter)
-        }
     }
 
     /// The point of `lane` under (`x`, `y`), if any; later points paint on
@@ -177,6 +186,12 @@ impl LaneEditor {
     }
 
     /// Whether point `index` of `lane` is selected, for drawing.
+    /// The lane the selection is on, unchecked against the project (see
+    /// [`check`](Self::check)).
+    pub fn selected_lane(&self) -> Option<LaneId> {
+        self.selection.as_ref().map(|(l, _)| *l)
+    }
+
     fn is_selected(&self, lane: LaneId, index: usize) -> bool {
         self.selection
             .as_ref()
@@ -237,18 +252,20 @@ impl LaneEditor {
         })
     }
 
-    /// A press on `lane`, drawn in `frame`, over its point `point` if any.
+    /// A press on `lane`, drawn in `frame` and snapping to `grid`, over its
+    /// point `point` if any.
     /// A right press selects the point for the context menu, which the view
     /// opens.
     pub fn press(
         &mut self,
         doc: &mut Document,
         frame: &LaneFrame,
+        grid: &LaneGrid,
         p: Pointer,
         lane: LaneId,
         point: Option<usize>,
     ) -> Outcome {
-        let o = self.press_inner(doc, frame, p, lane, point);
+        let o = self.press_inner(doc, frame, grid, p, lane, point);
         self.saw(doc.project());
         o
     }
@@ -257,6 +274,7 @@ impl LaneEditor {
         &mut self,
         doc: &mut Document,
         frame: &LaneFrame,
+        grid: &LaneGrid,
         p: Pointer,
         lane: LaneId,
         point: Option<usize>,
@@ -342,7 +360,7 @@ impl LaneEditor {
             }
             None => {
                 // Add a point here and drag it.
-                let at = TickTime(frame.snap(tick, p.shift).0.max(0));
+                let at = TickTime(grid.apply(frame, tick, p.shift).0.max(0));
                 let value = frame.scale.from_norm(frame.y_to_norm(p.y));
                 let mut points = orig;
                 let i = points.partition_point(|q| q.tick < at);
@@ -381,8 +399,14 @@ impl LaneEditor {
 
     /// Moves the drag in progress to `p`. `frame` is that of the lane
     /// [`dragging`](Self::dragging) names, or `None` if it no longer shows,
-    /// which ends the drag.
-    pub fn drag(&mut self, doc: &mut Document, frame: Option<&LaneFrame>, p: Pointer) -> Outcome {
+    /// which ends the drag; moved points snap to `grid`.
+    pub fn drag(
+        &mut self,
+        doc: &mut Document,
+        frame: Option<&LaneFrame>,
+        grid: &LaneGrid,
+        p: Pointer,
+    ) -> Outcome {
         let (Some(drag), Some(frame)) = (self.drag.clone(), frame) else {
             self.end_drag(doc);
             return Outcome::default();
@@ -396,7 +420,7 @@ impl LaneEditor {
                 orig,
                 moving,
                 ..
-            } => self.drag_points(doc, frame, p, lane, tick, y, lead, &orig, &moving),
+            } => self.drag_points(doc, frame, grid, p, lane, tick, y, lead, &orig, &moving),
             LaneDrag::Curve {
                 lane,
                 index,
@@ -418,6 +442,7 @@ impl LaneEditor {
         &mut self,
         doc: &mut Document,
         frame: &LaneFrame,
+        grid: &LaneGrid,
         p: Pointer,
         lane: LaneId,
         tick: TickTime,
@@ -437,7 +462,7 @@ impl LaneEditor {
         // Time: snap the grabbed point, move the rest with it, and keep
         // every moved point between its unmoved neighbours.
         let raw = TickTime(orig[lead].tick.0 + (frame.view.x_to_tick(p.x).0 - tick.0));
-        let mut delta = frame.snap(raw, p.shift).0 - orig[lead].tick.0;
+        let mut delta = grid.apply(frame, raw, p.shift).0 - orig[lead].tick.0;
         let is_moving = |i: usize| moving.contains(&i);
         for &i in moving {
             let lo = (0..i)
@@ -748,7 +773,7 @@ mod tests {
 
     /// A lane on its own, as a view other than the arrange view would
     /// host it: 100 px tall at the top of the view, with snapping off.
-    fn rig() -> (Document, LaneId, LaneFrame) {
+    fn rig() -> (Document, LaneId, LaneFrame, LaneGrid) {
         let mut project = Project::new("Lanes");
         let mut track = Track::new(TrackKind::Instrument, "Keys");
         let lane = AutomationLane::new(AutomationTarget::Pan);
@@ -757,12 +782,14 @@ mod tests {
         project.tracks.push(Arc::new(track));
         let frame = LaneFrame {
             view: TimelineView::default(),
-            snap: Snap::Off,
-            meter: snap::meter(&project.tempo),
             rect: Rect::new(0.0, 0.0, 800.0, 100.0),
             scale: LaneScale::PAN,
         };
-        (Document::new(project), id, frame)
+        let grid = LaneGrid {
+            snap: Snap::Off,
+            meter: snap::meter(&project.tempo),
+        };
+        (Document::new(project), id, frame, grid)
     }
 
     fn points(doc: &Document, lane: LaneId) -> Vec<AutomationPoint> {
@@ -771,11 +798,11 @@ mod tests {
 
     #[test]
     fn a_click_adds_a_point_that_drags_and_undoes_in_one_step() {
-        let (mut doc, lane, frame) = rig();
+        let (mut doc, lane, frame, grid) = rig();
         let mut e = LaneEditor::default();
         let (x, y) = (200.0, frame.value_y(0.0));
         assert!(
-            e.press(&mut doc, &frame, Pointer::left(x, y), lane, None)
+            e.press(&mut doc, &frame, &grid, Pointer::left(x, y), lane, None)
                 .document
         );
         assert_eq!(e.dragging(), Some(lane));
@@ -786,7 +813,7 @@ mod tests {
         // Up to the top of the lane: hard right.
         let top = frame.value_y(1.0);
         assert!(
-            e.drag(&mut doc, Some(&frame), Pointer::left(x, top))
+            e.drag(&mut doc, Some(&frame), &grid, Pointer::left(x, top))
                 .document
         );
         assert_eq!(points(&doc, lane)[0].value, 1.0);
@@ -801,12 +828,12 @@ mod tests {
 
     #[test]
     fn a_drag_whose_lane_is_gone_ends() {
-        let (mut doc, lane, frame) = rig();
+        let (mut doc, lane, frame, grid) = rig();
         let mut e = LaneEditor::default();
         let y = frame.value_y(0.0);
-        e.press(&mut doc, &frame, Pointer::left(100.0, y), lane, None);
+        e.press(&mut doc, &frame, &grid, Pointer::left(100.0, y), lane, None);
         assert_eq!(
-            e.drag(&mut doc, None, Pointer::left(150.0, y)),
+            e.drag(&mut doc, None, &grid, Pointer::left(150.0, y)),
             Outcome::default()
         );
         assert_eq!(e.dragging(), None);
