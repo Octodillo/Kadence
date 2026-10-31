@@ -10,13 +10,13 @@ publish.workspace = true
 
 [dependencies]
 daw-core.workspace = true
+daw-plugin-window = { path = "../daw-plugin-window" }
 libloading = "0.8"
 livi = "0.9"
 log = "0.4"
 lv2-sys = "2"
 lv2_raw = "0.3"
 rtrb = "0.3"
-x11rb = "0.13"
 
 [dev-dependencies]
 assert_no_alloc.workspace = true

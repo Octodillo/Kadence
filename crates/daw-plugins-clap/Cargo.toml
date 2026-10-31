@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 daw-core.workspace = true
+daw-plugin-window = { path = "../daw-plugin-window" }
 clack-host = "0.2"
 clack-extensions = { version = "0.2", features = [
     "clack-host",
@@ -25,7 +26,6 @@ clack-extensions = { version = "0.2", features = [
     "timer",
 ] }
 libc = "0.2"
-x11rb = "0.13"
 
 [dev-dependencies]
 assert_no_alloc = "1.1"

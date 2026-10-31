@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use daw_plugin_window::{HostWindow, WindowEvent};
 use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait, ViewType};
 use vst3::Steinberg::{
@@ -9,64 +10,9 @@ use vst3::Steinberg::{
     kPlatformTypeX11EmbedWindowID, kResultFalse, kResultOk, kResultTrue, tresult,
 };
 use vst3::{Class, ComPtr, ComWrapper};
-use x11rb::connection::Connection;
-use x11rb::properties::WmSizeHints;
-use x11rb::protocol::Event;
-use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, PropMode, WindowClass,
-};
-use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
 
 use crate::host::host;
 use crate::runloop::forward_run_loop;
-
-/// The window the editor lives in. Shared with the frame so `resizeView` can resize it.
-struct Window {
-    conn: RustConnection,
-    id: u32,
-    resizable: bool,
-    net_wm_name: u32,
-    utf8: u32,
-}
-
-impl Window {
-    fn set_title(&self, title: &str) {
-        let _ = self.conn.change_property8(
-            PropMode::REPLACE,
-            self.id,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            title.as_bytes(),
-        );
-        let _ = self.conn.change_property8(
-            PropMode::REPLACE,
-            self.id,
-            self.net_wm_name,
-            self.utf8,
-            title.as_bytes(),
-        );
-        let _ = self.conn.flush();
-    }
-
-    fn resize(&self, width: u32, height: u32) {
-        if !self.resizable {
-            let _ = fixed_size_hints(width, height).set_normal_hints(&self.conn, self.id);
-        }
-        let _ = self.conn.configure_window(
-            self.id,
-            &ConfigureWindowAux::new().width(width).height(height),
-        );
-        let _ = self.conn.flush();
-    }
-}
-
-fn fixed_size_hints(width: u32, height: u32) -> WmSizeHints {
-    let mut hints = WmSizeHints::new();
-    hints.min_size = Some((width as i32, height as i32));
-    hints.max_size = Some((width as i32, height as i32));
-    hints
-}
 
 fn rect_size(r: &ViewRect) -> (u32, u32) {
     (
@@ -79,7 +25,8 @@ fn rect_size(r: &ViewRect) -> (u32, u32) {
 /// host context. Both forward to the same process-wide loop.
 #[derive(Default)]
 struct PlugFrame {
-    window: Mutex<Option<Arc<Window>>>,
+    /// The window the editor lives in, so `resizeView` can resize it.
+    window: Mutex<Option<Arc<HostWindow>>>,
 }
 
 impl Class for PlugFrame {
@@ -105,9 +52,7 @@ forward_run_loop!(PlugFrame, self => host().run_loop);
 pub struct Editor {
     view: ComPtr<IPlugView>,
     frame: ComWrapper<PlugFrame>,
-    window: Arc<Window>,
-    wm_protocols: u32,
-    wm_delete: u32,
+    window: Arc<HostWindow>,
 }
 
 impl Editor {
@@ -140,80 +85,8 @@ impl Editor {
         };
         let (width, height) = rect_size(&rect);
 
-        let (conn, screen) = x11rb::connect(None).map_err(|e| format!("no X display: {e}"))?;
-        let x = |e: x11rb::errors::ReplyOrIdError| e.to_string();
-        let root = conn.setup().roots[screen].root;
-        let black = conn.setup().roots[screen].black_pixel;
-        let id = conn.generate_id().map_err(x)?;
-        let atom = |name: &str| -> Result<u32, String> {
-            Ok(conn
-                .intern_atom(false, name.as_bytes())
-                .map_err(|e| e.to_string())?
-                .reply()
-                .map_err(|e| e.to_string())?
-                .atom)
-        };
-        let wm_protocols = atom("WM_PROTOCOLS")?;
-        let wm_delete = atom("WM_DELETE_WINDOW")?;
-        let net_wm_name = atom("_NET_WM_NAME")?;
-        let utf8 = atom("UTF8_STRING")?;
-
-        (|| -> Result<(), x11rb::errors::ConnectionError> {
-            conn.create_window(
-                x11rb::COPY_DEPTH_FROM_PARENT,
-                id,
-                root,
-                0,
-                0,
-                width as u16,
-                height as u16,
-                0,
-                WindowClass::INPUT_OUTPUT,
-                0,
-                &CreateWindowAux::new()
-                    .background_pixel(black)
-                    .event_mask(EventMask::STRUCTURE_NOTIFY),
-            )?;
-            conn.change_property8(
-                PropMode::REPLACE,
-                id,
-                AtomEnum::WM_NAME,
-                AtomEnum::STRING,
-                title.as_bytes(),
-            )?;
-            conn.change_property8(PropMode::REPLACE, id, net_wm_name, utf8, title.as_bytes())?;
-            conn.change_property8(
-                PropMode::REPLACE,
-                id,
-                AtomEnum::WM_CLASS,
-                AtomEnum::STRING,
-                b"kadence\0Kadence\0",
-            )?;
-            conn.change_property32(
-                PropMode::REPLACE,
-                id,
-                wm_protocols,
-                AtomEnum::ATOM,
-                &[wm_delete],
-            )?;
-            Ok(())
-        })()
-        .map_err(|e| e.to_string())?;
-
-        let window = Arc::new(Window {
-            conn,
-            id,
-            resizable,
-            net_wm_name,
-            utf8,
-        });
-        if !resizable {
-            let _ = fixed_size_hints(width, height).set_normal_hints(&window.conn, id);
-        }
-
-        // The plugin creates its child window on its own X connection, so ours must exist on
-        // the server before `attached`, not just sit in our output buffer.
-        window.conn.sync().map_err(|e| e.to_string())?;
+        let window = Arc::new(HostWindow::new(title, width, height, !resizable)?);
+        let id = window.id();
 
         let frame = ComWrapper::new(PlugFrame::default());
         *frame.window.lock().unwrap() = Some(window.clone());
@@ -224,20 +97,18 @@ impl Editor {
             view.setFrame(frame_ptr);
             if view.attached(id as usize as *mut _, kPlatformTypeX11EmbedWindowID) != kResultOk {
                 view.setFrame(std::ptr::null_mut());
-                let _ = window.conn.destroy_window(id);
-                let _ = window.conn.flush();
+                // Drops the frame's reference, so the window goes with ours even if the
+                // plugin still holds the frame.
+                *frame.window.lock().unwrap() = None;
                 return Err("editor failed to attach".into());
             }
         }
-        let _ = window.conn.map_window(id);
-        let _ = window.conn.flush();
+        window.show();
 
         Ok(Editor {
             view,
             frame,
             window,
-            wm_protocols,
-            wm_delete,
         })
     }
 
@@ -250,21 +121,17 @@ impl Editor {
     pub fn pump(&mut self) -> bool {
         let mut open = true;
         let mut resized = None;
-        while let Ok(Some(event)) = self.window.conn.poll_for_event() {
+        while let Some(event) = self.window.poll() {
             match event {
-                Event::ClientMessage(m)
-                    if m.type_ == self.wm_protocols && m.data.as_data32()[0] == self.wm_delete =>
-                {
+                WindowEvent::Closed => {
                     open = false;
+                    break;
                 }
-                Event::ConfigureNotify(c) if c.window == self.window.id => {
-                    resized = Some((c.width as i32, c.height as i32));
-                }
-                Event::DestroyNotify(d) if d.window == self.window.id => open = false,
-                _ => {}
+                WindowEvent::Resized(w, h) => resized = Some((w as i32, h as i32)),
+                WindowEvent::Other(_) => {}
             }
         }
-        if let (Some((w, h)), true) = (resized, self.window.resizable) {
+        if let (Some((w, h)), false) = (resized, self.window.is_fixed()) {
             let mut current = ViewRect {
                 left: 0,
                 top: 0,
@@ -301,8 +168,7 @@ impl Drop for Editor {
             self.view.removed();
             self.view.setFrame(std::ptr::null_mut());
         }
+        // The window itself goes with `self.window`, after the view is removed.
         *self.frame.window.lock().unwrap() = None;
-        let _ = self.window.conn.destroy_window(self.window.id);
-        let _ = self.window.conn.flush();
     }
 }
