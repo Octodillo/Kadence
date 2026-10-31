@@ -133,23 +133,72 @@ fn a_click_adds_a_point_where_the_lane_is_drawn_and_drags_in_one_step() {
 }
 
 #[test]
-fn delete_takes_points_before_notes_and_a_note_press_drops_them() {
+fn notes_and_points_are_never_selected_together() {
     let mut r = Rig::new();
     let (x, y) = r.at(Q, 0.0);
-    r.click(x, y);
-    assert_eq!(r.points().len(), 1);
+    // A lane press leaves the notes, so Delete takes the point.
     r.pr.select_all(r.doc.project());
+    r.click(x, y);
+    assert!(r.pr.selection.is_empty());
+    assert!(r.pr.lanes.points_selected(r.doc.project()));
     r.pr.delete_selection(&mut r.doc);
     assert!(r.points().is_empty());
     assert_eq!(r.pr.notes(r.doc.project()).len(), 1);
 
-    // A press among the notes leaves the lane, so Delete is for notes.
+    // Select All leaves the points, so Delete takes the notes.
     r.click(x, y);
-    assert!(r.pr.lanes.points_selected(r.doc.project()));
+    r.pr.select_all(r.doc.project());
+    assert!(!r.pr.lanes.points_selected(r.doc.project()));
+    r.pr.delete_selection(&mut r.doc);
+    assert!(r.pr.notes(r.doc.project()).is_empty());
+    assert_eq!(r.points().len(), 1);
+
+    // So does a press among the notes.
+    r.click(x, y);
     let notes = r.pr.notes_rect();
     r.click(notes.x + 400.0, notes.y + 10.0);
     assert!(!r.pr.lanes.points_selected(r.doc.project()));
+}
+
+#[test]
+fn hiding_the_lanes_drops_their_point_selection() {
+    let mut r = Rig::new();
+    let (x, y) = r.at(Q, 0.0);
+    r.click(x, y);
+    r.pr.lanes_shown = false;
+    r.pr.sync(r.doc.project());
+    assert!(!r.pr.lanes.points_selected(r.doc.project()));
+    r.pr.delete_selection(&mut r.doc);
     assert_eq!(r.points().len(), 1);
+}
+
+#[test]
+fn lanes_share_their_part_of_a_short_roll() {
+    let mut r = Rig::new();
+    // 100 px under the ruler: the two lanes share half of it.
+    r.pr.resize(800.0, r.pr.ruler_height + 100.0);
+    assert_eq!(r.pr.lane_count(), 2);
+    assert!((r.pr.lanes_height() - 50.0).abs() < 1e-9);
+    assert!((r.pr.lane_row_height() - 25.0).abs() < 1e-9);
+    // Every lane is in reach, the last one too.
+    assert!((r.pr.lane_rect(1).bottom() - r.pr.height).abs() < 1e-9);
+    // The velocity lane has no say in it.
+    r.pr.velocity_height = 10.0;
+    assert!((r.pr.lanes_height() - 50.0).abs() < 1e-9);
+}
+
+#[test]
+fn ending_drags_before_another_edit_stops_a_lane_drag() {
+    let mut r = Rig::new();
+    let (x, y) = r.at(Q, 0.0);
+    r.press(Pointer::left(x, y));
+    r.pr.end_drag(&mut r.doc);
+    r.doc.undo().unwrap();
+    assert!(r.points().is_empty());
+    // Motion afterwards doesn't bring the point back.
+    let (x2, y2) = r.at(2 * Q, 1.0);
+    r.pr.motion(&mut r.doc, Pointer::left(x2, y2));
+    assert!(r.points().is_empty());
 }
 
 #[test]

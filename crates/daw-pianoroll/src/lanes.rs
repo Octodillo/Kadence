@@ -7,7 +7,9 @@
 //! roll only says where each lane is and passes the pointer on.
 //!
 //! How many rows there are is read from the project by
-//! [`sync`](PianoRoll::sync), so the layout needs no project.
+//! [`sync`](PianoRoll::sync), so the layout needs no project. The rows
+//! never take more than [`MAX_LANES_SHARE`] of the space under the ruler;
+//! many lanes share it in thinner rows, so every lane stays in reach.
 
 use daw_arrange::automation::{lane_scale, static_value};
 use daw_arrange::lane_editor::lane_of;
@@ -19,20 +21,33 @@ use daw_model::{Document, LaneId, Project, Track};
 
 use crate::{PianoRoll, outcome_view};
 
+/// The most of the height under the ruler the lane rows take.
+pub const MAX_LANES_SHARE: f64 = 0.5;
+
 impl PianoRoll {
     // -----------------------------------------------------------------------
     // Geometry
 
-    /// The height the lane rows take: none while hidden, and never more
-    /// than leaves the note grid a row.
+    /// Lanes on the open clip's track, as of the last
+    /// [`sync`](Self::sync).
+    pub fn lane_count(&self) -> usize {
+        self.lane_count
+    }
+
+    /// The height of one lane row: `lane_height`, or less when the rows
+    /// would take more than their share of the item.
+    pub fn lane_row_height(&self) -> f64 {
+        let room = ((self.height - self.ruler_height) * MAX_LANES_SHARE).max(0.0);
+        self.lane_height.min(room / self.lane_count.max(1) as f64)
+    }
+
+    /// The height the lane rows take: none while hidden.
     pub fn lanes_height(&self) -> f64 {
-        if !self.lanes_shown {
-            return 0.0;
+        if self.lanes_shown {
+            self.lane_count as f64 * self.lane_row_height()
+        } else {
+            0.0
         }
-        let room = self.height - self.ruler_height - self.velocity_height - self.key_height;
-        (self.lane_count as f64 * self.lane_height)
-            .min(room)
-            .max(0.0)
     }
 
     /// The lane rows, under the velocity lane.
@@ -51,15 +66,22 @@ impl PianoRoll {
         let r = self.lanes_rect();
         Rect::new(
             r.x,
-            r.y + index as f64 * self.lane_height,
+            r.y + index as f64 * self.lane_row_height(),
             r.w,
-            self.lane_height,
+            self.lane_row_height(),
         )
     }
 
     /// The track whose lanes show: the open clip's.
     pub(crate) fn lane_track<'a>(&self, project: &'a Project) -> Option<&'a Track> {
         project.track(self.track(project)?).map(|t| &**t)
+    }
+
+    /// The open clip's track's row in the project, which names it to the
+    /// app's lane getters and picks its colour.
+    pub fn track_row(&self, project: &Project) -> Option<usize> {
+        let track = self.track(project)?;
+        project.tracks.iter().position(|t| t.id == track)
     }
 
     fn frame_at(&self, track: &Track, index: usize) -> Option<LaneFrame> {
@@ -92,18 +114,35 @@ impl PianoRoll {
         }
     }
 
-    /// The lane under (`x`, `y`) in the lane rows, and the point of it
-    /// there, if any.
-    fn lane_at(&self, project: &Project, x: f64, y: f64) -> Option<(LaneId, Option<usize>)> {
+    /// The lane under (`x`, `y`) in the lane rows, the frame it is drawn
+    /// in, and the point of it there, if any.
+    fn lane_at(
+        &self,
+        project: &Project,
+        x: f64,
+        y: f64,
+    ) -> Option<(LaneId, LaneFrame, Option<usize>)> {
         let track = self.lane_track(project)?;
         let r = self.lanes_rect();
         if !r.contains(x, y) {
             return None;
         }
-        let index = ((y - r.y) / self.lane_height).floor() as usize;
+        let index = ((y - r.y) / self.lane_row_height()).floor() as usize;
         let lane = track.automation.get(index)?;
         let frame = self.frame_at(track, index)?;
-        Some((lane.id, frame.point_at(lane, x, y)))
+        let point = frame.point_at(lane, x, y);
+        Some((lane.id, frame, point))
+    }
+
+    /// Drops a point selection on a lane that no longer shows (hidden, or
+    /// not on the open clip's track), so Delete can't remove points no one
+    /// sees.
+    pub(crate) fn forget_hidden_points(&mut self, project: &Project) {
+        if let Some(lane) = self.lanes.selected_lane()
+            && self.lane_frame(project, lane).is_none()
+        {
+            self.lanes.clear_selection();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -112,22 +151,24 @@ impl PianoRoll {
     /// The pointer shape over the lane rows.
     pub(crate) fn lane_cursor(&self, project: &Project, x: f64, y: f64) -> Cursor {
         match self.lane_at(project, x, y) {
-            Some((_, Some(_))) => Cursor::Move,
-            Some((_, None)) => Cursor::Crosshair,
+            Some((_, _, Some(_))) => Cursor::Move,
+            Some((_, _, None)) => Cursor::Crosshair,
             None => Cursor::Arrow,
         }
     }
 
-    /// A press on the lane rows. A right press selects the point under it
-    /// and asks for the point menu.
+    /// A press on the lane rows. It leaves the notes, as a press on a lane
+    /// in the arrange view leaves the clips, so Delete and the menu act on
+    /// points. A right press selects the point under it and asks for the
+    /// point menu.
     pub(crate) fn press_lane(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        if p.button != Button::Middle {
+            self.selection.clear();
+        }
         let project = doc.project();
-        let Some((lane, point)) = self.lane_at(project, p.x, p.y) else {
+        let Some((lane, frame, point)) = self.lane_at(project, p.x, p.y) else {
             self.lanes.clear_selection();
             return outcome_view();
-        };
-        let Some(frame) = self.lane_frame(project, lane) else {
-            return Outcome::default();
         };
         let grid = self.lane_grid(project);
         if p.button == Button::Right {
@@ -149,7 +190,7 @@ impl PianoRoll {
     pub(crate) fn double_click_lane(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
         self.lanes.end_drag(doc);
         match self.lane_at(doc.project(), p.x, p.y) {
-            Some((lane, Some(index))) => self.lanes.delete_point(doc, lane, index),
+            Some((lane, _, Some(index))) => self.lanes.delete_point(doc, lane, index),
             _ => Outcome::default(),
         }
     }
@@ -189,16 +230,16 @@ impl PianoRoll {
         let Some(track) = self.lane_track(project).filter(|_| r.h > 0.0) else {
             return;
         };
+
         let pal = self.palette;
         let line = pal.background.mix(pal.text, 0.15);
-        let row = project
-            .tracks
-            .iter()
-            .position(|t| t.id == track.id)
-            .unwrap_or(0);
+        let Some(row) = self.track_row(project) else {
+            return;
+        };
         let color = track_color(track, row);
         s.rect(r, pal.background.mix(pal.text, 0.04));
         s.push(Prim::PushClip(r));
+        self.draw_grid_lines(s, &self.meter(project), r.y, r.bottom());
         for (i, lane) in track.automation.iter().enumerate() {
             let Some(frame) = self.frame_at(track, i) else {
                 continue;

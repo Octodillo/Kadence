@@ -419,7 +419,8 @@ Kirigami.Page {
                     required property int index
                     readonly property int revision: Project.revision + Automation.revision
                     width: roll.keyboardWidth
-                    height: roll.laneHeight
+                    // Rows share the space when many lanes would not fit.
+                    height: roll.lanesHeight / Math.max(1, roll.laneCount)
                     leftPadding: Kirigami.Units.smallSpacing
                     rightPadding: Kirigami.Units.smallSpacing
                     verticalAlignment: Text.AlignVCenter
@@ -504,7 +505,7 @@ Kirigami.Page {
     PointMenu {
         id: pointMenu
         onShapeChosen: (shape) => roll.setPointShape(shape)
-        onDeleteChosen: roll.deleteSelection()
+        onDeleteChosen: roll.deletePoints()
     }
 
     QQC2.Menu {

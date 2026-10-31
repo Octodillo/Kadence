@@ -6,11 +6,12 @@
 //! [`Scene`] that a front end paints, the same display list the arrange view
 //! uses.
 //!
-//! Layout, in logical pixels inside the item: a keyboard strip down the left
-//! (`keyboard_width`), a bar ruler across the top (`ruler_height`), the
-//! velocity lane under the notes (`velocity_height`), the track's
-//! automation lanes under that (`lane_height` each, while `lanes_shown`)
-//! and the note grid in between. Keys run from 127 at the top to 0 at the bottom.
+//! Layout, in logical pixels inside the item, top to bottom: a bar ruler
+//! (`ruler_height`), the note grid, the velocity lane (`velocity_height`)
+//! and, while `lanes_shown`, the track's automation lanes (`lane_height`
+//! each, see [`lanes`]). A keyboard strip runs down the left beside the
+//! notes (`keyboard_width`). Keys run from 127 at the top to 0 at the
+//! bottom.
 //!
 //! Gestures, with the same modifiers as the arrange view:
 //! - click a note to select only it, Ctrl+click toggles it, Shift+click
@@ -242,7 +243,10 @@ impl PianoRoll {
             n.x,
             n.bottom(),
             n.w,
-            self.velocity_height.min(self.height - n.bottom()).max(0.0),
+            // The lanes keep their rows on a short item; velocity gives way.
+            self.velocity_height
+                .min(self.height - n.bottom() - self.lanes_height())
+                .max(0.0),
         )
     }
 
@@ -782,6 +786,18 @@ impl PianoRoll {
         out
     }
 
+    /// Ends the gesture in progress, a note drag or a lane drag, so
+    /// another edit (an undo, a command from elsewhere) doesn't race it.
+    pub fn end_drag(&mut self, doc: &mut Document) {
+        // Only a gesture that was going closes the undo step, so edits
+        // that merge (a fader drag elsewhere) keep merging.
+        if self.gesture.take().is_some() {
+            doc.seal();
+        }
+        self.audition = None;
+        self.lanes.end_drag(doc);
+    }
+
     /// Escape: ends the gesture. A drag already applied stays (one undo
     /// step), like the arrange view.
     pub fn cancel(&mut self, doc: &mut Document) -> Outcome {
@@ -899,6 +915,7 @@ impl PianoRoll {
         }
         self.lane_count = self.lane_track(project).map_or(0, |t| t.automation.len());
         self.lanes.check(project);
+        self.forget_hidden_points(project);
         self.clamp_scroll();
     }
 
@@ -962,11 +979,13 @@ impl PianoRoll {
         if let Some((_, m)) = self.clip(project) {
             self.selection = m.notes.iter().map(|n| n.id).collect();
         }
+        self.lanes.clear_selection();
         outcome_view()
     }
 
     pub fn select_none(&mut self) -> Outcome {
         self.selection.clear();
+        self.lanes.clear_selection();
         outcome_view()
     }
 

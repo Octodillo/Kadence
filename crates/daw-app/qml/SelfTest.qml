@@ -495,7 +495,8 @@ Item {
             const lanes = roll.laneCount;
             Automation.addLane(roll.trackIndex, 0);
             roll.refresh();
-            check(roll.laneCount === lanes + 1 && roll.lanesHeight === roll.laneCount * roll.laneHeight,
+            check(roll.laneCount === lanes + 1 && roll.lanesHeight > 0
+                  && roll.lanesHeight <= roll.laneCount * roll.laneHeight,
                   "the Edit page shows the track's automation lanes");
             const lanesToggle = edit.editActions[23];
             lanesToggle.trigger();

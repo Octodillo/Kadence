@@ -136,6 +136,9 @@ pub mod qobject {
         fn point_shape(self: &PianoRoll) -> i32;
         #[qinvokable]
         fn set_point_shape(self: Pin<&mut PianoRoll>, shape: i32);
+        /// Deletes the selected automation points (never notes).
+        #[qinvokable]
+        fn delete_points(self: Pin<&mut PianoRoll>);
 
         /// A context menu was asked for over a note.
         #[qsignal]
@@ -301,9 +304,6 @@ impl qobject::PianoRoll {
             let p = &s.piano;
             let project = s.doc.project();
             let track = p.track(project);
-            let lanes = track
-                .and_then(|t| project.track(t))
-                .map_or(0, |t| t.automation.len());
             let shown = Shown {
                 scroll_x: p.view.scroll_x,
                 scroll_y: p.scroll_y,
@@ -316,10 +316,8 @@ impl qobject::PianoRoll {
                     .and_then(|t| strip_row(project, t))
                     .map_or(-1, |row| row as i32),
                 lanes_height: p.lanes_height(),
-                track_index: track
-                    .and_then(|t| project.tracks.iter().position(|x| x.id == t))
-                    .map_or(-1, |i| i as i32),
-                lane_count: lanes as i32,
+                track_index: p.track_row(project).map_or(-1, |i| i as i32),
+                lane_count: p.lane_count() as i32,
             };
             (scene, shown)
         });
@@ -512,6 +510,10 @@ impl qobject::PianoRoll {
 
     fn set_point_shape(self: Pin<&mut Self>, i: i32) {
         self.act(|s| s.piano.set_point_shape(&mut s.doc, shape(i)));
+    }
+
+    fn delete_points(self: Pin<&mut Self>) {
+        self.act(|s| s.piano.delete_points(&mut s.doc));
     }
 
     fn zoom(self: Pin<&mut Self>, factor: f64) {
