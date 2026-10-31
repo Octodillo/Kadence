@@ -37,6 +37,12 @@ pub enum WindowEvent {
     Other(Event),
 }
 
+/// Whether an X display can be reached at all. Plugin editors are X11 windows (XWayland under
+/// Wayland), so without one none can open; a Flatpak needs the `x11` socket for this.
+pub fn display_reachable() -> bool {
+    x11rb::connect(None).is_ok()
+}
+
 /// A top-level X11 window on its own connection. Destroyed on drop.
 pub struct HostWindow {
     conn: RustConnection,

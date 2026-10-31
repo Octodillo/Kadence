@@ -278,10 +278,13 @@ impl AppState {
             }
             Err(detail) => {
                 let device = self.device_name(device);
-                self.report(Message::Warning(daw_session::Warning::PluginEditorFailed {
-                    device,
-                    detail,
-                }));
+                // The usual cause, which the plugin's own message rarely names:
+                // a Wayland session without XWayland, or a sandbox without X11.
+                self.report(if daw_plugin_window::display_reachable() {
+                    Message::Warning(daw_session::Warning::PluginEditorFailed { device, detail })
+                } else {
+                    Message::NoPluginDisplay { device }
+                });
                 false
             }
         }

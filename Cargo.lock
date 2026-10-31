@@ -504,6 +504,7 @@ dependencies = [
  "daw-model",
  "daw-pianoroll",
  "daw-plugin-host",
+ "daw-plugin-window",
  "daw-plugins",
  "daw-session",
  "libc",

@@ -82,6 +82,8 @@ pub enum Reason {
     PluginStateNotSaved,
     /// The plugin of device `name` would not show its editor; `detail`.
     PluginEditorFailed,
+    /// The editor of device `name` needs an X11 display and none is reachable.
+    NoPluginDisplay,
     /// Audio file `path` cannot be streamed; `detail`.
     CannotStream,
     /// Audio file `path` cannot be read.
@@ -248,6 +250,10 @@ pub enum Message {
     Record(RecordProblem),
     /// Another Kadence has the bundle at this path open.
     AlreadyOpen(PathBuf),
+    /// The editor of this device could not open: no X11 display is reachable.
+    NoPluginDisplay {
+        device: String,
+    },
     Export(ExportProblem),
     /// The song was exported to this file, `seconds` long.
     Exported {
@@ -391,6 +397,9 @@ impl Message {
                 },
             },
             Self::AlreadyOpen(path) => Fields::new(C::Open, R::AlreadyOpen).path(path),
+            Self::NoPluginDisplay { device } => {
+                Fields::new(C::Playback, R::NoPluginDisplay).name(device)
+            }
             Self::Export(p) => export_fields(p),
             Self::Exported { path, seconds } => Fields {
                 number: *seconds,
@@ -557,6 +566,18 @@ mod tests {
         })
         .fields();
         assert_eq!(f.path.as_deref(), Some(Path::new("/a.wav")));
+    }
+
+    #[test]
+    fn no_plugin_display() {
+        let f = Message::NoPluginDisplay {
+            device: "Surge XT".into(),
+        }
+        .fields();
+        assert_eq!(
+            (f.context, f.reason, f.name.as_str()),
+            (Context::Playback, Reason::NoPluginDisplay, "Surge XT")
+        );
     }
 
     #[test]

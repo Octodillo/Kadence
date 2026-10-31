@@ -41,6 +41,7 @@ fn titles_are_utf8_in_both_properties() {
     if !display() {
         return;
     }
+    assert!(daw_plugin_window::display_reachable());
     let window = HostWindow::new("Surge XT — Keys", 300, 200, false).unwrap();
     let (conn, _) = x11rb::connect(None).unwrap();
     let utf8 = atom(&conn, "UTF8_STRING");

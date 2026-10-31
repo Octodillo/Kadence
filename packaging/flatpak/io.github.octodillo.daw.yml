@@ -21,7 +21,10 @@ command: kadence
 finish-args:
   - --share=ipc
   - --socket=wayland
-  - --socket=fallback-x11
+  # Plugin interfaces are X11 windows (XWayland under Wayland), so X11 is
+  # needed even when Kadence's own window uses Wayland. Flathub asks for an
+  # exception for having both; plugin GUIs are the reason.
+  - --socket=x11
   - --device=dri
   # Audio and MIDI go through PipeWire's JACK interface. The PulseAudio
   # socket covers systems where PipeWire's socket isn't exposed.
