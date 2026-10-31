@@ -36,6 +36,11 @@ QQC2.ToolButton {
     QQC2.ToolTip.visible: hovered && !menu.visible
     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
 
+    // Closes the menu, if open.
+    function dismiss(): void {
+        menu.dismiss();
+    }
+
     function choose(newDevice: string, newChannel: int): void {
         Project.setTrackMidiInput(trackIndex, newDevice, newChannel);
     }

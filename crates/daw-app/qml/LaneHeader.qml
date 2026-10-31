@@ -27,6 +27,12 @@ Rectangle {
         : ""
     readonly property int mode: revision >= 0 && !placeholder ? Automation.laneMode(track, lane) : 1
 
+    // Closes the lane's menus, if open.
+    function dismiss(): void {
+        addMenu.dismiss();
+        laneMenu.dismiss();
+    }
+
     // Like the timeline's lane rows: a shade off the background.
     color: Kirigami.ColorUtils.tintWithAlpha(Kirigami.Theme.backgroundColor, Kirigami.Theme.textColor, 0.04)
 

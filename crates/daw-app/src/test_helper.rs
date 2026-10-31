@@ -28,6 +28,19 @@ pub mod self_test {
         #[qinvokable]
         fn load_demo_project(self: &TestHelper) -> bool;
 
+        /// Replace the document with `tracks` audio tracks of `clips` clips
+        /// each, for `--benchmark`.
+        #[qinvokable]
+        fn load_stress_project(self: &TestHelper, tracks: i32, clips: i32) -> bool;
+
+        /// A monotonic clock in milliseconds, for frame timing.
+        #[qinvokable]
+        fn now_ms(self: &TestHelper) -> f64;
+
+        /// Deletes the temporary demo and benchmark projects.
+        #[qinvokable]
+        fn remove_temp_files(self: &TestHelper);
+
         /// Open the first MIDI clip in the piano roll, as a double-click on
         /// it in the arrange view would. Returns false if there is none.
         #[qinvokable]
@@ -82,6 +95,33 @@ impl self_test::TestHelper {
                 false
             }
         })
+    }
+
+    fn load_stress_project(&self, tracks: i32, clips: i32) -> bool {
+        let (tracks, clips) = (tracks.max(0) as usize, clips.max(0) as usize);
+        crate::state::with(|s| match crate::demo::stress(tracks, clips) {
+            Ok(doc) => {
+                s.replace_document(doc);
+                true
+            }
+            Err(e) => {
+                eprintln!("stress project: {e}");
+                false
+            }
+        })
+    }
+
+    fn now_ms(&self) -> f64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            * 1000.0
+    }
+
+    fn remove_temp_files(&self) {
+        crate::demo::remove_temp_files();
     }
 
     fn open_first_midi_clip(&self) -> bool {
