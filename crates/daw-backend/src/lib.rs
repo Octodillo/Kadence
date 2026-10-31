@@ -238,14 +238,20 @@ impl Latency {
 }
 
 /// The short name for a port made from `name`: JACK separates client and
-/// port with `:`, so that becomes `-`, and the length is capped.
+/// port with `:`, so that becomes `-`, and the length is capped in bytes,
+/// well inside JACK's 256-byte full name, with room for a number after it.
 pub fn port_short_name(name: &str) -> String {
-    const MAX_CHARS: usize = 64;
-    let cleaned: String = name
+    const MAX_BYTES: usize = 64;
+    let mut cleaned = String::new();
+    for c in name
         .chars()
         .map(|c| if c == ':' || c.is_control() { '-' } else { c })
-        .take(MAX_CHARS)
-        .collect();
+    {
+        if cleaned.len() + c.len_utf8() > MAX_BYTES {
+            break;
+        }
+        cleaned.push(c);
+    }
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         "midi_in".into()
@@ -276,5 +282,21 @@ pub(crate) fn rt_guard<R>(shared: &stats::SharedStats, f: impl FnOnce() -> R) ->
     {
         let _ = shared;
         f()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::port_short_name;
+
+    #[test]
+    fn short_names_are_capped_in_bytes_on_a_char_boundary() {
+        assert_eq!(port_short_name("seq out"), "seq out");
+        assert_eq!(port_short_name("a:b"), "a-b");
+        assert_eq!(port_short_name("  "), "midi_in");
+        let wide = "🎹".repeat(40);
+        let short = port_short_name(&wide);
+        assert!(short.len() <= 64, "{} bytes", short.len());
+        assert_eq!(short, "🎹".repeat(16));
     }
 }
