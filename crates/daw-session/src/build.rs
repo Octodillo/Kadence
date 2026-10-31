@@ -14,9 +14,7 @@ use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::time::TickTime;
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
-use daw_engine::{
-    AutomationLane, AutomationPoint, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
-};
+use daw_engine::{GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter};
 use daw_model::{
     AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, LaneId, Project,
     ProjectSnapshot, SendId, Track, TrackId, TrackKind, TrackOutput,
@@ -460,7 +458,12 @@ pub(crate) fn graph(
     };
     g.connect(click, g.master());
 
-    automate(session, snapshot, &mut g, &strips);
+    automate(session, snapshot, &mut g, &strips, &mut built);
+    // A lane that stopped playing (switched off, removed, emptied) left
+    // its last value behind: send the control's own value again.
+    for k in old.automated.difference(&built.automated) {
+        built.params.remove(k);
+    }
     (g, built)
 }
 
@@ -492,6 +495,7 @@ fn automate(
     project: &Project,
     g: &mut GraphDesc,
     strips: &HashMap<TrackId, NodeId>,
+    built: &mut Built,
 ) {
     for t in project.all_tracks() {
         for lane in t
@@ -510,16 +514,10 @@ fn automate(
                 }
             };
             let Some(node) = node else { continue };
-            let points = session
-                .engine_lane(&lane.points)
-                .points()
-                .iter()
-                .map(|p| AutomationPoint {
-                    value: to_value(p.value),
-                    ..*p
-                })
-                .collect();
-            g.automate(node, param, AutomationLane::new(points));
+            if let Some(key) = g.key(node) {
+                built.automated.insert((key, param));
+            }
+            g.automate(node, param, session.playback_lane(lane, to_value));
         }
     }
 }
