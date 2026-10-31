@@ -54,8 +54,7 @@ pub struct TargetName {
     pub param: String,
 }
 
-/// Parameter ranges of the built-in devices. Each kind's specs are looked
-/// up once (that makes a device).
+/// Parameter ranges of the built-in devices, looked up once per kind.
 #[derive(Default)]
 pub struct BuiltinParams {
     specs: Mutex<HashMap<String, &'static [ParamSpec]>>,
@@ -71,7 +70,7 @@ impl BuiltinParams {
         if let Some(&specs) = cache.get(kind) {
             return specs;
         }
-        let specs = daw_devices::create(kind).map_or(&[][..], |d| d.param_specs());
+        let specs = daw_devices::param_specs(kind).unwrap_or(&[]);
         cache.insert(kind.clone(), specs);
         specs
     }

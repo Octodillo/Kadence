@@ -33,11 +33,15 @@ fn plugin_folder() -> &'static Path {
             .expect("run cargo");
         assert!(status.success(), "building the test plugin failed");
         let dir = tempdir("plugins");
-        std::fs::copy(
-            target.join("debug").join("libdaw_clap_test_plugin.so"),
-            dir.join("test-gain.clap"),
-        )
-        .expect("copy the test plugin");
+        // Cargo links the library into place again even when it is up to
+        // date, so another test process's build can briefly remove it.
+        let library = target.join("debug").join("libdaw_clap_test_plugin.so");
+        let mut tries = 0;
+        while let Err(e) = std::fs::copy(&library, dir.join("test-gain.clap")) {
+            tries += 1;
+            assert!(tries < 50, "copy the test plugin: {e}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
         dir
     })
 }
