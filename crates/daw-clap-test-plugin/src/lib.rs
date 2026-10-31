@@ -7,11 +7,19 @@
 //! Loading the state `b"DAWL"` followed by a little-endian `u32` changes the reported latency;
 //! `b"DAWR"` does the same and asks the host to restart the plugin. `b"DAWS"` followed by a
 //! little-endian `u32` takes that many milliseconds to load and changes nothing, standing in
-//! for a slow main-thread call.
+//! for a slow main-thread call. `b"DAWC"` closes the editor, as the user closing its window
+//! would.
+//!
+//! It has a floating X11 editor that opens no window, so the host's editor handling can be
+//! tested without a display. Showing it stands in for the user loading a preset there: the
+//! plugin tells the host its state changed.
 
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
     PluginAudioPortsImpl,
+};
+use clack_extensions::gui::{
+    GuiApiType, GuiConfiguration, GuiSize, HostGui, PluginGui, PluginGuiImpl, Window,
 };
 use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
 use clack_extensions::note_ports::{
@@ -22,11 +30,12 @@ use clack_extensions::params::{
     ParamDisplayWriter, ParamInfo, ParamInfoFlags, ParamInfoWriter, PluginAudioProcessorParams,
     PluginMainThreadParams, PluginParams,
 };
-use clack_extensions::state::{PluginState, PluginStateImpl};
+use clack_extensions::state::{HostState, PluginState, PluginStateImpl};
 use clack_plugin::events::event_types::ParamValueEvent;
 use clack_plugin::events::spaces::CoreEventSpace;
 use clack_plugin::prelude::*;
 use clack_plugin::stream::{InputStream, OutputStream};
+use std::cell::Cell;
 use std::ffi::CStr;
 use std::fmt::Write as _;
 use std::io::{Read, Write as _};
@@ -50,7 +59,8 @@ impl Plugin for TestPlugin {
             .register::<PluginNotePorts>()
             .register::<PluginLatency>()
             .register::<PluginParams>()
-            .register::<PluginState>();
+            .register::<PluginState>()
+            .register::<PluginGui>();
     }
 }
 
@@ -74,7 +84,11 @@ impl DefaultPluginFactory for TestPlugin {
         host: HostMainThreadHandle<'a>,
         shared: &'a Shared,
     ) -> Result<MainThread<'a>, PluginError> {
-        Ok(MainThread { host, shared })
+        Ok(MainThread {
+            host,
+            shared,
+            gui_created: Cell::new(false),
+        })
     }
 }
 
@@ -102,6 +116,7 @@ impl PluginShared<'_> for Shared {}
 pub struct MainThread<'a> {
     host: HostMainThreadHandle<'a>,
     shared: &'a Shared,
+    gui_created: Cell<bool>,
 }
 
 impl<'a> PluginMainThread<'a, Shared> for MainThread<'a> {}
@@ -257,6 +272,69 @@ impl PluginNotePortsImpl for MainThread<'_> {
     }
 }
 
+impl PluginGuiImpl for MainThread<'_> {
+    fn is_api_supported(&self, configuration: GuiConfiguration) -> bool {
+        configuration.api_type == GuiApiType::X11 && configuration.is_floating
+    }
+
+    fn get_preferred_api(&self) -> Option<GuiConfiguration<'_>> {
+        Some(GuiConfiguration {
+            api_type: GuiApiType::X11,
+            is_floating: true,
+        })
+    }
+
+    fn create(&self, configuration: GuiConfiguration) -> Result<(), PluginError> {
+        if !self.is_api_supported(configuration) || self.gui_created.get() {
+            return Err(PluginError::Message("unsupported editor configuration"));
+        }
+        self.gui_created.set(true);
+        Ok(())
+    }
+
+    fn destroy(&self) {
+        self.gui_created.set(false);
+    }
+
+    fn set_scale(&self, _scale: f64) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn get_size(&self) -> Option<GuiSize> {
+        Some(GuiSize {
+            width: 320,
+            height: 200,
+        })
+    }
+
+    fn set_size(&self, _size: GuiSize) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn set_parent(&self, _window: Window) -> Result<(), PluginError> {
+        Err(PluginError::Message("the editor floats"))
+    }
+
+    fn set_transient(&self, _window: Window) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn show(&self) -> Result<(), PluginError> {
+        if !self.gui_created.get() {
+            return Err(PluginError::Message("no editor"));
+        }
+        // As if the user loaded a preset in it.
+        if let Some(state) = self.host.get_extension::<HostState>() {
+            state.mark_dirty(&self.host);
+        }
+        Ok(())
+    }
+
+    fn hide(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
 impl PluginLatencyImpl for MainThread<'_> {
     fn get(&self) -> u32 {
         self.shared.latency.load(Ordering::Relaxed)
@@ -281,6 +359,13 @@ impl PluginStateImpl for MainThread<'_> {
                 .store(u32::from_le_bytes(latency), Ordering::Relaxed);
             if &magic == b"DAWR" {
                 self.host.request_restart();
+            }
+            return Ok(());
+        }
+        if &magic == b"DAWC" {
+            // As if the user closed the editor's window.
+            if let Some(gui) = self.host.get_extension::<HostGui>() {
+                gui.closed(&self.host, false);
             }
             return Ok(());
         }

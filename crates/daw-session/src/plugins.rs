@@ -174,6 +174,9 @@ pub struct Plugins {
     /// Plugin states saved from an earlier session, to restore instead of the document's when
     /// the plugin is loaded again.
     carried: HashMap<DeviceId, (DeviceSource, Vec<u8>)>,
+    /// Editors that were open in an earlier session, by their window title, to open again
+    /// when the plugin is loaded again.
+    reopen: HashMap<DeviceId, String>,
 }
 
 pub(crate) enum Slot {
@@ -201,6 +204,10 @@ pub(crate) struct Live {
     /// Created since the last build: its parameters have not been sent yet.
     pub fresh: bool,
     pub params: Vec<ParamInfo>,
+    /// Whether the plugin's editor was open at the last tick.
+    pub editor_open: bool,
+    /// The editor's window title, once it has been opened.
+    pub editor_title: Option<String>,
 }
 
 impl Plugins {
@@ -299,6 +306,14 @@ impl Plugins {
             });
         }
         let params = instance.params();
+        // An editor that was open before audio restarted.
+        let mut editor_open = false;
+        let mut editor_title = None;
+        if let Some(title) = self.reopen.remove(&d.id) {
+            instance.set_editor_title(&title);
+            editor_open = instance.open_editor().is_ok();
+            editor_title = Some(title);
+        }
         Slot::Live(Box::new(Live {
             source: d.source.clone(),
             name: d.name.clone(),
@@ -309,6 +324,8 @@ impl Plugins {
             saved: None,
             fresh: true,
             params,
+            editor_open,
+            editor_title,
         }))
     }
 
@@ -358,9 +375,12 @@ impl Plugins {
         for id in gone {
             if let Some(Slot::Live(l)) = self.slots.remove(&id)
                 && !l.crashed
-                && let Ok(state) = l.handle.with(|p| p.save_state())
             {
-                self.carried.insert(id, (l.source.clone(), state));
+                // The device is gone, so is its window.
+                l.handle.with(|p| p.close_editor());
+                if let Ok(state) = l.handle.with(|p| p.save_state()) {
+                    self.carried.insert(id, (l.source.clone(), state));
+                }
             }
         }
     }
@@ -369,24 +389,35 @@ impl Plugins {
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
         self.carried.clear();
+        self.reopen.clear();
     }
 
     /// Saves every running plugin's state and frees the plugins, keeping the states for the
     /// next session to restore.
     pub(crate) fn detach(&mut self) -> Plugins {
         let mut carried = std::mem::take(&mut self.carried);
+        let mut reopen = std::mem::take(&mut self.reopen);
         for (id, slot) in self.slots.drain() {
-            if let Slot::Live(l) = slot
-                && !l.crashed
-                && let Ok(state) = l.handle.with(|p| p.save_state())
-            {
+            let Slot::Live(l) = slot else {
+                continue;
+            };
+            if l.crashed {
+                continue;
+            }
+            if let Ok(state) = l.handle.with(|p| p.save_state()) {
                 carried.insert(id, (l.source.clone(), state));
+            }
+            if l.handle.with(|p| p.is_editor_open())
+                && let Some(title) = l.editor_title.clone()
+            {
+                reopen.insert(id, title);
             }
         }
         Plugins {
             loader: self.loader.take(),
             slots: HashMap::new(),
             carried,
+            reopen,
         }
     }
 }
