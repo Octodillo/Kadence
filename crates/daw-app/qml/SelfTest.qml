@@ -545,6 +545,12 @@ Item {
         () => {
             const edit = window.pageStack.currentItem;
             const strip = edit.trackStrip.strip;
+            // The strip is chosen again just after each Mixer reset, which
+            // the Mixer's own clock can trigger at any moment.
+            if ((strip === null || strip.index !== edit.roll.stripRow) && test.waits < 10) {
+                return false;
+            }
+            test.waits = 0;
             check(edit.roll.stripRow === test.stripRow + 1,
                   "the clip's track moved a row on (" + test.stripRow + " to " + edit.roll.stripRow + ")");
             check(strip !== null && strip.index === edit.roll.stripRow
