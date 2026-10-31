@@ -106,6 +106,13 @@ QtObject {
             return i18nc("@info", "Another export is still running.");
         case Project.DiskTooSlow:
             return i18nc("@info", "Audio files could not be read from disk fast enough, so the export would have had gaps.");
+        case Project.PluginTooSlow:
+            return i18nc("@info", "A plugin did not keep up, so the export would have had gaps.");
+        case Project.ExportPluginCrashed:
+            return i18nc("@info %1 is a device name",
+                         "The plugin of “%1” stopped working, so the export would have been without it.", m.name);
+        case Project.LatencyChanged:
+            return i18nc("@info", "A plugin changed its delay during the export, which would have shifted the audio. Try again.");
         case Project.WrongExtension:
             return i18nc("@info %1 is a file name extension like wav",
                          "The file name ends in “.%1”, which is not the chosen format.", m.detail);
