@@ -353,6 +353,20 @@ Item {
             check(DevicePanel.switchedOn, "switch back on");
         },
         () => {
+            // Beside the page on a wide window, the panel takes room from
+            // it rather than covering its toolbar.
+            if (window.wideScreen) {
+                // The drawer slides in; a slow machine may not have
+                // started the animation yet.
+                const panel = window.devicePanelDrawer;
+                if (window.pageStack.anchors.rightMargin === 0 && test.waits < 10) {
+                    return false;
+                }
+                test.waits = 0;
+                check(window.pageStack.anchors.rightMargin > 0,
+                      "device panel beside the page (modal " + panel.modal + ", visible " + panel.visible
+                      + ", position " + panel.position + ")");
+            }
             shoot(window.title, "mix-device");
         },
         () => {
@@ -629,7 +643,28 @@ Item {
             shoot(window.title, "about");
         },
         () => {
-            window.pageStack.layers.pop();
+            check(window.aboutAction.checked && !window.pageActions[0].checked,
+                  "the drawer marks About while it is open");
+            // Picking About again (which unchecks it first) keeps it open
+            // and marked.
+            window.aboutAction.trigger();
+            check(window.pageStack.layers.depth === 2 && window.aboutAction.checked,
+                  "picking About again keeps it open and marked");
+            // What Escape does.
+            window.closeAbout();
+            check(window.pageStack.layers.depth === 1 && !window.aboutAction.checked
+                  && window.pageActions[0].checked,
+                  "closing About marks the page again");
+            window.closeAbout();
+            check(window.pageStack.layers.depth === 1, "closing About twice is harmless");
+            window.openAbout();
+        },
+        () => {
+            // Picking a page in the drawer leaves About.
+            window.pageActions[0].trigger();
+            check(window.pageStack.layers.depth === 1, "a page action closes About");
+            check(window.pageActions[0].checked && !window.aboutAction.checked,
+                  "the drawer marks the page again after About");
         }
     ]
 

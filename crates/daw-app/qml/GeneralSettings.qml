@@ -70,6 +70,17 @@ Kirigami.FormLayout {
         onValueModified: AppSettings.chooseAutosaveMinutes(value)
     }
 
+    QQC2.CheckBox {
+        Kirigami.FormData.label: i18nc("@label", "Piano roll:")
+        text: i18nc("@option:check", "Play keys and notes as they are pressed or moved")
+        checked: AppSettings.previewNotes
+        onToggled: {
+            AppSettings.choosePreviewNotes(checked);
+            // Toggling replaced the binding; follow the setting again.
+            checked = Qt.binding(() => AppSettings.previewNotes);
+        }
+    }
+
     FolderDialog {
         id: folderDialog
         title: i18nc("@title:window", "Choose Project Folder")

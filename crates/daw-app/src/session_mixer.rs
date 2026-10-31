@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::double_click::Clicks;
 use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
 use daw_arrange::ParamCatalog;
@@ -107,6 +108,12 @@ pub struct SessionMixer {
     pub write_lanes: HashSet<LaneId>,
     takes: Vec<Take>,
     effects: Vec<EffectChoice>,
+    /// The control held now, with the document's revision and undo length
+    /// when it was grabbed.
+    held: Option<((StripId, Control), u64, usize)>,
+    /// Presses that just edited a control, which a double-click's reset
+    /// takes back.
+    clicks: Option<Clicks<(StripId, Control)>>,
 }
 
 impl Default for SessionMixer {
@@ -116,6 +123,8 @@ impl Default for SessionMixer {
             write_lanes: HashSet::new(),
             takes: Vec::new(),
             effects: effect_choices(),
+            held: None,
+            clicks: None,
         }
     }
 }
@@ -634,7 +643,45 @@ impl SessionMixer {
         control: Control,
         pressed: bool,
     ) -> Result<(), Message> {
-        self.touch_with(doc, session, id, control, pressed, None)
+        if pressed {
+            // A press is its own undo step, apart from wheel or key edits.
+            doc.seal();
+            self.held = Some(((id, control), doc.revision(), doc.history().undo_len()));
+        }
+        let r = self.touch_with(doc, session, id, control, pressed, None);
+        if !pressed {
+            if let Some((key, before, undo_len)) = self.held.take()
+                && key == (id, control)
+            {
+                self.clicks = Clicks::after_edit(self.clicks, key, before, undo_len, doc);
+            }
+            // Also without a session, the next edit is its own step.
+            doc.seal();
+        }
+        r
+    }
+
+    /// Puts a control back to its default (0 dB, centre) as one undo step,
+    /// written into automation like a touch while writing. The edits of a
+    /// double-click's clicks on it just before are taken back.
+    pub fn reset(
+        &mut self,
+        doc: &mut Document,
+        mut session: Option<&mut Session>,
+        id: StripId,
+        control: Control,
+    ) -> Result<(), Message> {
+        let value = match control {
+            Control::Volume | Control::Pan | Control::Send(_) => 0.0,
+            Control::Param { .. } => return Ok(()),
+        };
+        Clicks::take_back(self.clicks.take(), (id, control), doc).map_err(Message::from)?;
+        doc.seal();
+        self.touch_with(doc, session.as_deref_mut(), id, control, true, None)?;
+        let r = self.set(doc, session.as_deref_mut(), id, control, value);
+        let ended = self.touch_with(doc, session, id, control, false, None);
+        doc.seal();
+        r.and(ended)
     }
 
     /// Grabs a device parameter, as [`touch`](Self::touch) does, with what
@@ -1122,6 +1169,10 @@ impl MixerHandle for AppMixer {
     fn touch(&mut self, id: StripId, control: Control, pressed: bool) {
         self.report(|m, d, s| m.touch(d, s, id, control, pressed));
     }
+
+    fn reset(&mut self, id: StripId, control: Control) {
+        self.report(|m, d, s| m.reset(d, s, id, control));
+    }
 }
 
 #[cfg(test)]
@@ -1360,6 +1411,80 @@ mod tests {
         let drums = r.id("Drums");
         r.mixer.set_instrument(&mut r.doc, drums, synth).unwrap();
         assert!(r.track("Drums").devices.is_empty());
+    }
+
+    #[test]
+    fn reset_takes_back_the_first_click_and_is_one_step() {
+        let mut r = rig();
+        r.set("Drums", Control::Volume, -6.0);
+        r.doc.seal();
+        // A double-click's first click jumps the fader.
+        r.touch("Drums", Control::Volume, true);
+        r.set("Drums", Control::Volume, -40.0);
+        r.touch("Drums", Control::Volume, false);
+        let id = r.id("Drums");
+        r.mixer
+            .reset(&mut r.doc, Some(&mut r.session), id, Control::Volume)
+            .unwrap();
+        assert_eq!(r.track("Drums").volume_db, 0.0);
+        // A drag after the reset is its own step.
+        r.touch("Drums", Control::Volume, true);
+        r.set("Drums", Control::Volume, -10.0);
+        r.touch("Drums", Control::Volume, false);
+        r.doc.undo().unwrap();
+        assert_eq!(r.track("Drums").volume_db, 0.0, "undo the drag");
+        r.doc.undo().unwrap();
+        assert_eq!(
+            r.track("Drums").volume_db,
+            -6.0,
+            "undo the reset, not the click"
+        );
+    }
+
+    #[test]
+    fn reset_takes_back_both_clicks_of_a_double_click() {
+        for second in [-40.0, -39.0] {
+            let mut r = rig();
+            r.set("Drums", Control::Volume, -6.0);
+            // A wheel turn: no press, so not a click.
+            r.set("Drums", Control::Volume, -5.0);
+            // Both clicks reach the mixer before the reset; the second
+            // edits only if it lands somewhere else.
+            for v in [-40.0, second] {
+                r.touch("Drums", Control::Volume, true);
+                r.set("Drums", Control::Volume, v);
+                r.touch("Drums", Control::Volume, false);
+            }
+            let id = r.id("Drums");
+            r.mixer
+                .reset(&mut r.doc, Some(&mut r.session), id, Control::Volume)
+                .unwrap();
+            assert_eq!(r.track("Drums").volume_db, 0.0);
+            r.doc.undo().unwrap();
+            assert_eq!(
+                r.track("Drums").volume_db,
+                -5.0,
+                "one undo back to before the clicks, keeping the wheel turn"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_keeps_an_older_edit() {
+        let mut r = rig();
+        // Not a double-click: the edit was not the last press.
+        r.touch("Drums", Control::Volume, true);
+        r.set("Drums", Control::Volume, -6.0);
+        r.touch("Drums", Control::Volume, false);
+        r.set("Drums", Control::Pan, 0.5);
+        let id = r.id("Drums");
+        r.mixer
+            .reset(&mut r.doc, Some(&mut r.session), id, Control::Volume)
+            .unwrap();
+        assert_eq!(r.track("Drums").volume_db, 0.0);
+        assert_eq!(r.track("Drums").pan, 0.5);
+        r.doc.undo().unwrap();
+        assert_eq!(r.track("Drums").volume_db, -6.0);
     }
 
     #[test]

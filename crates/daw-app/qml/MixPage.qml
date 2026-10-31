@@ -44,6 +44,20 @@ Kirigami.Page {
         }
     }
 
+    // Every strip's width and effects box height.
+    readonly property LayoutSize stripWidth: LayoutSize {
+        key: "MixerStripWidth"
+        defaultUnits: 7
+        minimumUnits: 5
+        maximumUnits: 20
+    }
+    readonly property LayoutSize boxHeight: LayoutSize {
+        key: "MixerSlotsHeight"
+        defaultUnits: 11
+        minimumUnits: 4
+        maximumUnits: 60
+    }
+
     background: Rectangle {
         color: Kirigami.Theme.backgroundColor
     }
@@ -60,8 +74,19 @@ Kirigami.Page {
             boundsBehavior: Flickable.StopAtBounds
             clip: true
 
+            // After the master, which it plays through.
+            footer: MetronomeStrip {
+                height: ListView.view.height
+                visible: ListView.view.count > 0
+                widthSize: page.stripWidth
+                boxSize: page.boxHeight
+                position: ListView.view.count
+            }
+
             delegate: ChannelStrip {
                 height: ListView.view.height
+                widthSize: page.stripWidth
+                boxSize: page.boxHeight
             }
         }
     }

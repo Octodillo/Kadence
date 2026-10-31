@@ -435,6 +435,7 @@ fn fixed_size_balance_bundle(dir: &Path, name: &str) -> tempfile::TempDir {
 /// UI's size, and its widget keeps that size even if the window changes.
 #[test]
 fn fixed_size_editors_have_fixed_windows() {
+    use daw_plugin_window::x11rb;
     use x11rb::connection::Connection;
     use x11rb::properties::WmSizeHints;
     use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt as _};
@@ -471,7 +472,7 @@ fn fixed_size_editors_have_fixed_windows() {
         .children
         .into_iter()
         .find(|&w| {
-            conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 64)
+            conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 64)
                 .ok()
                 .and_then(|c| c.reply().ok())
                 .is_some_and(|r| r.value == name.as_bytes())

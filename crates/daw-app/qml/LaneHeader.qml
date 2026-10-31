@@ -245,4 +245,10 @@ Rectangle {
         acceptedButtons: Qt.RightButton
         onTapped: laneMenu.popup()
     }
+    // Touch screens have no right button: hold a finger instead.
+    TapHandler {
+        acceptedDevices: PointerDevice.TouchScreen
+        // Under the finger: a touch doesn't move the mouse cursor.
+        onLongPressed: laneMenu.popup(parent, point.position.x, point.position.y)
+    }
 }

@@ -117,6 +117,10 @@ pub mod qobject {
         /// is "volume", "pan" or "send" (with `send` its index).
         #[qinvokable]
         fn touch(self: Pin<&mut Mixer>, row: i32, control: &QString, send: i32, pressed: bool);
+        /// Double-click: puts a control (as for `touch`) back to its
+        /// default, taking back the first click's edit.
+        #[qinvokable]
+        fn reset(self: Pin<&mut Mixer>, row: i32, control: &QString, send: i32);
         /// Picks up edits made elsewhere, records held controls and
         /// refreshes `levels`; `seconds` since the last call.
         #[qinvokable]
@@ -476,27 +480,37 @@ impl qobject::Mixer {
         self.reload();
     }
 
-    fn touch(mut self: Pin<&mut Self>, row: i32, control: &QString, send: i32, pressed: bool) {
-        let Some(id) = self.strip_id(row) else {
-            return;
-        };
+    /// The strip and control QML names: "volume", "pan" or "send" with
+    /// `send` its index.
+    fn control(&self, row: i32, control: &QString, send: i32) -> Option<(StripId, Control)> {
+        let id = self.strip_id(row)?;
         let control = match control.to_string().as_str() {
             "volume" => Control::Volume,
             "pan" => Control::Pan,
             "send" => {
                 let target = usize::try_from(send)
                     .ok()
-                    .and_then(|i| self.strips.get(row as usize)?.sends.get(i))
-                    .map(|s| s.target);
-                match target {
-                    Some(t) => Control::Send(t),
-                    None => return,
-                }
+                    .and_then(|i| self.strips.get(row as usize)?.sends.get(i))?
+                    .target;
+                Control::Send(target)
             }
-            _ => return,
+            _ => return None,
         };
-        self.as_mut().rust_mut().mixer.touch(id, control, pressed);
-        self.reload();
+        Some((id, control))
+    }
+
+    fn touch(mut self: Pin<&mut Self>, row: i32, control: &QString, send: i32, pressed: bool) {
+        if let Some((id, control)) = self.control(row, control, send) {
+            self.as_mut().rust_mut().mixer.touch(id, control, pressed);
+            self.reload();
+        }
+    }
+
+    fn reset(mut self: Pin<&mut Self>, row: i32, control: &QString, send: i32) {
+        if let Some((id, control)) = self.control(row, control, send) {
+            self.as_mut().rust_mut().mixer.reset(id, control);
+            self.reload();
+        }
     }
 
     /// Re-reads the strips, which may also have changed elsewhere (another
