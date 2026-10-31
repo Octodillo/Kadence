@@ -74,6 +74,12 @@ fn tap_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 3)
 }
 
+/// The key of a bus's input: a unity gain stage in front of the strip, for
+/// pre-fader sends from a bus with no devices to tap.
+fn input_key(track: TrackId) -> NodeKey {
+    NodeKey(track.0.as_u128() ^ 4)
+}
+
 /// How many captured input events can wait for the recorder.
 const MIDI_CAPTURE: usize = 4096;
 
@@ -353,6 +359,27 @@ pub(crate) fn graph(
                 chain.push(id);
             }
         }
+        // A bus taps its pre-fader sends from the end of its devices; with
+        // none switched on, from a unity stage in front of the strip.
+        if chain.is_empty()
+            && track.kind == TrackKind::Bus
+            && track.sends.iter().any(|s| s.pre_fader)
+        {
+            let key = input_key(track.id);
+            let id = match g.reuse(key) {
+                Some(id) => id,
+                None => {
+                    let id = g.add_node(
+                        NodeKind::Bus,
+                        format!("{} input", track.name),
+                        Box::new(Strip::send(STRIP_CHANNELS, 1.0)),
+                    );
+                    g.set_key(id, key);
+                    id
+                }
+            };
+            chain.push(id);
+        }
         for pair in chain.windows(2) {
             g.connect(pair[0], pair[1]);
         }
@@ -391,30 +418,29 @@ pub(crate) fn graph(
         }
     }
 
+    // Commands and loading never let routing loop, but the engine would
+    // refuse the whole graph if it did, so a route that would close a loop
+    // is left out and reported instead.
+    let mut routes = Routes::default();
     for track in snapshot.tracks.iter() {
         let target = match track.output {
             TrackOutput::Master => master,
             TrackOutput::Bus(b) => b,
         };
         if let Some(&head) = heads.get(&target) {
+            if !routes.add(track.id, target) {
+                session.warnings.push(Warning::RoutingLoop {
+                    track: track.name.clone(),
+                });
+                continue;
+            }
             g.connect(strips[&track.id], head);
         }
     }
     for track in snapshot.all_tracks() {
         for s in &track.sends {
-            let Some(&head) = heads.get(&s.target) else {
-                continue;
-            };
-            let tap = if s.pre_fader {
-                // Before the fader: the end of the device chain. A track with
-                // nothing before its strip has no pre-fader signal.
-                match pre_fader.get(&track.id) {
-                    Some(&n) => n,
-                    None => continue,
-                }
-            } else {
-                strips[&track.id]
-            };
+            // Every send gets its node, connected or not, so its level and
+            // automation always have somewhere to go.
             let key = send_key(s.id);
             let node = match g.reuse(key) {
                 Some(id) => {
@@ -433,6 +459,26 @@ pub(crate) fn graph(
                     id
                 }
             };
+            let Some(&head) = heads.get(&s.target) else {
+                continue;
+            };
+            let tap = if s.pre_fader {
+                // Before the fader: the end of the device chain. A track with
+                // nothing before its strip (an instrument track without
+                // devices) has no pre-fader signal.
+                match pre_fader.get(&track.id) {
+                    Some(&n) => n,
+                    None => continue,
+                }
+            } else {
+                strips[&track.id]
+            };
+            if !routes.add(track.id, s.target) {
+                session.warnings.push(Warning::RoutingLoop {
+                    track: track.name.clone(),
+                });
+                continue;
+            }
             g.connect(tap, node);
             g.connect(node, head);
         }
@@ -465,6 +511,28 @@ pub(crate) fn graph(
         built.params.remove(k);
     }
     (g, built)
+}
+
+/// The routes between tracks added to a graph so far.
+#[derive(Default)]
+struct Routes(HashMap<TrackId, Vec<TrackId>>);
+
+impl Routes {
+    /// Adds a route from `from` to `to` unless it would close a loop.
+    fn add(&mut self, from: TrackId, to: TrackId) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![to];
+        while let Some(t) = stack.pop() {
+            if t == from {
+                return false;
+            }
+            if seen.insert(t) {
+                stack.extend(self.0.get(&t).into_iter().flatten().copied());
+            }
+        }
+        self.0.entry(from).or_default().push(to);
+        true
+    }
 }
 
 /// Copies what was last sent to a reused node, so only real changes are

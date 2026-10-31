@@ -7,7 +7,7 @@ use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_media::{AudioData, WavFormat, write_wav};
 use daw_model::{
     AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Color, Device,
-    DeviceSource, Document, Fade, FadeShape, MidiClip, Note, Project, Track, TrackKind,
+    DeviceSource, Document, Fade, FadeShape, MidiClip, Note, Project, Send, Track, TrackKind,
 };
 
 const RATE: u32 = 48_000;
@@ -118,7 +118,22 @@ pub fn build() -> Result<Document, String> {
         TickTime(2 * BAR),
         ClipContent::Midi(m),
     ))];
-    project.tracks = vec![Arc::new(drums), Arc::new(leads), Arc::new(keys)];
+    let mut reverb = Track::new(TrackKind::Bus, "Reverb");
+    reverb.devices.push(Device::new(
+        "Reverb",
+        DeviceSource::Builtin {
+            kind: "daw.reverb".into(),
+        },
+    ));
+    let mut send = Send::new(reverb.id);
+    send.level_db = -8.0;
+    leads.sends.push(send);
+    project.tracks = vec![
+        Arc::new(drums),
+        Arc::new(leads),
+        Arc::new(keys),
+        Arc::new(reverb),
+    ];
     let mut doc = Document::new(project);
     doc.save_as(&dir).map_err(|e| e.to_string())?;
     Ok(doc)
