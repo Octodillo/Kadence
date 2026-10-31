@@ -470,8 +470,9 @@ Kirigami.ApplicationWindow {
     pageStack.columnView.columnResizeMode: Kirigami.ColumnView.SingleColumn
     // The device panel beside the page takes its room rather than covering
     // the page's toolbar (Play, Write Automation) and the strips under it.
-    pageStack.anchors.rightMargin: devicePanel.edge === Qt.RightEdge ? devicePanel.besidePage : 0
-    pageStack.anchors.leftMargin: devicePanel.edge === Qt.LeftEdge ? devicePanel.besidePage : 0
+    // The window mirrors layouts right to left, which moves this margin
+    // to the left, where the drawer is then.
+    pageStack.anchors.rightMargin: devicePanel.besidePage
 
     // The status line is on the Arrange page; elsewhere (recording from
     // the Mix or Edit page, a mixer error) a new message pops up instead.

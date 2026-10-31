@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
@@ -105,7 +106,25 @@ pub struct SessionMixer {
     pub write_lanes: HashSet<LaneId>,
     takes: Vec<Take>,
     effects: Vec<EffectChoice>,
+    /// The control held now, with the revision it was grabbed at.
+    held: Option<(StripId, Control, u64)>,
+    /// The last press that edited a control: the first click of a
+    /// double-click, which a reset takes back.
+    click: Option<Click>,
 }
+
+/// A press that edited `control`, leaving the document at `revision`.
+#[derive(Clone, Copy, Debug)]
+struct Click {
+    id: StripId,
+    control: Control,
+    revision: u64,
+    at: Instant,
+}
+
+/// The longest a double-click's two clicks can be apart, as for the device
+/// panel.
+const DOUBLE_CLICK: Duration = Duration::from_millis(600);
 
 impl Default for SessionMixer {
     fn default() -> Self {
@@ -114,6 +133,8 @@ impl Default for SessionMixer {
             write_lanes: HashSet::new(),
             takes: Vec::new(),
             effects: effect_choices(),
+            held: None,
+            click: None,
         }
     }
 }
@@ -632,7 +653,58 @@ impl SessionMixer {
         control: Control,
         pressed: bool,
     ) -> Result<(), Message> {
-        self.touch_with(doc, session, id, control, pressed, None)
+        if pressed {
+            self.held = Some((id, control, doc.revision()));
+        }
+        let r = self.touch_with(doc, session, id, control, pressed, None);
+        if !pressed {
+            // Remember a press that changed something, for a reset.
+            self.click = match self.held.take() {
+                Some((i, c, before)) if i == id && c == control && doc.revision() != before => {
+                    Some(Click {
+                        id,
+                        control,
+                        revision: doc.revision(),
+                        at: Instant::now(),
+                    })
+                }
+                _ => None,
+            };
+            // Also without a session, the next edit is its own step.
+            doc.seal();
+        }
+        r
+    }
+
+    /// Puts a control back to its default (0 dB, centre) as one undo step,
+    /// written into automation like a touch while writing. A press on the
+    /// same control just before is a double-click's first click: its edit
+    /// is taken back.
+    pub fn reset(
+        &mut self,
+        doc: &mut Document,
+        mut session: Option<&mut Session>,
+        id: StripId,
+        control: Control,
+    ) -> Result<(), Message> {
+        let value = match control {
+            Control::Volume | Control::Pan | Control::Send(_) => 0.0,
+            Control::Param { .. } => return Ok(()),
+        };
+        if let Some(c) = self.click.take()
+            && c.id == id
+            && c.control == control
+            && c.revision == doc.revision()
+            && c.at.elapsed() < DOUBLE_CLICK
+        {
+            doc.undo().map_err(Message::from)?;
+        }
+        doc.seal();
+        self.touch_with(doc, session.as_deref_mut(), id, control, true, None)?;
+        let r = self.set(doc, session.as_deref_mut(), id, control, value);
+        let ended = self.touch_with(doc, session, id, control, false, None);
+        doc.seal();
+        r.and(ended)
     }
 
     /// Grabs a device parameter, as [`touch`](Self::touch) does, with what
@@ -1122,6 +1194,10 @@ impl MixerHandle for AppMixer {
     fn touch(&mut self, id: StripId, control: Control, pressed: bool) {
         self.report(|m, d, s| m.touch(d, s, id, control, pressed));
     }
+
+    fn reset(&mut self, id: StripId, control: Control) {
+        self.report(|m, d, s| m.reset(d, s, id, control));
+    }
 }
 
 #[cfg(test)]
@@ -1360,6 +1436,52 @@ mod tests {
         let drums = r.id("Drums");
         r.mixer.set_instrument(&mut r.doc, drums, synth).unwrap();
         assert!(r.track("Drums").devices.is_empty());
+    }
+
+    #[test]
+    fn reset_takes_back_the_first_click_and_is_one_step() {
+        let mut r = rig();
+        r.set("Drums", Control::Volume, -6.0);
+        r.doc.seal();
+        // A double-click's first click jumps the fader.
+        r.touch("Drums", Control::Volume, true);
+        r.set("Drums", Control::Volume, -40.0);
+        r.touch("Drums", Control::Volume, false);
+        let id = r.id("Drums");
+        r.mixer
+            .reset(&mut r.doc, Some(&mut r.session), id, Control::Volume)
+            .unwrap();
+        assert_eq!(r.track("Drums").volume_db, 0.0);
+        // A drag after the reset is its own step.
+        r.touch("Drums", Control::Volume, true);
+        r.set("Drums", Control::Volume, -10.0);
+        r.touch("Drums", Control::Volume, false);
+        r.doc.undo().unwrap();
+        assert_eq!(r.track("Drums").volume_db, 0.0, "undo the drag");
+        r.doc.undo().unwrap();
+        assert_eq!(
+            r.track("Drums").volume_db,
+            -6.0,
+            "undo the reset, not the click"
+        );
+    }
+
+    #[test]
+    fn reset_keeps_an_older_edit() {
+        let mut r = rig();
+        // Not a double-click: the edit was not the last press.
+        r.touch("Drums", Control::Volume, true);
+        r.set("Drums", Control::Volume, -6.0);
+        r.touch("Drums", Control::Volume, false);
+        r.set("Drums", Control::Pan, 0.5);
+        let id = r.id("Drums");
+        r.mixer
+            .reset(&mut r.doc, Some(&mut r.session), id, Control::Volume)
+            .unwrap();
+        assert_eq!(r.track("Drums").volume_db, 0.0);
+        assert_eq!(r.track("Drums").pan, 0.5);
+        r.doc.undo().unwrap();
+        assert_eq!(r.track("Drums").volume_db, -6.0);
     }
 
     #[test]
