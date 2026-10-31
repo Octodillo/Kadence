@@ -18,7 +18,6 @@
 //!
 //! Features still on open pull requests have hooks marked `TODO(#n)`; extend
 //! this test when they merge:
-//! * #95 sends from the mixer: add the keys' send there.
 //! * #98 device parameters: set the reverb through the device panel's
 //!   commands, and check bypass.
 //! * #91 plugin devices: add the CLAP test plugin as an insert and check it
@@ -40,12 +39,12 @@ use daw_engine::EngineConfig;
 use daw_media::{AudioData, WavFormat, decode_file, write_wav};
 use daw_model::bundle::to_json;
 use daw_model::commands::{
-    AddClip, AddLane, AddNotes, AddSend, ClipField, RemoveSend, SetClip, SetParam, SetTempo,
+    AddClip, AddLane, AddNotes, ClipField, RemoveSend, SetClip, SetParam, SetTempo,
 };
 use daw_model::{
     AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, DeviceSource,
-    Document, Fade, FadeShape, MeterPoint, MidiClip, Note, Project, Send, SendId, TempoData,
-    TempoPoint, Track, TrackId, TrackKind,
+    Document, Fade, FadeShape, MeterPoint, MidiClip, Note, Project, SendId, TempoData, TempoPoint,
+    Track, TrackId, TrackKind,
 };
 use daw_session::{Session, SessionConfig};
 
@@ -225,11 +224,16 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     })
     .unwrap();
     doc.seal();
-    // TODO(#95): add the send from the mixer.
-    let send = Send::new(bus);
-    let keys_send = send.id;
-    doc.execute(AddSend { track: keys, send }).unwrap();
-    doc.seal();
+    // The keys' send into the reverb bus, added from the keys' strip.
+    let choices = mixer
+        .strips(doc.project(), None)
+        .into_iter()
+        .find(|s| s.id == strip(keys))
+        .unwrap()
+        .send_choices;
+    assert!(choices.iter().any(|c| c.id == strip(bus)), "{choices:?}");
+    assert!(mixer.add_send(&mut doc, strip(keys), strip(bus)));
+    let keys_send = doc.project().track(keys).unwrap().sends[0].id;
 
     // Volume automation: full level for the first chord, -12 dB from the
     // second on.
