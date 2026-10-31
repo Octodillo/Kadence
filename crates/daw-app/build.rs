@@ -32,6 +32,8 @@ const QML_FILES: &[&str] = &[
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
     "qml/TrackHeader.qml",
+    "qml/RecoveryDialog.qml",
+    "qml/RelinkDialog.qml",
     "qml/PluginBrowser.qml",
     "qml/PluginSettings.qml",
     "qml/ExportDialog.qml",

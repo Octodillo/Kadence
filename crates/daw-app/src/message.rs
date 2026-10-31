@@ -26,6 +26,10 @@ pub enum Context {
     Playback,
     /// Recording MIDI or audio.
     Record,
+    /// Copying audio from outside the bundle into it.
+    Collect,
+    /// Getting unsaved work back from an autosave.
+    Recover,
     /// Exporting the song to an audio file.
     Export,
 }
@@ -134,6 +138,8 @@ pub enum Reason {
     TrackGoneWhileRecording,
     /// The audio system missed `number` cycles while recording.
     RecordXruns,
+    /// The bundle at `path` is open in another Kadence.
+    AlreadyOpen,
 }
 
 /// A message, flattened for a front end.
@@ -236,6 +242,8 @@ pub enum Message {
     Playback(daw_session::SessionError),
     Warning(Warning),
     Record(RecordProblem),
+    /// Another Kadence has the bundle at this path open.
+    AlreadyOpen(PathBuf),
     Export(ExportProblem),
     /// The song was exported to this file, `seconds` long.
     Exported {
@@ -378,6 +386,7 @@ impl Message {
                     ..Fields::new(C::Record, R::RecordXruns)
                 },
             },
+            Self::AlreadyOpen(path) => Fields::new(C::Open, R::AlreadyOpen).path(path),
             Self::Export(p) => export_fields(p),
             Self::Exported { path, seconds } => Fields {
                 number: *seconds,
