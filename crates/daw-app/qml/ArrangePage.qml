@@ -14,6 +14,11 @@ import io.github.octodillo.daw
 Kirigami.Page {
     id: page
 
+    // Touch drags on the timeline pan and edit; the page row must not take
+    // them for swiping between pages (the timeline lets touches be stolen
+    // so a pinch can take over).
+    Kirigami.ColumnView.preventStealing: true
+
     property list<Kirigami.Action> transportActions
     readonly property alias view: view
     readonly property alias transportBar: transportBar
@@ -429,9 +434,13 @@ Kirigami.Page {
                             // Follow the finger the touch began with: while a
                             // second one lands, the mouse position Qt makes
                             // from the touch can jump between them.
-                            const at = touchPoint.active ? touchPoint.point.position : Qt.point(m.x, m.y);
-                            view.wheel(at.x, at.y, at.x - last.x, at.y - last.y, 0);
-                            last = at;
+                            // Once that finger lifts, stop: the other one
+                            // is somewhere else entirely.
+                            if (touchPoint.active) {
+                                const at = touchPoint.point.position;
+                                view.wheel(at.x, at.y, at.x - last.x, at.y - last.y, 0);
+                                last = at;
+                            }
                         } else {
                             view.motion(m.x, m.y, m.modifiers);
                         }
