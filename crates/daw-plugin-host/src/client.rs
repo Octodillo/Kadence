@@ -712,7 +712,12 @@ pub struct SandboxedInstance {
     ports: PortLayout,
     params: Vec<ParamInfo>,
     has_editor: bool,
+    /// The editor was opened and not closed since, by us or (as the host reports) the user.
     editor_open: bool,
+    /// From `set_editor_title`, for this host and the ones a reload starts.
+    editor_title: Option<String>,
+    /// The host reported a state change not taken yet.
+    state_changed: bool,
     latency: u32,
     /// The host reported that the plugin wants to be prepared again; see
     /// [`PluginInstance::take_layout_changed`].
@@ -820,6 +825,8 @@ impl SandboxedInstance {
             params: Vec::new(),
             has_editor: false,
             editor_open: false,
+            editor_title: None,
+            state_changed: false,
             latency,
             layout_changed: false,
             // Instantiating prepared it.
@@ -909,6 +916,9 @@ impl SandboxedInstance {
             a.rt.late_pending = false;
             a.shm = Some(shm);
         });
+        if let Some(title) = self.editor_title.clone() {
+            let _ = self.control(Request::SetEditorTitle(title), &[]);
+        }
         if self.editor_open {
             self.editor_open = false;
             let _ = self.open_editor();
@@ -1511,6 +1521,11 @@ impl PluginInstance for SandboxedInstance {
         };
         self.state = Some(data.to_vec());
         self.mark_clean(before);
+        // Changes reported before the load are overwritten by it.
+        self.state_changed = false;
+        if let Some(link) = self.running() {
+            link.shm.header().state_changed.store(0, Ordering::Release);
+        }
         self.latency = latency;
         // Loading state can change the parameter list (a different preset of a modular synth).
         self.refresh_params();
@@ -1536,17 +1551,46 @@ impl PluginInstance for SandboxedInstance {
         let _ = self.control(Request::CloseEditor, &[]);
     }
 
+    fn is_editor_open(&self) -> bool {
+        self.editor_open
+    }
+
+    fn set_editor_title(&mut self, title: &str) {
+        if self.editor_title.as_deref() == Some(title) {
+            return;
+        }
+        self.editor_title = Some(title.to_owned());
+        if self.running().is_some() {
+            let _ = self.control(Request::SetEditorTitle(title.to_owned()), &[]);
+        }
+    }
+
+    fn take_state_changed(&mut self) -> bool {
+        std::mem::take(&mut self.state_changed)
+    }
+
     /// The host pumps the plugin's own main thread; this performs requested reloads and picks
     /// up layout changes the host reported.
     fn on_main_thread(&mut self) {
         if self.shared.reload_requested.load(Ordering::Acquire) {
             let _ = self.reload();
         }
-        if let Some(link) = self.running()
-            && link.shm.header().layout_changed.swap(0, Ordering::AcqRel) != 0
-        {
+        let Some(link) = self.running() else {
+            return;
+        };
+        let header = link.shm.header();
+        let layout_changed = header.layout_changed.swap(0, Ordering::AcqRel) != 0;
+        let state_changed = header.state_changed.swap(0, Ordering::AcqRel) != 0;
+        // The user closed the window. (A host that is down keeps the editor "open", so a
+        // reload opens it again.)
+        let closed = header.editor_open.load(Ordering::Acquire) == 0;
+        if layout_changed {
             self.layout_changed = true;
             self.prepared_with = None;
+        }
+        self.state_changed |= state_changed;
+        if closed && self.editor_open {
+            self.editor_open = false;
         }
     }
 

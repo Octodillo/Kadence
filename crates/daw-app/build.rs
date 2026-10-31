@@ -96,6 +96,7 @@ fn main() {
         "src/device_panel_bridge.rs",
         "src/plugins_bridge.rs",
         "src/instruments_bridge.rs",
+        "src/plugin_editors_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",

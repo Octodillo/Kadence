@@ -33,12 +33,20 @@ fn build_test_plugin() -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target = root.join("target").join("clap-test-plugin");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    // The same build as every other test that uses this target directory: a
+    // different package set unifies features differently and rebuilds the
+    // plugin while another test process is copying or loading it.
     let status = Command::new(cargo)
         .args([
             "build",
             "--quiet",
             "--package",
             "daw-clap-test-plugin",
+            "--package",
+            "daw-plugin-host",
+            "--bin",
+            "daw-plugin-host",
+            "--lib",
             "--target-dir",
         ])
         .arg(&target)
@@ -160,7 +168,54 @@ fn reports_ports_params_and_latency() {
     assert!(gain.automatable);
     let last = params.iter().find(|p| p.id == LAST_NOTE).unwrap();
     assert!(!last.automatable, "read-only params are not automatable");
-    assert!(!plugin.has_editor());
+    assert!(plugin.has_editor());
+}
+
+#[test]
+fn opens_and_closes_a_floating_editor_without_a_display() {
+    let mut plugin = instance();
+    assert!(!plugin.is_editor_open());
+    plugin.set_editor_title("DAW Test Gain — Bass");
+    plugin.open_editor().expect("open the editor");
+    assert!(plugin.is_editor_open());
+    // Opening it again leaves it as it is.
+    plugin.open_editor().expect("open the editor again");
+    plugin.set_editor_title("DAW Test Gain — Lead");
+    // Showing the test plugin's editor marks its state dirty, as a preset loaded there would.
+    plugin.on_main_thread();
+    assert!(plugin.take_state_changed());
+    assert!(!plugin.take_state_changed(), "reported once");
+    plugin.close_editor();
+    assert!(!plugin.is_editor_open());
+    plugin.close_editor();
+    // A second open works after a close.
+    plugin
+        .open_editor()
+        .expect("open the editor after closing it");
+    assert!(plugin.is_editor_open());
+}
+
+#[test]
+fn an_editor_the_user_closed_reads_as_closed() {
+    let mut plugin = instance();
+    plugin.open_editor().unwrap();
+    plugin.load_state(b"DAWC").unwrap();
+    assert!(plugin.is_editor_open(), "noticed by the main-thread pump");
+    plugin.on_main_thread();
+    assert!(!plugin.is_editor_open());
+}
+
+#[test]
+fn loading_state_is_not_a_change_of_the_plugins_own() {
+    let mut plugin = instance();
+    plugin.open_editor().unwrap();
+    let state = plugin.save_state().unwrap();
+    // Saving does not clear a change waiting to be reported.
+    assert!(plugin.take_state_changed());
+    plugin.close_editor();
+    plugin.open_editor().unwrap();
+    plugin.load_state(&state).unwrap();
+    assert!(!plugin.take_state_changed(), "the load made it moot");
 }
 
 #[test]

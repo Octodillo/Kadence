@@ -70,6 +70,9 @@ QtObject {
         case Project.PluginStateNotSaved:
             return i18nc("@info %1 is a device name, %2 a message which may be in English",
                          "“%1” did not hand over its plugin settings, so the project keeps the ones saved before (%2).", m.name, m.detail);
+        case Project.PluginEditorFailed:
+            return i18nc("@info %1 is a device name, %2 a message which may be in English",
+                         "The plugin interface of “%1” could not be opened (%2).", m.name, m.detail);
         case Project.CannotStream:
             return i18nc("@info %1 is a file path, %2 a message which may be in English",
                          "“%1” could not be played from disk, so its clips are silent (%2).", m.path, m.detail);
