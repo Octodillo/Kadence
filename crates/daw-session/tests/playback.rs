@@ -938,3 +938,150 @@ fn a_faster_tempo_while_looping_keeps_the_playhead_in_the_loop() {
     let at = rig.session.position();
     assert!(at < TickTime(8 * PPQ), "{at:?} left the loop");
 }
+
+/// An audio track playing a steady 0.5 through `kinds` (built-in device
+/// ids), in that order. Returns the rig and the devices' ids.
+fn effect_rig(kinds: &[&str]) -> (Rig, Vec<daw_model::DeviceId>) {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 8 * BEAT as usize, 0.5);
+    rig.add_clip("a.wav", 0, 8);
+    let mut ids = Vec::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        let device = daw_model::Device::new(
+            *kind,
+            daw_model::DeviceSource::Builtin {
+                kind: (*kind).into(),
+            },
+        );
+        ids.push(device.id);
+        rig.doc
+            .execute(daw_model::commands::AddDevice {
+                track: rig.track,
+                index: i,
+                device,
+            })
+            .unwrap();
+    }
+    rig.sync();
+    rig.session.play().unwrap();
+    (rig, ids)
+}
+
+/// The level the track settles at: the last sample of a beat's run.
+fn settled(rig: &mut Rig) -> f32 {
+    *rig.run(BEAT as usize).last().unwrap()
+}
+
+#[test]
+fn device_param_edits_play_without_a_rebuild_and_reset_to_default() {
+    use daw_devices::devices::eq;
+    use daw_model::commands::SetParam;
+    let (mut rig, ids) = effect_rig(&["daw.eq"]);
+    let eq = ids[0];
+    let before = settled(&mut rig);
+    assert!((before - 0.5).abs() < 1e-3, "{before}");
+    let swaps = rig.session.controller().graphs_swapped();
+
+    let set = |rig: &mut Rig, value: Option<f64>| {
+        rig.doc
+            .execute(SetParam {
+                device: eq,
+                param: eq::OUTPUT,
+                value,
+            })
+            .unwrap();
+        rig.sync();
+    };
+    set(&mut rig, Some(-6.0));
+    // A separate gesture, so undo doesn't merge it with the reset.
+    rig.doc.seal();
+    let cut = settled(&mut rig);
+    assert!((cut - 0.5 * 10f32.powf(-6.0 / 20.0)).abs() < 1e-3, "{cut}");
+
+    // Back to the default (no value in the document): heard at once.
+    set(&mut rig, None);
+    let reset = settled(&mut rig);
+    assert!((reset - before).abs() < 1e-4, "{reset}");
+
+    // Undo brings the edit back the same way.
+    rig.doc.undo().unwrap();
+    rig.sync();
+    let undone = settled(&mut rig);
+    assert!((undone - cut).abs() < 1e-4, "{undone}");
+    assert_eq!(
+        rig.session.controller().graphs_swapped(),
+        swaps,
+        "parameter edits don't rebuild the graph"
+    );
+}
+
+#[test]
+fn compressor_threshold_changes_the_output() {
+    use daw_devices::devices::compressor;
+    let (mut rig, ids) = effect_rig(&["daw.compressor"]);
+    // 0.5 is about -6 dBFS, above the default -18 dB threshold.
+    let squeezed = settled(&mut rig);
+    rig.doc
+        .execute(daw_model::commands::SetParam {
+            device: ids[0],
+            param: compressor::THRESHOLD,
+            value: Some(0.0),
+        })
+        .unwrap();
+    rig.sync();
+    rig.run(BEAT as usize); // Let the release finish.
+    let open = settled(&mut rig);
+    assert!(
+        open > squeezed * 1.5,
+        "a higher threshold compresses less: {squeezed} -> {open}"
+    );
+}
+
+#[test]
+fn bypass_and_reorder_keep_device_state() {
+    use daw_devices::devices::{eq, utility};
+    use daw_model::commands::{DeviceField, MoveDevice, SetDevice, SetParam};
+    let (mut rig, ids) = effect_rig(&["daw.eq", "daw.utility"]);
+    let (eq_id, util) = (ids[0], ids[1]);
+    rig.doc
+        .execute(SetParam {
+            device: eq_id,
+            param: eq::OUTPUT,
+            value: Some(-6.0),
+        })
+        .unwrap();
+    rig.doc
+        .execute(SetParam {
+            device: util,
+            param: utility::GAIN,
+            value: Some(6.0),
+        })
+        .unwrap();
+    rig.sync();
+    let both = settled(&mut rig);
+    assert!((both - 0.5).abs() < 2e-3, "-6 then +6 dB: {both}");
+
+    let set_enabled = |rig: &mut Rig, id, on| {
+        rig.doc
+            .execute(SetDevice {
+                id,
+                field: DeviceField::Enabled(on),
+            })
+            .unwrap();
+        rig.sync();
+    };
+    set_enabled(&mut rig, eq_id, false);
+    let bypassed = settled(&mut rig);
+    assert!(
+        (bypassed - 0.5 * 10f32.powf(6.0 / 20.0)).abs() < 2e-3,
+        "only the utility: {bypassed}"
+    );
+    set_enabled(&mut rig, eq_id, true);
+    // Moving keeps each device's settings: still -6 + 6 dB.
+    rig.doc.execute(MoveDevice::new(eq_id, 1)).unwrap();
+    rig.sync();
+    let devices: Vec<_> = rig.doc.project().track(rig.track).unwrap().devices.clone();
+    assert_eq!(devices[1].id, eq_id);
+    let moved = settled(&mut rig);
+    assert!((moved - 0.5).abs() < 2e-3, "{moved}");
+}
