@@ -204,6 +204,8 @@ pub struct GeneralSettings {
     pub autosave_minutes: u32,
     /// Whether the piano roll plays the keys and notes pressed in it.
     pub preview_notes: bool,
+    /// Whether the Edit page shows the clip's track strip beside the notes.
+    pub edit_strip_shown: bool,
 }
 
 impl Default for GeneralSettings {
@@ -212,6 +214,7 @@ impl Default for GeneralSettings {
             project_folder: None,
             autosave_minutes: 1,
             preview_notes: true,
+            edit_strip_shown: true,
         }
     }
 }
@@ -265,6 +268,7 @@ pub fn load_general_settings(store: &dyn SettingsStore) -> GeneralSettings {
             .filter(|&m| m <= MAX_AUTOSAVE_MINUTES)
             .unwrap_or(defaults.autosave_minutes),
         preview_notes: read_bool(store, GENERAL, "PreviewNotes", defaults.preview_notes),
+        edit_strip_shown: read_bool(store, GENERAL, "EditStripShown", defaults.edit_strip_shown),
     }
 }
 
@@ -280,6 +284,11 @@ pub fn save_general_settings(store: &mut dyn SettingsStore, settings: &GeneralSe
         &settings.autosave_minutes.to_string(),
     );
     store.write(GENERAL, "PreviewNotes", &settings.preview_notes.to_string());
+    store.write(
+        GENERAL,
+        "EditStripShown",
+        &settings.edit_strip_shown.to_string(),
+    );
     store.sync();
 }
 
@@ -522,6 +531,7 @@ mod tests {
             project_folder: Some("/home/me/Music/Projects".into()),
             autosave_minutes: 0,
             preview_notes: false,
+            edit_strip_shown: false,
         };
         save_general_settings(&mut store, &s);
         assert_eq!(load_general_settings(&store), s);

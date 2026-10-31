@@ -16,6 +16,7 @@ use daw_midi::edit::{Quantize, QuantizeEnds};
 
 use crate::arrange_view::{cursor_shape, pointer, to_qcolor, to_rgba};
 use crate::paint::{self, PaintOp};
+use crate::session_mixer::strip_row;
 use crate::state;
 
 #[cxx_qt::bridge]
@@ -53,6 +54,8 @@ pub mod qobject {
         /// Whether a MIDI clip is open.
         #[qproperty(bool, has_clip)]
         #[qproperty(QString, clip_name)]
+        /// The `Mixer` row of the open clip's track; -1 without a clip.
+        #[qproperty(i32, strip_row)]
         #[qproperty(bool, has_selection)]
         /// A Qt::CursorShape for the pointer's position.
         #[qproperty(i32, cursor_shape)]
@@ -152,6 +155,7 @@ pub struct PianoRollRust {
     content_height: f64,
     has_clip: bool,
     clip_name: QString,
+    strip_row: i32,
     has_selection: bool,
     cursor_shape: i32,
     ops: Vec<PaintOp>,
@@ -180,6 +184,7 @@ impl Default for PianoRollRust {
             content_height: 0.0,
             has_clip: false,
             clip_name: QString::default(),
+            strip_row: -1,
             has_selection: false,
             cursor_shape: 0,
             ops: Vec::new(),
@@ -230,10 +235,20 @@ impl qobject::PianoRoll {
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
+        // What the properties show, read while the state is borrowed.
+        struct Shown {
+            scroll_x: f64,
+            scroll_y: f64,
+            content_height: f64,
+            has_clip: bool,
+            clip_name: String,
+            has_selection: bool,
+            strip_row: i32,
+        }
         let (w, h) = (self.width(), self.height());
         let palette = self.palette();
         let (rh, kw, vh) = (self.ruler_height, self.keyboard_width, self.velocity_height);
-        let (scene, geometry) = state::with(|s| {
+        let (scene, shown) = state::with(|s| {
             s.piano.palette = palette;
             s.piano.ruler_height = rh;
             s.piano.keyboard_width = kw;
@@ -244,24 +259,29 @@ impl qobject::PianoRoll {
             let scene = s.with_piano(|p, doc, env| p.scene(doc.project(), env));
             let p = &s.piano;
             let project = s.doc.project();
-            let geometry = (
-                p.view.scroll_x,
-                p.scroll_y,
-                128.0 * p.key_height,
-                p.has_clip(project),
-                p.clip_name(project).unwrap_or_default(),
-                !p.selection.is_empty(),
-            );
-            (scene, geometry)
+            let shown = Shown {
+                scroll_x: p.view.scroll_x,
+                scroll_y: p.scroll_y,
+                content_height: 128.0 * p.key_height,
+                has_clip: p.has_clip(project),
+                clip_name: p.clip_name(project).unwrap_or_default(),
+                has_selection: !p.selection.is_empty(),
+                strip_row: p
+                    .track(project)
+                    .and_then(|t| strip_row(project, t))
+                    .map_or(-1, |row| row as i32),
+            };
+            (scene, shown)
         });
         self.as_mut().store(scene);
-        let (sx, sy, ch, has, name, sel) = geometry;
-        self.as_mut().set_scroll_x(sx);
-        self.as_mut().set_scroll_y(sy);
-        self.as_mut().set_content_height(ch);
-        self.as_mut().set_has_clip(has);
-        self.as_mut().set_clip_name(QString::from(name.as_str()));
-        self.as_mut().set_has_selection(sel);
+        self.as_mut().set_scroll_x(shown.scroll_x);
+        self.as_mut().set_scroll_y(shown.scroll_y);
+        self.as_mut().set_content_height(shown.content_height);
+        self.as_mut().set_has_clip(shown.has_clip);
+        self.as_mut()
+            .set_clip_name(QString::from(shown.clip_name.as_str()));
+        self.as_mut().set_has_selection(shown.has_selection);
+        self.as_mut().set_strip_row(shown.strip_row);
         self.update();
     }
 

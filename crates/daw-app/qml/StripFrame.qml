@@ -6,9 +6,10 @@ import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
 // What every mixer strip shares: its name and kind, a box (effects and
-// sends on a channel) and its controls below. All strips have one width
-// and one box height, the LayoutSizes the Mix page holds; dragging a
-// strip's right edge or the line under its box changes them for all.
+// sends on a channel) and its controls below. Strips that share a
+// width and a box height share LayoutSizes (the Mix page holds those of
+// its row); dragging a strip's edge or the line under its box changes them
+// for all.
 Item {
     id: frame
 
@@ -16,6 +17,11 @@ Item {
     required property LayoutSize boxSize
     // Strips before this one in the row: a width drag widens them too.
     property int position: 0
+    // Where the line and the width handle are: Qt.RightEdge in a row of
+    // strips, Qt.LeftEdge for a strip alone at a page's far side (both
+    // mirror right to left).
+    property int edge: Qt.RightEdge
+    readonly property bool leftEdge: edge === Qt.LeftEdge
     property string title
     property string subtitle
     property bool dimmed: false
@@ -38,16 +44,18 @@ Item {
         anchors {
             top: parent.top
             bottom: parent.bottom
-            right: parent.right
+            left: frame.leftEdge ? parent.left : undefined
+            right: frame.leftEdge ? undefined : parent.right
         }
     }
-    // In the strip's right margin: the next strip is drawn over anything
-    // past its edge.
+    // In the strip's margin on that side, so in a row the next strip
+    // isn't drawn over it.
     SplitHandle {
         anchors {
             top: parent.top
             bottom: parent.bottom
-            right: parent.right
+            left: frame.leftEdge ? parent.left : undefined
+            right: frame.leftEdge ? undefined : parent.right
         }
         width: Kirigami.Units.smallSpacing + 1
         z: 1
@@ -55,7 +63,8 @@ Item {
         lineVisible: false
         ratio: frame.position + 1
         onStarted: frame.widthSize.begin(frame.width, Infinity)
-        onMoved: (delta, done) => frame.widthSize.drag(delta, done)
+        // Dragging a left edge leftwards widens the strip.
+        onMoved: (delta, done) => frame.widthSize.drag(frame.leftEdge ? -delta : delta, done)
         onCanceled: frame.widthSize.cancel()
         onReset: frame.widthSize.reset()
     }
@@ -64,7 +73,8 @@ Item {
         anchors {
             fill: parent
             margins: Kirigami.Units.smallSpacing
-            rightMargin: Kirigami.Units.smallSpacing + 1
+            leftMargin: Kirigami.Units.smallSpacing + (frame.leftEdge ? 1 : 0)
+            rightMargin: Kirigami.Units.smallSpacing + (frame.leftEdge ? 0 : 1)
         }
         spacing: Kirigami.Units.smallSpacing
 

@@ -156,6 +156,11 @@ fn ordered(project: &Project) -> Vec<&Arc<Track>> {
     v
 }
 
+/// The row of `track`'s strip, in the order the mixer shows strips.
+pub fn strip_row(project: &Project, track: TrackId) -> Option<usize> {
+    ordered(project).iter().position(|t| t.id == track)
+}
+
 fn find(project: &Project, id: StripId) -> Option<&Arc<Track>> {
     project.all_tracks().find(|t| strip_id(t.id) == id)
 }
@@ -1292,6 +1297,17 @@ mod tests {
         );
         assert_eq!(strips[0].sends.len(), 1);
         assert_eq!(strips[0].sends[0].target_name, "Reverb");
+        // A track's row is where its strip is, not where the track is.
+        let project = r.doc.project();
+        for name in ["Drums", "Keys", "Reverb"] {
+            let row = strip_row(project, r.track(name).id).unwrap();
+            assert_eq!(strips[row].name, name);
+        }
+        assert_eq!(
+            strip_row(project, project.master.id),
+            Some(strips.len() - 1)
+        );
+        assert_eq!(strip_row(project, TrackId::new()), None);
     }
 
     #[test]
