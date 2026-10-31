@@ -6,8 +6,8 @@ use std::sync::Arc;
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_media::{AudioData, WavFormat, write_wav};
 use daw_model::{
-    AudioClip, Clip, ClipContent, Color, Device, DeviceSource, Document, Fade, FadeShape, MidiClip,
-    Note, Project, Track, TrackKind,
+    AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Color, Device,
+    DeviceSource, Document, Fade, FadeShape, MidiClip, Note, Project, Send, Track, TrackKind,
 };
 
 const RATE: u32 = 48_000;
@@ -62,6 +62,19 @@ pub fn build() -> Result<Document, String> {
         audio_clip("Bass", "bass.wav", 4, 2, 0),
         audio_clip("Bass", "bass.wav", 8, 4, 0),
     ];
+    // A swell in, then a fade out, so the screenshots show a lane.
+    let mut swell = AutomationLane::new(AutomationTarget::Volume);
+    let point = |bar: i64, db: f64, curve: f64| AutomationPoint {
+        curve,
+        ..AutomationPoint::new(TickTime(bar * BAR), db)
+    };
+    swell.points = vec![
+        point(0, -24.0, 1.5),
+        point(4, 0.0, 0.0),
+        point(10, 0.0, -1.5),
+        point(12, -40.0, 0.0),
+    ];
+    drums.automation.push(swell);
     let mut leads = Track::new(TrackKind::Audio, "Lead");
     leads.color = Some(Color(0xf6, 0x74, 0x00));
     // A faded, quieter take so the screenshots show fades and clip gain.
@@ -80,6 +93,13 @@ pub fn build() -> Result<Document, String> {
             kind: "daw.synth".into(),
         },
     ));
+    let mut pan = AutomationLane::new(AutomationTarget::Pan);
+    pan.points = vec![
+        AutomationPoint::new(TickTime(4 * BAR), -0.6),
+        AutomationPoint::new(TickTime(5 * BAR), 0.6),
+        AutomationPoint::new(TickTime(6 * BAR), -0.6),
+    ];
+    keys.automation.push(pan);
     let mut m = MidiClip::default();
     for (i, key) in [60u8, 64, 67, 72, 67, 64, 62, 65, 69, 74, 69, 65]
         .into_iter()
@@ -98,8 +118,67 @@ pub fn build() -> Result<Document, String> {
         TickTime(2 * BAR),
         ClipContent::Midi(m),
     ))];
-    project.tracks = vec![Arc::new(drums), Arc::new(leads), Arc::new(keys)];
+    let mut reverb = Track::new(TrackKind::Bus, "Reverb");
+    reverb.devices.push(Device::new(
+        "Reverb",
+        DeviceSource::Builtin {
+            kind: "daw.reverb".into(),
+        },
+    ));
+    let mut send = Send::new(reverb.id);
+    send.level_db = -8.0;
+    leads.sends.push(send);
+    project.tracks = vec![
+        Arc::new(drums),
+        Arc::new(leads),
+        Arc::new(keys),
+        Arc::new(reverb),
+    ];
     let mut doc = Document::new(project);
     doc.save_as(&dir).map_err(|e| e.to_string())?;
     Ok(doc)
+}
+
+/// A large project for `--benchmark`: `tracks` audio tracks of `clips`
+/// one-beat clips each, all playing one short tone.
+pub fn stress(tracks: usize, clips: usize) -> Result<Document, String> {
+    let dir = std::env::temp_dir()
+        .join(format!("kadence-benchmark-{}", std::process::id()))
+        .join("Stress");
+    let _ = std::fs::remove_dir_all(&dir);
+    let audio = dir.join("audio");
+    std::fs::create_dir_all(&audio).map_err(|e| e.to_string())?;
+    write_wav(audio.join("tone.wav"), &pluck(220.0, 1), WavFormat::Float32)
+        .map_err(|e| e.to_string())?;
+    let mut project = Project::new("Stress");
+    project.tracks = (0..tracks)
+        .map(|t| {
+            let mut track = Track::new(TrackKind::Audio, format!("Track {}", t + 1));
+            track.clips = (0..clips)
+                .map(|c| {
+                    Arc::new(Clip::new(
+                        format!("Clip {}", c + 1),
+                        TickTime((2 * c as i64 + (t % 2) as i64) * PPQ),
+                        TickTime(PPQ),
+                        ClipContent::Audio(AudioClip::new("audio/tone.wav", SampleTime(0))),
+                    ))
+                })
+                .collect();
+            Arc::new(track)
+        })
+        .collect();
+    let mut doc = Document::new(project);
+    doc.save_as(&dir).map_err(|e| e.to_string())?;
+    Ok(doc)
+}
+
+/// Removes what [`build`] and [`stress`] wrote.
+pub fn remove_temp_files() {
+    let pid = std::process::id();
+    for name in [
+        format!("kadence-demo-{pid}"),
+        format!("kadence-benchmark-{pid}"),
+    ] {
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(name));
+    }
 }

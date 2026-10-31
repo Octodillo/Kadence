@@ -14,6 +14,7 @@ Kirigami.ApplicationWindow {
     // Set from C++ (see kadence.cpp).
     required property var aboutData
     required property bool smokeTest
+    required property bool benchmark
     required property string screenshotDir
 
     // A project that was never named or saved has an empty name. This is %1
@@ -100,6 +101,15 @@ Kirigami.ApplicationWindow {
             icon.name: "document-open"
             shortcut: StandardKey.Open
             onTriggered: openDialog.open()
+        },
+        Kirigami.Action {
+            // A project is a folder. A file dialog can't pick one whose name
+            // ends in .kadence (the filter makes it look like a file), and
+            // without the project file inside it there's nothing to pick,
+            // so offer the folder itself too.
+            text: i18nc("@action:inmenu", "Open Project Folder…")
+            icon.name: "folder-open"
+            onTriggered: openFolderDialog.open()
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Save")
@@ -203,6 +213,7 @@ Kirigami.ApplicationWindow {
     FileDialog {
         id: openDialog
         title: i18nc("@title:window", "Open Project")
+        currentFolder: AppSettings.projectFolderUrl
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         onAccepted: {
             const url = selectedFile;
@@ -210,9 +221,18 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    FolderDialog {
+        id: openFolderDialog
+        title: i18nc("@title:window", "Open Project Folder")
+        onAccepted: {
+            root.notify(Project.openProject(selectedFolder));
+        }
+    }
+
     FileDialog {
         id: saveDialog
         title: i18nc("@title:window", "Save Project As")
+        currentFolder: AppSettings.projectFolderUrl
         fileMode: FileDialog.SaveFile
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         // Runs after a successful save, when saving was asked for before
@@ -379,6 +399,14 @@ Kirigami.ApplicationWindow {
         }
         onClosed: pickHandler = null
         onConfigureRequested: root.openSettings()
+    }
+
+    // MIDI devices plugged in or out.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: true
+        onTriggered: AppSettings.refreshMidi()
     }
 
     Kirigami.Action {
@@ -571,8 +599,8 @@ Kirigami.ApplicationWindow {
     function openSettings(): Item {
         return pageStack.pushDialogLayer(Qt.resolvedUrl("SettingsPage.qml"), {}, {
             title: i18nc("@title:window", "Configure — Kadence"),
-            width: Kirigami.Units.gridUnit * 30,
-            height: Kirigami.Units.gridUnit * 22
+            width: Kirigami.Units.gridUnit * 32,
+            height: Kirigami.Units.gridUnit * 24
         });
     }
 
@@ -592,6 +620,14 @@ Kirigami.ApplicationWindow {
     Loader {
         active: root.smokeTest || root.screenshotDir !== ""
         sourceComponent: SelfTest {
+            window: root
+        }
+    }
+
+    // `--benchmark`: frame times while scrolling a large project.
+    Loader {
+        active: root.benchmark
+        sourceComponent: Benchmark {
             window: root
         }
     }

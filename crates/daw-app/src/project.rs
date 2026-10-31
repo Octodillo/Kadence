@@ -9,7 +9,7 @@ use cxx_qt_lib::{
 };
 use daw_core::time::{PPQ, TickTime};
 use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
-use daw_model::{FadeShape, InputChannels, Monitoring, Track, TrackKind};
+use daw_model::{FadeShape, InputChannels, MidiInput, Monitoring, Track, TrackKind};
 
 use crate::instrument;
 use crate::message::{Context, Fields, Message, Reason};
@@ -77,6 +77,7 @@ pub mod qobject {
         CannotRead,
         NotesDropped,
         ClipsDropped,
+        RoutingLoop,
         NoInstrumentTrack,
         EngineNotRunning,
         NoMidiPlayer,
@@ -296,6 +297,23 @@ pub mod qobject {
         fn set_track_muted(self: Pin<&mut Project>, index: i32, muted: bool);
         #[qinvokable]
         fn set_track_soloed(self: Pin<&mut Project>, index: i32, soloed: bool);
+        /// The MIDI source port an instrument track listens to; empty for
+        /// every input.
+        #[qinvokable]
+        fn track_midi_device(self: &Project, index: i32) -> QString;
+        /// The MIDI channel (0 to 15) an instrument track listens to; -1
+        /// for every channel.
+        #[qinvokable]
+        fn track_midi_channel(self: &Project, index: i32) -> i32;
+        /// Sets which live MIDI an instrument track takes: `device` empty
+        /// for every input, `channel` -1 for every channel.
+        #[qinvokable]
+        fn set_track_midi_input(
+            self: Pin<&mut Project>,
+            index: i32,
+            device: &QString,
+            channel: i32,
+        );
         #[qinvokable]
         fn rename_track(self: Pin<&mut Project>, index: i32, name: &QString);
         /// The name of the track's instrument; empty when it has none.
@@ -503,6 +521,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::CannotRead => QR::CannotRead,
         Reason::NotesDropped => QR::NotesDropped,
         Reason::ClipsDropped => QR::ClipsDropped,
+        Reason::RoutingLoop => QR::RoutingLoop,
         Reason::NoInstrumentTrack => QR::NoInstrumentTrack,
         Reason::EngineNotRunning => QR::EngineNotRunning,
         Reason::NoMidiPlayer => QR::NoMidiPlayer,
@@ -624,7 +643,7 @@ impl qobject::Project {
                 s.loop_range().is_some(),
                 format!("{}.{}", bar + 1, beat + 1),
                 format!("{}:{:04.1}", (secs / 60.0).floor() as i64, secs % 60.0),
-                !s.arrange.selection.is_empty(),
+                !s.arrange.selection.is_empty() || s.arrange.points_selected(p),
                 s.arrange.audio_selected(p),
                 selected,
                 s.status.clone(),
@@ -765,6 +784,11 @@ impl qobject::Project {
             }
             if s.arrange.peaks.poll() {
                 s.touch();
+            }
+            // Live MIDI goes where recording would, while nothing is armed.
+            let focus = crate::recording::input_focus(s);
+            if let Some(session) = s.engine.session_mut() {
+                session.set_input_focus(focus);
             }
             if s.engine.is_playing() && s.follow_playhead && !s.arrange.dragging() {
                 let at = s.playhead();
@@ -1206,6 +1230,33 @@ impl qobject::Project {
 
     fn set_track_soloed(self: Pin<&mut Self>, index: i32, soloed: bool) {
         self.set_track_field(index, TrackField::Solo(soloed));
+    }
+
+    fn track_midi_device(&self, index: i32) -> QString {
+        state::with(|s| {
+            let device = track_at(s, index).and_then(|t| t.midi_input.device.clone());
+            QString::from(device.unwrap_or_default().as_str())
+        })
+    }
+
+    fn track_midi_channel(&self, index: i32) -> i32 {
+        state::with(|s| {
+            track_at(s, index)
+                .and_then(|t| t.midi_input.channel)
+                .map_or(-1, i32::from)
+        })
+    }
+
+    fn set_track_midi_input(self: Pin<&mut Self>, index: i32, device: &QString, channel: i32) {
+        let device = device.to_string();
+        let input = MidiInput {
+            device: (!device.is_empty()).then_some(device),
+            channel: u8::try_from(channel).ok().filter(|&c| c < 16),
+        };
+        if state::with(|s| track_at(s, index).is_none_or(|t| t.midi_input == input)) {
+            return;
+        }
+        self.set_track_field(index, TrackField::MidiInput(input));
     }
 
     fn track_instrument(&self, index: i32) -> QString {

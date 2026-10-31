@@ -427,3 +427,44 @@ fn clamps_unbounded_plugin_latency() {
     let compiled = CompiledGraph::compile(g, 48_000.0, 64, 16).unwrap();
     assert_eq!(compiled.latency(), max - 1);
 }
+
+/// One block through a track routed by `route`, with a gain-to-zero event
+/// in source `source`; returns the last output sample.
+fn gain_event_from(route: impl FnOnce(&mut GraphDesc, NodeId), source: usize) -> f32 {
+    let mut g = GraphDesc::new(1, 1);
+    let track = g.add_track("track", 1);
+    g.connect(g.input(), track);
+    route(&mut g, track);
+    let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+        event_sources: 2,
+        ..config(64)
+    });
+    ctl.set_graph(g).unwrap();
+    let mut gain = EventList::with_capacity(1);
+    let kind = EventKind::ParamValue {
+        param: Strip::GAIN,
+        value: 0.0,
+    };
+    gain.push(Event { frame: 0, kind }).unwrap();
+    let none = EventList::with_capacity(0);
+    let mut sources = [&none; 6];
+    sources[source] = &gain;
+    let input = vec![1.0; 32];
+    let mut out = vec![0.0; 32];
+    proc.process_sources(32, &[&input], &mut [&mut out], &sources);
+    out[31]
+}
+
+#[test]
+fn external_events_can_come_from_one_source() {
+    let from = |s| move |g: &mut GraphDesc, t| g.route_external_events_from(t, s);
+    assert_eq!(gain_event_from(from(1), 1), 0.0, "its own source");
+    assert_eq!(gain_event_from(from(1), 0), 1.0, "another source");
+    let all = |g: &mut GraphDesc, t| g.route_external_events(t);
+    assert_eq!(gain_event_from(all, 0), 0.0);
+    assert_eq!(gain_event_from(all, 1), 0.0);
+    // Past `event_sources`, a source reaches only nodes taking all of them.
+    assert_eq!(gain_event_from(all, 5), 0.0);
+    assert_eq!(gain_event_from(from(5), 5), 1.0);
+    assert_eq!(gain_event_from(from(1), 5), 1.0);
+}
