@@ -8,6 +8,7 @@ use std::time::Duration;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList, QUrl};
 
+use crate::qt_lists::{list, string_list};
 use crate::settings::{self, GeneralSettings, KConfigStore, MAX_AUTOSAVE_MINUTES};
 use crate::state::{self, AppState};
 
@@ -141,22 +142,6 @@ pub fn source_rows(s: &AppState) -> Vec<SourceRow> {
     rows
 }
 
-fn string_list<'a>(items: impl IntoIterator<Item = &'a str>) -> QStringList {
-    let mut list = QStringList::default();
-    for item in items {
-        list.append(QString::from(item));
-    }
-    list
-}
-
-fn bool_list(items: impl IntoIterator<Item = bool>) -> QList<bool> {
-    let mut list = QList::default();
-    for item in items {
-        list.append(item);
-    }
-    list
-}
-
 impl cxx_qt::Initialize for qobject::AppSettings {
     fn initialize(mut self: Pin<&mut Self>) {
         let midi = settings::load_midi_settings(&KConfigStore);
@@ -204,7 +189,7 @@ impl qobject::AppSettings {
         // The list of sources other clients offer can change without our
         // ports changing (a program started), so compare what is shown.
         if self.midi_source_names != string_list(rows.iter().map(|r| r.name.as_str()))
-            || self.midi_source_present != bool_list(rows.iter().map(|r| r.present))
+            || self.midi_source_present != list(rows.iter().map(|r| r.present))
         {
             self.as_mut().sync_midi();
         }
@@ -225,11 +210,11 @@ impl qobject::AppSettings {
         self.as_mut()
             .set_midi_source_labels(string_list(rows.iter().map(|r| midi_label(&r.name))));
         self.as_mut()
-            .set_midi_source_physical(bool_list(rows.iter().map(|r| r.physical)));
+            .set_midi_source_physical(list(rows.iter().map(|r| r.physical)));
         self.as_mut()
-            .set_midi_source_used(bool_list(rows.iter().map(|r| r.used)));
+            .set_midi_source_used(list(rows.iter().map(|r| r.used)));
         self.as_mut()
-            .set_midi_source_present(bool_list(rows.iter().map(|r| r.present)));
+            .set_midi_source_present(list(rows.iter().map(|r| r.present)));
         self.as_mut().set_use_new_midi_devices(use_new);
         self.as_mut()
             .set_midi_input_names(string_list(inputs.iter().map(String::as_str)));

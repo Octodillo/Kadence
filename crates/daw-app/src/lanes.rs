@@ -246,13 +246,6 @@ mod tests {
             }
             assert!(p.name(&d, id).is_some());
             assert!(p.default_value(&d, id).is_some());
-            // A lane's height is the device panel's slider position.
-            let desc = p.param(&d, id).expect("described");
-            for n in [0.0, 0.25, 0.5, 1.0] {
-                let v = desc.from_normalized(n);
-                assert_eq!(s.from_norm(n), v);
-                assert!((s.to_norm(v) - desc.to_normalized(v)).abs() < 1e-12);
-            }
         }
         let unknown = Device::new(
             "?",
@@ -261,6 +254,51 @@ mod tests {
             },
         );
         assert!(p.automatable(&unknown).is_empty());
+    }
+
+    /// Every built-in parameter's slider and lane run along its taper:
+    /// halfway is the geometric mean on a log taper, the midpoint
+    /// otherwise, and discrete parameters land on whole numbers.
+    #[test]
+    fn every_builtin_param_maps_along_its_taper() {
+        use daw_devices::{ParamKind, Taper};
+        let p = BuiltinParams;
+        for entry in daw_devices::devices() {
+            let d = Device::new(
+                entry.info.name,
+                DeviceSource::Builtin {
+                    kind: entry.info.id.into(),
+                },
+            );
+            for spec in entry.params {
+                let desc = p.param(&d, spec.id).expect("described");
+                let half = desc.from_normalized(0.5);
+                let expected =
+                    if spec.taper == Taper::Log && matches!(spec.kind, ParamKind::Continuous) {
+                        (spec.min * spec.max).sqrt()
+                    } else if matches!(spec.kind, ParamKind::Continuous) {
+                        (spec.min + spec.max) / 2.0
+                    } else {
+                        ((spec.min + spec.max) / 2.0).round()
+                    };
+                assert!(
+                    (half - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                    "{} {}",
+                    entry.info.id,
+                    spec.name
+                );
+                assert!((desc.from_normalized(0.0) - spec.min).abs() < 1e-9);
+                assert!(
+                    (desc.from_normalized(1.0) - spec.max).abs() < 1e-9 * spec.max.abs().max(1.0)
+                );
+                assert!(
+                    (desc.to_normalized(half) - 0.5).abs() < 1e-9
+                        || !matches!(spec.kind, ParamKind::Continuous)
+                );
+                // The lanes' catalog uses the same scale.
+                assert_eq!(p.scale(&d, spec.id), Some(desc.scale()));
+            }
+        }
     }
 
     #[test]

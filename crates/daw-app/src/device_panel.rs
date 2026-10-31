@@ -5,8 +5,9 @@
 //! devices describe theirs with [`BuiltinParams`]; plugins add a source of
 //! their own (their parameters are known once the plugin is loaded), and
 //! the panel shows them the same way. [`BuiltinParams`] is also the
-//! automation lanes' [`ParamCatalog`], so a parameter has one range, taper
-//! and unit wherever it shows.
+//! automation lanes' [`ParamCatalog`], so a built-in parameter has one
+//! range, taper and unit wherever it shows, and [`ParamDesc::scale`] is the
+//! one mapping between values and slider or lane positions.
 //!
 //! A parameter drag is one undo step: [`DevicePanel::set_value`] runs
 //! [`SetParam`], which merges with the previous edit of the same parameter
@@ -125,12 +126,11 @@ impl ParamDesc {
     /// a thousandth of a slider's travel (at the bottom of a log taper,
     /// where its steps are finest).
     pub fn tolerance(&self) -> f64 {
-        let span = (self.max - self.min).abs();
-        let t = match self.control {
-            ParamControl::Continuous { log: true } if self.max > self.min => {
-                self.min * ((self.max / self.min).powf(1e-3) - 1.0)
-            }
-            _ => span * 1e-3,
+        let t = if self.is_discrete() {
+            // A whole step would round the thousandth away.
+            (self.max - self.min).abs() * 1e-3
+        } else {
+            (self.scale().from_norm(1e-3) - self.min).abs()
         };
         if t.is_finite() && t > 0.0 { t } else { 1e-6 }
     }
@@ -156,6 +156,14 @@ impl ParamDesc {
             ParamUnit::Octaves => "octaves",
             ParamUnit::Ratio => "ratio",
             ParamUnit::Pan => "pan",
+        }
+    }
+
+    /// The labels of a choice parameter; empty for other kinds.
+    pub fn choices(&self) -> &[String] {
+        match &self.control {
+            ParamControl::Choice(labels) => labels,
+            _ => &[],
         }
     }
 

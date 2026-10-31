@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
+use daw_arrange::ParamCatalog;
 use daw_core::plugin::PluginFormatKind;
 use daw_core::time::{SampleTime, TickTime};
 use daw_engine::nodes::Strip;
@@ -33,6 +34,7 @@ use daw_model::{
 };
 use daw_session::{Session, db_to_gain, effective_mutes};
 
+use crate::device_panel::BuiltinParams;
 use crate::mixer::{
     Control, EffectChoice, InsertInfo, MAX_DB, MixerHandle, RouteTarget, SILENT_DB, SendInfo,
     StripId, StripInfo, StripKind, StripLevels, effect_choices,
@@ -863,13 +865,11 @@ fn target_of(
         }
         Control::Param { device, param } => {
             let d = track.devices.iter().find(|d| d.id == device)?;
-            let value = d.params.get(&param).copied().or_else(|| {
-                let DeviceSource::Builtin { kind } = &d.source else {
-                    return None;
-                };
-                let specs = daw_devices::param_specs(kind)?;
-                specs.iter().find(|s| s.id == param).map(|s| s.default)
-            });
+            let value = d
+                .params
+                .get(&param)
+                .copied()
+                .or_else(|| BuiltinParams.default_value(d, param));
             let value = value.or(fallback)?;
             Some((AutomationTarget::DeviceParam { device, param }, value))
         }

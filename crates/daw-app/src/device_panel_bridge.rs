@@ -10,11 +10,11 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
-    QVector,
+    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector,
 };
 
-use crate::device_panel::{AppDevicePanel, DeviceView, ParamControl, ParamView};
+use crate::device_panel::{AppDevicePanel, DeviceView, ParamView};
+use crate::qt_lists::string_list;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -370,15 +370,7 @@ impl qobject::DevicePanel {
             Some("maximum") => QVariant::from(&d.max),
             Some("control") => QVariant::from(&QString::from(d.control_name())),
             Some("unit") => QVariant::from(&QString::from(d.unit_name())),
-            Some("choices") => {
-                let mut list = QStringList::default();
-                if let ParamControl::Choice(labels) = &d.control {
-                    for l in labels {
-                        list.append(QString::from(l.as_str()));
-                    }
-                }
-                QVariant::from(&list)
-            }
+            Some("choices") => QVariant::from(&string_list(d.choices())),
             Some("isDefault") => QVariant::from(&p.is_default()),
             Some("automated") => QVariant::from(&p.automated),
             Some("writable") => QVariant::from(&p.writable),

@@ -28,6 +28,7 @@ pub mod piano_roll;
 pub mod plugin_editors_bridge;
 pub mod plugins_bridge;
 pub mod project;
+mod qt_lists;
 mod recording;
 pub mod recovery;
 pub mod session_mixer;
