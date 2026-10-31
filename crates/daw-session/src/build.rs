@@ -504,11 +504,21 @@ pub(crate) fn graph(
     };
     g.connect(click, g.master());
 
-    automate(session, snapshot, &mut g, &strips, &mut built);
+    automate(session, snapshot, &mut g, &strips, &mut built, &old);
     // A lane that stopped playing (switched off, removed, emptied) left
-    // its last value behind: send the control's own value again.
+    // its last value behind: send the control's own value again, or the
+    // one it had before the lane, when the document has none.
     for k in old.automated.difference(&built.automated) {
         built.params.remove(k);
+        if let Some(&v) = old.rest.get(k).or(old.restore.get(k)) {
+            built.restore.insert(*k, v);
+        }
+    }
+    // Not sent yet (a full queue) and not taken over by a lane again.
+    for (k, &v) in &old.restore {
+        if !built.automated.contains(k) {
+            built.restore.entry(*k).or_insert(v);
+        }
     }
     (g, built)
 }
@@ -564,6 +574,7 @@ fn automate(
     g: &mut GraphDesc,
     strips: &HashMap<TrackId, NodeId>,
     built: &mut Built,
+    old: &Built,
 ) {
     for t in project.all_tracks() {
         for lane in t
@@ -584,9 +595,50 @@ fn automate(
             let Some(node) = node else { continue };
             if let Some(key) = g.key(node) {
                 built.automated.insert((key, param));
+                if let AutomationTarget::DeviceParam { device, .. } = lane.target
+                    && let Some(rest) = rest_value(session, t, device, key, param, old)
+                {
+                    built.rest.insert((key, param), rest);
+                }
             }
             g.automate(node, param, session.playback_lane(lane, to_value));
         }
+    }
+}
+
+/// What a device parameter goes back to when its lane stops, if the
+/// document has no value for it (with one, the document's value is sent).
+/// Taken when the lane starts, before it plays: the value last sent, else
+/// what a plugin reports or a built-in device's default.
+fn rest_value(
+    session: &Session,
+    track: &Track,
+    device: DeviceId,
+    key: NodeKey,
+    param: u32,
+    old: &Built,
+) -> Option<f64> {
+    let d = track.devices.iter().find(|d| d.id == device)?;
+    if d.params.contains_key(&param) {
+        return None;
+    }
+    if old.automated.contains(&(key, param)) {
+        return old.rest.get(&(key, param)).copied();
+    }
+    if let Some(&v) = old.restore.get(&(key, param)) {
+        return Some(v);
+    }
+    if let Some(&v) = old.params.get(&(key, param)) {
+        return Some(v);
+    }
+    match &d.source {
+        DeviceSource::Builtin { kind } => daw_devices::param_specs(kind)?
+            .iter()
+            .find(|s| s.id == param)
+            .map(|s| s.default),
+        DeviceSource::Plugin { .. } => session
+            .with_plugin(device, |p| p.param_value(param))
+            .filter(|v| v.is_finite()),
     }
 }
 

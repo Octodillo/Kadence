@@ -1183,3 +1183,78 @@ fn bypass_and_reorder_keep_device_state() {
     let moved = settled(&mut rig);
     assert!((moved - 0.5).abs() < 2e-3, "{moved}");
 }
+
+#[test]
+fn a_removed_device_lane_puts_the_parameter_back() {
+    use daw_devices::devices::eq;
+    use daw_model::commands::{AddLane, LaneField, RemoveLane, SetLane, SetParam};
+    use daw_model::{AutomationLane, AutomationPoint, AutomationTarget};
+    let (mut rig, ids) = effect_rig(&["daw.eq"]);
+    let device = ids[0];
+    let at = |db: f32| 0.5 * 10f32.powf(db / 20.0);
+    let lane = |rig: &mut Rig| {
+        let mut lane = AutomationLane::new(AutomationTarget::DeviceParam {
+            device,
+            param: eq::OUTPUT,
+        });
+        lane.points.push(AutomationPoint {
+            tick: TickTime(0),
+            value: -12.0,
+            curve: 0.0,
+            step: true,
+        });
+        let id = lane.id;
+        rig.doc
+            .execute(AddLane {
+                track: rig.track,
+                lane,
+            })
+            .unwrap();
+        rig.doc.seal();
+        rig.sync();
+        id
+    };
+
+    // Left at its default: the lane's value is heard, then the default again.
+    let id = lane(&mut rig);
+    let automated = settled(&mut rig);
+    assert!((automated - at(-12.0)).abs() < 1e-3, "{automated}");
+    rig.doc.execute(RemoveLane::new(id)).unwrap();
+    rig.sync();
+    let back = settled(&mut rig);
+    assert!((back - 0.5).abs() < 1e-3, "back to the default: {back}");
+
+    // Undo brings the lane back, and switching it off works like removing it.
+    rig.doc.undo().unwrap();
+    rig.sync();
+    let again = settled(&mut rig);
+    assert!((again - at(-12.0)).abs() < 1e-3, "{again}");
+    rig.doc
+        .execute(SetLane {
+            id,
+            field: LaneField::Enabled(false),
+        })
+        .unwrap();
+    rig.sync();
+    let off = settled(&mut rig);
+    assert!((off - 0.5).abs() < 1e-3, "switched off: {off}");
+    rig.doc.execute(RemoveLane::new(id)).unwrap();
+    rig.doc.seal();
+
+    // Set by hand: the hand-set value comes back.
+    rig.doc
+        .execute(SetParam {
+            device,
+            param: eq::OUTPUT,
+            value: Some(-6.0),
+        })
+        .unwrap();
+    rig.doc.seal();
+    let id = lane(&mut rig);
+    let automated = settled(&mut rig);
+    assert!((automated - at(-12.0)).abs() < 1e-3, "{automated}");
+    rig.doc.execute(RemoveLane::new(id)).unwrap();
+    rig.sync();
+    let back = settled(&mut rig);
+    assert!((back - at(-6.0)).abs() < 1e-3, "back to the hand-set value: {back}");
+}

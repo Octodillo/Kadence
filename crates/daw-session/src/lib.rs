@@ -163,6 +163,16 @@ pub(crate) struct Built {
     pub params: HashMap<(NodeKey, u32), f64>,
     /// Parameters an automation lane drives in this graph.
     pub automated: HashSet<(NodeKey, u32)>,
+    /// What each automated device parameter the document leaves unset goes
+    /// back to when its lane stops: the value it had before the lane took
+    /// it over.
+    pub rest: HashMap<(NodeKey, u32), f64>,
+    /// Parameters whose lane stopped in this graph, with their [`rest`]
+    /// values; sent by the next parameter sync unless the document has a
+    /// value of its own for them.
+    ///
+    /// [`rest`]: Self::rest
+    pub restore: HashMap<(NodeKey, u32), f64>,
     /// The clips each player was last given, to spot clip edits.
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Gain reduction meters of devices that have one.
@@ -966,6 +976,18 @@ impl Session {
                 self.controller.set_param_by_key(key, param, value)?;
                 built.params.insert((key, param), value);
             }
+        }
+        // A lane that stopped driving a parameter the document doesn't set
+        // left its last value in the device: put back what it had before.
+        // Kept until sent, so a full queue retries on the next sync.
+        let restore: Vec<_> = built.restore.iter().map(|(&k, &v)| (k, v)).collect();
+        for ((key, param), value) in restore {
+            if !built.params.contains_key(&(key, param)) {
+                let value = self.live.get(&(key, param)).copied().unwrap_or(value);
+                self.controller.set_param_by_key(key, param, value)?;
+                built.params.insert((key, param), value);
+            }
+            built.restore.remove(&(key, param));
         }
         Ok(())
     }

@@ -353,6 +353,7 @@ fn plugin_params_follow_automation() {
         curve: 0.0,
         step: true,
     });
+    let id = lane.id;
     rig.doc
         .execute(AddLane {
             track: rig.track,
@@ -361,6 +362,15 @@ fn plugin_params_follow_automation() {
         .unwrap();
     rig.sync();
     rig.settles_at(LEVEL * 0.25);
+
+    // Without the lane, the plugin goes back to the value it had before.
+    rig.doc
+        .execute(daw_model::commands::RemoveLane::new(id))
+        .unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL);
+    let value = rig.session.with_plugin(rig.device, |p| p.param_value(GAIN));
+    assert_eq!(value, Some(1.0));
 }
 
 #[test]
