@@ -4,10 +4,11 @@
 
 use std::pin::Pin;
 
-use cxx_qt_lib::QString;
+use cxx_qt_lib::{QString, QStringList};
 use daw_arrange::PointShape;
 
 use crate::lanes::{LaneMode, TargetName};
+use crate::qt_lists::string_list;
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]
@@ -15,6 +16,8 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qstringlist.h");
+        type QStringList = cxx_qt_lib::QStringList;
     }
 
     #[auto_cxx_name]
@@ -51,6 +54,43 @@ pub mod qobject {
         fn set_lane_mode(self: Pin<&mut Automation>, track: i32, lane: i32, mode: i32);
         #[qinvokable]
         fn remove_lane(self: Pin<&mut Automation>, track: i32, lane: i32);
+
+        /// What the lane's target is at now, from 0 to 1 along the lane's
+        /// scale (as the timeline draws it); 0 for no such lane.
+        #[qinvokable]
+        fn lane_position(self: &Automation, track: i32, lane: i32) -> f64;
+        /// The same in the target's own unit: dB, pan from -1 (left) to 1,
+        /// or the parameter's plain value.
+        #[qinvokable]
+        fn lane_value(self: &Automation, track: i32, lane: i32) -> f64;
+        /// Whether the lane plays its points, so its control follows them.
+        #[qinvokable]
+        fn lane_following(self: &Automation, track: i32, lane: i32) -> bool;
+        /// Whether moving the lane's control during playback records over
+        /// the lane, so it can move while the lane follows its points.
+        #[qinvokable]
+        fn lane_writes(self: &Automation, track: i32, lane: i32) -> bool;
+        /// The user grabbed the lane's control (also around a key press):
+        /// starts an undo step, and a take when writing during playback.
+        #[qinvokable]
+        fn begin_lane_control(self: Pin<&mut Automation>, track: i32, lane: i32);
+        /// Moves what the lane controls (fader, pan, send, device
+        /// parameter) to `position` on its scale, as the same control on
+        /// the Mix page or device panel would.
+        #[qinvokable]
+        fn set_lane_position(self: Pin<&mut Automation>, track: i32, lane: i32, position: f64);
+        /// The user let go of the lane's control.
+        #[qinvokable]
+        fn end_lane_control(self: Pin<&mut Automation>, track: i32, lane: i32);
+        /// For device-parameter lanes, how ValueText words the value: the
+        /// control kind, the unit and a choice parameter's labels (see
+        /// `ParamDesc`); empty for other lanes.
+        #[qinvokable]
+        fn lane_control_kind(self: &Automation, track: i32, lane: i32) -> QString;
+        #[qinvokable]
+        fn lane_unit(self: &Automation, track: i32, lane: i32) -> QString;
+        #[qinvokable]
+        fn lane_choices(self: &Automation, track: i32, lane: i32) -> QStringList;
 
         /// Targets a new lane on `track` can have, like the lane getters.
         #[qinvokable]
@@ -153,6 +193,53 @@ impl qobject::Automation {
 
     fn remove_lane(self: Pin<&mut Self>, track: i32, lane: i32) {
         self.edit(|s| s.remove_lane(track, lane));
+    }
+
+    fn lane_position(&self, track: i32, lane: i32) -> f64 {
+        state::with(|s| s.lane_control(track, lane).map_or(0.0, |c| c.norm))
+    }
+
+    fn lane_value(&self, track: i32, lane: i32) -> f64 {
+        state::with(|s| s.lane_control(track, lane).map_or(0.0, |c| c.value))
+    }
+
+    fn lane_following(&self, track: i32, lane: i32) -> bool {
+        state::with(|s| s.lane_control(track, lane).is_some_and(|c| c.following))
+    }
+
+    fn lane_writes(&self, track: i32, lane: i32) -> bool {
+        state::with(|s| s.lane_control(track, lane).is_some_and(|c| c.writes))
+    }
+
+    // These play the change and bump the view's revision themselves (see
+    // `AppState::control_lane`); the lanes' own revision doesn't change.
+    fn begin_lane_control(self: Pin<&mut Self>, track: i32, lane: i32) {
+        state::with(|s| s.begin_lane_control(track, lane));
+    }
+
+    fn set_lane_position(self: Pin<&mut Self>, track: i32, lane: i32, position: f64) {
+        state::with(|s| s.set_lane_control(track, lane, position));
+    }
+
+    fn end_lane_control(self: Pin<&mut Self>, track: i32, lane: i32) {
+        state::with(|s| s.end_lane_control(track, lane));
+    }
+
+    fn lane_control_kind(&self, track: i32, lane: i32) -> QString {
+        text(state::with(|s| {
+            s.lane_param(track, lane)
+                .map(|p| p.control_name().to_owned())
+        }))
+    }
+
+    fn lane_unit(&self, track: i32, lane: i32) -> QString {
+        text(state::with(|s| {
+            s.lane_param(track, lane).map(|p| p.unit_name().to_owned())
+        }))
+    }
+
+    fn lane_choices(&self, track: i32, lane: i32) -> QStringList {
+        state::with(|s| string_list(s.lane_param(track, lane).iter().flat_map(|p| p.choices())))
     }
 
     fn target(&self, track: i32, target: i32) -> Option<TargetName> {
