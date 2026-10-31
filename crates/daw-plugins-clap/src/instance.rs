@@ -122,6 +122,8 @@ struct EditorState {
     /// The host window an embedded editor lives in.
     window: Option<HostWindow>,
     resizable: bool,
+    /// From `set_editor_title`; the plugin's name until then.
+    title: Option<String>,
 }
 
 /// What `process` uses: the plugin's audio processor and the buffers it fills. Present while
@@ -651,6 +653,8 @@ impl plugin::PluginInstance for ClapInstance {
             self.inst()
                 .access_handler(|h| HostShared::take(&h.latency_changed));
         }
+        // Not a change of the plugin's own.
+        self.take_flag(|s| &s.state_changed);
         Ok(())
     }
 
@@ -691,12 +695,12 @@ impl plugin::PluginInstance for ClapInstance {
                     height: 600,
                 });
                 let resizable = gui.can_resize(&handle);
-                let window = match HostWindow::new(
-                    &self.descriptor.name,
-                    size.width,
-                    size.height,
-                    resizable,
-                ) {
+                let title = self
+                    .editor
+                    .title
+                    .as_deref()
+                    .unwrap_or(&self.descriptor.name);
+                let window = match HostWindow::new(title, size.width, size.height, resizable) {
                     Ok(window) => window,
                     Err(e) => {
                         gui.destroy(&handle);
@@ -715,8 +719,15 @@ impl plugin::PluginInstance for ClapInstance {
                 }
                 self.editor.window = Some(window);
                 self.editor.resizable = resizable;
-            } else if let Ok(title) = CString::new(self.descriptor.name.as_str()) {
-                gui.suggest_title(&handle, &title);
+            } else {
+                let title = self
+                    .editor
+                    .title
+                    .as_deref()
+                    .unwrap_or(&self.descriptor.name);
+                if let Ok(title) = CString::new(title) {
+                    gui.suggest_title(&handle, &title);
+                }
             }
         }
         if let Err(e) = gui.show(&instance.plugin_handle()) {
@@ -741,6 +752,29 @@ impl plugin::PluginInstance for ClapInstance {
         // Only after `destroy`: the plugin's window is a child of this one.
         self.editor.window = None;
         self.editor.created = false;
+    }
+
+    fn is_editor_open(&self) -> bool {
+        self.editor.created
+    }
+
+    fn set_editor_title(&mut self, title: &str) {
+        if self.editor.title.as_deref() == Some(title) {
+            return;
+        }
+        self.editor.title = Some(title.to_owned());
+        if !self.editor.created {
+            return;
+        }
+        if let Some(window) = &self.editor.window {
+            window.set_title(title);
+        } else if let (Some(gui), Ok(title)) = (self.ext.gui, CString::new(title)) {
+            gui.suggest_title(&self.inst().plugin_handle(), &title);
+        }
+    }
+
+    fn take_state_changed(&mut self) -> bool {
+        self.take_flag(|s| &s.state_changed)
     }
 
     fn on_main_thread(&mut self) {

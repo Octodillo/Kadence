@@ -80,6 +80,8 @@ pub enum Reason {
     PluginCrashed,
     /// Device `name` did not save its plugin state; `detail`.
     PluginStateNotSaved,
+    /// The plugin of device `name` would not show its editor; `detail`.
+    PluginEditorFailed,
     /// Audio file `path` cannot be streamed; `detail`.
     CannotStream,
     /// Audio file `path` cannot be read.
@@ -427,6 +429,11 @@ impl Message {
                 }
                 Warning::PluginStateNotSaved { device, detail } => {
                     Fields::new(C::Save, R::PluginStateNotSaved)
+                        .name(device)
+                        .detail(detail)
+                }
+                Warning::PluginEditorFailed { device, detail } => {
+                    Fields::new(C::Playback, R::PluginEditorFailed)
                         .name(device)
                         .detail(detail)
                 }

@@ -5,19 +5,20 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{
-    Event, IAttributeList, IAttributeListTrait, IComponentHandler, IComponentHandlerTrait,
-    IConnectionPoint, IConnectionPointTrait, IEventList, IEventListTrait, IHostApplication,
-    IHostApplicationTrait, IMessage, IMessageTrait, IParamValueQueue, IParamValueQueueTrait,
-    IParameterChanges, IParameterChangesTrait, ParamID, ParamValue, String128, TChar,
+    Event, IAttributeList, IAttributeListTrait, IComponentHandler, IComponentHandler2,
+    IComponentHandler2Trait, IComponentHandlerTrait, IConnectionPoint, IConnectionPointTrait,
+    IEventList, IEventListTrait, IHostApplication, IHostApplicationTrait, IMessage, IMessageTrait,
+    IParamValueQueue, IParamValueQueueTrait, IParameterChanges, IParameterChangesTrait, ParamID,
+    ParamValue, String128, TChar,
 };
 use vst3::Steinberg::{
-    FIDString, FUnknown, IBStream, IBStream_::IStreamSeekMode_, IBStreamTrait, TUID, int32, int64,
-    kInvalidArgument, kOutOfMemory, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
+    FIDString, FUnknown, IBStream, IBStream_::IStreamSeekMode_, IBStreamTrait, TBool, TUID, int32,
+    int64, kInvalidArgument, kOutOfMemory, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
 };
 use vst3::{Class, ComWrapper, Interface};
 
@@ -504,6 +505,8 @@ struct EditQueue {
 pub struct ComponentHandler {
     edits: Mutex<EditQueue>,
     restart_flags: AtomicI32,
+    /// The plugin edited a parameter or called `setDirty` since `take_state_changed`.
+    state_changed: AtomicBool,
 }
 
 impl ComponentHandler {
@@ -514,6 +517,7 @@ impl ComponentHandler {
                 overflow: Vec::new(),
             }),
             restart_flags: AtomicI32::new(0),
+            state_changed: AtomicBool::new(false),
         }
     }
 
@@ -546,10 +550,20 @@ impl ComponentHandler {
     pub fn take_restart_flags(&self) -> i32 {
         self.restart_flags.swap(0, Ordering::AcqRel)
     }
+
+    /// Notes a change to the plugin's state that it made on its own.
+    pub fn mark_state_changed(&self) {
+        self.state_changed.store(true, Ordering::Release);
+    }
+
+    /// Whether the plugin changed its state on its own since the last call.
+    pub fn take_state_changed(&self) -> bool {
+        self.state_changed.swap(false, Ordering::AcqRel)
+    }
 }
 
 impl Class for ComponentHandler {
-    type Interfaces = (IComponentHandler,);
+    type Interfaces = (IComponentHandler, IComponentHandler2);
 }
 
 impl IComponentHandlerTrait for ComponentHandler {
@@ -559,6 +573,7 @@ impl IComponentHandlerTrait for ComponentHandler {
 
     unsafe fn performEdit(&self, id: ParamID, normalized: ParamValue) -> tresult {
         let edit = Edit { id, normalized };
+        self.mark_state_changed();
         let mut q = self.edits.lock().unwrap();
         if !q.overflow.is_empty() || q.ring.push(edit).is_err() {
             match q.overflow.iter_mut().find(|e| e.id == id) {
@@ -575,6 +590,28 @@ impl IComponentHandlerTrait for ComponentHandler {
 
     unsafe fn restartComponent(&self, flags: int32) -> tresult {
         self.restart_flags.fetch_or(flags, Ordering::AcqRel);
+        kResultOk
+    }
+}
+
+impl IComponentHandler2Trait for ComponentHandler {
+    unsafe fn setDirty(&self, state: TBool) -> tresult {
+        if state != 0 {
+            self.mark_state_changed();
+        }
+        kResultOk
+    }
+
+    unsafe fn requestOpenEditor(&self, _name: FIDString) -> tresult {
+        // Editors open from the device's own action only.
+        kResultFalse
+    }
+
+    unsafe fn startGroupEdit(&self) -> tresult {
+        kResultOk
+    }
+
+    unsafe fn finishGroupEdit(&self) -> tresult {
         kResultOk
     }
 }

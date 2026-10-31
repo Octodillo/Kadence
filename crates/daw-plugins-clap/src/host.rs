@@ -91,6 +91,10 @@ pub(crate) struct HostShared {
     pub(crate) flush_requested: AtomicBool,
     pub(crate) gui_closed: AtomicBool,
     pub(crate) state_dirty: AtomicBool,
+    /// Like `state_dirty`, for [`PluginInstance::take_state_changed`]; saving does not clear it.
+    ///
+    /// [`PluginInstance::take_state_changed`]: daw_core::plugin::PluginInstance::take_state_changed
+    pub(crate) state_changed: AtomicBool,
     /// An embedded editor's requested size, `width << 32 | height`, or 0 for none.
     pub(crate) pending_resize: AtomicU64,
 }
@@ -104,6 +108,7 @@ impl HostShared {
             flush_requested: AtomicBool::new(false),
             gui_closed: AtomicBool::new(false),
             state_dirty: AtomicBool::new(false),
+            state_changed: AtomicBool::new(false),
             pending_resize: AtomicU64::new(0),
         }
     }
@@ -258,6 +263,7 @@ impl HostLatencyImpl for HostMainThread<'_> {
 impl HostStateImpl for HostMainThread<'_> {
     fn mark_dirty(&self) {
         self.shared.state_dirty.store(true, Ordering::Release);
+        self.shared.state_changed.store(true, Ordering::Release);
     }
 }
 

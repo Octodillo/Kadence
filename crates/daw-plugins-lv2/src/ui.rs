@@ -143,6 +143,8 @@ struct X11 {
     window: u32,
     child: u32,
     wm_delete: u32,
+    net_wm_name: u32,
+    utf8: u32,
     size: (u16, u16),
     /// The UI may not be resized by the user (see `UiInfo::fixed_size`).
     fixed: bool,
@@ -219,9 +221,29 @@ impl X11 {
             window,
             child: 0,
             wm_delete,
+            net_wm_name,
+            utf8,
             size: (0, 0),
             fixed,
         })
+    }
+
+    fn set_title(&self, title: &str) {
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        );
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.window,
+            self.net_wm_name,
+            self.utf8,
+            title.as_bytes(),
+        );
+        let _ = self.conn.flush();
     }
 
     fn resize(&mut self, w: u16, h: u16) {
@@ -277,6 +299,11 @@ struct Controller {
     event_transfer: u32,
     closed: bool,
     x11: Option<X11>,
+    /// The control values last given to the UI, so a UI that writes back what it was given
+    /// does not count as an edit.
+    last_sent: Vec<(u32, f32)>,
+    /// The UI wrote something new since `take_state_changed`.
+    changed: bool,
 }
 
 unsafe extern "C" fn write_function(
@@ -295,8 +322,17 @@ unsafe extern "C" fn write_function(
     // SAFETY: the UI promises `size` readable bytes at `buffer`.
     let bytes = unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), size as usize) };
     if protocol == 0 && size == 4 {
+        let value = f32::from_ne_bytes(bytes.try_into().unwrap_or_default());
+        let echo = c
+            .last_sent
+            .iter()
+            .any(|&(p, v)| p == port && v.to_bits() == value.to_bits());
+        if !echo {
+            c.changed = true;
+        }
         ring::write(&mut c.to_dsp, port, ring::CONTROL, bytes);
     } else if protocol == c.event_transfer {
+        c.changed = true;
         ring::write(&mut c.to_dsp, port, ring::ATOM, bytes);
     }
 }
@@ -327,7 +363,6 @@ pub(crate) struct Editor {
     idle: Option<*const LV2UI_Idle_Interface>,
     ui_resize: Option<*const LV2UI_Resize>,
     external: Option<*mut ExternalWidget>,
-    last_sent: Vec<(u32, f32)>,
     atom_buf: Vec<u8>,
     event_transfer: u32,
     // Everything the UI may still point at, kept until cleanup.
@@ -360,6 +395,8 @@ impl Editor {
             event_transfer: host.urids.event_transfer,
             closed: false,
             x11: None,
+            last_sent: Vec::new(),
+            changed: false,
         }));
         match Self::try_open(info, &host, controller) {
             Ok((descriptor, handle, features, external)) => {
@@ -371,7 +408,6 @@ impl Editor {
                     idle: None,
                     ui_resize: None,
                     external,
-                    last_sent: Vec::new(),
                     atom_buf: vec![0; from_dsp_capacity],
                     event_transfer: host.urids.event_transfer,
                     _features: features,
@@ -606,6 +642,19 @@ impl Editor {
         }
     }
 
+    pub(crate) fn set_title(&mut self, title: &str) {
+        // SAFETY: the controller is ours; the UI is not running right now.
+        if let Some(x) = unsafe { (*self.controller).x11.as_ref() } {
+            x.set_title(title);
+        }
+    }
+
+    /// Whether the UI changed a value since the last call.
+    pub(crate) fn take_state_changed(&mut self) -> bool {
+        // SAFETY: the controller is ours; the UI is not running right now.
+        std::mem::take(unsafe { &mut (*self.controller).changed })
+    }
+
     /// Queues a message for the audio thread as if the UI wrote it.
     pub(crate) fn queue(&mut self, port: u32, kind: u8, body: &[u8]) -> bool {
         // SAFETY: the controller is ours; the UI is not running right now.
@@ -632,7 +681,10 @@ impl Editor {
                 }
             }
             for &(port, value) in controls {
-                let known = self.last_sent.iter_mut().find(|(p, _)| *p == port);
+                // SAFETY: the controller is ours; the UI is not running right now, and the
+                // borrow ends before it does.
+                let last_sent = unsafe { &mut (*self.controller).last_sent };
+                let known = last_sent.iter_mut().find(|(p, _)| *p == port);
                 let changed = match known {
                     Some((_, v)) if v.to_bits() == value.to_bits() => false,
                     Some((_, v)) => {
@@ -640,7 +692,7 @@ impl Editor {
                         true
                     }
                     None => {
-                        self.last_sent.push((port, value));
+                        last_sent.push((port, value));
                         true
                     }
                 };
@@ -728,7 +780,6 @@ impl Editor {
         // dropped, so nothing is dropped twice.
         unsafe {
             let from_dsp = std::ptr::read(&this.from_dsp);
-            drop(std::ptr::read(&this.last_sent));
             drop(std::ptr::read(&this.atom_buf));
             drop(std::ptr::read(&this._features));
             drop(std::ptr::read(&this._host_features));

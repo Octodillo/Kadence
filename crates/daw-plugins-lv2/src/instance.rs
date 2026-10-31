@@ -27,6 +27,10 @@ const ATOM_CAPACITY: usize = 8192;
 pub struct Lv2Instance {
     // Declared first so it is dropped before the plugin it points into.
     editor: Option<ui::Editor>,
+    /// From `set_editor_title`; the plugin's name until then.
+    editor_title: Option<String>,
+    /// The UI changed a value, and `take_state_changed` has not said so yet.
+    state_changed: bool,
     ui_info: Option<ui::UiInfo>,
     /// The UI's ends of the rings while no editor holds them.
     ui_ends: Option<ui::UiEnds>,
@@ -223,6 +227,8 @@ impl Lv2Instance {
 
         let mut this = Self {
             editor: None,
+            editor_title: None,
+            state_changed: false,
             ui_info,
             ui_ends: Some(ui::UiEnds { to_dsp, from_dsp }),
             from_ui,
@@ -597,6 +603,8 @@ impl Node for Lv2Instance {
         self.close_editor();
         match Self::new(self.shared.clone(), &self.descriptor, sample_rate) {
             Ok(mut fresh) => {
+                fresh.editor_title = self.editor_title.take();
+                fresh.state_changed = self.state_changed;
                 if let Ok(state) = state
                     && let Err(e) = fresh.load_state(&state)
                 {
@@ -684,7 +692,13 @@ impl PluginInstance for Lv2Instance {
             .map_err(|e| PluginError::State(e.to_string()))?;
         self.inst
             .restore_state(&state)
-            .map_err(|e| PluginError::State(e.to_string()))
+            .map_err(|e| PluginError::State(e.to_string()))?;
+        // The UI hears the loaded values as new ones; what it writes back is no edit.
+        if let Some(editor) = &mut self.editor {
+            editor.take_state_changed();
+        }
+        self.state_changed = false;
+        Ok(())
     }
 
     fn has_editor(&self) -> bool {
@@ -710,7 +724,10 @@ impl PluginInstance for Lv2Instance {
             features: &self.features,
             urids: &self.urids,
             plugin_uri: &self.descriptor.id,
-            title: &self.descriptor.name,
+            title: self
+                .editor_title
+                .as_deref()
+                .unwrap_or(&self.descriptor.name),
             handle: instance.handle(),
             extension_data: instance.descriptor().and_then(|d| d.extension_data),
         };
@@ -731,9 +748,29 @@ impl PluginInstance for Lv2Instance {
 
     fn close_editor(&mut self) {
         self.ui_active = false;
-        if let Some(editor) = self.editor.take() {
+        if let Some(mut editor) = self.editor.take() {
+            self.state_changed |= editor.take_state_changed();
             self.ui_ends = Some(editor.close());
         }
+    }
+
+    fn is_editor_open(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    fn set_editor_title(&mut self, title: &str) {
+        if let Some(editor) = &mut self.editor {
+            editor.set_title(title);
+        }
+        self.editor_title = Some(title.to_owned());
+    }
+
+    fn take_state_changed(&mut self) -> bool {
+        let ui = self
+            .editor
+            .as_mut()
+            .is_some_and(ui::Editor::take_state_changed);
+        std::mem::take(&mut self.state_changed) | ui
     }
 
     /// Plugin workers run on livi's own worker thread, not here, so slow work
