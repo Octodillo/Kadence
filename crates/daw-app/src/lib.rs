@@ -31,6 +31,7 @@ pub mod session_mixer;
 pub mod settings;
 pub mod state;
 mod test_helper;
+mod transport;
 
 /// Runs a plugin sandbox host or scanner if the arguments ask for one
 /// (`--plugin-host <socket>` or `--scan <format> <bundle>`), which the

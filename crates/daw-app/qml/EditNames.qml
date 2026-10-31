@@ -29,6 +29,7 @@ QtObject {
         "Change Send Tap": i18nc("@item:inmenu name of an edit", "Change Send Tap"),
         "Change Send Target": i18nc("@item:inmenu name of an edit", "Change Send Target"),
         "Change Tempo": i18nc("@item:inmenu name of an edit", "Change Tempo"),
+        "Change Time Signature": i18nc("@item:inmenu name of an edit", "Change Time Signature"),
         "Change Track Color": i18nc("@item:inmenu name of an edit", "Change Track Color"),
         "Change Track Input": i18nc("@item:inmenu name of an edit", "Change Track Input"),
         "Change Track Output": i18nc("@item:inmenu name of an edit", "Change Track Output"),

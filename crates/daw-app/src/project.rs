@@ -14,6 +14,7 @@ use daw_model::{FadeShape, InputChannels, Monitoring, Track, TrackKind};
 use crate::instrument;
 use crate::message::{Context, Fields, Message, Reason};
 use crate::recovery::Candidate;
+use crate::settings::{self, ClickSettings, KConfigStore};
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]
@@ -128,6 +129,19 @@ pub mod qobject {
         #[qproperty(QString, position_text)]
         /// Minutes:seconds of the playhead.
         #[qproperty(QString, time_text)]
+        /// The tempo in effect at the playhead, in beats per minute.
+        #[qproperty(f64, bpm)]
+        /// The time signature in effect at the playhead.
+        #[qproperty(i32, meter_numerator)]
+        #[qproperty(i32, meter_denominator)]
+        /// The click sounds while playing.
+        #[qproperty(bool, metronome)]
+        /// The click's level in dB.
+        #[qproperty(f64, metronome_volume)]
+        /// Bars counted in before recording, 0 for none.
+        #[qproperty(i32, count_in_bars)]
+        /// A count-in is under way.
+        #[qproperty(bool, counting_in)]
         #[qproperty(bool, has_selection)]
         /// The selection holds an audio clip (for clip gain and fades).
         #[qproperty(bool, audio_selected)]
@@ -320,6 +334,21 @@ pub mod qobject {
         fn toggle_record(self: Pin<&mut Project>);
         #[qinvokable]
         fn go_to_start(self: Pin<&mut Project>);
+        /// Sets the tempo at the playhead. Calls in a row are one undo step.
+        #[qinvokable]
+        fn set_tempo(self: Pin<&mut Project>, bpm: f64);
+        /// Sets the time signature at the playhead; the denominator is
+        /// rounded down to a power of two.
+        #[qinvokable]
+        fn set_time_signature(self: Pin<&mut Project>, numerator: i32, denominator: i32);
+        #[qinvokable]
+        fn set_metronome_enabled(self: Pin<&mut Project>, enabled: bool);
+        /// Saves the setting only when `save`, so a slider can save once it
+        /// is let go.
+        #[qinvokable]
+        fn set_metronome_level(self: Pin<&mut Project>, volume_db: f64, save: bool);
+        #[qinvokable]
+        fn set_count_in(self: Pin<&mut Project>, bars: i32);
         /// Turns looping on (over the selection, or the four bars from the
         /// playhead) or off.
         #[qinvokable]
@@ -370,6 +399,13 @@ pub struct ProjectRust {
     looping: bool,
     position_text: QString,
     time_text: QString,
+    bpm: f64,
+    meter_numerator: i32,
+    meter_denominator: i32,
+    metronome: bool,
+    metronome_volume: f64,
+    count_in_bars: i32,
+    counting_in: bool,
     has_selection: bool,
     audio_selected: bool,
     selected_track: i32,
@@ -386,6 +422,9 @@ pub struct ProjectRust {
     /// Last view revision copied into the properties.
     seen: u64,
     seen_position: i64,
+    /// Whether a count-in was under way at the last refresh; it starts and
+    /// ends with the playhead standing still.
+    seen_counting_in: bool,
 }
 
 fn kind_index(kind: TrackKind) -> i32 {
@@ -522,6 +561,8 @@ fn message_or_empty(fields: Option<&Fields>) -> QMap<QMapPair_QString_QVariant> 
 
 impl cxx_qt::Initialize for qobject::Project {
     fn initialize(self: Pin<&mut Self>) {
+        let click = settings::load_click_settings(&KConfigStore);
+        state::with(|s| s.set_click(click));
         self.refresh(true);
     }
 }
@@ -532,17 +573,34 @@ impl qobject::Project {
     fn refresh(mut self: Pin<&mut Self>, all: bool) {
         let seen = self.seen;
         let seen_position = self.seen_position;
+        let seen_counting_in = self.seen_counting_in;
         let snapshot = state::with(|s| {
             s.sync();
             let playhead = s.playhead();
-            let changed = all || s.view_revision != seen || playhead.0 != seen_position;
+            let counting_in = s.is_counting_in();
+            let changed = all
+                || s.view_revision != seen
+                || playhead.0 != seen_position
+                || counting_in != seen_counting_in;
             if !changed {
                 return None;
             }
             let p = s.doc.project();
             let h = s.doc.history();
-            let meter = s.arrange.meter(p);
-            let bb = meter.bar_beat(playhead);
+            // Bars and beats as the engine counts them (what the metronome
+            // clicks), else from the document.
+            let (bar, beat) = match s.engine.session() {
+                Some(x) => {
+                    let m = x.music();
+                    (m.bar, m.bar_beat().floor() as i64)
+                }
+                None => {
+                    let bb = s.arrange.meter(p).bar_beat(playhead);
+                    (bb.bar, bb.beat)
+                }
+            };
+            let tempo = s.tempo_at_playhead();
+            let click = s.click();
             let secs = s.engine.session().map_or(0.0, |x| {
                 x.ticks_to_samples(playhead).0 as f64 / x.sample_rate()
             });
@@ -564,12 +622,15 @@ impl qobject::Project {
                 h.redo_label().unwrap_or_default(),
                 s.engine.is_playing(),
                 s.loop_range().is_some(),
-                format!("{}.{}", bb.bar + 1, bb.beat + 1),
+                format!("{}.{}", bar + 1, beat + 1),
                 format!("{}:{:04.1}", (secs / 60.0).floor() as i64, secs % 60.0),
                 !s.arrange.selection.is_empty(),
                 s.arrange.audio_selected(p),
                 selected,
                 s.status.clone(),
+                tempo,
+                click,
+                counting_in,
             ))
         });
         let Some((
@@ -591,6 +652,9 @@ impl qobject::Project {
             audio_selected,
             selected,
             status,
+            (bpm, numerator, denominator),
+            click,
+            counting_in,
         )) = snapshot
         else {
             return;
@@ -599,6 +663,7 @@ impl qobject::Project {
             let mut r = self.as_mut().rust_mut();
             r.seen = rev;
             r.seen_position = pos;
+            r.seen_counting_in = counting_in;
         }
         let mut this = self.as_mut();
         this.as_mut().set_track_count(tracks);
@@ -618,6 +683,15 @@ impl qobject::Project {
         this.as_mut()
             .set_position_text(QString::from(position.as_str()));
         this.as_mut().set_time_text(QString::from(time.as_str()));
+        this.as_mut().set_bpm(bpm);
+        this.as_mut().set_meter_numerator(i32::from(numerator));
+        this.as_mut().set_meter_denominator(i32::from(denominator));
+        this.as_mut().set_metronome(click.metronome.enabled);
+        this.as_mut()
+            .set_metronome_volume(click.metronome.volume_db);
+        this.as_mut()
+            .set_count_in_bars(i32::try_from(click.count_in_bars).unwrap_or(0));
+        this.as_mut().set_counting_in(counting_in);
         this.as_mut().set_has_selection(has_selection);
         this.as_mut().set_audio_selected(audio_selected);
         this.as_mut().set_selected_track(selected);
@@ -1232,6 +1306,50 @@ impl qobject::Project {
                 let _ = session.locate(TickTime(0));
             }
             s.arrange.view.scroll_x = 0.0;
+        });
+    }
+
+    fn set_tempo(self: Pin<&mut Self>, bpm: f64) {
+        self.edit(|s| {
+            if let Err(e) = s.set_bpm(bpm) {
+                s.report(e.into());
+            }
+        });
+    }
+
+    fn set_time_signature(self: Pin<&mut Self>, numerator: i32, denominator: i32) {
+        let to_u8 = |n: i32| u8::try_from(n.clamp(0, 255)).unwrap_or(0);
+        self.edit(|s| {
+            if let Err(e) = s.set_meter(to_u8(numerator), to_u8(denominator)) {
+                s.report(e.into());
+            }
+        });
+    }
+
+    /// Changes the click settings with `f` and applies them, saving them
+    /// when `save`.
+    fn change_click(self: Pin<&mut Self>, save: bool, f: impl FnOnce(&mut ClickSettings)) {
+        self.edit(|s| {
+            let mut click = s.click();
+            f(&mut click);
+            s.set_click(click);
+            if save {
+                settings::save_click_settings(&mut KConfigStore, &s.click());
+            }
+        });
+    }
+
+    fn set_metronome_enabled(self: Pin<&mut Self>, enabled: bool) {
+        self.change_click(true, |c| c.metronome.enabled = enabled);
+    }
+
+    fn set_metronome_level(self: Pin<&mut Self>, volume_db: f64, save: bool) {
+        self.change_click(save, |c| c.metronome.volume_db = volume_db);
+    }
+
+    fn set_count_in(self: Pin<&mut Self>, bars: i32) {
+        self.change_click(true, |c| {
+            c.count_in_bars = u32::try_from(bars).unwrap_or(0);
         });
     }
 

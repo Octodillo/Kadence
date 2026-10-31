@@ -23,6 +23,86 @@ pub struct TransportState {
     /// position is before its end. The wrap falls on a block boundary, so a
     /// block never runs past the end.
     pub looping: Option<TransportLoop>,
+    /// A count-in is running: the transport was told to play, but holds
+    /// `position` (and reports `playing` false) until it ends. Only the
+    /// metronome acts on it.
+    pub count_in: Option<CountIn>,
+}
+
+/// A count-in before playback: `beats` clicks, `beat_len` samples apart,
+/// on the song's beat lines before the play position, so the pulse carries
+/// straight on into playback.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct CountIn {
+    /// Samples of the count-in already played at the start of the block.
+    pub elapsed: i64,
+    /// Samples between clicks.
+    pub beat_len: f64,
+    /// How many clicks in all.
+    pub beats: u32,
+    pub beats_per_bar: u32,
+    /// Samples from the last click to the start of playback: a beat when
+    /// playback starts on a beat line, less when it starts between two.
+    pub last_gap: f64,
+    /// The first click's beat in its bar (0 is the downbeat), counting back
+    /// from the beat at the play position.
+    pub first_beat: i64,
+}
+
+impl CountIn {
+    /// A count-in of `bars` bars in the time signature and tempo of
+    /// `music` (the play position), or `None` for zero bars or an unknown
+    /// tempo. Its clicks fall where the song's beats before the play
+    /// position would, and it lasts until playback starts there.
+    pub fn bars(bars: u32, music: &MusicalPosition, bpm: f64, sample_rate: f64) -> Option<Self> {
+        if bars == 0 || !(bpm > 0.0 && sample_rate > 0.0) {
+            return None;
+        }
+        let beats_per_bar = u32::from(music.numerator.max(1));
+        let beats = bars * beats_per_bar;
+        let beat_len = music.beat_len() * 60.0 / bpm * sample_rate;
+        // How far into its beat the play position is, in beats; on a beat
+        // line counts as a whole beat, since that line plays as the song.
+        let into = music.bar_beat().max(0.0);
+        let mut frac = into.fract();
+        // Rounding in the tempo map can leave a position a hair before its
+        // beat.
+        if frac < 1e-6 || frac > 1.0 - 1e-6 {
+            frac = 1.0;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let last = (into - frac + 1e-6).floor() as i64;
+        Some(Self {
+            elapsed: 0,
+            beat_len,
+            beats,
+            beats_per_bar,
+            last_gap: frac * beat_len,
+            first_beat: last - i64::from(beats) + 1,
+        })
+    }
+
+    /// Total length in samples.
+    pub fn len(&self) -> i64 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            (f64::from(self.beats.saturating_sub(1)) * self.beat_len + self.last_gap).round() as i64
+        }
+    }
+
+    /// Samples left before playback starts.
+    pub fn remaining(&self) -> i64 {
+        (self.len() - self.elapsed).max(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.remaining() == 0
+    }
+
+    /// Whether click `k` (from 0) is a bar's first beat.
+    pub fn is_downbeat(&self, k: u32) -> bool {
+        (self.first_beat + i64::from(k)).rem_euclid(i64::from(self.beats_per_bar.max(1))) == 0
+    }
 }
 
 /// A loop from `start` (inclusive) to `end` (exclusive), in samples and in
@@ -57,6 +137,7 @@ impl TransportState {
             sample_rate,
             music: timeline.position(position, sample_rate),
             looping: None,
+            count_in: None,
         }
     }
 
@@ -115,6 +196,9 @@ impl TransportState {
     /// A stopped transport stays where it is.
     pub fn advanced(&self, frames: u32) -> Self {
         let mut t = *self;
+        if let Some(c) = &mut t.count_in {
+            c.elapsed += i64::from(frames);
+        }
         if !self.playing || frames == 0 {
             return t;
         }
