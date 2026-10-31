@@ -32,12 +32,18 @@ fn plugin_folder() -> &'static Path {
             .status()
             .expect("run cargo");
         assert!(status.success(), "building the test plugin failed");
-        let dir = tempdir("plugins");
-        std::fs::copy(
-            target.join("debug").join("libdaw_clap_test_plugin.so"),
-            dir.join("test-gain.clap"),
-        )
-        .expect("copy the test plugin");
+        // A folder per process: the smoke tests run as separate processes,
+        // and tempdir clears the folder it returns.
+        let dir = tempdir(&format!("plugins-{}", std::process::id()));
+        // A build with other arguments into the same target directory would
+        // re-link the library and briefly remove it.
+        let library = target.join("debug").join("libdaw_clap_test_plugin.so");
+        let mut tries = 0;
+        while let Err(e) = std::fs::copy(&library, dir.join("test-gain.clap")) {
+            tries += 1;
+            assert!(tries < 50, "copy the test plugin: {e}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
         dir
     })
 }
@@ -84,8 +90,9 @@ fn run(mut cmd: Command) -> std::process::Output {
     };
     let stdout = drain(Box::new(child.stdout.take().expect("stdout")));
     let stderr = drain(Box::new(child.stderr.take().expect("stderr")));
-    // The self test takes a few seconds; anything near a minute is a hang.
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    // The self test takes about 20 s, but its steps may wait up to a minute
+    // in all for a slow machine; anything near two minutes is a hang.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let status = loop {
         if let Some(status) = child.try_wait().expect("wait for kadence") {
             break status;
@@ -95,7 +102,7 @@ fn run(mut cmd: Command) -> std::process::Output {
             child.wait().ok();
             let log = stderr.join().unwrap_or_default();
             panic!(
-                "kadence did not exit within 60 s:\n{}",
+                "kadence did not exit within 120 s:\n{}",
                 String::from_utf8_lossy(&log)
             );
         }

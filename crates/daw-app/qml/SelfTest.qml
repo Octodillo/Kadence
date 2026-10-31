@@ -252,8 +252,16 @@ Item {
             window.playAction.trigger();
         },
         () => {
+            // The engine swaps in the new graph on its own time, and a busy
+            // machine (CI runs several app instances at once) can take more
+            // than one step to bring the compressor's meter up.
+            const metered = Mixer.levels.some((v, i) => i % 5 < 4 && v > 0) && Mixer.levels[0 * 5 + 4] >= 0;
+            if (!metered && test.waits < 25) {
+                return false;
+            }
+            test.waits = 0;
             check(Project.undoText === "Add Device", "mixer edits undo");
-            check(Mixer.levels.some(v => v > 0), "meters move while playing");
+            check(Mixer.levels.some((v, i) => i % 5 < 4 && v > 0), "meters move while playing");
             check(Mixer.levels[0 * 5 + 4] >= 0, "compressor gain reduction metered");
             Mixer.setSoloed(0, true);
             check(Mixer.anySoloed, "solo");
@@ -301,6 +309,7 @@ Item {
             check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
             check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
             check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            check(!PluginEditors.hasEditor(id), "a built-in device has no plugin interface");
             // Drag the threshold: one undo step.
             Project.tick();
             const before = Project.undoText;

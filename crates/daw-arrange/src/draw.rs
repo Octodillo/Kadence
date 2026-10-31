@@ -221,8 +221,15 @@ fn draw_clip(s: &mut Scene, a: &mut Arrange, env: &Env, row: usize, clip: &Clip,
         } else {
             Rgba::rgb(0xff, 0xff, 0xff)
         };
-        // Keep the name visible when the clip starts off the left edge.
-        let tx = header.x.max(0.0) + 4.0;
+        // Keep the name visible when the clip starts off the left edge, and
+        // clear of the fade-in handle on audio clips (always, so it doesn't
+        // shift when the handles appear).
+        let handle = if a.handles(row, clip).is_some() {
+            a.handle_px + 2.0
+        } else {
+            0.0
+        };
+        let tx = header.x.max(0.0) + 4.0 + handle;
         s.text(
             Rect::new(tx, header.y, header.right() - tx - 2.0, header.h),
             &clip.name,
@@ -242,9 +249,11 @@ fn draw_clip(s: &mut Scene, a: &mut Arrange, env: &Env, row: usize, clip: &Clip,
             }
             if let Some(h) = a.handles(row, clip) {
                 fades(s, r, body, &h, audio, pal.background, ink);
-                s.pop_clip();
-                handles(s, &h, audio, pal, ink);
-                return;
+                if a.active_handles(row, clip).is_some() {
+                    s.pop_clip();
+                    handles(s, &h, audio, pal, ink);
+                    return;
+                }
             }
         }
         ClipContent::Midi(m) => {
