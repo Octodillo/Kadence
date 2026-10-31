@@ -25,6 +25,7 @@ clack-extensions = { version = "0.2", features = [
     "timer",
 ] }
 libc = "0.2"
+daw-plugin-window = { path = "../daw-plugin-window" }
 x11rb = "0.13"
 
 [dev-dependencies]

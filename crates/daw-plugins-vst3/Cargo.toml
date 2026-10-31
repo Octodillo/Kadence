@@ -13,6 +13,7 @@ daw-core.workspace = true
 vst3 = "0.3"
 libloading = "0.8"
 rtrb = "0.3"
+daw-plugin-window = { path = "../daw-plugin-window" }
 x11rb = "0.13"
 libc = "0.2"
 log = "0.4"

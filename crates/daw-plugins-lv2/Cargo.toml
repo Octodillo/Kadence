@@ -16,6 +16,7 @@ log = "0.4"
 lv2-sys = "2"
 lv2_raw = "0.3"
 rtrb = "0.3"
+daw-plugin-window = { path = "../daw-plugin-window" }
 x11rb = "0.13"
 
 [dev-dependencies]

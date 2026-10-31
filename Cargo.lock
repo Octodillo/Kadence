@@ -644,6 +644,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "daw-plugin-window"
+version = "0.1.0"
+dependencies = [
+ "x11rb",
+]
+
+[[package]]
 name = "daw-plugins"
 version = "0.1.0"
 dependencies = [
@@ -666,6 +673,7 @@ dependencies = [
  "clack-extensions",
  "clack-host",
  "daw-core",
+ "daw-plugin-window",
  "libc",
  "x11rb",
 ]
@@ -676,6 +684,7 @@ version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
  "daw-core",
+ "daw-plugin-window",
  "libloading 0.8.9",
  "livi",
  "log",
@@ -692,6 +701,7 @@ version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
  "daw-core",
+ "daw-plugin-window",
  "libc",
  "libloading 0.8.9",
  "log",

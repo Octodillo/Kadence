@@ -10,20 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use daw_core::plugin::PluginError;
+use daw_plugin_window::HostWindow;
 use lv2_sys::{
     LV2_Extension_Data_Feature, LV2_Feature, LV2UI_Descriptor, LV2UI_Handle, LV2UI_Idle_Interface,
     LV2UI_Resize,
 };
 use rtrb::{Consumer, Producer};
 use x11rb::connection::Connection;
-use x11rb::properties::WmSizeHints;
 use x11rb::protocol::Event as XEvent;
-use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, PropMode,
-    WindowClass,
-};
-use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
+use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _};
 
 use crate::atom::Urids;
 use crate::{ring, uri_to_path};
@@ -40,7 +35,6 @@ const URID_MAP: &str = "http://lv2plug.in/ns/ext/urid#map";
 const URID_UNMAP: &str = "http://lv2plug.in/ns/ext/urid#unmap";
 const OPTIONS: &str = "http://lv2plug.in/ns/ext/options#options";
 /// Window class, so Plasma groups plugin windows with the app.
-const WM_CLASS: &[u8] = b"kadence\0Kadence\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UiKind {
@@ -139,12 +133,9 @@ struct ExternalHost {
 }
 
 struct X11 {
-    conn: RustConnection,
-    window: u32,
+    host: HostWindow,
+    /// The UI's widget, once it has made one.
     child: u32,
-    wm_delete: u32,
-    net_wm_name: u32,
-    utf8: u32,
     size: (u16, u16),
     /// The UI may not be resized by the user (see `UiInfo::fixed_size`).
     fixed: bool,
@@ -152,98 +143,13 @@ struct X11 {
 
 impl X11 {
     fn open(title: &str, fixed: bool) -> Result<Self, String> {
-        let (conn, screen) = x11rb::connect(None).map_err(|e| format!("no X11 display: {e}"))?;
-        let root = conn.setup().roots[screen].root;
-        let window = conn.generate_id().map_err(|e| e.to_string())?;
-        let e = |e: &dyn std::fmt::Display| e.to_string();
-        conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            window,
-            root,
-            0,
-            0,
-            400,
-            300,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            // Substructure: hear about the UI's widget resizing itself.
-            &CreateWindowAux::new()
-                .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_NOTIFY),
-        )
-        .map_err(|x| e(&x))?;
-        let atom = |name: &[u8]| -> Result<u32, String> {
-            Ok(conn
-                .intern_atom(false, name)
-                .map_err(|x| e(&x))?
-                .reply()
-                .map_err(|x| e(&x))?
-                .atom)
-        };
-        let wm_protocols = atom(b"WM_PROTOCOLS")?;
-        let wm_delete = atom(b"WM_DELETE_WINDOW")?;
-        let net_wm_name = atom(b"_NET_WM_NAME")?;
-        let utf8 = atom(b"UTF8_STRING")?;
-        let props = || -> Result<(), x11rb::errors::ConnectionError> {
-            conn.change_property32(
-                PropMode::REPLACE,
-                window,
-                wm_protocols,
-                AtomEnum::ATOM,
-                &[wm_delete],
-            )?;
-            conn.change_property8(
-                PropMode::REPLACE,
-                window,
-                AtomEnum::WM_NAME,
-                AtomEnum::STRING,
-                title.as_bytes(),
-            )?;
-            conn.change_property8(
-                PropMode::REPLACE,
-                window,
-                net_wm_name,
-                utf8,
-                title.as_bytes(),
-            )?;
-            conn.change_property8(
-                PropMode::REPLACE,
-                window,
-                AtomEnum::WM_CLASS,
-                AtomEnum::STRING,
-                WM_CLASS,
-            )?;
-            conn.flush()
-        };
-        props().map_err(|x| e(&x))?;
+        // The size is a placeholder until the UI asks for one or makes its widget.
         Ok(Self {
-            conn,
-            window,
+            host: HostWindow::new(title, 400, 300, false)?,
             child: 0,
-            wm_delete,
-            net_wm_name,
-            utf8,
             size: (0, 0),
             fixed,
         })
-    }
-
-    fn set_title(&self, title: &str) {
-        let _ = self.conn.change_property8(
-            PropMode::REPLACE,
-            self.window,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            title.as_bytes(),
-        );
-        let _ = self.conn.change_property8(
-            PropMode::REPLACE,
-            self.window,
-            self.net_wm_name,
-            self.utf8,
-            title.as_bytes(),
-        );
-        let _ = self.conn.flush();
     }
 
     fn resize(&mut self, w: u16, h: u16) {
@@ -251,26 +157,8 @@ impl X11 {
             return;
         }
         self.size = (w, h);
-        if self.fixed {
-            // So KWin offers no resize handles: min = max = the UI's size.
-            let mut hints = WmSizeHints::new();
-            let (w, h) = (i32::from(w), i32::from(h));
-            hints.min_size = Some((w, h));
-            hints.max_size = Some((w, h));
-            let _ = hints.set_normal_hints(&self.conn, self.window);
-        }
-        let aux = ConfigureWindowAux::new()
-            .width(u32::from(w))
-            .height(u32::from(h));
-        let _ = self.conn.configure_window(self.window, &aux);
-        let _ = self.conn.flush();
-    }
-}
-
-impl Drop for X11 {
-    fn drop(&mut self) {
-        let _ = self.conn.destroy_window(self.window);
-        let _ = self.conn.flush();
+        // A fixed UI's size hints follow, so KWin offers no resize handles.
+        self.host.resize(u32::from(w), u32::from(h), self.fixed);
     }
 }
 
@@ -475,7 +363,7 @@ impl Editor {
             unsafe { (*controller).x11 = Some(x11) };
         }
         // SAFETY: as above.
-        let parent = unsafe { (*controller).x11.as_ref().map(|x| x.window) };
+        let parent = unsafe { (*controller).x11.as_ref().map(|x| x.host.id()) };
 
         let title = CString::new(host.title).unwrap_or_default();
         let mut external_host = Box::new(ExternalHost {
@@ -627,12 +515,12 @@ impl Editor {
         if let Some(x) = unsafe { (*self.controller).x11.as_mut() } {
             if x.size == (0, 0) && x.child != 0 {
                 // The UI did not ask for a size: use its widget's.
-                if let Ok(Ok(g)) = x.conn.get_geometry(x.child).map(|r| r.reply()) {
+                let geometry = x.host.connection().get_geometry(x.child);
+                if let Ok(Ok(g)) = geometry.map(|r| r.reply()) {
                     x.resize(g.width, g.height);
                 }
             }
-            let _ = x.conn.map_window(x.window);
-            let _ = x.conn.flush();
+            x.host.show();
         }
         if let Some(w) = self.external {
             // SAFETY: a live external widget.
@@ -645,7 +533,7 @@ impl Editor {
     pub(crate) fn set_title(&mut self, title: &str) {
         // SAFETY: the controller is ours; the UI is not running right now.
         if let Some(x) = unsafe { (*self.controller).x11.as_ref() } {
-            x.set_title(title);
+            x.host.set_title(title);
         }
     }
 
@@ -722,17 +610,12 @@ impl Editor {
             return false;
         }
         while let Some(x) = unsafe { (*self.controller).x11.as_mut() } {
-            let Ok(Some(ev)) = x.conn.poll_for_event() else {
+            let Ok(Some(ev)) = x.host.connection().poll_for_event() else {
                 break;
             };
             let resized = match ev {
-                XEvent::ClientMessage(e)
-                    if e.window == x.window && e.data.as_data32()[0] == x.wm_delete =>
-                {
-                    return false;
-                }
-                XEvent::DestroyNotify(e) if e.window == x.window => return false,
-                XEvent::ConfigureNotify(e) if e.window == x.window => {
+                ev if x.host.is_close(&ev) => return false,
+                XEvent::ConfigureNotify(e) if e.window == x.host.id() => {
                     if x.fixed {
                         // A fixed-size UI keeps its size even if the window
                         // manager ignores the size hints, and `size` stays the
@@ -744,8 +627,9 @@ impl Editor {
                             let aux = ConfigureWindowAux::new()
                                 .width(u32::from(e.width))
                                 .height(u32::from(e.height));
-                            let _ = x.conn.configure_window(x.child, &aux);
-                            let _ = x.conn.flush();
+                            let conn = x.host.connection();
+                            let _ = conn.configure_window(x.child, &aux);
+                            let _ = conn.flush();
                         }
                         Some((e.width, e.height))
                     }

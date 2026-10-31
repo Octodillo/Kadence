@@ -19,7 +19,7 @@ use daw_core::event::ParamId;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{self, ParamInfo, PluginDescriptor, PluginError};
 
-use crate::editor::HostWindow;
+use crate::editor::EditorWindow;
 use crate::events;
 use crate::host::{AudioThreadScope, DawHost, HostShared};
 
@@ -120,7 +120,7 @@ enum EditorMode {
 struct EditorState {
     created: bool,
     /// The host window an embedded editor lives in.
-    window: Option<HostWindow>,
+    window: Option<EditorWindow>,
     resizable: bool,
     /// From `set_editor_title`; the plugin's name until then.
     title: Option<String>,
@@ -700,7 +700,7 @@ impl plugin::PluginInstance for ClapInstance {
                     .title
                     .as_deref()
                     .unwrap_or(&self.descriptor.name);
-                let window = match HostWindow::new(title, size.width, size.height, resizable) {
+                let window = match EditorWindow::new(title, size.width, size.height, resizable) {
                     Ok(window) => window,
                     Err(e) => {
                         gui.destroy(&handle);

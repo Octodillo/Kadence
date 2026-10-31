@@ -471,7 +471,7 @@ fn fixed_size_editors_have_fixed_windows() {
         .children
         .into_iter()
         .find(|&w| {
-            conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 64)
+            conn.get_property(false, w, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 64)
                 .ok()
                 .and_then(|c| c.reply().ok())
                 .is_some_and(|r| r.value == name.as_bytes())
