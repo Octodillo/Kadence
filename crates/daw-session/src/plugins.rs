@@ -311,7 +311,10 @@ impl Plugins {
         let mut editor_title = None;
         if let Some(title) = self.reopen.remove(&d.id) {
             instance.set_editor_title(&title);
-            editor_open = instance.open_editor().is_ok();
+            match instance.open_editor() {
+                Ok(()) => editor_open = true,
+                Err(e) => warnings.push(Warning::editor_failed(d.name.clone(), &e)),
+            }
             editor_title = Some(title);
         }
         Slot::Live(Box::new(Live {

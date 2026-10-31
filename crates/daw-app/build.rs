@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use cxx_qt_build::{CxxQtBuilder, QmlModule};
+use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 
 /// KDE Frameworks used from `src/cpp`, as (include dirs, library).
 const KF6: &[(&[&str], &str)] = &[
@@ -91,7 +91,10 @@ fn main() {
     );
 
     let mut builder = CxxQtBuilder::new_qml_module(
-        QmlModule::new("io.github.octodillo.daw").qml_files(QML_FILES.iter().copied()),
+        QmlModule::new("io.github.octodillo.daw")
+            .qml_files(QML_FILES.iter().copied())
+            // Shared helpers without state: one instance for the whole app.
+            .qml_file(QmlFile::from("qml/ValueText.qml").singleton(true)),
     )
     .files([
         "src/bridge.rs",

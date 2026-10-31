@@ -3,18 +3,19 @@
 //! The arrange view (`daw_arrange`) draws and edits the lanes' points; this
 //! names lanes and their targets for the headers, adds and removes lanes and
 //! keeps each lane's mode: off (the control keeps its own value), read (the
-//! lane plays) or write (it plays, and moving its control on the Mix page
-//! during playback records over it, as with the mixer's Write Automation
-//! switch).
+//! lane plays) or write (it plays, and moving its control during playback
+//! records over it, as with the mixer's Write Automation switch). The
+//! control is the same wherever it is moved: on the Mix page, in the device
+//! panel or in the lane's header, which goes through the same mixer.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::collections::HashSet;
 
-use daw_arrange::{LaneScale, ParamCatalog};
-use daw_core::event::ParamId;
-use daw_devices::{ParamKind, ParamSpec, Taper};
-use daw_model::{AutomationTarget, Device, DeviceSource, LaneId, Project, Track};
+use daw_model::{AutomationLane, AutomationTarget, LaneId, Project, Track};
 
+use crate::device_panel::{BuiltinParams, ParamDesc};
+use crate::message::Message;
+use crate::mixer::{Control, StripId};
+use crate::session_mixer::{ParamStart, strip_id};
 use crate::state::AppState;
 
 /// What a lane automates, as the header words it.
@@ -54,61 +55,6 @@ pub struct TargetName {
     pub param: String,
 }
 
-/// Parameter ranges of the built-in devices, looked up once per kind.
-#[derive(Default)]
-pub struct BuiltinParams {
-    specs: Mutex<HashMap<String, &'static [ParamSpec]>>,
-}
-
-impl BuiltinParams {
-    fn specs(&self, device: &Device) -> &'static [ParamSpec] {
-        let DeviceSource::Builtin { kind } = &device.source else {
-            // Plugins describe their parameters once they are loaded.
-            return &[];
-        };
-        let mut cache = self.specs.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&specs) = cache.get(kind) {
-            return specs;
-        }
-        let specs = daw_devices::param_specs(kind).unwrap_or(&[]);
-        cache.insert(kind.clone(), specs);
-        specs
-    }
-
-    fn spec(&self, device: &Device, param: ParamId) -> Option<ParamSpec> {
-        self.specs(device).iter().find(|p| p.id == param).copied()
-    }
-
-    /// The name of a parameter, for headers.
-    pub fn name(&self, device: &Device, param: ParamId) -> Option<&'static str> {
-        self.spec(device, param).map(|s| s.name)
-    }
-}
-
-impl ParamCatalog for BuiltinParams {
-    fn automatable(&self, device: &Device) -> Vec<ParamId> {
-        self.specs(device)
-            .iter()
-            .filter(|p| p.automatable)
-            .map(|p| p.id)
-            .collect()
-    }
-
-    fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
-        let s = self.spec(device, param)?;
-        Some(LaneScale::Range {
-            min: s.min,
-            max: s.max,
-            log: s.taper == Taper::Log && s.min > 0.0,
-            steps: !matches!(s.kind, ParamKind::Continuous),
-        })
-    }
-
-    fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
-        self.spec(device, param).map(|s| s.default)
-    }
-}
-
 /// Names `target` on `track`.
 pub fn target_name(
     project: &Project,
@@ -145,6 +91,24 @@ pub fn target_name(
     }
 }
 
+/// A lane's control as its header shows it: what the target is set to,
+/// or what the lane plays at the playhead.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct LaneControl {
+    /// Along the lane's scale, 0 (bottom) to 1 (top), as the timeline
+    /// draws it.
+    pub norm: f64,
+    /// In the target's own unit: dB, pan position or plain value.
+    pub value: f64,
+    /// The lane is on and has points, so it sets the value as it plays and
+    /// the control follows it.
+    pub following: bool,
+    /// Moving the control during playback records over the lane (it is in
+    /// write mode, or the mixer writes automation), as the mixer's and
+    /// device panel's controls do.
+    pub writes: bool,
+}
+
 /// The lane modes and parameter names the app keeps beside the document.
 #[derive(Default)]
 pub struct Lanes {
@@ -164,6 +128,144 @@ impl AppState {
     fn lane_id(&self, track: i32, lane: i32) -> Option<LaneId> {
         let t = self.track_at_index(track)?;
         Some(t.automation.get(usize::try_from(lane).ok()?)?.id)
+    }
+
+    fn lane_at(&self, track: i32, lane: i32) -> Option<(&std::sync::Arc<Track>, &AutomationLane)> {
+        let t = self.track_at_index(track)?;
+        let l = t.automation.get(usize::try_from(lane).ok()?)?;
+        Some((t, l))
+    }
+
+    /// The value lane `lane` of track `track` controls, as it is now.
+    pub fn lane_control(&self, track: i32, lane: i32) -> Option<LaneControl> {
+        let (t, l) = self.lane_at(track, lane)?;
+        let scale = self.arrange.lane_scale(t, l.target);
+        let following = l.enabled && !l.points.is_empty();
+        let value = if following {
+            l.value_at(self.playhead())
+        } else {
+            None
+        }
+        .unwrap_or_else(|| self.arrange.static_value(t, l.target));
+        Some(LaneControl {
+            norm: scale.to_norm(value),
+            value,
+            following,
+            writes: self.mixer.write() || (l.enabled && self.lanes.write.contains(&l.id)),
+        })
+    }
+
+    /// The mixer control a lane's header drives: its strip and control,
+    /// and for a built-in device's parameter, its description.
+    fn lane_mixer_control(
+        &self,
+        track: i32,
+        lane: i32,
+    ) -> Option<(StripId, Control, Option<ParamDesc>)> {
+        let (t, l) = self.lane_at(track, lane)?;
+        let control = match l.target {
+            AutomationTarget::Volume => Control::Volume,
+            AutomationTarget::Pan => Control::Pan,
+            AutomationTarget::SendLevel { send } => {
+                let send = t.sends.iter().find(|s| s.id == send)?;
+                Control::Send(strip_id(send.target))
+            }
+            AutomationTarget::DeviceParam { device, param } => Control::Param { device, param },
+        };
+        Some((strip_id(t.id), control, self.lane_param(track, lane)))
+    }
+
+    /// Runs a change to a lane's control as the mixer runs its own: after
+    /// pending edits elsewhere, with the lanes' write modes, then plays it.
+    fn control_lane(
+        &mut self,
+        track: i32,
+        lane: i32,
+        f: impl FnOnce(&mut Self, StripId, Control, Option<ParamDesc>) -> Result<(), Message>,
+    ) {
+        let Some((id, control, param)) = self.lane_mixer_control(track, lane) else {
+            return;
+        };
+        self.end_drag();
+        self.flush_plugin_changes();
+        self.mixer.write_lanes.clone_from(&self.lanes.write);
+        let r = f(self, id, control, param);
+        self.sync();
+        if let Err(e) = r {
+            self.report(e);
+        }
+    }
+
+    /// The user grabbed a lane's control: a new undo step, and during
+    /// playback with writing armed, a take, as grabbing the same control on
+    /// the Mix page or device panel would start.
+    pub fn begin_lane_control(&mut self, track: i32, lane: i32) {
+        let static_value = self
+            .lane_at(track, lane)
+            .map(|(t, l)| self.arrange.static_value(t, l.target));
+        self.control_lane(track, lane, |s, id, control, param| {
+            s.doc.seal();
+            let session = s.engine.session_mut();
+            match param {
+                None => s.mixer.touch(&mut s.doc, session, id, control, true),
+                Some(p) if p.records() => {
+                    let start = ParamStart {
+                        value: static_value.unwrap_or(p.default),
+                        tolerance: p.tolerance(),
+                    };
+                    s.mixer.touch_param(&mut s.doc, session, id, control, start)
+                }
+                Some(_) => Ok(()),
+            }
+        });
+    }
+
+    /// Moves a lane's control to height `norm` on the lane's scale. Like
+    /// the mixer's controls, it records while a take runs and otherwise
+    /// sets the static value; a lane playing its points ignores it unless
+    /// it writes. Moves until
+    /// [`end_lane_control`](Self::end_lane_control) are one undo step.
+    pub fn set_lane_control(&mut self, track: i32, lane: i32, norm: f64) {
+        if !norm.is_finite() {
+            return;
+        }
+        let Some(c) = self.lane_control(track, lane) else {
+            return;
+        };
+        if c.following && !c.writes {
+            return;
+        }
+        let Some(scale) = self
+            .lane_at(track, lane)
+            .map(|(t, l)| self.arrange.lane_scale(t, l.target))
+        else {
+            return;
+        };
+        self.control_lane(track, lane, |s, id, control, param| {
+            let value = param.map_or_else(|| scale.from_norm(norm), |p| p.from_normalized(norm));
+            let session = s.engine.session_mut();
+            s.mixer.set(&mut s.doc, session, id, control, value)
+        });
+    }
+
+    /// The user let go of a lane's control: ends its take and the undo
+    /// step.
+    pub fn end_lane_control(&mut self, track: i32, lane: i32) {
+        self.control_lane(track, lane, |s, id, control, _| {
+            let session = s.engine.session_mut();
+            s.mixer.touch(&mut s.doc, session, id, control, false)
+        });
+    }
+
+    /// How a device-parameter lane's parameter is described (its unit,
+    /// control and choices); `None` for other lanes and unknown devices.
+    pub fn lane_param(&self, track: i32, lane: i32) -> Option<ParamDesc> {
+        let (t, l) = self.lane_at(track, lane)?;
+        let AutomationTarget::DeviceParam { device, param } = l.target else {
+            return None;
+        };
+        let d = t.devices.iter().find(|d| d.id == device)?;
+        self.lanes.params.param(d, param)
     }
 
     pub fn lane_count(&self, track: i32) -> usize {
@@ -277,8 +379,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daw_arrange::{LaneScale, ParamCatalog};
     use daw_model::commands::AddDevice;
-    use daw_model::{Document, TrackKind};
+    use daw_model::{Device, DeviceSource, Document, TrackKind};
 
     fn eq_device() -> Device {
         Device::new(
@@ -291,7 +394,7 @@ mod tests {
 
     #[test]
     fn builtin_params_have_ranges_and_names() {
-        let p = BuiltinParams::default();
+        let p = BuiltinParams;
         let d = eq_device();
         let ids = p.automatable(&d);
         assert!(!ids.is_empty());
@@ -313,6 +416,51 @@ mod tests {
         assert!(p.automatable(&unknown).is_empty());
     }
 
+    /// Every built-in parameter's slider and lane run along its taper:
+    /// halfway is the geometric mean on a log taper, the midpoint
+    /// otherwise, and discrete parameters land on whole numbers.
+    #[test]
+    fn every_builtin_param_maps_along_its_taper() {
+        use daw_devices::{ParamKind, Taper};
+        let p = BuiltinParams;
+        for entry in daw_devices::devices() {
+            let d = Device::new(
+                entry.info.name,
+                DeviceSource::Builtin {
+                    kind: entry.info.id.into(),
+                },
+            );
+            for spec in entry.params {
+                let desc = p.param(&d, spec.id).expect("described");
+                let half = desc.from_normalized(0.5);
+                let expected =
+                    if spec.taper == Taper::Log && matches!(spec.kind, ParamKind::Continuous) {
+                        (spec.min * spec.max).sqrt()
+                    } else if matches!(spec.kind, ParamKind::Continuous) {
+                        (spec.min + spec.max) / 2.0
+                    } else {
+                        ((spec.min + spec.max) / 2.0).round()
+                    };
+                assert!(
+                    (half - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                    "{} {}",
+                    entry.info.id,
+                    spec.name
+                );
+                assert!((desc.from_normalized(0.0) - spec.min).abs() < 1e-9);
+                assert!(
+                    (desc.from_normalized(1.0) - spec.max).abs() < 1e-9 * spec.max.abs().max(1.0)
+                );
+                assert!(
+                    (desc.to_normalized(half) - 0.5).abs() < 1e-9
+                        || !matches!(spec.kind, ParamKind::Continuous)
+                );
+                // The lanes' catalog uses the same scale.
+                assert_eq!(p.scale(&d, spec.id), Some(desc.scale()));
+            }
+        }
+    }
+
     #[test]
     fn target_names_name_devices_and_params() {
         let mut doc = Document::new(Project::new("t"));
@@ -327,14 +475,11 @@ mod tests {
             device: d,
         })
         .unwrap();
-        let p = BuiltinParams::default();
+        let p = BuiltinParams;
         let track = doc.project().track(id).unwrap().clone();
         let targets = daw_arrange::automation::lane_targets(
             &track,
-            Some(
-                &(std::sync::Arc::new(BuiltinParams::default())
-                    as std::sync::Arc<dyn ParamCatalog>),
-            ),
+            Some(&(std::sync::Arc::new(BuiltinParams) as std::sync::Arc<dyn ParamCatalog>)),
         );
         let last = *targets.last().unwrap();
         let n = target_name(doc.project(), &p, &track, last);
