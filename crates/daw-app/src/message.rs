@@ -114,6 +114,12 @@ pub enum Reason {
     DiskTooSlow,
     /// The file name's extension, `detail`, is another format's.
     WrongExtension,
+    /// Sandboxed plugins missed `number` cycles during the export.
+    PluginTooSlow,
+    /// The plugin of device `name` crashed during the export.
+    ExportPluginCrashed,
+    /// A plugin changed its latency during the export.
+    LatencyChanged,
     /// An audio take could not be written to `path`; `detail`.
     CannotRecordTo,
     /// Track `name` records inputs the audio system doesn't have.
@@ -298,6 +304,12 @@ fn export_fields(p: &ExportProblem) -> Fields {
                 number: *n,
                 ..new(R::DiskTooSlow)
             },
+            E::PluginTooSlow(n) => Fields {
+                number: *n,
+                ..new(R::PluginTooSlow)
+            },
+            E::PluginCrashed(device) => new(R::ExportPluginCrashed).name(device),
+            E::LatencyChanged => new(R::LatencyChanged),
             // The dialog only offers valid settings.
             E::SampleRate(_) | E::Tail(_) => new(R::EncodeFailed).detail(e),
         },

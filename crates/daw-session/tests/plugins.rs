@@ -65,14 +65,23 @@ fn binaries() -> &'static (PathBuf, PathBuf) {
     })
 }
 
+/// A loader that finds only the test plugin, set up as an export's.
+fn export_loader() -> SandboxLoader {
+    loader_with(daw_session::export::offline_sandbox)
+}
+
 /// A loader that finds only the test plugin.
 fn loader() -> SandboxLoader {
+    loader_with(|c| c)
+}
+
+fn loader_with(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
     let (plugins, host) = binaries();
     let mut config = SandboxConfig::new(HostLauncher::new(host, Vec::<String>::new()));
     // CI machines are slow and the host is a debug build.
     config.process_timeout = Some(Duration::from_secs(5));
     config.rt_priority = None;
-    let mut loader = SandboxLoader::new(config);
+    let mut loader = SandboxLoader::new(adjust(config));
     let registry = loader.registry_mut();
     registry.set_search_paths(PluginFormatKind::Clap, vec![plugins.clone()]);
     registry.set_search_paths(PluginFormatKind::Lv2, vec![]);
@@ -699,4 +708,122 @@ fn a_crashed_plugin_has_no_editor_to_open() {
         rig.run(BLOCK);
     }
     assert!(rig.session.plugin_editor_open(rig.device));
+}
+
+/// Renders bar 1 of `rig`'s project offline, loading plugins with `loader`.
+fn export_bar(
+    rig: &mut Rig,
+    loader: Option<Box<dyn daw_session::PluginLoader>>,
+) -> (Vec<f32>, Vec<Warning>) {
+    let mut out = Vec::new();
+    let warnings = try_export(rig, loader, 4 * PPQ, |planes| {
+        out.extend_from_slice(planes[0]);
+    })
+    .unwrap();
+    (out, warnings)
+}
+
+fn try_export(
+    rig: &mut Rig,
+    loader: Option<Box<dyn daw_session::PluginLoader>>,
+    ticks: i64,
+    mut sink: impl FnMut(&[&[f32]]),
+) -> Result<Vec<Warning>, daw_session::export::ExportError> {
+    use daw_session::export::{Progress, RenderSettings, render};
+    render(
+        &rig.doc.snapshot(),
+        Some(rig.dir.path().to_path_buf()),
+        loader,
+        &RenderSettings {
+            start: TickTime(0),
+            end: TickTime(ticks),
+            tail_seconds: 0.0,
+            sample_rate: RATE as u32,
+        },
+        &Progress::default(),
+        |planes| {
+            sink(planes);
+            Ok(())
+        },
+    )
+}
+
+/// Loads through a [`SandboxLoader`], keeping each sandbox host's pid.
+struct PidLoader(SandboxLoader, std::sync::Arc<std::sync::Mutex<Vec<u32>>>);
+
+impl daw_session::PluginLoader for PidLoader {
+    fn load(
+        &mut self,
+        format: &PluginFormatKind,
+        id: &str,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<daw_session::LoadedPlugin, daw_session::LoadError> {
+        let loaded = self.0.load(format, id, sample_rate, max_frames)?;
+        if let Some(m) = &loaded.monitor {
+            self.1.lock().unwrap().push(m.pid());
+        }
+        Ok(loaded)
+    }
+}
+
+#[test]
+fn exports_play_plugins_with_their_stored_state() {
+    let mut rig = Rig::new();
+    rig.doc
+        .store_plugin_state(rig.device, Some(gain_state(0.5).into()))
+        .unwrap();
+
+    let (out, warnings) = export_bar(&mut rig, Some(Box::new(export_loader())));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    // Two seconds at 120 bpm through the plugin at its stored gain. The plugin
+    // reports 32 samples of latency but doesn't delay, so the export, which
+    // compensates for it, starts 32 samples into the clip's 64-sample fade-in
+    // and ends with 32 samples of silence.
+    let latency = 32; // daw_clap_test_plugin::LATENCY
+    assert_eq!(out.len(), 2 * RATE as usize);
+    let body = &out[latency..out.len() - latency];
+    let worst = body
+        .iter()
+        .fold(0.0f32, |m, s| m.max((s - LEVEL * 0.5).abs()));
+    assert!(
+        worst < 1e-5,
+        "export strays {worst} from the plugin's output"
+    );
+    assert!(out[out.len() - latency..].iter().all(|&s| s == 0.0));
+
+    // Without a loader the device is bypassed, and the export says so.
+    let (out, warnings) = export_bar(&mut rig, None);
+    assert!(
+        matches!(warnings.as_slice(), [Warning::PluginNotLoaded { .. }]),
+        "{warnings:?}"
+    );
+    // Past the clip's fade-in, the clip as it is.
+    assert!(out[64..].iter().all(|s| (s - LEVEL).abs() < 1e-5));
+}
+
+#[test]
+fn a_plugin_crashing_mid_export_fails_it() {
+    use daw_session::export::ExportError;
+    let mut rig = Rig::new();
+    let pids = std::sync::Arc::default();
+    let loader = PidLoader(export_loader(), std::sync::Arc::clone(&pids));
+    let mut blocks = 0;
+    let result = try_export(&mut rig, Some(Box::new(loader)), 16 * PPQ, |_| {
+        blocks += 1;
+        if blocks == 1 {
+            let pid = pids.lock().unwrap()[0];
+            // SAFETY: plain syscall on a process this test started.
+            assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
+    // Never a file quietly missing the plugin.
+    assert!(
+        matches!(
+            result,
+            Err(ExportError::PluginCrashed(ref d)) if d == "Gain"
+        ) || matches!(result, Err(ExportError::PluginTooSlow(_))),
+        "{result:?}"
+    );
 }
