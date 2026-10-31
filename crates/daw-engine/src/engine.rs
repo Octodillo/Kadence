@@ -82,6 +82,7 @@ enum Command {
 struct Shared {
     position: AtomicI64,
     playing: AtomicBool,
+    counting_in: AtomicBool,
     latency: AtomicU32,
     swaps: AtomicU64,
     dropped: AtomicU64,
@@ -226,6 +227,12 @@ impl EngineController {
         self.transport(TransportCommand::Play)
     }
 
+    /// Plays after a count-in of `bars` bars; see
+    /// [`TransportCommand::PlayWithCountIn`].
+    pub fn play_with_count_in(&mut self, bars: u32) -> Result<(), EngineError> {
+        self.transport(TransportCommand::PlayWithCountIn(bars))
+    }
+
     pub fn stop(&mut self) -> Result<(), EngineError> {
         self.transport(TransportCommand::Stop)
     }
@@ -306,6 +313,11 @@ impl EngineController {
 
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Relaxed)
+    }
+
+    /// Whether the audio thread last reported a count-in under way.
+    pub fn is_counting_in(&self) -> bool {
+        self.shared.counting_in.load(Ordering::Relaxed)
     }
 
     /// Latency of the graph currently running.
@@ -417,6 +429,9 @@ impl EngineProcessor {
         self.shared
             .playing
             .store(self.transport.is_playing(), Ordering::Relaxed);
+        self.shared
+            .counting_in
+            .store(self.transport.is_counting_in(), Ordering::Relaxed);
     }
 
     pub fn transport(&self) -> &Transport {

@@ -4,13 +4,17 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QMap, QMapPair_QString_QVariant, QString, QUrl, QVariant};
+use cxx_qt_lib::{
+    QColor, QList, QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant,
+};
 use daw_core::time::{PPQ, TickTime};
 use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
 use daw_model::{FadeShape, InputChannels, Monitoring, Track, TrackKind};
 
 use crate::instrument;
 use crate::message::{Context, Fields, Message, Reason};
+use crate::recovery::Candidate;
+use crate::settings::{self, ClickSettings, KConfigStore};
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]
@@ -24,6 +28,8 @@ pub mod qobject {
         type QUrl = cxx_qt_lib::QUrl;
         include!("cxx-qt-lib/qmap.h");
         type QMap_QString_QVariant = cxx_qt_lib::QMap<cxx_qt_lib::QMapPair_QString_QVariant>;
+        include!("cxx-qt-lib/qstringlist.h");
+        type QStringList = cxx_qt_lib::QStringList;
     }
 
     /// The `context` of a message map: what the user was doing. See
@@ -37,6 +43,8 @@ pub mod qobject {
         EditContext,
         PlaybackContext,
         RecordContext,
+        CollectContext,
+        RecoverContext,
         ExportContext,
     }
 
@@ -94,6 +102,7 @@ pub mod qobject {
         PositionJumped,
         TrackGoneWhileRecording,
         RecordXruns,
+        AlreadyOpen,
     }
 
     #[auto_cxx_name]
@@ -120,6 +129,19 @@ pub mod qobject {
         #[qproperty(QString, position_text)]
         /// Minutes:seconds of the playhead.
         #[qproperty(QString, time_text)]
+        /// The tempo in effect at the playhead, in beats per minute.
+        #[qproperty(f64, bpm)]
+        /// The time signature in effect at the playhead.
+        #[qproperty(i32, meter_numerator)]
+        #[qproperty(i32, meter_denominator)]
+        /// The click sounds while playing.
+        #[qproperty(bool, metronome)]
+        /// The click's level in dB.
+        #[qproperty(f64, metronome_volume)]
+        /// Bars counted in before recording, 0 for none.
+        #[qproperty(i32, count_in_bars)]
+        /// A count-in is under way.
+        #[qproperty(bool, counting_in)]
         #[qproperty(bool, has_selection)]
         /// The selection holds an audio clip (for clip gain and fades).
         #[qproperty(bool, audio_selected)]
@@ -127,7 +149,84 @@ pub mod qobject {
         /// The last error or warning, as a message map (see
         /// `message_map`); empty when there is none. QML words it.
         #[qproperty(QMap_QString_QVariant, status)]
+        /// Folders of recently used projects, newest first.
+        #[qproperty(QStringList, recent_projects)]
+        /// How many audio files clips play that are not on disk; see
+        /// `missing_files`, `missing_clip_count` and `relink`.
+        #[qproperty(i32, missing_count)]
+        /// The missing files, as the clips name them; index them for
+        /// `missing_clip_count` and `relink`.
+        #[qproperty(QStringList, missing_files)]
+        /// How many audio files clips play from outside the bundle, which
+        /// `collect_files` copies in.
+        #[qproperty(i32, external_count)]
+        /// How many earlier sessions left unsaved work; see `recovery_name`.
+        #[qproperty(i32, recovery_count)]
         type Project = super::ProjectRust;
+
+        /// Starts remembering recent projects and autosaving projects that
+        /// were never saved, and looks for unsaved work earlier sessions
+        /// left (`recovery_count`). The real app calls this once at
+        /// startup; the self test doesn't, so it never touches the user's
+        /// files.
+        #[qinvokable]
+        fn start_session(self: Pin<&mut Project>);
+        /// At a clean exit, after the user saved or chose to discard their
+        /// changes.
+        #[qinvokable]
+        fn shutdown(self: Pin<&mut Project>);
+
+        /// The bundle name of unsaved work `index`; empty for a project
+        /// that was never saved.
+        #[qinvokable]
+        fn recovery_name(self: &Project, index: i32) -> QString;
+        /// Where unsaved work `index` is kept.
+        #[qinvokable]
+        fn recovery_path(self: &Project, index: i32) -> QString;
+        /// When unsaved work `index` was last autosaved, in milliseconds
+        /// since 1970, or 0 if unknown.
+        #[qinvokable]
+        fn recovery_time(self: &Project, index: i32) -> f64;
+        /// Opens unsaved work `index` in place of the current project.
+        /// Returns an empty map, or a message map saying why it failed.
+        #[qinvokable]
+        fn recover_session(self: Pin<&mut Project>, index: i32) -> QMap_QString_QVariant;
+        /// Deletes unsaved work `index`.
+        #[qinvokable]
+        fn discard_session(self: Pin<&mut Project>, index: i32);
+
+        /// Opens the bundle at `url` from its autosave, after open_project
+        /// reported `AutosavePending`.
+        #[qinvokable]
+        fn recover_project(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
+        /// Opens the bundle at `url`, deleting its autosave.
+        #[qinvokable]
+        fn open_discarding_autosave(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
+        /// Opens the recent project at `url` (from `recent_url`). A project
+        /// that is gone is dropped from the list. By URL, not index, since
+        /// a save in between can reorder the list.
+        #[qinvokable]
+        fn open_recent(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
+        /// The URL of recent project `index`, for open_discarding_autosave
+        /// and recover_project.
+        #[qinvokable]
+        fn recent_url(self: &Project, index: i32) -> QUrl;
+        #[qinvokable]
+        fn forget_recent(self: Pin<&mut Project>, index: i32);
+
+        /// How many clips play missing file `index`.
+        #[qinvokable]
+        fn missing_clip_count(self: &Project, index: i32) -> i32;
+        /// Points the clips playing missing file `index` at the file at
+        /// `url`, and other missing files found next to it by name, as one
+        /// undoable edit. Returns how many files were relinked.
+        #[qinvokable]
+        fn relink(self: Pin<&mut Project>, index: i32, url: &QUrl) -> i32;
+        /// Copies every audio file clips play from outside the bundle into
+        /// it, as one undoable edit. Returns how many files were copied, or
+        /// -1 after reporting why it failed in `status`.
+        #[qinvokable]
+        fn collect_files(self: Pin<&mut Project>) -> i32;
 
         /// Called by a timer: picks up engine position and background work.
         #[qinvokable]
@@ -202,6 +301,10 @@ pub mod qobject {
         /// The name of the track's instrument; empty when it has none.
         #[qinvokable]
         fn track_instrument(self: &Project, index: i32) -> QString;
+        /// The id of the track's instrument device, for `DevicePanel.open`;
+        /// empty when it has none.
+        #[qinvokable]
+        fn track_instrument_device(self: &Project, index: i32) -> QString;
         /// The row in `Instruments` of the track's instrument, or -1.
         #[qinvokable]
         fn track_instrument_choice(self: &Project, index: i32) -> i32;
@@ -231,6 +334,21 @@ pub mod qobject {
         fn toggle_record(self: Pin<&mut Project>);
         #[qinvokable]
         fn go_to_start(self: Pin<&mut Project>);
+        /// Sets the tempo at the playhead. Calls in a row are one undo step.
+        #[qinvokable]
+        fn set_tempo(self: Pin<&mut Project>, bpm: f64);
+        /// Sets the time signature at the playhead; the denominator is
+        /// rounded down to a power of two.
+        #[qinvokable]
+        fn set_time_signature(self: Pin<&mut Project>, numerator: i32, denominator: i32);
+        #[qinvokable]
+        fn set_metronome_enabled(self: Pin<&mut Project>, enabled: bool);
+        /// Saves the setting only when `save`, so a slider can save once it
+        /// is let go.
+        #[qinvokable]
+        fn set_metronome_level(self: Pin<&mut Project>, volume_db: f64, save: bool);
+        #[qinvokable]
+        fn set_count_in(self: Pin<&mut Project>, bars: i32);
         /// Turns looping on (over the selection, or the four bars from the
         /// playhead) or off.
         #[qinvokable]
@@ -281,13 +399,32 @@ pub struct ProjectRust {
     looping: bool,
     position_text: QString,
     time_text: QString,
+    bpm: f64,
+    meter_numerator: i32,
+    meter_denominator: i32,
+    metronome: bool,
+    metronome_volume: f64,
+    count_in_bars: i32,
+    counting_in: bool,
     has_selection: bool,
     audio_selected: bool,
     selected_track: i32,
     status: QMap<QMapPair_QString_QVariant>,
+    recent_projects: QStringList,
+    missing_count: i32,
+    missing_files: QStringList,
+    external_count: i32,
+    recovery_count: i32,
+    /// Missing files, as of the document state in `files_seen`.
+    missing: Vec<daw_model::files::AudioFile>,
+    /// (`doc_serial`, revision) the file lists were made for.
+    files_seen: Option<(u64, u64)>,
     /// Last view revision copied into the properties.
     seen: u64,
     seen_position: i64,
+    /// Whether a count-in was under way at the last refresh; it starts and
+    /// ends with the playhead standing still.
+    seen_counting_in: bool,
 }
 
 fn kind_index(kind: TrackKind) -> i32 {
@@ -336,6 +473,8 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Context::Edit => QC::EditContext,
         Context::Playback => QC::PlaybackContext,
         Context::Record => QC::RecordContext,
+        Context::Collect => QC::CollectContext,
+        Context::Recover => QC::RecoverContext,
         Context::Export => QC::ExportContext,
     };
     let reason = match f.reason {
@@ -389,6 +528,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::PositionJumped => QR::PositionJumped,
         Reason::TrackGoneWhileRecording => QR::TrackGoneWhileRecording,
         Reason::RecordXruns => QR::RecordXruns,
+        Reason::AlreadyOpen => QR::AlreadyOpen,
     };
     let text = |s: &str| QVariant::from(&QString::from(s));
     // Numbers are schema versions or lengths in seconds; they fit an i32.
@@ -421,6 +561,8 @@ fn message_or_empty(fields: Option<&Fields>) -> QMap<QMapPair_QString_QVariant> 
 
 impl cxx_qt::Initialize for qobject::Project {
     fn initialize(self: Pin<&mut Self>) {
+        let click = settings::load_click_settings(&KConfigStore);
+        state::with(|s| s.set_click(click));
         self.refresh(true);
     }
 }
@@ -431,17 +573,34 @@ impl qobject::Project {
     fn refresh(mut self: Pin<&mut Self>, all: bool) {
         let seen = self.seen;
         let seen_position = self.seen_position;
+        let seen_counting_in = self.seen_counting_in;
         let snapshot = state::with(|s| {
             s.sync();
             let playhead = s.playhead();
-            let changed = all || s.view_revision != seen || playhead.0 != seen_position;
+            let counting_in = s.is_counting_in();
+            let changed = all
+                || s.view_revision != seen
+                || playhead.0 != seen_position
+                || counting_in != seen_counting_in;
             if !changed {
                 return None;
             }
             let p = s.doc.project();
             let h = s.doc.history();
-            let meter = s.arrange.meter(p);
-            let bb = meter.bar_beat(playhead);
+            // Bars and beats as the engine counts them (what the metronome
+            // clicks), else from the document.
+            let (bar, beat) = match s.engine.session() {
+                Some(x) => {
+                    let m = x.music();
+                    (m.bar, m.bar_beat().floor() as i64)
+                }
+                None => {
+                    let bb = s.arrange.meter(p).bar_beat(playhead);
+                    (bb.bar, bb.beat)
+                }
+            };
+            let tempo = s.tempo_at_playhead();
+            let click = s.click();
             let secs = s.engine.session().map_or(0.0, |x| {
                 x.ticks_to_samples(playhead).0 as f64 / x.sample_rate()
             });
@@ -463,12 +622,15 @@ impl qobject::Project {
                 h.redo_label().unwrap_or_default(),
                 s.engine.is_playing(),
                 s.loop_range().is_some(),
-                format!("{}.{}", bb.bar + 1, bb.beat + 1),
+                format!("{}.{}", bar + 1, beat + 1),
                 format!("{}:{:04.1}", (secs / 60.0).floor() as i64, secs % 60.0),
-                !s.arrange.selection.is_empty(),
+                !s.arrange.selection.is_empty() || s.arrange.points_selected(p),
                 s.arrange.audio_selected(p),
                 selected,
                 s.status.clone(),
+                tempo,
+                click,
+                counting_in,
             ))
         });
         let Some((
@@ -490,6 +652,9 @@ impl qobject::Project {
             audio_selected,
             selected,
             status,
+            (bpm, numerator, denominator),
+            click,
+            counting_in,
         )) = snapshot
         else {
             return;
@@ -498,6 +663,7 @@ impl qobject::Project {
             let mut r = self.as_mut().rust_mut();
             r.seen = rev;
             r.seen_position = pos;
+            r.seen_counting_in = counting_in;
         }
         let mut this = self.as_mut();
         this.as_mut().set_track_count(tracks);
@@ -517,12 +683,61 @@ impl qobject::Project {
         this.as_mut()
             .set_position_text(QString::from(position.as_str()));
         this.as_mut().set_time_text(QString::from(time.as_str()));
+        this.as_mut().set_bpm(bpm);
+        this.as_mut().set_meter_numerator(i32::from(numerator));
+        this.as_mut().set_meter_denominator(i32::from(denominator));
+        this.as_mut().set_metronome(click.metronome.enabled);
+        this.as_mut()
+            .set_metronome_volume(click.metronome.volume_db);
+        this.as_mut()
+            .set_count_in_bars(i32::try_from(click.count_in_bars).unwrap_or(0));
+        this.as_mut().set_counting_in(counting_in);
         this.as_mut().set_has_selection(has_selection);
         this.as_mut().set_audio_selected(audio_selected);
         this.as_mut().set_selected_track(selected);
         this.as_mut().set_status(message_or_empty(status.as_ref()));
+        this.as_mut().refresh_files();
         // Last, so QML that reacts to it sees the other values already.
         this.set_revision((rev % i32::MAX as u64) as i32);
+    }
+
+    /// The recent list, and the missing and external files when the
+    /// document changed.
+    fn refresh_files(mut self: Pin<&mut Self>) {
+        let seen = self.files_seen;
+        let (recent, files, recovery) = state::with(|s| {
+            let recent: Vec<String> = s.recent.iter().map(|p| p.display().to_string()).collect();
+            let at = (s.doc_serial, s.doc.revision());
+            let files =
+                (seen != Some(at)).then(|| (at, s.missing_files(), s.external_file_count()));
+            (recent, files, s.recovery.len())
+        });
+        self.as_mut()
+            .set_recovery_count(i32::try_from(recovery).unwrap_or(i32::MAX));
+        let mut list = QList::<QString>::default();
+        for p in &recent {
+            list.append(QString::from(p.as_str()));
+        }
+        let list = QStringList::from(&list);
+        if self.recent_projects != list {
+            self.as_mut().set_recent_projects(list);
+        }
+        if let Some((at, missing, external)) = files {
+            let count = i32::try_from(missing.len()).unwrap_or(i32::MAX);
+            {
+                let mut r = self.as_mut().rust_mut();
+                r.files_seen = Some(at);
+                r.missing = missing;
+            }
+            let mut names = QList::<QString>::default();
+            for f in &self.missing {
+                names.append(QString::from(f.source.display().to_string().as_str()));
+            }
+            self.as_mut().set_missing_files(QStringList::from(&names));
+            self.as_mut().set_missing_count(count);
+            self.as_mut()
+                .set_external_count(i32::try_from(external).unwrap_or(i32::MAX));
+        }
     }
 
     /// Runs `f` on the state, then refreshes every property.
@@ -540,6 +755,7 @@ impl qobject::Project {
     fn tick(self: Pin<&mut Self>) {
         state::with(|s| {
             s.tick_engine();
+            s.tick_plugins();
             // An update a full player queue refused; the queue has drained.
             if s.engine
                 .session()
@@ -577,13 +793,206 @@ impl qobject::Project {
             return message_map(&Message::NotLocalFile(Context::Open).fields());
         };
         let path = std::path::PathBuf::from(path.to_string());
+        self.open_with(&path, AppState::open)
+    }
+
+    fn open_with(
+        mut self: Pin<&mut Self>,
+        path: &std::path::Path,
+        open: fn(&mut AppState, &std::path::Path) -> Result<(), Message>,
+    ) -> QMap<QMapPair_QString_QVariant> {
         let mut result = None;
-        self.edit(|s| {
-            if let Err(e) = s.open(&path) {
-                result = Some(Message::File(Context::Open, e).fields());
+        self.as_mut().edit(|s| {
+            if let Err(e) = open(s, path) {
+                result = Some(e.fields());
             }
         });
+        // Recheck the files on disk even for the same document.
+        self.as_mut().rust_mut().files_seen = None;
+        self.refresh_files();
         message_or_empty(result.as_ref())
+    }
+
+    fn local_path(url: &QUrl, context: Context) -> Result<std::path::PathBuf, Fields> {
+        url.to_local_file()
+            .map(|p| std::path::PathBuf::from(p.to_string()))
+            .ok_or_else(|| Message::NotLocalFile(context).fields())
+    }
+
+    fn recover_project(self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
+        match Self::local_path(url, Context::Recover) {
+            Ok(path) => self.open_with(&path, AppState::recover),
+            Err(f) => message_map(&f),
+        }
+    }
+
+    fn open_discarding_autosave(
+        self: Pin<&mut Self>,
+        url: &QUrl,
+    ) -> QMap<QMapPair_QString_QVariant> {
+        match Self::local_path(url, Context::Open) {
+            Ok(path) => self.open_with(&path, AppState::open_discarding_autosave),
+            Err(f) => message_map(&f),
+        }
+    }
+
+    fn recent_path(index: i32) -> Option<std::path::PathBuf> {
+        state::with(|s| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| s.recent.get(i).cloned())
+        })
+    }
+
+    fn open_recent(mut self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
+        let path = match Self::local_path(url, Context::Open) {
+            Ok(p) => p,
+            Err(f) => return message_map(&f),
+        };
+        let result = self.as_mut().open_with(&path, AppState::open);
+        if !path.exists() {
+            self.edit(|s| s.forget_recent(&path));
+        }
+        result
+    }
+
+    fn recent_url(&self, index: i32) -> QUrl {
+        Self::recent_path(index).map_or_else(QUrl::default, |p| {
+            QUrl::from_local_file(&QString::from(p.display().to_string().as_str()))
+        })
+    }
+
+    fn forget_recent(self: Pin<&mut Self>, index: i32) {
+        let Some(path) = Self::recent_path(index) else {
+            return;
+        };
+        self.edit(|s| s.forget_recent(&path));
+    }
+
+    fn start_session(self: Pin<&mut Self>) {
+        self.edit(|s| {
+            s.start_session(
+                Box::new(crate::settings::KConfigStore),
+                crate::recovery::default_base().as_deref(),
+            );
+        });
+    }
+
+    fn shutdown(self: Pin<&mut Self>) {
+        state::with(AppState::shutdown);
+    }
+
+    fn candidate<R>(index: i32, f: impl FnOnce(&Candidate) -> R) -> Option<R> {
+        state::with(|s| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| s.recovery.get(i))
+                .map(f)
+        })
+    }
+
+    fn recovery_name(&self, index: i32) -> QString {
+        Self::candidate(index, |c| QString::from(c.name().as_str())).unwrap_or_default()
+    }
+
+    fn recovery_path(&self, index: i32) -> QString {
+        Self::candidate(index, |c| {
+            QString::from(c.autosave.display().to_string().as_str())
+        })
+        .unwrap_or_default()
+    }
+
+    fn recovery_time(&self, index: i32) -> f64 {
+        Self::candidate(index, |c| c.modified)
+            .flatten()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0.0, |d| d.as_millis() as f64)
+    }
+
+    /// Takes candidate `index` off the list.
+    fn take_candidate(self: Pin<&mut Self>, index: i32) -> Option<Candidate> {
+        let i = usize::try_from(index).ok()?;
+        let mut c = None;
+        self.edit(|s| c = s.take_recovery(i));
+        c
+    }
+
+    fn recover_session(mut self: Pin<&mut Self>, index: i32) -> QMap<QMapPair_QString_QVariant> {
+        let Some(c) = self.as_mut().take_candidate(index) else {
+            return QMap::default();
+        };
+        match &c.bundle {
+            Some(root) => self.open_with(root, AppState::recover),
+            None => {
+                let mut result = None;
+                self.as_mut().edit(|s| {
+                    if let Err(e) = s.recover_untitled(&c) {
+                        result = Some(e.fields());
+                    }
+                });
+                message_or_empty(result.as_ref())
+            }
+        }
+    }
+
+    fn discard_session(mut self: Pin<&mut Self>, index: i32) {
+        let Some(c) = self.as_mut().take_candidate(index) else {
+            return;
+        };
+        // Another Kadence may have recovered it since it was offered.
+        if let Some(root) = c.bundle.as_ref().filter(|r| crate::recovery::is_locked(r)) {
+            let root = root.clone();
+            self.edit(|s| s.report(Message::AlreadyOpen(root)));
+            return;
+        }
+        if let Err(e) = c.discard() {
+            let path = c.autosave.clone();
+            self.edit(|s| {
+                s.report(Message::File(
+                    Context::Recover,
+                    daw_model::FormatError::Io { path, source: e },
+                ));
+            });
+        }
+    }
+
+    fn missing_entry(&self, index: i32) -> Option<&daw_model::files::AudioFile> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.missing.get(i))
+    }
+
+    fn missing_clip_count(&self, index: i32) -> i32 {
+        self.missing_entry(index)
+            .map_or(0, |f| i32::try_from(f.clips.len()).unwrap_or(i32::MAX))
+    }
+
+    fn relink(mut self: Pin<&mut Self>, index: i32, url: &QUrl) -> i32 {
+        let Some(source) = self.missing_entry(index).map(|f| f.source.clone()) else {
+            return 0;
+        };
+        let file = match Self::local_path(url, Context::Edit) {
+            Ok(f) => f,
+            Err(f) => {
+                self.edit(|s| s.status = Some(f));
+                return 0;
+            }
+        };
+        let mut n = 0;
+        self.as_mut().edit(|s| match s.relink(&source, &file) {
+            Ok(count) => n = count,
+            Err(e) => s.report(e),
+        });
+        i32::try_from(n).unwrap_or(i32::MAX)
+    }
+
+    fn collect_files(mut self: Pin<&mut Self>) -> i32 {
+        let mut n = -1;
+        self.as_mut().edit(|s| match s.collect_files() {
+            Ok(count) => n = i32::try_from(count).unwrap_or(i32::MAX),
+            Err(e) => s.report(e),
+        });
+        n
     }
 
     fn save(self: Pin<&mut Self>) -> QMap<QMapPair_QString_QVariant> {
@@ -597,7 +1006,7 @@ impl qobject::Project {
         message_or_empty(result.as_ref())
     }
 
-    fn save_as(self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
+    fn save_as(mut self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {
         let Some(path) = url.to_local_file() else {
             return message_map(&Message::NotLocalFile(Context::Save).fields());
         };
@@ -608,13 +1017,16 @@ impl qobject::Project {
             dir.set_extension("");
         }
         let mut result = None;
-        self.edit(|s| {
+        self.as_mut().edit(|s| {
             s.store_plugin_states();
-            if let Err(e) = s.doc.save_as(&dir) {
+            if let Err(e) = s.save_as(&dir) {
                 result = Some(Message::File(Context::Save, e).fields());
             }
             s.resync();
         });
+        // Files now resolve against the bundle, and may be outside it.
+        self.as_mut().rust_mut().files_seen = None;
+        self.as_mut().refresh_files();
         message_or_empty(result.as_ref())
     }
 
@@ -805,6 +1217,15 @@ impl qobject::Project {
         .unwrap_or_default()
     }
 
+    fn track_instrument_device(&self, index: i32) -> QString {
+        state::with(|s| {
+            track_at(s, index)
+                .and_then(|t| instrument::instrument_of(t))
+                .map(|d| QString::from(d.id.to_string().as_str()))
+        })
+        .unwrap_or_default()
+    }
+
     fn track_instrument_choice(&self, index: i32) -> i32 {
         state::with(|s| {
             track_at(s, index)
@@ -885,6 +1306,50 @@ impl qobject::Project {
                 let _ = session.locate(TickTime(0));
             }
             s.arrange.view.scroll_x = 0.0;
+        });
+    }
+
+    fn set_tempo(self: Pin<&mut Self>, bpm: f64) {
+        self.edit(|s| {
+            if let Err(e) = s.set_bpm(bpm) {
+                s.report(e.into());
+            }
+        });
+    }
+
+    fn set_time_signature(self: Pin<&mut Self>, numerator: i32, denominator: i32) {
+        let to_u8 = |n: i32| u8::try_from(n.clamp(0, 255)).unwrap_or(0);
+        self.edit(|s| {
+            if let Err(e) = s.set_meter(to_u8(numerator), to_u8(denominator)) {
+                s.report(e.into());
+            }
+        });
+    }
+
+    /// Changes the click settings with `f` and applies them, saving them
+    /// when `save`.
+    fn change_click(self: Pin<&mut Self>, save: bool, f: impl FnOnce(&mut ClickSettings)) {
+        self.edit(|s| {
+            let mut click = s.click();
+            f(&mut click);
+            s.set_click(click);
+            if save {
+                settings::save_click_settings(&mut KConfigStore, &s.click());
+            }
+        });
+    }
+
+    fn set_metronome_enabled(self: Pin<&mut Self>, enabled: bool) {
+        self.change_click(true, |c| c.metronome.enabled = enabled);
+    }
+
+    fn set_metronome_level(self: Pin<&mut Self>, volume_db: f64, save: bool) {
+        self.change_click(save, |c| c.metronome.volume_db = volume_db);
+    }
+
+    fn set_count_in(self: Pin<&mut Self>, bars: i32) {
+        self.change_click(true, |c| {
+            c.count_in_bars = u32::try_from(bars).unwrap_or(0);
         });
     }
 

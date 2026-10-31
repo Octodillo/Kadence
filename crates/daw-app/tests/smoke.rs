@@ -3,12 +3,55 @@
 //! Needs Qt 6, Kirigami and qqc2-desktop-style installed, which is why the
 //! CI runs this crate on Arch Linux.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// A plugin folder holding only the CLAP test plugin, built in its own
+/// target directory under the system temp folder: CI caches restore
+/// `target/` with fingerprints whose libraries were dropped, and cleaning
+/// there would race the other test processes copying the library.
+fn plugin_folder() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let target = std::env::temp_dir().join("kadence-clap-test-plugin");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = Command::new(cargo)
+            .args([
+                "build",
+                "--quiet",
+                "--package",
+                "daw-clap-test-plugin",
+                "--lib",
+            ])
+            .arg("--target-dir")
+            .arg(&target)
+            .current_dir(&root)
+            .status()
+            .expect("run cargo");
+        assert!(status.success(), "building the test plugin failed");
+        let dir = tempdir("plugins");
+        std::fs::copy(
+            target.join("debug").join("libdaw_clap_test_plugin.so"),
+            dir.join("test-gain.clap"),
+        )
+        .expect("copy the test plugin");
+        dir
+    })
+}
 
 fn kadence(config_home: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_kadence"));
+    // Scan only the test plugin, with a fresh cache: CLAP also looks in
+    // ~/.clap and /usr/lib/clap, which a test machine leaves empty.
+    let empty = config_home.join("no-plugins");
+    std::fs::create_dir_all(&empty).expect("create an empty plugin folder");
+    cmd.env("CLAP_PATH", plugin_folder())
+        .env("LV2_PATH", &empty)
+        .env("VST3_PATH", &empty)
+        .env("XDG_CACHE_HOME", config_home.join("cache"));
     cmd.env("QT_QPA_PLATFORM", "offscreen")
         .env("QT_FORCE_STDERR_LOGGING", "1")
         .env("XDG_CONFIG_HOME", config_home)
@@ -76,6 +119,10 @@ fn smoke_test_passes_and_saves_settings() {
     let log = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "smoke test failed:\n{log}");
     assert!(log.contains("smoke test: passed"), "no pass line:\n{log}");
+    assert!(
+        log.contains("smoke test: checking the test plugin"),
+        "the plugin browser checks did not run:\n{log}"
+    );
     assert!(
         log.contains("startup audio: 0 48000 256"),
         "fresh config should start on defaults:\n{log}"

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use daw_core::plugin::{
     PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
@@ -90,6 +91,11 @@ impl PluginRegistry {
         &self.plugins
     }
 
+    /// Replaces the plugin list with one found elsewhere, such as a scan on another thread.
+    pub fn set_plugins(&mut self, plugins: Vec<PluginDescriptor>) {
+        self.plugins = plugins;
+    }
+
     pub fn find(&self, kind: &PluginFormatKind, id: &str) -> Option<&PluginDescriptor> {
         self.plugins
             .iter()
@@ -119,6 +125,18 @@ impl PluginRegistry {
     /// is current are not loaded; the rest are scanned in child processes by `scanner`, several
     /// at a time, and their results stored in `cache`.
     pub fn scan(&mut self, scanner: &Scanner, cache: &mut ScanCache) -> ScanReport {
+        self.scan_with_progress(scanner, cache, &|_, _| {})
+    }
+
+    /// [`scan`](Self::scan), calling `progress(done, total)` with the number of bundles finished
+    /// out of all found: once the bundles are known, then after each scanned one. Called from
+    /// the scanning threads.
+    pub fn scan_with_progress(
+        &mut self,
+        scanner: &Scanner,
+        cache: &mut ScanCache,
+        progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> ScanReport {
         let mut report = ScanReport::default();
         // One slot per bundle, in search-path order, filled from the cache or a scan.
         let mut slots: Vec<(PathBuf, Option<BundleResult>)> = Vec::new();
@@ -143,7 +161,12 @@ impl PluginRegistry {
             }
         }
 
-        let results = scan_parallel(scanner, &jobs);
+        let total = slots.len();
+        progress(report.cached, total);
+        let done = AtomicUsize::new(report.cached);
+        let results = scan_parallel(scanner, &jobs, &|| {
+            progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+        });
         for ((slot, (kind, bundle)), result) in job_slots.into_iter().zip(jobs).zip(results) {
             report.scanned += 1;
             let cacheable = result
@@ -183,6 +206,7 @@ impl PluginRegistry {
 fn scan_parallel(
     scanner: &Scanner,
     todo: &[(PluginFormatKind, PathBuf)],
+    finished: &(dyn Fn() + Sync),
 ) -> Vec<Result<Vec<PluginDescriptor>, crate::ScanError>> {
     let next = Mutex::new(0usize);
     let results: Vec<Mutex<Option<_>>> = todo.iter().map(|_| Mutex::new(None)).collect();
@@ -201,6 +225,7 @@ fn scan_parallel(
                     };
                     let result = scanner.scan(kind, Path::new(bundle));
                     *results[i].lock().unwrap() = Some(result);
+                    finished();
                 }
             });
         }
@@ -215,7 +240,7 @@ fn scan_parallel(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     struct Counting(PluginFormatKind, Arc<AtomicU32>);
 

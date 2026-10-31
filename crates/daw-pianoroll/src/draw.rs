@@ -120,6 +120,22 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
             }
         }
     }
+    // A take being recorded, outlined in the highlight colour.
+    for d in &pr.live {
+        if !rows.contains(&d.key) {
+            continue;
+        }
+        let mut r = v.note_rect(d);
+        r.x += n.x;
+        r.y += n.y;
+        s.push(Prim::RoundRect {
+            r: Rect::new(r.x, r.y + 0.5, r.w.max(2.0), r.h - 1.0),
+            radius: NOTE_RADIUS,
+            fill: pal.highlight.with_alpha(0.35),
+            stroke: pal.highlight,
+            stroke_width: 1.0,
+        });
+    }
     if let Some(b) = pr.band() {
         s.push(Prim::RoundRect {
             r: b,

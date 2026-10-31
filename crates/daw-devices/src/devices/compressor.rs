@@ -27,7 +27,7 @@ pub const KNEE: ParamId = 4;
 pub const MAKEUP: ParamId = 5;
 pub const MIX: ParamId = 6;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::new(
         THRESHOLD,
         "threshold",

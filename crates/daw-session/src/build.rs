@@ -13,9 +13,7 @@ use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::time::TickTime;
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
-use daw_engine::{
-    AutomationLane, AutomationPoint, GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter,
-};
+use daw_engine::{GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter};
 use daw_model::{
     AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, LaneId, Project,
     ProjectSnapshot, SendId, Track, TrackId, TrackKind, TrackOutput,
@@ -28,7 +26,7 @@ use crate::Warning;
 use crate::capture::input_tap;
 use crate::media::Loaded;
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
-use crate::{Built, Session, db_to_gain};
+use crate::{Built, MetronomeSettings, Session, db_to_gain};
 
 /// Every channel strip in the graph is stereo.
 const STRIP_CHANNELS: u16 = 2;
@@ -52,6 +50,22 @@ fn player_key(track: TrackId) -> NodeKey {
 /// The key of an instrument track's MIDI player.
 fn midi_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 2)
+}
+
+/// The key of the metronome. Model ids are random (version 4) UUIDs, which
+/// never have every bit set but the last.
+pub const METRONOME_KEY: NodeKey = NodeKey(u128::MAX - 1);
+
+/// The metronome's parameters for `settings`.
+pub(crate) fn metronome_params(settings: &MetronomeSettings) -> [((NodeKey, u32), f64); 2] {
+    use daw_devices::devices::metronome::{PLAYBACK, VOLUME};
+    [
+        (
+            (METRONOME_KEY, PLAYBACK),
+            if settings.enabled { 1.0 } else { 0.0 },
+        ),
+        ((METRONOME_KEY, VOLUME), settings.volume_db),
+    ]
 }
 
 /// The key of an audio track's input tap.
@@ -385,7 +399,32 @@ pub(crate) fn graph(
         }
     }
 
-    automate(session, snapshot, &mut g, &strips);
+    // The click goes through the master, so its meter shows it, and stays
+    // in every graph so turning it on and off needs no rebuild.
+    let click = match g.reuse(METRONOME_KEY) {
+        Some(id) => {
+            carry_params(&mut built, &old, METRONOME_KEY);
+            id
+        }
+        None => {
+            let mut node = daw_devices::Metronome::new();
+            for ((key, param), value) in metronome_params(&session.metronome) {
+                daw_devices::Device::set_param(&mut node, param, value);
+                built.params.insert((key, param), value);
+            }
+            let id = g.add_device("metronome", Box::new(node));
+            g.set_key(id, METRONOME_KEY);
+            id
+        }
+    };
+    g.connect(click, g.master());
+
+    automate(session, snapshot, &mut g, &strips, &mut built);
+    // A lane that stopped playing (switched off, removed, emptied) left
+    // its last value behind: send the control's own value again.
+    for k in old.automated.difference(&built.automated) {
+        built.params.remove(k);
+    }
     (g, built)
 }
 
@@ -417,6 +456,7 @@ fn automate(
     project: &Project,
     g: &mut GraphDesc,
     strips: &HashMap<TrackId, NodeId>,
+    built: &mut Built,
 ) {
     for t in project.all_tracks() {
         for lane in t
@@ -435,16 +475,10 @@ fn automate(
                 }
             };
             let Some(node) = node else { continue };
-            let points = session
-                .engine_lane(&lane.points)
-                .points()
-                .iter()
-                .map(|p| AutomationPoint {
-                    value: to_value(p.value),
-                    ..*p
-                })
-                .collect();
-            g.automate(node, param, AutomationLane::new(points));
+            if let Some(key) = g.key(node) {
+                built.automated.insert((key, param));
+            }
+            g.automate(node, param, session.playback_lane(lane, to_value));
         }
     }
 }
@@ -475,6 +509,25 @@ pub(crate) fn params(project: &Project) -> Vec<((NodeKey, u32), f64)> {
             for (&p, &v) in &d.params {
                 out.push(((device_key(d.id), p), v));
             }
+        }
+    }
+    out
+}
+
+/// The default of every built-in device parameter the project leaves at
+/// its default. A parameter returned to its default (`SetParam` with
+/// `None`) is no longer in [`params`], so the session sends it this.
+pub(crate) fn param_defaults(project: &Project) -> Vec<((NodeKey, u32), f64)> {
+    let mut out = Vec::new();
+    for d in project.all_tracks().flat_map(|t| t.devices.iter()) {
+        let DeviceSource::Builtin { kind } = &d.source else {
+            continue;
+        };
+        let Some(specs) = daw_devices::param_specs(kind) else {
+            continue;
+        };
+        for s in specs.iter().filter(|s| !d.params.contains_key(&s.id)) {
+            out.push(((device_key(d.id), s.id), s.default));
         }
     }
     out

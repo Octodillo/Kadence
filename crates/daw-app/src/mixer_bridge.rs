@@ -37,6 +37,7 @@ pub mod qobject {
         type QVector_i32 = cxx_qt_lib::QVector<i32>;
         include!("cxx-qt-lib/qlist.h");
         type QList_f64 = cxx_qt_lib::QList<f64>;
+        type QList_bool = cxx_qt_lib::QList<bool>;
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qstringlist.h");
@@ -75,8 +76,25 @@ pub mod qobject {
         /// Appends the effect at `effect` in `effect_names` to the strip.
         #[qinvokable]
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
+        /// Appends plugin `plugin` (a plugin id) of `format` ("clap",
+        /// "lv2" or "vst3") to the strip, as a device called `name`.
+        #[qinvokable]
+        fn add_plugin_insert(
+            self: Pin<&mut Mixer>,
+            row: i32,
+            format: &QString,
+            plugin: &QString,
+            name: &QString,
+        ) -> bool;
         #[qinvokable]
         fn remove_insert(self: Pin<&mut Mixer>, row: i32, insert: i32);
+        /// The id of an insert's device, for `DevicePanel.open`; empty if
+        /// there is none.
+        #[qinvokable]
+        fn insert_device(self: &Mixer, row: i32, insert: i32) -> QString;
+        /// The id of the strip's instrument device; empty if it has none.
+        #[qinvokable]
+        fn instrument_device(self: &Mixer, row: i32) -> QString;
         /// Swaps the strip's instrument for row `choice` of `Instruments`
         /// at its `revision`.
         #[qinvokable]
@@ -148,6 +166,7 @@ const ROLES: &[&str] = &[
     "instrument",
     "instrumentChoice",
     "inserts",
+    "insertsEnabled",
     "insertMeters",
     "sends",
     "sendLevels",
@@ -331,11 +350,51 @@ impl qobject::Mixer {
         added
     }
 
+    fn add_plugin_insert(
+        mut self: Pin<&mut Self>,
+        row: i32,
+        format: &QString,
+        plugin: &QString,
+        name: &QString,
+    ) -> bool {
+        let format = daw_plugins::kind_from_name(&format.to_string());
+        let (Some(id), Some(format)) = (self.strip_id(row), format) else {
+            return false;
+        };
+        let added = self.as_mut().rust_mut().mixer.add_plugin_insert(
+            id,
+            format,
+            &plugin.to_string(),
+            &name.to_string(),
+        );
+        if added {
+            self.reload();
+        }
+        added
+    }
+
     fn remove_insert(mut self: Pin<&mut Self>, row: i32, insert: i32) {
         if let (Some(id), Ok(insert)) = (self.strip_id(row), usize::try_from(insert)) {
             self.as_mut().rust_mut().mixer.remove_insert(id, insert);
             self.reload();
         }
+    }
+
+    fn insert_device(&self, row: i32, insert: i32) -> QString {
+        let uid = usize::try_from(row)
+            .ok()
+            .zip(usize::try_from(insert).ok())
+            .and_then(|(r, i)| self.strips.get(r)?.inserts.get(i))
+            .map_or("", |i| i.uid.as_str());
+        QString::from(uid)
+    }
+
+    fn instrument_device(&self, row: i32) -> QString {
+        let uid = usize::try_from(row)
+            .ok()
+            .and_then(|r| self.strips.get(r)?.instrument.as_ref())
+            .map_or("", |i| i.uid.as_str());
+        QString::from(uid)
     }
 
     fn set_instrument(mut self: Pin<&mut Self>, row: i32, choice: i32, revision: i32) {
@@ -470,6 +529,13 @@ impl qobject::Mixer {
             ),
             Some("inserts") => {
                 QVariant::from(&string_list(s.inserts.iter().map(|i| i.name.as_str())))
+            }
+            Some("insertsEnabled") => {
+                let mut on = QList::<bool>::default();
+                for i in &s.inserts {
+                    on.append(i.enabled);
+                }
+                QVariant::from(&on)
             }
             Some("insertMeters") => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
             Some("sends") => {

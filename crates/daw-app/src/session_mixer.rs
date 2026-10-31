@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
+use daw_core::plugin::PluginFormatKind;
 use daw_core::time::{SampleTime, TickTime};
 use daw_engine::nodes::Strip;
 use daw_engine::{AutomationRecorder, Curve, NodeKey};
@@ -80,6 +81,9 @@ struct Take {
 /// session itself, since it changes playback without changing the document.
 pub struct SessionMixer {
     write: bool,
+    /// Lanes in write mode (set from the track headers): their controls
+    /// record even with `write` off.
+    pub write_lanes: HashSet<LaneId>,
     takes: Vec<Take>,
     effects: Vec<EffectChoice>,
 }
@@ -88,10 +92,26 @@ impl Default for SessionMixer {
     fn default() -> Self {
         Self {
             write: false,
+            write_lanes: HashSet::new(),
             takes: Vec::new(),
             effects: effect_choices(),
         }
     }
+}
+
+/// Appends `device` to the chain of strip `id`, as one undo step.
+fn add_device(doc: &mut Document, id: StripId, device: Device) -> bool {
+    let Some(track) = find(doc.project(), id) else {
+        return false;
+    };
+    let command = AddDevice {
+        track: track.id,
+        index: track.devices.len(),
+        device,
+    };
+    let added = doc.execute(command).is_ok();
+    doc.seal();
+    added
 }
 
 /// Strips in display order: tracks, then buses, then the master.
@@ -124,7 +144,9 @@ fn insert_info(d: &Device, session: Option<&Session>) -> InsertInfo {
         DeviceSource::Plugin { id, .. } => id.clone(),
     };
     InsertInfo {
+        uid: d.id.to_string(),
         device_id,
+        enabled: d.enabled,
         name: d.name.clone(),
         has_gain_reduction: session.is_some_and(|s| s.device_meter(d.id).is_some()),
     }
@@ -269,23 +291,31 @@ impl SessionMixer {
         let Some(effect) = self.effects.iter().find(|e| e.id == device_id) else {
             return false;
         };
-        let Some(track) = find(doc.project(), id) else {
+        let source = DeviceSource::Builtin {
+            kind: effect.id.clone(),
+        };
+        let name = effect.name.clone();
+        add_device(doc, id, Device::new(name, source))
+    }
+
+    /// Appends plugin `plugin` of `format` to the strip's chain, as a
+    /// device called `name`. The session loads it on the next sync.
+    pub fn add_plugin_insert(
+        &mut self,
+        doc: &mut Document,
+        id: StripId,
+        format: PluginFormatKind,
+        plugin: &str,
+        name: &str,
+    ) -> bool {
+        if plugin.is_empty() {
             return false;
+        }
+        let source = DeviceSource::Plugin {
+            format,
+            id: plugin.to_owned(),
         };
-        let device = Device::new(
-            effect.name.clone(),
-            DeviceSource::Builtin {
-                kind: effect.id.clone(),
-            },
-        );
-        let command = AddDevice {
-            track: track.id,
-            index: track.devices.len(),
-            device,
-        };
-        let added = doc.execute(command).is_ok();
-        doc.seal();
-        added
+        add_device(doc, id, Device::new(name, source))
     }
 
     pub fn remove_insert(
@@ -391,19 +421,22 @@ impl SessionMixer {
             .takes
             .iter()
             .position(|t| t.track == track.id && t.control == control);
+        let armed = |m: &Self| {
+            m.write
+                || target_of(&track, control)
+                    .and_then(|(target, _)| lane_of(&track, target))
+                    .is_some_and(|l| l.enabled && m.write_lanes.contains(&l.id))
+        };
         match (pressed, running) {
-            (true, None) if self.write && session.is_playing() => {
+            (true, None) if armed(self) && session.is_playing() => {
                 let Some((target, value)) = target_of(&track, control) else {
                     return Ok(());
                 };
                 // Start from what is heard: the lane's value, if it has one.
+                let now = session.samples_to_ticks(session.controller().position());
                 let value = lane_of(&track, target)
                     .filter(|l| l.enabled)
-                    .and_then(|l| {
-                        session
-                            .engine_lane(&l.points)
-                            .value_at(session.controller().position())
-                    })
+                    .and_then(|l| l.value_at(now))
                     .unwrap_or(value);
                 let mut take = Take {
                     track: track.id,
@@ -413,16 +446,15 @@ impl SessionMixer {
                     value,
                 };
                 record(&mut take, session);
-                self.takes.push(take);
-                self.suspend(doc, session)?;
-                if let Some((key, param, v)) =
-                    live_param(doc.project(), session, self.takes.last().expect("pushed"))
-                {
+                // Hold the take's value before the lane stops playing, so
+                // the graph without it never plays the static value.
+                if let Some((key, param, v)) = live_param(doc.project(), session, &take) {
                     session
                         .set_live_param(key, param, Some(v))
                         .map_err(Message::from)?;
                 }
-                Ok(())
+                self.takes.push(take);
+                self.suspend(doc, session)
             }
             (false, running) => {
                 let mut r = Ok(());
@@ -675,6 +707,7 @@ impl AppMixer {
     ) -> R {
         state::with(|s| {
             s.end_drag();
+            self.inner.write_lanes.clone_from(&s.lanes.write);
             let r = f(&mut self.inner, &mut s.doc, s.engine.session_mut());
             s.sync();
             r
@@ -727,6 +760,16 @@ impl MixerHandle for AppMixer {
         self.edit(|m, d, _| m.add_insert(d, id, device_id))
     }
 
+    fn add_plugin_insert(
+        &mut self,
+        id: StripId,
+        format: PluginFormatKind,
+        plugin: &str,
+        name: &str,
+    ) -> bool {
+        self.edit(|m, d, _| m.add_plugin_insert(d, id, format, plugin, name))
+    }
+
     fn remove_insert(&mut self, id: StripId, index: usize) {
         self.report(|m, d, _| m.remove_insert(d, id, index));
     }
@@ -750,9 +793,14 @@ impl MixerHandle for AppMixer {
     }
 
     fn revision(&self) -> u64 {
-        // Strips depend only on the document; a new document restarts its
-        // revision count, so its serial goes in the high bits.
-        state::with(|s| (s.doc_serial << 40) ^ s.doc.revision())
+        // Strips depend on the document, and on which plugins a scan found
+        // to be effects (that moves where an instrument track's inserts
+        // start). A new document restarts its revision count, so its serial
+        // goes in the high bits, the plugin list's in the middle.
+        state::with(|s| {
+            let plugins = s.known_plugins.map_or(0, |r| r + 1);
+            (s.doc_serial << 40) ^ (plugins << 24) ^ s.doc.revision()
+        })
     }
 
     fn set_write_automation(&mut self, on: bool) {
@@ -932,6 +980,38 @@ mod tests {
         assert_eq!(r.mixer.levels(r.doc.project(), Some(&r.session)).len(), 4);
         r.mixer.remove_insert(&mut r.doc, keys, 0).unwrap();
         assert!(r.track("Keys").devices.is_empty());
+    }
+
+    #[test]
+    fn plugin_inserts_are_plugin_devices_that_undo() {
+        let mut r = rig();
+        let drums = r.id("Drums");
+        assert!(
+            !r.mixer
+                .add_plugin_insert(&mut r.doc, drums, PluginFormatKind::Clap, "", "x")
+        );
+        assert!(r.mixer.add_plugin_insert(
+            &mut r.doc,
+            drums,
+            PluginFormatKind::Lv2,
+            "http://example.org/eq",
+            "Para EQ",
+        ));
+        let device = &r.track("Drums").devices[0];
+        assert_eq!(device.name, "Para EQ");
+        assert_eq!(
+            device.source,
+            DeviceSource::Plugin {
+                format: PluginFormatKind::Lv2,
+                id: "http://example.org/eq".into(),
+            }
+        );
+        assert_eq!(r.doc.history().undo_label().as_deref(), Some("Add Device"));
+        // Without a plugin loader the session plays it bypassed.
+        r.sync();
+        r.run(2);
+        r.doc.undo().unwrap();
+        assert!(r.track("Drums").devices.is_empty());
     }
 
     #[test]

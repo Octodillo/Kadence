@@ -23,6 +23,7 @@ Item {
     required property string instrument
     required property int instrumentChoice
     required property list<string> inserts
+    required property list<bool> insertsEnabled
     required property bool insertMeters
     required property list<string> sends
     required property list<real> sendLevels
@@ -121,6 +122,7 @@ Item {
                     instrument: strip.instrument
                     currentChoice: strip.instrumentChoice
                     onChosen: (choice, revision) => Mixer.setInstrument(strip.index, choice, revision)
+                    onSettingsRequested: DevicePanel.open(Mixer.instrumentDevice(strip.index))
                 }
 
                 // Inserts
@@ -136,11 +138,15 @@ Item {
                         required property string modelData
                         Layout.fillWidth: true
                         spacing: 0
-                        QQC2.Label {
+                        // Opens the device panel; dimmed while bypassed.
+                        QQC2.ItemDelegate {
                             Layout.fillWidth: true
                             text: insertRow.modelData
-                            elide: Text.ElideRight
-                            leftPadding: Kirigami.Units.smallSpacing
+                            opacity: strip.insertsEnabled[insertRow.index] === false ? 0.5 : 1
+                            onClicked: DevicePanel.open(Mixer.insertDevice(strip.index, insertRow.index))
+                            QQC2.ToolTip.text: i18nc("@info:tooltip", "Show the settings of %1", insertRow.modelData)
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                         }
                         QQC2.ToolButton {
                             icon.name: "list-remove"
@@ -167,6 +173,19 @@ Item {
                                 required property string modelData
                                 text: modelData
                                 onTriggered: Mixer.addInsert(strip.index, index)
+                            }
+                        }
+                        QQC2.MenuSeparator {}
+                        QQC2.MenuItem {
+                            icon.name: "preferences-plugin"
+                            text: i18nc("@action:inmenu", "Browse Plugins…")
+                            onTriggered: {
+                                // The row now: the delegate may be gone by the time a
+                                // plugin is chosen.
+                                const row = strip.index;
+                                applicationWindow().browsePlugins(2, (format, pluginId, name) => {
+                                    Mixer.addPluginInsert(row, format, pluginId, name);
+                                });
                             }
                         }
                     }

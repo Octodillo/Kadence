@@ -43,7 +43,7 @@ pub const BEND_RANGE: ParamId = 21;
 
 const FILTER_TYPES: &[&str] = &["Low-pass", "High-pass", "Band-pass"];
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::choice(OSC1_WAVE, "osc1_wave", "Osc 1 Wave", Waveform::LABELS, 0),
     ParamSpec::choice(OSC2_WAVE, "osc2_wave", "Osc 2 Wave", Waveform::LABELS, 0),
     ParamSpec::new(

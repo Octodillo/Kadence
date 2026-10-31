@@ -18,6 +18,8 @@ QQC2.ToolButton {
 
     // The user picked row `choice` of Instruments at `revision`.
     signal chosen(int choice, int revision)
+    // The user asked to see the instrument's settings.
+    signal settingsRequested()
 
     icon.name: "audio-midi"
     text: instrument || i18nc("@action:button the track has no instrument", "Choose Instrument")
@@ -42,6 +44,17 @@ QQC2.ToolButton {
 
     QQC2.Menu {
         id: menu
+        QQC2.MenuItem {
+            visible: button.instrument !== ""
+            height: visible ? implicitHeight : 0
+            icon.name: "configure"
+            text: i18nc("@action:inmenu", "Show Instrument Settings")
+            onTriggered: button.settingsRequested()
+        }
+        QQC2.MenuSeparator {
+            visible: button.instrument !== ""
+            height: visible ? implicitHeight : 0
+        }
         Repeater {
             model: Instruments
             delegate: QQC2.MenuItem {
@@ -56,6 +69,18 @@ QQC2.ToolButton {
                     button.chosen(index, Instruments.revision);
                 }
             }
+        }
+        QQC2.MenuSeparator {}
+        QQC2.MenuItem {
+            icon.name: "preferences-plugin"
+            text: i18nc("@action:inmenu", "Browse Plugins…")
+            onTriggered: applicationWindow().browsePlugins(1, (format, pluginId, name) => {
+                // The browser and this list come from the same scan.
+                Instruments.refresh();
+                const row = Instruments.rowOf(format, pluginId);
+                if (row >= 0)
+                    button.chosen(row, Instruments.revision);
+            })
         }
     }
 }

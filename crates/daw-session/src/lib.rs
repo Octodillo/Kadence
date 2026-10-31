@@ -21,6 +21,7 @@
 
 mod build;
 pub mod capture;
+pub mod catalog;
 pub mod export;
 pub mod host;
 mod media;
@@ -41,6 +42,7 @@ use daw_engine::{
 };
 use daw_model::{ClipId, DeviceId, LaneId, ProjectSnapshot, SendId, TrackId};
 
+pub use build::METRONOME_KEY;
 pub use build::effective_mutes;
 pub use media::{MEMORY_LIMIT_SECONDS, MediaPool};
 use player::{LoopPoints, PlayerHandle};
@@ -48,6 +50,11 @@ pub use plugins::{
     LoadError, LoadedPlugin, PluginLoader, PluginState, PluginStatus, Plugins, SandboxLoader,
 };
 pub use tempo::tempo_map;
+
+/// Length of the straight pieces a curved automation segment is played
+/// as, in samples, and the most pieces one segment gets.
+const PIECE_SAMPLES: i64 = 256;
+const MAX_PIECES: i64 = 256;
 
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
@@ -64,6 +71,24 @@ impl Default for SessionConfig {
             engine: EngineConfig::default(),
             inputs: 2,
             outputs: 2,
+        }
+    }
+}
+
+/// The click. Not part of the document: whether you hear it is a playing
+/// preference, so it is neither undone nor saved with the project.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MetronomeSettings {
+    /// Click while playing. A count-in clicks either way.
+    pub enabled: bool,
+    pub volume_db: f64,
+}
+
+impl Default for MetronomeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            volume_db: -6.0,
         }
     }
 }
@@ -128,6 +153,8 @@ pub(crate) struct Built {
     pub players: HashMap<TrackId, PlayerHandle>,
     /// Last value sent per (node, param), so unchanged values aren't resent.
     pub params: HashMap<(NodeKey, u32), f64>,
+    /// Parameters an automation lane drives in this graph.
+    pub automated: HashSet<(NodeKey, u32)>,
     /// The clips each player was last given, to spot clip edits.
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Gain reduction meters of devices that have one.
@@ -161,6 +188,10 @@ pub struct Session {
     suspended: HashSet<LaneId>,
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
+    metronome: MetronomeSettings,
+    /// The tick the playhead was last sent to. Until playback moves it,
+    /// this is where it is, even before the audio thread says so.
+    parked: Option<TickTime>,
     /// Rendering to a file rather than playing: players wait for the disk.
     pub(crate) offline: Option<Arc<player::Offline>>,
     plugins: Plugins,
@@ -212,6 +243,8 @@ impl Session {
             master: None,
             suspended: HashSet::new(),
             live: HashMap::new(),
+            metronome: MetronomeSettings::default(),
+            parked: None,
             offline: None,
             plugins: Plugins::default(),
             last: None,
@@ -288,6 +321,11 @@ impl Session {
         self.master = Some(snapshot.master.id);
         let tempo_changed = self.tempo_data.as_ref() != Some(&snapshot.tempo);
         if tempo_changed {
+            let keep = self
+                .tempo_data
+                .is_some()
+                .then(|| self.kept_tick())
+                .flatten();
             // Tempo and time signatures, so the metronome and plugins see
             // the project's bars and beats.
             let timeline = daw_midi::model::timeline(&snapshot.tempo);
@@ -296,6 +334,9 @@ impl Session {
             self.controller.set_timeline(timeline)?;
             self.tempo_data = Some(snapshot.tempo.clone());
             self.apply_loop()?;
+            if let Some(at) = keep {
+                self.locate(at)?;
+            }
         }
         self.last = Some(snapshot.clone());
         let structure = build::Structure::of(snapshot, &self.suspended);
@@ -404,6 +445,14 @@ impl Session {
     /// want of a loader are tried again on the next sync.
     pub fn set_plugin_loader(&mut self, loader: Option<Box<dyn PluginLoader>>) {
         self.plugins.set_loader(loader);
+        self.force_rebuild = true;
+    }
+
+    /// Tells the plugin loader which plugins are installed, from a scan the
+    /// app ran (see [`catalog`]). Devices whose plugin was missing are tried
+    /// again on the next sync.
+    pub fn set_known_plugins(&mut self, plugins: &[daw_core::plugin::PluginDescriptor]) {
+        self.plugins.set_known(plugins);
         self.force_rebuild = true;
     }
 
@@ -656,11 +705,86 @@ impl Session {
         )
     }
 
+    /// A lane as the engine plays it, values turned into the engine's unit
+    /// by `to_value`. The engine only steps or ramps in straight lines, so
+    /// curved segments are played as short straight pieces, and so is
+    /// every ramp on a level (drawn in dB from
+    /// [`LEVEL_FLOOR_DB`](daw_model::LEVEL_FLOOR_DB) up, which the engine
+    /// would otherwise ramp in linear gain). What plays then follows the
+    /// line the arrange view draws.
+    pub fn playback_lane(
+        &self,
+        lane: &daw_model::AutomationLane,
+        to_value: fn(f64) -> f64,
+    ) -> AutomationLane {
+        let dense = lane.target.is_level();
+        let floor = lane.target.ramp_floor();
+        let mut out = Vec::with_capacity(lane.points.len());
+        for (i, p) in lane.points.iter().enumerate() {
+            let time = self.ticks_to_samples(p.tick);
+            let next = lane.points.get(i + 1);
+            let ramp = !p.step && next.is_some_and(|n| n.value != p.value);
+            out.push(daw_engine::AutomationPoint {
+                time,
+                value: to_value(p.value),
+                curve: if p.step { Curve::Step } else { Curve::Linear },
+            });
+            let Some(next) = next.filter(|_| ramp && (dense || p.curve != 0.0)) else {
+                continue;
+            };
+            let span = self.ticks_to_samples(next.tick).0 - time.0;
+            let pieces = (span / PIECE_SAMPLES).clamp(1, MAX_PIECES);
+            for k in 1..pieces {
+                let x = k as f64 / pieces as f64;
+                let tick = TickTime(p.tick.0 + ((next.tick.0 - p.tick.0) as f64 * x) as i64);
+                out.push(daw_engine::AutomationPoint {
+                    time: self.ticks_to_samples(tick),
+                    value: to_value(p.towards(next.value, x, floor)),
+                    curve: Curve::Linear,
+                });
+            }
+        }
+        AutomationLane::new(out)
+    }
+
+    /// Sets the click. Takes effect at once, without a graph rebuild: the
+    /// metronome is always in the graph and only its parameters change.
+    /// When a parameter can't be sent (a full queue), the error says so and
+    /// [`metronome`](Self::metronome) keeps the old settings, so calling
+    /// again retries.
+    pub fn set_metronome(&mut self, settings: MetronomeSettings) -> Result<(), SessionError> {
+        if let Some(built) = self.built.as_mut() {
+            for ((key, param), value) in build::metronome_params(&settings) {
+                if built.params.get(&(key, param)) != Some(&value) {
+                    self.controller.set_param_by_key(key, param, value)?;
+                    built.params.insert((key, param), value);
+                }
+            }
+        }
+        self.metronome = settings;
+        Ok(())
+    }
+
+    pub fn metronome(&self) -> MetronomeSettings {
+        self.metronome
+    }
+
     fn send_params(&mut self, snapshot: &ProjectSnapshot) -> Result<(), SessionError> {
         let built = self.built.as_mut().expect("built before params");
-        for ((key, param), value) in build::params(snapshot) {
+        let metronome = build::metronome_params(&self.metronome);
+        for ((key, param), value) in build::params(snapshot).into_iter().chain(metronome) {
             let value = self.live.get(&(key, param)).copied().unwrap_or(value);
             if built.params.get(&(key, param)) != Some(&value) {
+                self.controller.set_param_by_key(key, param, value)?;
+                built.params.insert((key, param), value);
+            }
+        }
+        // Only parameters that were sent another value: one the document
+        // never set keeps what the device has, which may come from its
+        // saved state.
+        for ((key, param), value) in build::param_defaults(snapshot) {
+            let value = self.live.get(&(key, param)).copied().unwrap_or(value);
+            if built.params.get(&(key, param)).is_some_and(|&v| v != value) {
                 self.controller.set_param_by_key(key, param, value)?;
                 built.params.insert((key, param), value);
             }
@@ -734,6 +858,21 @@ impl Session {
         }
     }
 
+    /// Where the playhead should stay, in ticks, when the tempo changes. A
+    /// stopped (or counting-in) playhead stays on its bar and beat. A
+    /// playing one stays on its sample, so playback doesn't jump, unless it
+    /// is inside the loop: the loop moves with the tempo and the playhead
+    /// must stay inside it.
+    fn kept_tick(&self) -> Option<TickTime> {
+        if !self.playing || self.controller.is_counting_in() {
+            // The audio thread may not have applied the last locate yet.
+            return Some(self.parked.unwrap_or_else(|| self.position()));
+        }
+        let at = self.position();
+        let (start, end) = self.loop_ticks?;
+        (start <= at && at < end).then_some(at)
+    }
+
     pub fn play(&mut self) -> Result<(), SessionError> {
         self.controller.play()?;
         self.playing = true;
@@ -741,9 +880,27 @@ impl Session {
         Ok(())
     }
 
+    /// Plays after counting in `bars` bars of the time signature at the
+    /// play position, with the metronome clicking them. The position holds
+    /// until the count-in ends, and so does recording, which only captures
+    /// while the transport moves. Already playing: carries on.
+    pub fn play_with_count_in(&mut self, bars: u32) -> Result<(), SessionError> {
+        self.controller.play_with_count_in(bars)?;
+        self.playing = true;
+        self.update_monitors();
+        Ok(())
+    }
+
+    /// Whether the audio thread last reported a count-in under way.
+    pub fn is_counting_in(&self) -> bool {
+        self.controller.is_counting_in()
+    }
+
     pub fn stop(&mut self) -> Result<(), SessionError> {
         self.controller.stop()?;
         self.playing = false;
+        // Wherever playback got to; the audio thread reports it.
+        self.parked = None;
         self.update_monitors();
         Ok(())
     }
@@ -755,12 +912,22 @@ impl Session {
 
     pub fn locate(&mut self, t: TickTime) -> Result<(), SessionError> {
         let s = self.ticks_to_samples(t);
-        Ok(self.controller.locate(s)?)
+        self.controller.locate(s)?;
+        self.parked = Some(t);
+        Ok(())
     }
 
     /// The play position the audio thread last reported.
     pub fn position(&self) -> TickTime {
         self.samples_to_ticks(self.controller.position())
+    }
+
+    /// Bars and beats at the play position, as the engine gives them to
+    /// the metronome and plugins.
+    pub fn music(&self) -> daw_core::time::MusicalPosition {
+        self.controller
+            .timeline()
+            .position(self.controller.position(), self.sample_rate())
     }
 
     /// Loops `[start, end)` while playing. `None` (or an empty range) turns
