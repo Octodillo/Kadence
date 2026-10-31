@@ -8,8 +8,9 @@
 //!
 //! Layout, in logical pixels inside the item: a keyboard strip down the left
 //! (`keyboard_width`), a bar ruler across the top (`ruler_height`), the
-//! velocity lane along the bottom (`velocity_height`) and the note grid in
-//! between. Keys run from 127 at the top to 0 at the bottom.
+//! velocity lane under the notes (`velocity_height`), the track's
+//! automation lanes under that (`lane_height` each, while `lanes_shown`)
+//! and the note grid in between. Keys run from 127 at the top to 0 at the bottom.
 //!
 //! Gestures, with the same modifiers as the arrange view:
 //! - click a note to select only it, Ctrl+click toggles it, Shift+click
@@ -20,6 +21,8 @@
 //! - double-click empty space to add a note, double-click a note to delete it;
 //! - click a key to select every note on it (Shift adds, Ctrl toggles);
 //! - drag in the velocity lane to draw velocities;
+//! - edit the clip's track's automation lanes under it, as in the arrange
+//!   view (see [`lanes`]);
 //! - click the ruler to move the playhead.
 //!
 //! Pressing a key or a note, and dragging a note up or down, auditions its
@@ -27,11 +30,14 @@
 //! front end plays it through the track's instrument.
 
 mod draw;
+pub mod lanes;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use daw_arrange::{
-    Button, Cursor, Env, Outcome, Palette, Pointer, Rect, Refusal, Scene, Snap, TimelineView,
+    Button, Cursor, Env, LaneEditor, Outcome, Palette, ParamCatalog, Pointer, Rect, Refusal, Scene,
+    Snap, TimelineView,
 };
 use daw_core::time::{PPQ, TickTime};
 use daw_midi::edit::{self, Quantize, Snap as ClipSnap};
@@ -68,6 +74,8 @@ pub enum Area {
     Keyboard,
     Notes,
     Velocity,
+    /// The automation lane rows.
+    Lanes,
     Corner,
 }
 
@@ -129,6 +137,18 @@ pub struct PianoRoll {
     pub new_velocity: f64,
     /// Length of drawn notes in ticks; `None` is one grid step.
     pub new_length: Option<i64>,
+    /// Whether the track's automation lanes show under the velocity lane.
+    pub lanes_shown: bool,
+    /// Height of one automation lane row.
+    pub lane_height: f64,
+    /// Device parameter ranges for the lanes, as the arrange view's.
+    pub params: Option<Arc<dyn ParamCatalog>>,
+    /// The selected points and the drag on the lanes.
+    pub lanes: LaneEditor,
+    /// Lanes on the open clip's track, as of the last [`sync`](Self::sync).
+    lane_count: usize,
+    /// A right press on a lane asked for the point menu; `true` on a point.
+    lane_menu_requested: Option<bool>,
     gesture: Option<Gesture>,
     /// The note the pointer is sounding, if any.
     audition: Option<Preview>,
@@ -188,6 +208,12 @@ impl PianoRoll {
             selection: BTreeSet::new(),
             new_velocity: 0.8,
             new_length: None,
+            lanes_shown: true,
+            lane_height: 40.0,
+            params: None,
+            lanes: LaneEditor::default(),
+            lane_count: 0,
+            lane_menu_requested: None,
             gesture: None,
             audition: None,
             fit_pending: false,
@@ -206,7 +232,7 @@ impl PianoRoll {
             self.keyboard_width,
             self.ruler_height,
             (self.width - self.keyboard_width).max(0.0),
-            (self.height - self.ruler_height - self.velocity_height).max(0.0),
+            (self.height - self.ruler_height - self.velocity_height - self.lanes_height()).max(0.0),
         )
     }
 
@@ -222,6 +248,10 @@ impl PianoRoll {
 
     pub fn area(&self, x: f64, y: f64) -> Area {
         let n = self.notes_rect();
+        let lanes = self.lanes_rect();
+        if lanes.h > 0.0 && y >= lanes.y {
+            return if x < n.x { Area::Corner } else { Area::Lanes };
+        }
         match (x < n.x, y < n.y, y >= n.bottom()) {
             (true, true, _) | (true, _, true) => Area::Corner,
             (true, false, false) => Area::Keyboard,
@@ -299,6 +329,8 @@ impl PianoRoll {
     pub fn open(&mut self, project: &Project, clip: ClipId) {
         self.clip = Some(clip);
         self.selection.clear();
+        self.lanes.clear_selection();
+        self.lane_count = self.lane_track(project).map_or(0, |t| t.automation.len());
         self.gesture = None;
         self.audition = None;
         self.live.clear();
@@ -391,7 +423,11 @@ impl PianoRoll {
 
     /// The pointer shape for a position.
     pub fn cursor(&self, project: &Project, x: f64, y: f64) -> Cursor {
+        if let Some(c) = self.lanes.cursor() {
+            return c;
+        }
         match self.area(x, y) {
+            Area::Lanes => self.lane_cursor(project, x, y),
             Area::Ruler => Cursor::Pointing,
             Area::Notes => match self.hit(project, x, y) {
                 Some((_, NotePart::Body)) => Cursor::Move,
@@ -406,8 +442,17 @@ impl PianoRoll {
         doc.seal();
         self.gesture = None;
         self.audition = None;
-        let project = doc.project();
+        // At most one gesture at a time: a lane drag whose release got
+        // lost ends here.
+        self.lanes.end_drag(doc);
         let area = self.area(p.x, p.y);
+        if area == Area::Lanes {
+            return self.press_lane(doc, p);
+        }
+        if p.button != Button::Middle && area != Area::Ruler {
+            self.lanes.clear_selection();
+        }
+        let project = doc.project();
         if p.button == Button::Right {
             if area == Area::Notes {
                 if let Some((id, _)) = self.hit(project, p.x, p.y)
@@ -536,10 +581,14 @@ impl PianoRoll {
                 out
             }
             Area::Corner => Outcome::default(),
+            Area::Lanes => unreachable!("handled by press_lane"),
         }
     }
 
     pub fn motion(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        if let Some(o) = self.drag_lane(doc, p) {
+            return o;
+        }
         let Some(g) = self.gesture.clone() else {
             return Outcome::default();
         };
@@ -703,6 +752,9 @@ impl PianoRoll {
 
     pub fn release(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
         self.audition = None;
+        if let Some(o) = self.lanes.release(doc, p) {
+            return o;
+        }
         let out = match self.gesture.take() {
             Some(Gesture::Band { .. }) => outcome_view(),
             // A click (no drag) on a note of a larger selection selects
@@ -735,11 +787,17 @@ impl PianoRoll {
     pub fn cancel(&mut self, doc: &mut Document) -> Outcome {
         self.gesture = None;
         self.audition = None;
+        if let Some(o) = self.lanes.cancel(doc) {
+            return o;
+        }
         doc.seal();
         outcome_view()
     }
 
     pub fn double_click(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        if self.area(p.x, p.y) == Area::Lanes {
+            return self.double_click_lane(doc, p);
+        }
         if self.area(p.x, p.y) != Area::Notes {
             return Outcome::default();
         }
@@ -829,7 +887,9 @@ impl PianoRoll {
     }
 
     /// Drops selected IDs whose notes are gone (after an undo, a glue or a
-    /// deleted clip). The front end calls it before reading the selection.
+    /// deleted clip) and points whose lane changed, and counts the lane
+    /// rows. The front end calls it before reading the selection or the
+    /// layout.
     pub fn sync(&mut self, project: &Project) {
         match self.clip(project) {
             Some((_, m)) => self
@@ -837,6 +897,9 @@ impl PianoRoll {
                 .retain(|s| m.notes.iter().any(|n| n.id == *s)),
             None => self.selection.clear(),
         }
+        self.lane_count = self.lane_track(project).map_or(0, |t| t.automation.len());
+        self.lanes.check(project);
+        self.clamp_scroll();
     }
 
     /// The top of the velocity lane's drawing area and its geometry, shared
@@ -907,7 +970,11 @@ impl PianoRoll {
         outcome_view()
     }
 
+    /// Deletes the selected automation points, or else the selected notes.
     pub fn delete_selection(&mut self, doc: &mut Document) -> Outcome {
+        if self.lanes.points_selected(doc.project()) {
+            return self.delete_points(doc);
+        }
         let Some((id, _, sel, _)) = self.selected(doc.project()) else {
             return Outcome::default();
         };

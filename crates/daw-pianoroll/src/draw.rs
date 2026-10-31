@@ -172,6 +172,8 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
         s.push(Prim::PopClip);
     }
 
+    pr.draw_lanes(&mut s, project);
+
     // Keyboard strip. Keys are light and dark whatever the colour scheme,
     // taken from the scheme's own darkest and lightest colours.
     let kb = Rect::new(0.0, n.y, pr.keyboard_width, n.h);
@@ -260,7 +262,7 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
     // Playhead.
     let x = n.x + pr.view.tick_to_x(env.playhead);
     if (n.x - 2.0..w + 2.0).contains(&x) {
-        s.vline(x, 0.0, vel.bottom(), pal.highlight, 2.0);
+        s.vline(x, 0.0, pr.lanes_rect().bottom(), pal.highlight, 2.0);
     }
     s
 }

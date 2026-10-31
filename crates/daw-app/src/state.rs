@@ -167,11 +167,13 @@ impl AppState {
         let lanes = crate::lanes::Lanes::default();
         let mut arrange = Arrange::new();
         arrange.params = Some(lanes.params.clone());
+        let mut piano = PianoRoll::new();
+        piano.params = Some(lanes.params.clone());
         let mut s = Self {
             doc: Document::new(Project::default()),
             engine,
             arrange,
-            piano: PianoRoll::new(),
+            piano,
             instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
             export: None,

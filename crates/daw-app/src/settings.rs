@@ -206,6 +206,9 @@ pub struct GeneralSettings {
     pub preview_notes: bool,
     /// Whether the Edit page shows the clip's track strip beside the notes.
     pub edit_strip_shown: bool,
+    /// Whether the Edit page shows the clip's track's automation lanes
+    /// under the notes.
+    pub edit_lanes_shown: bool,
 }
 
 impl Default for GeneralSettings {
@@ -215,6 +218,7 @@ impl Default for GeneralSettings {
             autosave_minutes: 1,
             preview_notes: true,
             edit_strip_shown: true,
+            edit_lanes_shown: true,
         }
     }
 }
@@ -269,6 +273,7 @@ pub fn load_general_settings(store: &dyn SettingsStore) -> GeneralSettings {
             .unwrap_or(defaults.autosave_minutes),
         preview_notes: read_bool(store, GENERAL, "PreviewNotes", defaults.preview_notes),
         edit_strip_shown: read_bool(store, GENERAL, "EditStripShown", defaults.edit_strip_shown),
+        edit_lanes_shown: read_bool(store, GENERAL, "EditLanesShown", defaults.edit_lanes_shown),
     }
 }
 
@@ -288,6 +293,11 @@ pub fn save_general_settings(store: &mut dyn SettingsStore, settings: &GeneralSe
         GENERAL,
         "EditStripShown",
         &settings.edit_strip_shown.to_string(),
+    );
+    store.write(
+        GENERAL,
+        "EditLanesShown",
+        &settings.edit_lanes_shown.to_string(),
     );
     store.sync();
 }
@@ -532,6 +542,7 @@ mod tests {
             autosave_minutes: 0,
             preview_notes: false,
             edit_strip_shown: false,
+            edit_lanes_shown: false,
         };
         save_general_settings(&mut store, &s);
         assert_eq!(load_general_settings(&store), s);

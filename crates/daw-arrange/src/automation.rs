@@ -133,6 +133,12 @@ pub trait ParamCatalog: Send + Sync {
     fn default_value(&self, device: &Device, param: ParamId) -> Option<f64>;
 }
 
+impl std::fmt::Debug for dyn ParamCatalog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ParamCatalog")
+    }
+}
+
 /// Shapes the context menu gives a segment.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PointShape {

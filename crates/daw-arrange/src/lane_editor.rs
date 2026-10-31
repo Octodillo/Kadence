@@ -57,7 +57,9 @@ impl LaneGrid {
 #[derive(Clone, Debug)]
 pub struct LaneFrame {
     pub view: TimelineView,
-    /// The lane's rectangle; its width is the timeline's.
+    /// The lane's rectangle. Its left edge is where the timeline's x 0 is
+    /// (the arrange view's 0, the piano roll's keyboard edge), and its
+    /// width is the timeline's.
     pub rect: Rect,
     pub scale: LaneScale,
 }
@@ -87,9 +89,19 @@ impl LaneFrame {
         self.norm_to_y(self.scale.to_norm(v))
     }
 
+    /// The x of `tick`.
+    pub fn tick_x(&self, tick: TickTime) -> f64 {
+        self.rect.x + self.view.tick_to_x(tick)
+    }
+
+    /// The tick under `x`.
+    pub fn x_tick(&self, x: f64) -> TickTime {
+        self.view.x_to_tick(x - self.rect.x)
+    }
+
     /// Where point `p` is drawn.
     pub fn point_pos(&self, p: &AutomationPoint) -> (f64, f64) {
-        (self.view.tick_to_x(p.tick), self.value_y(p.value))
+        (self.tick_x(p.tick), self.value_y(p.value))
     }
 
     /// The point of `lane` under (`x`, `y`), if any; later points paint on
@@ -300,7 +312,7 @@ impl LaneEditor {
             return Outcome::view();
         };
         let orig = l.points.clone();
-        let tick = frame.view.x_to_tick(p.x);
+        let tick = frame.x_tick(p.x);
         match point {
             Some(i) => {
                 if p.ctrl {
@@ -461,7 +473,7 @@ impl LaneEditor {
         }
         // Time: snap the grabbed point, move the rest with it, and keep
         // every moved point between its unmoved neighbours.
-        let raw = TickTime(orig[lead].tick.0 + (frame.view.x_to_tick(p.x).0 - tick.0));
+        let raw = TickTime(orig[lead].tick.0 + (frame.x_tick(p.x).0 - tick.0));
         let mut delta = grid.apply(frame, raw, p.shift).0 - orig[lead].tick.0;
         let is_moving = |i: usize| moving.contains(&i);
         for &i in moving {

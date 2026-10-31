@@ -120,7 +120,7 @@ pub struct AutomationRust {
     revision: i32,
 }
 
-fn shape_index(s: PointShape) -> i32 {
+pub(crate) fn shape_index(s: PointShape) -> i32 {
     match s {
         PointShape::Linear => 0,
         PointShape::Step => 1,
@@ -129,7 +129,7 @@ fn shape_index(s: PointShape) -> i32 {
     }
 }
 
-fn shape(i: i32) -> PointShape {
+pub(crate) fn shape(i: i32) -> PointShape {
     match i {
         1 => PointShape::Step,
         2 => PointShape::SlowStart,

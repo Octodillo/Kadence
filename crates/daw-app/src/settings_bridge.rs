@@ -58,6 +58,8 @@ pub mod qobject {
         #[qproperty(bool, preview_notes)]
         /// The Edit page shows the clip's track strip.
         #[qproperty(bool, edit_strip_shown)]
+        /// The Edit page shows the clip's track's automation lanes.
+        #[qproperty(bool, edit_lanes_shown)]
         type AppSettings = super::AppSettingsRust;
 
         /// Uses `name` or stops using it, and remembers the choice.
@@ -81,6 +83,8 @@ pub mod qobject {
         fn choose_preview_notes(self: Pin<&mut AppSettings>, on: bool);
         #[qinvokable]
         fn choose_edit_strip_shown(self: Pin<&mut AppSettings>, on: bool);
+        #[qinvokable]
+        fn choose_edit_lanes_shown(self: Pin<&mut AppSettings>, on: bool);
 
         /// A size the user gave part of the window under `key`, or
         /// `fallback`. Sizes are in grid units, so they suit any scale.
@@ -109,6 +113,7 @@ pub struct AppSettingsRust {
     max_autosave_minutes: i32,
     preview_notes: bool,
     edit_strip_shown: bool,
+    edit_lanes_shown: bool,
     general: GeneralSettings,
 }
 
@@ -239,7 +244,7 @@ impl qobject::AppSettings {
             .set_midi_input_labels(string_list(inputs.iter().map(|n| midi_label(n))));
     }
 
-    fn choose_project_folder(mut self: Pin<&mut Self>, url: &QUrl) {
+    fn choose_project_folder(self: Pin<&mut Self>, url: &QUrl) {
         let folder = (!url.is_empty())
             .then(|| url.to_local_file().map(|p| p.to_string()))
             .flatten()
@@ -248,11 +253,10 @@ impl qobject::AppSettings {
             project_folder: folder,
             ..self.general.clone()
         };
-        settings::save_general_settings(&mut KConfigStore, &general);
-        self.as_mut().apply_general(general);
+        self.choose_general(general);
     }
 
-    fn choose_autosave_minutes(mut self: Pin<&mut Self>, minutes: i32) {
+    fn choose_autosave_minutes(self: Pin<&mut Self>, minutes: i32) {
         let minutes = u32::try_from(minutes)
             .unwrap_or(0)
             .min(MAX_AUTOSAVE_MINUTES);
@@ -260,8 +264,7 @@ impl qobject::AppSettings {
             autosave_minutes: minutes,
             ..self.general.clone()
         };
-        settings::save_general_settings(&mut KConfigStore, &general);
-        self.as_mut().apply_general(general);
+        self.choose_general(general);
     }
 
     fn layout_value(&self, key: &QString, fallback: f64) -> f64 {
@@ -272,20 +275,32 @@ impl qobject::AppSettings {
         settings::save_layout_value(&mut KConfigStore, &key.to_string(), value);
     }
 
-    fn choose_preview_notes(mut self: Pin<&mut Self>, on: bool) {
+    fn choose_preview_notes(self: Pin<&mut Self>, on: bool) {
         let general = GeneralSettings {
             preview_notes: on,
             ..self.general.clone()
         };
-        settings::save_general_settings(&mut KConfigStore, &general);
-        self.as_mut().apply_general(general);
+        self.choose_general(general);
     }
 
-    fn choose_edit_strip_shown(mut self: Pin<&mut Self>, on: bool) {
+    fn choose_edit_strip_shown(self: Pin<&mut Self>, on: bool) {
         let general = GeneralSettings {
             edit_strip_shown: on,
             ..self.general.clone()
         };
+        self.choose_general(general);
+    }
+
+    fn choose_edit_lanes_shown(self: Pin<&mut Self>, on: bool) {
+        let general = GeneralSettings {
+            edit_lanes_shown: on,
+            ..self.general.clone()
+        };
+        self.choose_general(general);
+    }
+
+    /// Saves and applies a change to the general settings.
+    fn choose_general(mut self: Pin<&mut Self>, general: GeneralSettings) {
         settings::save_general_settings(&mut KConfigStore, &general);
         self.as_mut().apply_general(general);
     }
@@ -299,6 +314,7 @@ impl qobject::AppSettings {
         });
         self.as_mut().set_preview_notes(general.preview_notes);
         self.as_mut().set_edit_strip_shown(general.edit_strip_shown);
+        self.as_mut().set_edit_lanes_shown(general.edit_lanes_shown);
         let folder = general.project_folder.clone().unwrap_or_default();
         let url = if folder.is_empty() {
             QUrl::default()

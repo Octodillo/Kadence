@@ -15,6 +15,7 @@ use daw_arrange::Scene;
 use daw_midi::edit::{Quantize, QuantizeEnds};
 
 use crate::arrange_view::{cursor_shape, pointer, to_qcolor, to_rgba};
+use crate::automation_bridge::{shape, shape_index};
 use crate::paint::{self, PaintOp};
 use crate::session_mixer::strip_row;
 use crate::state;
@@ -47,6 +48,15 @@ pub mod qobject {
         #[qproperty(f64, ruler_height)]
         #[qproperty(f64, keyboard_width)]
         #[qproperty(f64, velocity_height)]
+        /// Whether the clip's track's automation lanes show, and the
+        /// height of each (set by QML).
+        #[qproperty(bool, lanes_shown)]
+        #[qproperty(f64, lane_height)]
+        /// The height the lane rows take, and the clip's track's row in
+        /// the project and its number of lanes, for the lane headers.
+        #[qproperty(f64, lanes_height)]
+        #[qproperty(i32, track_index)]
+        #[qproperty(i32, lane_count)]
         /// Scroll offsets and content size, for the scroll bars.
         #[qproperty(f64, scroll_x)]
         #[qproperty(f64, scroll_y)]
@@ -57,6 +67,8 @@ pub mod qobject {
         /// The `Mixer` row of the open clip's track; -1 without a clip.
         #[qproperty(i32, strip_row)]
         #[qproperty(bool, has_selection)]
+        /// Automation points are selected (Delete deletes them first).
+        #[qproperty(bool, has_points)]
         /// A Qt::CursorShape for the pointer's position.
         #[qproperty(i32, cursor_shape)]
         type PianoRoll = super::PianoRollRust;
@@ -118,10 +130,20 @@ pub mod qobject {
         fn select_all(self: Pin<&mut PianoRoll>);
         #[qinvokable]
         fn zoom(self: Pin<&mut PianoRoll>, factor: f64);
+        /// The selected automation points' shape (see
+        /// `Automation.pointShape`), or -1.
+        #[qinvokable]
+        fn point_shape(self: &PianoRoll) -> i32;
+        #[qinvokable]
+        fn set_point_shape(self: Pin<&mut PianoRoll>, shape: i32);
 
         /// A context menu was asked for over a note.
         #[qsignal]
         fn context_menu_requested(self: Pin<&mut PianoRoll>, x: f64, y: f64);
+        /// A context menu was asked for over an automation lane, on a
+        /// point or between points.
+        #[qsignal]
+        fn lane_menu_requested(self: Pin<&mut PianoRoll>, x: f64, y: f64, on_point: bool);
         /// The document or view changed through this item.
         #[qsignal]
         fn edited(self: Pin<&mut PianoRoll>);
@@ -150,6 +172,11 @@ pub struct PianoRollRust {
     ruler_height: f64,
     keyboard_width: f64,
     velocity_height: f64,
+    lanes_shown: bool,
+    lane_height: f64,
+    lanes_height: f64,
+    track_index: i32,
+    lane_count: i32,
     scroll_x: f64,
     scroll_y: f64,
     content_height: f64,
@@ -157,6 +184,7 @@ pub struct PianoRollRust {
     clip_name: QString,
     strip_row: i32,
     has_selection: bool,
+    has_points: bool,
     cursor_shape: i32,
     ops: Vec<PaintOp>,
     texts: Vec<String>,
@@ -179,6 +207,11 @@ impl Default for PianoRollRust {
             ruler_height: d.ruler_height,
             keyboard_width: d.keyboard_width,
             velocity_height: d.velocity_height,
+            lanes_shown: d.lanes_shown,
+            lane_height: d.lane_height,
+            lanes_height: 0.0,
+            track_index: -1,
+            lane_count: 0,
             scroll_x: 0.0,
             scroll_y: 0.0,
             content_height: 0.0,
@@ -186,6 +219,7 @@ impl Default for PianoRollRust {
             clip_name: QString::default(),
             strip_row: -1,
             has_selection: false,
+            has_points: false,
             cursor_shape: 0,
             ops: Vec::new(),
             texts: Vec::new(),
@@ -243,22 +277,33 @@ impl qobject::PianoRoll {
             has_clip: bool,
             clip_name: String,
             has_selection: bool,
+            has_points: bool,
             strip_row: i32,
+            lanes_height: f64,
+            track_index: i32,
+            lane_count: i32,
         }
         let (w, h) = (self.width(), self.height());
         let palette = self.palette();
         let (rh, kw, vh) = (self.ruler_height, self.keyboard_width, self.velocity_height);
+        let (lanes_shown, lh) = (self.lanes_shown, self.lane_height);
         let (scene, shown) = state::with(|s| {
             s.piano.palette = palette;
             s.piano.ruler_height = rh;
             s.piano.keyboard_width = kw;
             s.piano.velocity_height = vh;
+            s.piano.lanes_shown = lanes_shown;
+            s.piano.lane_height = lh;
             s.piano.resize(w, h);
             s.piano.sync(s.doc.project());
             s.piano.fit_if_pending(s.doc.project());
             let scene = s.with_piano(|p, doc, env| p.scene(doc.project(), env));
             let p = &s.piano;
             let project = s.doc.project();
+            let track = p.track(project);
+            let lanes = track
+                .and_then(|t| project.track(t))
+                .map_or(0, |t| t.automation.len());
             let shown = Shown {
                 scroll_x: p.view.scroll_x,
                 scroll_y: p.scroll_y,
@@ -266,10 +311,15 @@ impl qobject::PianoRoll {
                 has_clip: p.has_clip(project),
                 clip_name: p.clip_name(project).unwrap_or_default(),
                 has_selection: !p.selection.is_empty(),
-                strip_row: p
-                    .track(project)
+                has_points: p.lanes.points_selected(project),
+                strip_row: track
                     .and_then(|t| strip_row(project, t))
                     .map_or(-1, |row| row as i32),
+                lanes_height: p.lanes_height(),
+                track_index: track
+                    .and_then(|t| project.tracks.iter().position(|x| x.id == t))
+                    .map_or(-1, |i| i as i32),
+                lane_count: lanes as i32,
             };
             (scene, shown)
         });
@@ -281,7 +331,11 @@ impl qobject::PianoRoll {
         self.as_mut()
             .set_clip_name(QString::from(shown.clip_name.as_str()));
         self.as_mut().set_has_selection(shown.has_selection);
+        self.as_mut().set_has_points(shown.has_points);
         self.as_mut().set_strip_row(shown.strip_row);
+        self.as_mut().set_lanes_height(shown.lanes_height);
+        self.as_mut().set_track_index(shown.track_index);
+        self.as_mut().set_lane_count(shown.lane_count);
         self.update();
     }
 
@@ -299,18 +353,24 @@ impl qobject::PianoRoll {
     /// Applies an outcome, then redraws and tells QML.
     fn after(mut self: Pin<&mut Self>, out: daw_arrange::Outcome) {
         let any = out.document || out.view || out.locate.is_some() || out.set_loop.is_some();
-        let menu = state::with(|s| {
+        let (menu, lane_menu) = state::with(|s| {
             s.apply(out);
             s.sync_audition();
-            s.piano.take_menu_request()
+            (
+                s.piano.take_menu_request(),
+                s.piano.take_lane_menu_request(),
+            )
         });
         if any {
             self.as_mut().refresh();
             self.as_mut().edited();
         }
+        let (px, py) = self.rust().last_press;
         if menu {
-            let (px, py) = self.rust().last_press;
-            self.context_menu_requested(px, py);
+            self.as_mut().context_menu_requested(px, py);
+        }
+        if let Some(on_point) = lane_menu {
+            self.lane_menu_requested(px, py, on_point);
         }
     }
 
@@ -444,6 +504,14 @@ impl qobject::PianoRoll {
 
     fn select_all(self: Pin<&mut Self>) {
         self.act(|s| s.piano.select_all(s.doc.project()));
+    }
+
+    fn point_shape(&self) -> i32 {
+        state::with(|s| s.piano.point_shape(s.doc.project()).map_or(-1, shape_index))
+    }
+
+    fn set_point_shape(self: Pin<&mut Self>, i: i32) {
+        self.act(|s| s.piano.set_point_shape(&mut s.doc, shape(i)));
     }
 
     fn zoom(self: Pin<&mut Self>, factor: f64) {
