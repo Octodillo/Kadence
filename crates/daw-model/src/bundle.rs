@@ -199,11 +199,17 @@ impl Bundle {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .and_then(|n| strip_suffix_ci(n, PROJECT_SUFFIX))
-                .filter(|stem| !stem.is_empty())
+                .filter(|stem| !matches!(*stem, "" | "." | ".."))
                 .map(|stem| path.with_file_name(stem))
                 .filter(|dir| dir.is_dir())
         {
-            return Self::open(dir);
+            // A folder that holds no project is reported as the path asked for.
+            return Self::open(dir).map_err(|e| match e {
+                FormatError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                    FormatError::io(path)(source)
+                }
+                e => e,
+            });
         }
         if !path.is_file() {
             let mut files = project_files(path)?;

@@ -181,7 +181,9 @@ jobs:
             echo "::warning title=KDE neon archive unreachable::Skipping this job: $neon did not answer. This is not a failure of the code under test."
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
-            # Any other run (a manual one) stays red.
+            # Not reached: CI runs only on pushes and pull requests. During an
+            # outage this job's clippy and tests on neon don't run; the weekly
+            # Packaging run's neon job goes red instead.
             echo "::error title=KDE neon archive unreachable::$neon did not answer."
             exit 1
           fi
