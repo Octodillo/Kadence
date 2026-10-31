@@ -14,6 +14,8 @@ use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
 use daw_model::{Document, FormatError, Project};
 use daw_pianoroll::PianoRoll;
+use daw_plugins::Scanner;
+use daw_session::catalog::PluginCatalog;
 
 use crate::engine::{EngineHandle, default_engine};
 use crate::message::{Context, Fields, Message};
@@ -58,6 +60,24 @@ pub struct AppState {
     last_autosave: Option<Instant>,
     /// The MIDI inputs last asked of the engine.
     midi_tried: Option<Vec<String>>,
+    /// The installed plugins, for the plugin browser. Scanned in the
+    /// background once the browser's model starts it.
+    pub plugins: PluginCatalog,
+    /// The catalog list revision last handed to the session.
+    pub known_plugins: Option<u64>,
+}
+
+/// The app's plugin catalog: scanned by this executable (which answers
+/// `--scan`; see [`run_plugin_child`](crate::run_plugin_child)), sharing the
+/// session's scan cache.
+fn plugin_catalog() -> PluginCatalog {
+    let scanner = Scanner::current_exe()
+        .unwrap_or_else(|_| Scanner::new("kadence", Vec::<std::ffi::OsString>::new()));
+    let catalog = PluginCatalog::new(scanner);
+    match crate::engine::plugin_cache_file() {
+        Some(file) => catalog.with_cache_file(file),
+        None => catalog,
+    }
 }
 
 thread_local! {
@@ -96,6 +116,8 @@ impl AppState {
             autosave_every: Some(Duration::from_secs(60)),
             last_autosave: None,
             midi_tried: None,
+            plugins: plugin_catalog(),
+            known_plugins: None,
         };
         s.sync();
         s
@@ -214,6 +236,38 @@ impl AppState {
                 self.touch();
             }
         }
+    }
+
+    /// Picks up a finished plugin scan and tells the session's loader what
+    /// it found, so devices whose plugin was missing load now. Returns true
+    /// when the catalog changed.
+    pub fn tick_plugins(&mut self) -> bool {
+        if !self.plugins.poll() {
+            return false;
+        }
+        let list = self.plugins.list_revision();
+        if self.known_plugins == Some(list) || !self.plugins.has_scanned() {
+            return true;
+        }
+        self.known_plugins = Some(list);
+        crate::instrument::set_plugin_effects(self.plugins.plugins());
+        self.instruments.clear_plugins();
+        for choice in crate::instrument::plugin_choices(self.plugins.plugins()) {
+            self.instruments.push(choice);
+        }
+        if let Some(session) = self.engine.session_mut() {
+            session.set_known_plugins(self.plugins.plugins());
+            // Missing plugins are tried again; those still missing say so again.
+            if self
+                .status
+                .as_ref()
+                .is_some_and(|f| f.reason == crate::message::Reason::PluginMissing)
+            {
+                self.status = None;
+            }
+            self.resync();
+        }
+        true
     }
 
     /// Stores each plugin's current state in the document, so saving keeps

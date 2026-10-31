@@ -33,6 +33,8 @@ const QML_FILES: &[&str] = &[
     "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
     "qml/TrackHeader.qml",
+    "qml/PluginBrowser.qml",
+    "qml/PluginSettings.qml",
     "qml/ExportDialog.qml",
     "qml/InstrumentButton.qml",
 ];
@@ -80,6 +82,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/mixer_bridge.rs",
+        "src/plugins_bridge.rs",
         "src/instruments_bridge.rs",
         "src/ffi.rs",
         "src/test_helper.rs",

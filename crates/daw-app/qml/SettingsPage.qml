@@ -35,7 +35,20 @@ Kirigami.ScrollablePage {
         currentIndex: tabs.currentIndex
 
         GeneralSettings {}
-        AudioSettings {}
+        // The audio and plugin forms share one label column.
+        ColumnLayout {
+            spacing: Kirigami.Units.largeSpacing
+
+            AudioSettings {
+                id: audio
+                Layout.fillWidth: true
+            }
+
+            PluginSettings {
+                Layout.fillWidth: true
+                twinFormLayouts: [audio.form]
+            }
+        }
         MidiSettings {}
     }
 }

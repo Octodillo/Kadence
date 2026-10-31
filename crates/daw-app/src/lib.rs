@@ -21,6 +21,7 @@ pub mod mixer;
 pub mod mixer_bridge;
 mod paint;
 pub mod piano_roll;
+pub mod plugins_bridge;
 pub mod project;
 mod recording;
 pub mod session_mixer;

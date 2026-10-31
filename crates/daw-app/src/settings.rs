@@ -4,6 +4,8 @@
 //! The load and save logic is written against [`SettingsStore`] so it can be
 //! tested with an in-memory map.
 
+use std::path::PathBuf;
+
 use crate::engine::AudioConfig;
 use crate::ffi;
 
@@ -239,6 +241,25 @@ pub fn save_general_settings(store: &mut dyn SettingsStore, settings: &GeneralSe
     store.sync();
 }
 
+const PLUGINS: &str = "Plugins";
+
+/// Folders the user added to the plugin search, one path per line.
+pub fn load_plugin_folders(store: &dyn SettingsStore) -> Vec<PathBuf> {
+    read_list(store, PLUGINS, "ExtraFolders")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+pub fn save_plugin_folders(store: &mut dyn SettingsStore, folders: &[PathBuf]) {
+    let value: Vec<String> = folders
+        .iter()
+        .map(|f| f.to_string_lossy().into_owned())
+        .collect();
+    store.write(PLUGINS, "ExtraFolders", &value.join("\n"));
+    store.sync();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +379,19 @@ mod tests {
         let config = load_audio_config(&store);
         assert_eq!(config.sample_rate, AudioConfig::default().sample_rate);
         assert_eq!(config.buffer_size, 128);
+    }
+
+    #[test]
+    fn plugin_folders_round_trip() {
+        let mut store = MemoryStore::default();
+        assert!(load_plugin_folders(&store).is_empty());
+        let folders = vec![
+            PathBuf::from("/opt/plugins"),
+            PathBuf::from("/home/a b/clap"),
+        ];
+        save_plugin_folders(&mut store, &folders);
+        assert_eq!(load_plugin_folders(&store), folders);
+        save_plugin_folders(&mut store, &[]);
+        assert!(load_plugin_folders(&store).is_empty());
     }
 }

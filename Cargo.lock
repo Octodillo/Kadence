@@ -489,6 +489,7 @@ dependencies = [
 name = "daw-app"
 version = "0.1.0"
 dependencies = [
+ "assert_no_alloc",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",

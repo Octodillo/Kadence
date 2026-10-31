@@ -33,6 +33,7 @@ daw-engine = { path = "../daw-engine" }
 daw-backend = { path = "../daw-backend" }
 
 [dev-dependencies]
+assert_no_alloc.workspace = true
 tempfile = "3"
 
 [build-dependencies]
