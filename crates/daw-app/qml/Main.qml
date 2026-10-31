@@ -421,9 +421,11 @@ Kirigami.ApplicationWindow {
         onTriggered: root.openSettings()
     }
 
+    // Shown in the drawer like the pages: checked while About is open.
     readonly property Kirigami.Action aboutAction: Kirigami.Action {
         text: i18nc("@action:inmenu", "About Kadence")
         icon.name: "help-about"
+        checkable: true
         onTriggered: root.openAbout()
     }
 
@@ -506,8 +508,17 @@ Kirigami.ApplicationWindow {
     Component {
         id: aboutComponent
         Kirigami.AboutPage {
+            id: aboutPage
             objectName: "aboutPage"
             aboutData: root.aboutData
+
+            // Close it the way the other layers close, as well as with the
+            // back button and by picking a page in the drawer.
+            Shortcut {
+                sequences: [StandardKey.Cancel, StandardKey.Back]
+                enabled: aboutPage.visible
+                onActivated: root.pageStack.layers.pop()
+            }
         }
     }
 
@@ -583,11 +594,32 @@ Kirigami.ApplicationWindow {
     }
 
     function showPage(page: Kirigami.Page, action: Kirigami.Action): void {
-        for (const a of pageActions) {
-            a.checked = a === action;
+        // Picking a page leaves About, as it would leave any other page.
+        while (pageStack.layers.depth > 1) {
+            pageStack.layers.pop();
         }
         if (pageStack.currentItem !== page) {
             pageStack.replace(page);
+        }
+        syncPageChecks();
+    }
+
+    // The drawer marks the view on screen: About while it is open, else
+    // the current page. Clicking a checked entry unchecks it, so set every
+    // entry each time.
+    function syncPageChecks(): void {
+        const aboutOpen = pageStack.layers.currentItem?.objectName === "aboutPage";
+        aboutAction.checked = aboutOpen;
+        const pages = [arrangePage, mixPage, editPage];
+        for (let i = 0; i < pageActions.length; ++i) {
+            pageActions[i].checked = !aboutOpen && pageStack.currentItem === pages[i];
+        }
+    }
+
+    Connections {
+        target: root.pageStack.layers
+        function onCurrentItemChanged(): void {
+            root.syncPageChecks();
         }
     }
 
@@ -614,6 +646,7 @@ Kirigami.ApplicationWindow {
         // instanceof does not match QML-defined Kirigami types, so compare
         // the objectName set on aboutComponent instead.
         if (pageStack.layers.currentItem?.objectName === "aboutPage") {
+            syncPageChecks();
             return pageStack.layers.currentItem;
         }
         return pageStack.layers.push(aboutComponent);

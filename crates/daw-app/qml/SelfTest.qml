@@ -596,7 +596,13 @@ Item {
             shoot(window.title, "about");
         },
         () => {
-            window.pageStack.layers.pop();
+            check(window.aboutAction.checked && !window.pageActions[0].checked,
+                  "the drawer marks About while it is open");
+            // Picking a page in the drawer leaves About.
+            window.pageActions[0].trigger();
+            check(window.pageStack.layers.depth === 1, "a page action closes About");
+            check(window.pageActions[0].checked && !window.aboutAction.checked,
+                  "the drawer marks the page again after About");
         }
     ]
 
