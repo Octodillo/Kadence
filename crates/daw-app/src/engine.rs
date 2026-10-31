@@ -127,6 +127,12 @@ pub trait EngineHandle {
         0
     }
 
+    /// How an export loads plugins, as the session does: `None` when the
+    /// session has no plugin loader either (the stub engine).
+    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
+        None
+    }
+
     /// The session playing the project. After
     /// [`apply_audio_config`](Self::apply_audio_config) it may be a new one
     /// that has to be synced with the document again.
@@ -139,19 +145,33 @@ pub trait EngineHandle {
 /// [`run_plugin_child`](crate::run_plugin_child)). Scan results are cached
 /// in `$XDG_CACHE_HOME/kadence/plugins.json`.
 fn plugin_loader() -> Option<Box<dyn PluginLoader>> {
+    sandbox_loader(|c| c)
+}
+
+/// [`plugin_loader`] for an export, which renders faster than real time.
+fn export_plugin_loader() -> Option<Box<dyn PluginLoader>> {
+    sandbox_loader(daw_session::export::offline_sandbox)
+}
+
+fn sandbox_loader(
+    adjust: impl FnOnce(SandboxConfig) -> SandboxConfig,
+) -> Option<Box<dyn PluginLoader>> {
     let launcher = HostLauncher::current_exe().ok()?;
-    let mut loader = SandboxLoader::new(SandboxConfig::new(launcher));
-    if let Some(dir) = cache_dir() {
-        loader = loader.with_cache_file(dir.join("kadence").join("plugins.json"));
+    let mut loader = SandboxLoader::new(adjust(SandboxConfig::new(launcher)));
+    if let Some(file) = plugin_cache_file() {
+        loader = loader.with_cache_file(file);
     }
     Some(Box::new(loader))
 }
 
-fn cache_dir() -> Option<PathBuf> {
+/// Where plugin scan results are kept, shared by the session's loader and
+/// the plugin browser's scan.
+pub(crate) fn plugin_cache_file() -> Option<PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .map(|dir| dir.join("kadence").join("plugins.json"))
 }
 
 /// Starts audio with plugins loading through [`plugin_loader`].
@@ -212,6 +232,10 @@ impl Default for SessionEngine {
 }
 
 impl EngineHandle for SessionEngine {
+    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
+        Some(Box::new(export_plugin_loader))
+    }
+
     fn backend_kind(&self) -> BackendKind {
         match self.host.kind() {
             HostKind::Jack => BackendKind::Jack,

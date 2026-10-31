@@ -26,6 +26,10 @@ pub enum Context {
     Playback,
     /// Recording MIDI or audio.
     Record,
+    /// Copying audio from outside the bundle into it.
+    Collect,
+    /// Getting unsaved work back from an autosave.
+    Recover,
     /// Exporting the song to an audio file.
     Export,
 }
@@ -112,6 +116,12 @@ pub enum Reason {
     DiskTooSlow,
     /// The file name's extension, `detail`, is another format's.
     WrongExtension,
+    /// Sandboxed plugins missed `number` cycles during the export.
+    PluginTooSlow,
+    /// The plugin of device `name` crashed during the export.
+    ExportPluginCrashed,
+    /// A plugin changed its latency during the export.
+    LatencyChanged,
     /// An audio take could not be written to `path`; `detail`.
     CannotRecordTo,
     /// Track `name` records inputs the audio system doesn't have.
@@ -128,6 +138,8 @@ pub enum Reason {
     TrackGoneWhileRecording,
     /// The audio system missed `number` cycles while recording.
     RecordXruns,
+    /// The bundle at `path` is open in another Kadence.
+    AlreadyOpen,
 }
 
 /// A message, flattened for a front end.
@@ -230,6 +242,8 @@ pub enum Message {
     Playback(daw_session::SessionError),
     Warning(Warning),
     Record(RecordProblem),
+    /// Another Kadence has the bundle at this path open.
+    AlreadyOpen(PathBuf),
     Export(ExportProblem),
     /// The song was exported to this file, `seconds` long.
     Exported {
@@ -296,6 +310,12 @@ fn export_fields(p: &ExportProblem) -> Fields {
                 number: *n,
                 ..new(R::DiskTooSlow)
             },
+            E::PluginTooSlow(n) => Fields {
+                number: *n,
+                ..new(R::PluginTooSlow)
+            },
+            E::PluginCrashed(device) => new(R::ExportPluginCrashed).name(device),
+            E::LatencyChanged => new(R::LatencyChanged),
             // The dialog only offers valid settings.
             E::SampleRate(_) | E::Tail(_) => new(R::EncodeFailed).detail(e),
         },
@@ -366,6 +386,7 @@ impl Message {
                     ..Fields::new(C::Record, R::RecordXruns)
                 },
             },
+            Self::AlreadyOpen(path) => Fields::new(C::Open, R::AlreadyOpen).path(path),
             Self::Export(p) => export_fields(p),
             Self::Exported { path, seconds } => Fields {
                 number: *seconds,

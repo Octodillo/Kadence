@@ -30,6 +30,7 @@ QtObject {
         "Attack": i18nc("@label name of a device setting", "Attack"),
         "Band-pass": i18nc("@label choice of a device setting", "Band-pass"),
         "Beats per Bar": i18nc("@label name of a device setting", "Beats per Bar"),
+        "Click During Playback": i18nc("@label name of a device setting", "Click During Playback"),
         "Compressor": i18nc("@label name of a built-in device", "Compressor"),
         "Cutoff": i18nc("@label name of a device setting", "Cutoff"),
         "Damping": i18nc("@label name of a device setting", "Damping"),

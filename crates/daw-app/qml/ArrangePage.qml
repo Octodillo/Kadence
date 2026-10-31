@@ -16,6 +16,10 @@ Kirigami.Page {
 
     property list<Kirigami.Action> transportActions
     readonly property alias view: view
+    readonly property alias transportBar: transportBar
+
+    // A project in the welcome list was clicked: open Project.recentProjects[index].
+    signal recentActivated(int index)
 
     title: i18nc("@title", "Arrange")
     padding: 0
@@ -220,6 +224,11 @@ Kirigami.Page {
             }
         }
 
+        TransportBar {
+            id: transportBar
+            Layout.fillWidth: true
+        }
+
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -239,22 +248,6 @@ Kirigami.Page {
                     Layout.preferredHeight: view.rulerHeight
                     color: Kirigami.Theme.alternateBackgroundColor
 
-                    QQC2.Label {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.left: parent.left
-                        anchors.leftMargin: Kirigami.Units.largeSpacing
-                        text: Project.positionText
-                        font: Kirigami.Theme.smallFont
-                        Accessible.name: i18nc("@info:accessible", "Playhead position")
-                    }
-                    QQC2.Label {
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.right: parent.right
-                        anchors.rightMargin: Kirigami.Units.largeSpacing
-                        text: Project.timeText
-                        font: Kirigami.Theme.smallFont
-                        opacity: 0.7
-                    }
                     Kirigami.Separator {
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -410,8 +403,9 @@ Kirigami.Page {
                 }
 
                 Kirigami.PlaceholderMessage {
+                    id: placeholder
                     anchors.centerIn: view
-                    width: view.width - Kirigami.Units.gridUnit * 4
+                    width: Math.min(view.width - Kirigami.Units.gridUnit * 4, Kirigami.Units.gridUnit * 24)
                     visible: Project.trackCount === 0
                     icon.name: "view-media-track"
                     text: i18nc("@info:placeholder", "No tracks yet")
@@ -420,6 +414,35 @@ Kirigami.Page {
                         text: i18nc("@action:button", "Add Audio Track")
                         icon.name: "list-add"
                         onTriggered: page.addTrack(0)
+                    }
+
+                    // On a new, untouched project: pick up where you left off.
+                    readonly property bool showRecent: !Project.savedBefore && !Project.modified
+                                                       && Project.recentProjects.length > 0
+
+                    Kirigami.Heading {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Kirigami.Units.gridUnit
+                        visible: placeholder.showRecent
+                        level: 3
+                        horizontalAlignment: Text.AlignHCenter
+                        text: i18nc("@title", "Recent Projects")
+                    }
+
+                    Repeater {
+                        model: placeholder.showRecent ? Project.recentProjects.slice(0, 5) : []
+                        delegate: QQC2.ItemDelegate {
+                            required property int index
+                            required property string modelData
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.maximumWidth: placeholder.width
+                            icon.name: "folder-sound"
+                            text: modelData.split("/").pop()
+                            QQC2.ToolTip.text: modelData
+                            QQC2.ToolTip.visible: hovered
+                            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                            onClicked: page.recentActivated(index)
+                        }
                     }
                 }
 

@@ -171,6 +171,7 @@ fn rendered(snapshot: &ProjectSnapshot, dir: &Path, settings: &RenderSettings) -
     render(
         snapshot,
         Some(dir.to_path_buf()),
+        None,
         settings,
         &Progress::default(),
         |planes| {
@@ -269,6 +270,7 @@ fn wav_and_flac_files_hold_the_render() {
         let report = export(
             &snap,
             Some(dir.path().to_path_buf()),
+            None,
             &path,
             &ExportSettings {
                 render: render.clone(),
@@ -310,6 +312,7 @@ fn cancelling_leaves_no_file_and_keeps_the_old_one() {
     let r = render(
         &snap,
         Some(dir.path().to_path_buf()),
+        None,
         &settings.render,
         &progress,
         |_| {
@@ -327,6 +330,7 @@ fn cancelling_leaves_no_file_and_keeps_the_old_one() {
     let job = ExportJob::start(
         snap.clone(),
         Some(dir.path().to_path_buf()),
+        None,
         path.clone(),
         settings,
     )
@@ -350,6 +354,7 @@ fn a_job_reports_progress_and_finishes() {
     let job = ExportJob::start(
         snap,
         Some(dir.path().to_path_buf()),
+        None,
         path.clone(),
         ExportSettings {
             render: settings(0, 4 * PPQ, 0.25),
@@ -374,7 +379,7 @@ fn bad_settings_are_refused() {
     let mut doc = Document::new(Project::new("empty"));
     let snap = doc.snapshot();
     assert_eq!(song_end(&snap), TickTime(0));
-    let run = |s: RenderSettings| render(&snap, None, &s, &Progress::default(), |_| Ok(()));
+    let run = |s: RenderSettings| render(&snap, None, None, &s, &Progress::default(), |_| Ok(()));
     assert!(matches!(
         run(settings(0, 0, 1.0)),
         Err(ExportError::EmptyRange)
@@ -394,6 +399,7 @@ fn bad_settings_are_refused() {
     let path = dir.path().join("silence.wav");
     let report = export(
         &snap,
+        None,
         None,
         &path,
         &ExportSettings {

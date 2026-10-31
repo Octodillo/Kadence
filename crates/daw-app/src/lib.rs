@@ -23,12 +23,15 @@ pub mod mixer;
 pub mod mixer_bridge;
 mod paint;
 pub mod piano_roll;
+pub mod plugins_bridge;
 pub mod project;
 mod recording;
+pub mod recovery;
 pub mod session_mixer;
 pub mod settings;
 pub mod state;
 mod test_helper;
+mod transport;
 
 /// Runs a plugin sandbox host or scanner if the arguments ask for one
 /// (`--plugin-host <socket>` or `--scan <format> <bundle>`), which the

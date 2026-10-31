@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import QtQml
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Dialogs
@@ -92,7 +93,7 @@ Kirigami.ApplicationWindow {
             text: i18nc("@action:inmenu", "New Project")
             icon.name: "document-new"
             shortcut: StandardKey.New
-            onTriggered: Project.newProject()
+            onTriggered: root.whenChangesHandled(() => Project.newProject())
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Open Project…")
@@ -119,6 +120,58 @@ Kirigami.ApplicationWindow {
             onTriggered: root.openExport()
         }
     ]
+
+    // Filled from Project.recentProjects by recentInstantiator.
+    readonly property Kirigami.Action openRecentAction: Kirigami.Action {
+        text: i18nc("@action:inmenu", "Open Recent")
+        icon.name: "document-open-recent"
+        enabled: Project.recentProjects.length > 0
+    }
+
+    Instantiator {
+        id: recentInstantiator
+        model: Project.recentProjects
+        delegate: Kirigami.Action {
+            required property int index
+            required property string modelData
+            text: modelData.split("/").pop()
+            tooltip: modelData
+            icon.name: "folder-sound"
+            onTriggered: root.openRecent(index)
+        }
+        onObjectAdded: rebuild()
+        onObjectRemoved: rebuild()
+        function rebuild(): void {
+            const list = [];
+            for (let i = 0; i < count; ++i) {
+                if (objectAt(i)) {
+                    list.push(objectAt(i));
+                }
+            }
+            root.openRecentAction.children = list;
+        }
+    }
+
+    readonly property Kirigami.Action collectAction: Kirigami.Action {
+        text: i18nc("@action:inmenu", "Collect Audio Files")
+        icon.name: "folder-download"
+        tooltip: i18nc("@info:tooltip", "Copy the audio files the project uses from elsewhere into its folder, so it can be moved or shared")
+        enabled: Project.savedBefore && Project.externalCount > 0
+        onTriggered: {
+            const n = Project.collectFiles();
+            if (n > 0) {
+                showPassiveNotification(i18ncp("@info", "Copied %1 audio file into the project.",
+                                               "Copied %1 audio files into the project.", n));
+            }
+        }
+    }
+
+    readonly property Kirigami.Action findMissingAction: Kirigami.Action {
+        text: i18nc("@action:inmenu", "Find Missing Audio Files…")
+        icon.name: "edit-find"
+        visible: Project.missingCount > 0
+        onTriggered: relinkDialog.open()
+    }
 
     readonly property list<Kirigami.Action> historyActions: [
         Kirigami.Action {
@@ -152,7 +205,8 @@ Kirigami.ApplicationWindow {
         title: i18nc("@title:window", "Open Project")
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         onAccepted: {
-            root.notify(Project.openProject(selectedFile));
+            const url = selectedFile;
+            root.whenChangesHandled(() => root.opened(Project.openProject(url), url));
         }
     }
 
@@ -161,17 +215,170 @@ Kirigami.ApplicationWindow {
         title: i18nc("@title:window", "Save Project As")
         fileMode: FileDialog.SaveFile
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
+        // Runs after a successful save, when saving was asked for before
+        // closing or replacing the project.
+        property var then: null
         onAccepted: {
-            root.notify(Project.saveAs(selectedFile));
+            const result = Project.saveAs(selectedFile);
+            root.notify(result);
+            const next = then;
+            then = null;
+            if (result.context === undefined && next) {
+                next();
+            }
+        }
+        onRejected: then = null
+    }
+
+    // Runs `proceed` once the project's unsaved changes are saved or the
+    // user chose to discard them; not at all if they cancel.
+    function whenChangesHandled(proceed: var): void {
+        if (!Project.modified) {
+            proceed();
+            return;
+        }
+        unsavedDialog.proceed = proceed;
+        unsavedDialog.open();
+    }
+
+    Kirigami.PromptDialog {
+        id: unsavedDialog
+        property var proceed: null
+        title: i18nc("@title:window", "Save Changes?")
+        subtitle: i18nc("@info %1 is the project name",
+                        "The project “%1” has been modified. Do you want to save your changes or discard them?",
+                        root.projectName)
+        standardButtons: Kirigami.Dialog.Save | Kirigami.Dialog.Discard | Kirigami.Dialog.Cancel
+        onAccepted: {
+            const next = proceed;
+            proceed = null;
+            if (!Project.savedBefore) {
+                saveDialog.then = next;
+                saveDialog.open();
+                return;
+            }
+            const result = Project.save();
+            root.notify(result);
+            if (result.context === undefined) {
+                next();
+            }
+        }
+        onDiscarded: {
+            const next = proceed;
+            proceed = null;
+            close();
+            next();
+        }
+        onRejected: proceed = null
+    }
+
+    // After opening a project: offer to recover unsaved changes it holds,
+    // say why it failed, or offer to find missing audio files.
+    function opened(result: var, url: url): void {
+        if (result.context === Project.OpenContext && result.reason === Project.AutosavePending) {
+            autosaveDialog.url = url;
+            autosaveDialog.open();
+            return;
+        }
+        notify(result);
+        if (result.context === undefined && Project.missingCount > 0) {
+            relinkDialog.open();
         }
     }
 
-    // Engine position, peak loading, autosave.
+    function openRecent(index: int): void {
+        const url = Project.recentUrl(index);
+        root.whenChangesHandled(() => root.opened(Project.openRecent(url), url));
+    }
+
+    Kirigami.PromptDialog {
+        id: autosaveDialog
+        property url url
+        title: i18nc("@title:window", "Recover Unsaved Changes?")
+        subtitle: i18nc("@info",
+                        "This project has changes from a session that ended without saving. Recover them, or open the last saved version and discard them?")
+        standardButtons: Kirigami.Dialog.Cancel
+        customFooterActions: [
+            Kirigami.Action {
+                text: i18nc("@action:button", "Recover")
+                icon.name: "document-revert"
+                onTriggered: {
+                    autosaveDialog.close();
+                    root.opened(Project.recoverProject(autosaveDialog.url), autosaveDialog.url);
+                }
+            },
+            Kirigami.Action {
+                text: i18nc("@action:button", "Open Saved Version")
+                icon.name: "edit-delete"
+                onTriggered: {
+                    autosaveDialog.close();
+                    root.opened(Project.openDiscardingAutosave(autosaveDialog.url), autosaveDialog.url);
+                }
+            }
+        ]
+    }
+
+    RelinkDialog {
+        id: relinkDialog
+        onRelinked: (count) => {
+            if (count > 0 && Project.missingCount > 0) {
+                root.showPassiveNotification(i18ncp("@info", "Found %1 file.", "Found %1 files.", count));
+            }
+        }
+    }
+
+    RecoveryDialog {
+        id: recoveryDialog
+        onRecovered: (result) => {
+            root.notify(result);
+            if (result.context === undefined && Project.missingCount > 0) {
+                relinkDialog.open();
+            }
+        }
+    }
+
+    // For the self test.
+    readonly property alias relinkDialog: relinkDialog
+    readonly property alias recoveryDialog: recoveryDialog
+    readonly property alias unsavedDialog: unsavedDialog
+
+    // Set once the user agreed to close with the project as it is.
+    property bool closeConfirmed: false
+
+    onClosing: (close) => {
+        if (!closeConfirmed && Project.modified && !smokeTest && screenshotDir === "") {
+            close.accepted = false;
+            whenChangesHandled(() => {
+                root.closeConfirmed = true;
+                root.close();
+            });
+            return;
+        }
+        Project.shutdown();
+    }
+
+    // Engine position, peak loading, autosave, plugin scan progress.
     Timer {
         interval: 33
         repeat: true
         running: true
-        onTriggered: Project.tick()
+        onTriggered: {
+            Project.tick();
+            Plugins.tick();
+        }
+    }
+
+    // One browser for every place that adds a plugin; see browsePlugins().
+    PluginBrowser {
+        id: pluginBrowser
+        property var pickHandler: null
+        onChosen: (format, pluginId, name) => {
+            if (pickHandler) {
+                pickHandler(format, pluginId, name);
+            }
+        }
+        onClosed: pickHandler = null
+        onConfigureRequested: root.openSettings()
     }
 
     Kirigami.Action {
@@ -196,7 +403,8 @@ Kirigami.ApplicationWindow {
         text: i18nc("@action:inmenu", "Quit")
         icon.name: "application-exit"
         shortcut: StandardKey.Quit
-        onTriggered: Qt.quit()
+        // Through the window, so unsaved changes are asked about.
+        onTriggered: root.close()
     }
 
     globalDrawer: Kirigami.GlobalDrawer {
@@ -208,9 +416,12 @@ Kirigami.ApplicationWindow {
         actions: [
             root.fileActions[0],
             root.fileActions[1],
+            root.openRecentAction,
             root.fileActions[2],
             root.fileActions[3],
             root.fileActions[4],
+            root.collectAction,
+            root.findMissingAction,
             separatorAction,
             root.historyActions[0],
             root.historyActions[1],
@@ -245,6 +456,7 @@ Kirigami.ApplicationWindow {
         id: arrangePage
         visible: false
         transportActions: [root.playAction, root.recordAction]
+        onRecentActivated: (index) => root.openRecent(index)
     }
     MixPage {
         id: mixPage
@@ -320,7 +532,16 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    Component.onCompleted: notifyEngineError()
+    Component.onCompleted: {
+        notifyEngineError();
+        // The self test must not touch the user's recent list or autosaves.
+        if (!smokeTest && screenshotDir === "") {
+            Project.startSession();
+            if (Project.recoveryCount > 0) {
+                recoveryDialog.open();
+            }
+        }
+    }
 
     Connections {
         target: Engine
@@ -336,6 +557,15 @@ Kirigami.ApplicationWindow {
         if (pageStack.currentItem !== page) {
             pageStack.replace(page);
         }
+    }
+
+    // Opens the plugin browser on `kind` (0 any, 1 instruments, 2 effects);
+    // `pick(format, pluginId, name)` runs when the user chooses one.
+    function browsePlugins(kind: int, pick: var): var {
+        pluginBrowser.kind = kind;
+        pluginBrowser.pickHandler = pick;
+        pluginBrowser.open();
+        return pluginBrowser;
     }
 
     function openSettings(): Item {

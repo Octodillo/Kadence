@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
@@ -60,9 +61,17 @@ impl ScanCache {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(tmp, path)
+        // Named for this process and call, so two writers (the app's scan, playback's loader, an export's)
+        // never write into the same temporary file.
+        static SAVES: AtomicU64 = AtomicU64::new(0);
+        let n = SAVES.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
+        let written = std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)
+            .and_then(|()| std::fs::rename(&tmp, path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
     }
 
     /// The cached entry for `bundle`, if it is still current.
