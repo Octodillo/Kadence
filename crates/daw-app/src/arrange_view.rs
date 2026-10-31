@@ -97,6 +97,14 @@ pub mod qobject {
         fn wheel(self: Pin<&mut ArrangeView>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32);
         #[qinvokable]
         fn pinch(self: Pin<&mut ArrangeView>, scale: f64, x: f64);
+        /// Makes every track row `height` pixels tall (clamped), keeping
+        /// the spot at view-y `anchor_y` in place: dragging a track
+        /// header's lower edge, anchored at that row's top.
+        #[qinvokable]
+        fn resize_tracks(self: Pin<&mut ArrangeView>, height: f64, anchor_y: f64);
+        /// The track height a new timeline starts with.
+        #[qinvokable]
+        fn default_track_height(self: &ArrangeView) -> f64;
         /// From the scroll bars.
         #[qinvokable]
         fn scroll_to(self: Pin<&mut ArrangeView>, x: f64, y: f64);
@@ -440,6 +448,23 @@ impl qobject::ArrangeView {
             s.arrange.pinch(&project, scale, x)
         });
         self.after(out);
+    }
+
+    fn resize_tracks(self: Pin<&mut Self>, height: f64, anchor_y: f64) {
+        if !height.is_finite() || height <= 0.0 || !anchor_y.is_finite() {
+            return;
+        }
+        state::with(|s| {
+            let project = s.doc.project().clone();
+            let factor = height / s.arrange.track_height.max(1.0);
+            s.arrange.zoom_tracks(&project, factor, anchor_y);
+            s.touch();
+        });
+        self.refresh();
+    }
+
+    fn default_track_height(&self) -> f64 {
+        daw_arrange::DEFAULT_TRACK_HEIGHT
     }
 
     fn scroll_to(self: Pin<&mut Self>, x: f64, y: f64) {

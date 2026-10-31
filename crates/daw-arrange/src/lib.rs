@@ -43,6 +43,8 @@ pub use view::TimelineView;
 /// Smallest and largest track height in logical pixels.
 pub const MIN_TRACK_HEIGHT: f64 = 24.0;
 pub const MAX_TRACK_HEIGHT: f64 = 400.0;
+/// A new timeline's track height.
+pub const DEFAULT_TRACK_HEIGHT: f64 = 64.0;
 
 /// A pointer must move this far before a press becomes a drag.
 const DRAG_THRESHOLD: f64 = 3.0;
@@ -412,7 +414,7 @@ impl Arrange {
             view: TimelineView::default(),
             width: 800.0,
             height: 600.0,
-            track_height: 64.0,
+            track_height: DEFAULT_TRACK_HEIGHT,
             ruler_height: 24.0,
             scroll_y: 0.0,
             edge_px: 6.0,

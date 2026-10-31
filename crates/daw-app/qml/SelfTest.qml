@@ -82,8 +82,25 @@ Item {
             check(Project.trackCount === 1, "add instrument track");
             check(Project.trackName(0) === i18nc("@item default track name, %1 is a number", "Instrument %1", 1),
                   "default track name worded in QML");
-            // Double-click the first lane: a one-bar MIDI clip appears.
+            // Dragging a header's lower edge resizes every track.
             const v = arrange.view;
+            const close = (a, b) => Math.abs(a - b) < 0.5;
+            const before = v.trackHeight;
+            const target = before > 40 ? before - 10 : before + 10;
+            v.resizeTracks(target, v.rulerHeight);
+            check(close(v.trackHeight, target) && close(v.rowHeight(0), target), "resize tracks");
+            v.resizeTracks(1, v.rulerHeight);
+            check(v.trackHeight >= 24, "tracks keep a minimum height");
+            v.resizeTracks(before, v.rulerHeight);
+            check(close(v.trackHeight, before), "resize tracks back");
+            // The edge follows the pointer: scrolled, the sizes above the
+            // row scroll away; at the top, they share the movement.
+            const header = arrange.trackHeaders.itemAtIndex(0);
+            check(header.edgeChange(12, 100, 2, 1, 10, 2000, 500) === 12, "a dragged edge follows the pointer");
+            check(header.edgeChange(12, 0, 2, 1, 3, 192, 500) === 4 && header.edgeChange(12, 0, 1, 2, 3, 192, 500) === 4,
+                  "in a short timeline, the sizes above a dragged edge share the movement");
+            check(header.edgeChange(-30, 10, 1, 1, 10, 2000, 500) === -20, "an edge scrolls to the top, then shares the rest");
+            // Double-click the first lane: a one-bar MIDI clip appears.
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
             check(Project.undoText in editNames.names, "undo name has a translation");
@@ -154,6 +171,20 @@ Item {
             Automation.setExpanded(0, true);
             Automation.setExpanded(2, true);
             check(Automation.expanded(0) && v.rowHeight(0) === v.trackHeight + v.laneHeight, "Bass shows its lane");
+            // A lane header's lower edge resizes the lanes, within limits;
+            // a double-click puts the default back.
+            // The test leaves the user's saved sizes as they were.
+            const lanes = window.pageStack.currentItem.laneSize;
+            const savedLanes = lanes.units;
+            lanes.begin(v.laneHeight, Infinity);
+            lanes.drag(Kirigami.Units.gridUnit, false);
+            check(Math.abs(v.laneHeight - Math.round(lanes.pixels)) < 1 && lanes.units > lanes.defaultUnits, "resize lanes");
+            lanes.drag(-1000, false);
+            check(lanes.units === lanes.minimumUnits, "lanes keep a minimum height");
+            lanes.reset();
+            check(lanes.units === lanes.defaultUnits && v.rowHeight(0) === v.trackHeight + v.laneHeight, "lane height reset");
+            lanes.units = savedLanes;
+            AppSettings.setLayoutValue(lanes.key, savedLanes);
             const y = v.rulerHeight + v.trackHeight + v.laneHeight / 2;
             v.press(v.width * 0.45, y, 1, 0);
             v.release(v.width * 0.45, y, 0);
@@ -444,6 +475,22 @@ Item {
         () => {
             const roll = window.pageStack.currentItem.roll;
             check(roll.hasClip, "piano roll has the clip");
+            // Dragging the velocity lane's edge up makes it taller, but
+            // never so tall the notes lose their last three rows.
+            const velocity = window.pageStack.currentItem.velocitySize;
+            const savedVelocity = velocity.units;
+            velocity.begin(roll.velocityHeight, roll.maximumVelocityHeight);
+            velocity.drag(Kirigami.Units.gridUnit, false);
+            check(Math.abs(roll.velocityHeight - Math.round(velocity.pixels)) < 1, "resize the velocity lane");
+            velocity.begin(roll.velocityHeight, roll.maximumVelocityHeight);
+            velocity.drag(100000, false);
+            check(velocity.pixels <= roll.maximumVelocityHeight + 0.5
+                  && roll.velocityHeight === Math.round(Math.min(velocity.pixels, roll.maximumVelocityHeight)),
+                  "the velocity lane leaves room for notes");
+            velocity.reset();
+            check(velocity.units === velocity.defaultUnits, "velocity lane reset");
+            velocity.units = savedVelocity;
+            AppSettings.setLayoutValue(velocity.key, savedVelocity);
             const notes = TestHelper.pianoNoteCount();
             check(notes === 12, "demo clip has 12 notes");
             // Double-click empty space low in the grid: a note is added.
