@@ -129,6 +129,12 @@ pub trait EngineHandle {
         0
     }
 
+    /// How an export loads plugins, as the session does: `None` when the
+    /// session has no plugin loader either (the stub engine).
+    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
+        None
+    }
+
     /// The session playing the project. After
     /// [`apply_audio_config`](Self::apply_audio_config) it may be a new one
     /// that has to be synced with the document again.
@@ -187,8 +193,19 @@ macro_rules! host_midi {
 /// [`run_plugin_child`](crate::run_plugin_child)). Scan results are cached
 /// in `$XDG_CACHE_HOME/kadence/plugins.json`.
 fn plugin_loader() -> Option<Box<dyn PluginLoader>> {
+    sandbox_loader(|c| c)
+}
+
+/// [`plugin_loader`] for an export, which renders faster than real time.
+fn export_plugin_loader() -> Option<Box<dyn PluginLoader>> {
+    sandbox_loader(daw_session::export::offline_sandbox)
+}
+
+fn sandbox_loader(
+    adjust: impl FnOnce(SandboxConfig) -> SandboxConfig,
+) -> Option<Box<dyn PluginLoader>> {
     let launcher = HostLauncher::current_exe().ok()?;
-    let mut loader = SandboxLoader::new(SandboxConfig::new(launcher));
+    let mut loader = SandboxLoader::new(adjust(SandboxConfig::new(launcher)));
     if let Some(dir) = cache_dir() {
         loader = loader.with_cache_file(dir.join("kadence").join("plugins.json"));
     }
@@ -260,6 +277,10 @@ impl Default for SessionEngine {
 }
 
 impl EngineHandle for SessionEngine {
+    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
+        Some(Box::new(export_plugin_loader))
+    }
+
     fn backend_kind(&self) -> BackendKind {
         match self.host.kind() {
             HostKind::Jack => BackendKind::Jack,

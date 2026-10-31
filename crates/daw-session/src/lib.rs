@@ -471,6 +471,19 @@ impl Session {
         }
     }
 
+    /// Cycles the sandboxed plugins missed so far, by not answering in time:
+    /// each played a block of silence.
+    pub fn plugin_late_cycles(&self) -> u64 {
+        self.plugins
+            .slots
+            .values()
+            .filter_map(|s| match s {
+                plugins::Slot::Live(l) => l.monitor.as_ref().map(|m| m.late_cycles()),
+                _ => None,
+            })
+            .sum()
+    }
+
     /// Sets how plugin devices are loaded. Devices that could not load for
     /// want of a loader are tried again on the next sync.
     pub fn set_plugin_loader(&mut self, loader: Option<Box<dyn PluginLoader>>) {
