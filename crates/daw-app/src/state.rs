@@ -339,9 +339,6 @@ impl AppState {
         (!ours && recovery::is_locked(&root)).then_some(root)
     }
 
-    /// Runs the plugins' main-thread work and frees what the audio thread
-    /// is done with. Called by the UI's refresh timer, about 60 times a
-    /// second.
     /// Records the touch-write takes in progress at the playhead, and
     /// ends them when playback stops. Called with [`tick_engine`](Self::tick_engine).
     pub fn tick_mixer(&mut self) {
@@ -356,6 +353,9 @@ impl AppState {
         }
     }
 
+    /// Runs the plugins' main-thread work and frees what the audio thread
+    /// is done with. Called by the UI's refresh timer, about 60 times a
+    /// second.
     pub fn tick_engine(&mut self) {
         let Some(session) = self.engine.session_mut() else {
             return;

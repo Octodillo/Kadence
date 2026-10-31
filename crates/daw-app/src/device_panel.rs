@@ -46,6 +46,8 @@ pub struct ParamDesc {
     pub default: f64,
     pub control: ParamControl,
     pub unit: ParamUnit,
+    /// An automation lane may play it.
+    pub automatable: bool,
 }
 
 impl ParamDesc {
@@ -68,6 +70,7 @@ impl ParamDesc {
                 }
             },
             unit: spec.unit,
+            automatable: spec.automatable,
         }
     }
 
@@ -82,6 +85,7 @@ impl ParamDesc {
             default: info.default,
             control: ParamControl::Continuous { log: false },
             unit: ParamUnit::None,
+            automatable: info.automatable,
         }
     }
 
@@ -111,6 +115,20 @@ impl ParamDesc {
             }
             _ => (v - self.min) / (self.max - self.min),
         }
+    }
+
+    /// How far a recorded take of the parameter may stray from the hand:
+    /// a thousandth of a slider's travel (at the bottom of a log taper,
+    /// where its steps are finest).
+    pub fn tolerance(&self) -> f64 {
+        let span = (self.max - self.min).abs();
+        let t = match self.control {
+            ParamControl::Continuous { log: true } if self.max > self.min => {
+                self.min * ((self.max / self.min).powf(1e-3) - 1.0)
+            }
+            _ => span * 1e-3,
+        };
+        if t.is_finite() && t > 0.0 { t } else { 1e-6 }
     }
 
     /// A slider position from 0 to 1 as a plain value.
@@ -163,6 +181,10 @@ pub struct ParamView {
     /// An automation lane plays this parameter, so it overrides the
     /// value here during playback.
     pub automated: bool,
+    /// Moving it during playback records into its lane (the lane is in
+    /// write mode, or the mixer writes automation), so a lane doesn't
+    /// lock it.
+    pub writable: bool,
 }
 
 impl ParamView {
@@ -289,6 +311,7 @@ impl DevicePanel {
                     desc,
                     value,
                     automated,
+                    writable: false,
                 }
             })
             .collect();
@@ -309,7 +332,7 @@ impl DevicePanel {
         })
     }
 
-    fn param(&self, project: &Project, param: ParamId) -> Option<(DeviceId, ParamView)> {
+    pub(crate) fn param(&self, project: &Project, param: ParamId) -> Option<(DeviceId, ParamView)> {
         let view = self.view(project)?;
         let p = view.params.into_iter().find(|p| p.desc.id == param)?;
         Some((view.id, p))
@@ -551,6 +574,8 @@ pub struct AppDevicePanel {
     /// Counts plugin snapshot changes, so the view refreshes when a plugin
     /// loads or its own values change.
     loads: Cell<u64>,
+    /// The parameter a drag in progress moves.
+    gesture: Option<ParamId>,
 }
 
 impl Default for AppDevicePanel {
@@ -562,6 +587,7 @@ impl Default for AppDevicePanel {
             inner,
             plugins,
             loads: Cell::new(0),
+            gesture: None,
         }
     }
 }
@@ -580,6 +606,8 @@ impl AppDevicePanel {
         });
         match found {
             Some(d) => {
+                // A control still held on the device open now lets go.
+                self.end_gesture();
                 self.inner.open(d);
                 // Read the plugin's values afresh: they may have changed
                 // since it was last open.
@@ -591,8 +619,34 @@ impl AppDevicePanel {
         }
     }
 
+    pub fn close(&mut self) {
+        self.end_gesture();
+        self.inner.close();
+    }
+
     pub fn view(&self) -> Option<DeviceView> {
-        crate::state::with(|s| self.inner.view(s.doc.project()))
+        crate::state::with(|s| {
+            let mut view = self.inner.view(s.doc.project())?;
+            let project = s.doc.project();
+            let track = project
+                .device_location(view.id)
+                .and_then(|(t, _)| project.track(t));
+            for p in &mut view.params {
+                let target = AutomationTarget::DeviceParam {
+                    device: view.id,
+                    param: p.desc.id,
+                };
+                p.writable = p.desc.automatable
+                    && matches!(p.desc.control, ParamControl::Continuous { .. })
+                    && (s.mixer.write()
+                        || track.is_some_and(|t| {
+                            t.automation
+                                .iter()
+                                .any(|l| l.target == target && s.lanes.write.contains(&l.id))
+                        }));
+            }
+            Some(view)
+        })
     }
 
     /// Describes the open device's plugin once it has loaded.
@@ -610,8 +664,13 @@ impl AppDevicePanel {
     /// Changes whenever the view may have changed from elsewhere.
     pub fn revision(&self) -> u64 {
         self.update_plugins();
-        let doc = crate::state::with(|s| (s.doc_serial << 40) ^ s.doc.revision());
-        doc ^ (self.loads.get() << 56)
+        let (doc, writes) = crate::state::with(|s| {
+            (
+                (s.doc_serial << 40) ^ s.doc.revision(),
+                ((s.lanes.write.len() as u64) << 1) | u64::from(s.mixer.write()),
+            )
+        });
+        doc ^ (self.loads.get() << 56) ^ (writes << 48)
     }
 
     /// Sets a parameter from a control. During playback, when the
@@ -622,9 +681,15 @@ impl AppDevicePanel {
         let Some(device) = self.inner.device() else {
             return;
         };
+        // Like a fader, a drag starts recording only when it starts.
+        let start = dragging && self.gesture != Some(param);
+        self.gesture = dragging.then_some(param);
         crate::state::with(|s| {
             s.end_drag();
-            let r = self.write_param(s, device, param, value, dragging);
+            let mut r = self.write_param(s, device, param, value, start);
+            if !dragging {
+                r = r.and(self.release(s));
+            }
             s.sync();
             if let Err(e) = r {
                 s.report(e);
@@ -638,50 +703,61 @@ impl AppDevicePanel {
         device: DeviceId,
         param: ParamId,
         value: f64,
-        dragging: bool,
+        start: bool,
     ) -> Result<(), Message> {
-        let Some(track) = s
-            .doc
-            .project()
-            .all_tracks()
-            .find(|t| t.devices.iter().any(|d| d.id == device))
-            .map(|t| t.id)
-        else {
+        let Some((_, p)) = self.inner.param(s.doc.project(), param) else {
+            return Ok(());
+        };
+        let value = p.desc.sanitize(value);
+        let Some(track) = s.doc.project().device_location(device).map(|(t, _)| t) else {
             return Ok(());
         };
         let id = crate::session_mixer::strip_id(track);
         let control = Control::Param { device, param };
-        s.mixer.write_lanes.clone_from(&s.lanes.write);
-        if dragging && !s.mixer.recording_control(id, control) {
+        if start
+            && p.desc.automatable
+            && matches!(p.desc.control, ParamControl::Continuous { .. })
+            && !s.mixer.recording_control(id, control)
+        {
+            s.mixer.write_lanes.clone_from(&s.lanes.write);
+            let start = crate::session_mixer::ParamStart {
+                value: p.value,
+                tolerance: p.desc.tolerance(),
+            };
             s.mixer
-                .touch(&mut s.doc, s.engine.session_mut(), id, control, true)?;
+                .touch_param(&mut s.doc, s.engine.session_mut(), id, control, start)?;
         }
-        let r = if s.mixer.recording_control(id, control) {
+        if s.mixer.recording_control(id, control) {
             s.mixer
                 .set(&mut s.doc, s.engine.session_mut(), id, control, value)
         } else {
             self.inner.set_value(&mut s.doc, param, value)
-        };
-        if !dragging {
-            s.mixer
-                .release_device(&mut s.doc, s.engine.session_mut(), device)?;
-            self.inner.end_gesture(&mut s.doc);
         }
+    }
+
+    /// Ends the takes of every device parameter. A take that was only a
+    /// click sets its value instead, as a click does when not recording
+    /// (so a double-click's reset can take it back).
+    fn release(&self, s: &mut crate::state::AppState) -> Result<(), Message> {
+        let clicks = s.mixer.release_params(&mut s.doc, s.engine.session_mut())?;
+        let mut r = Ok(());
+        for (control, value) in clicks {
+            if let Control::Param { device, param } = control
+                && self.inner.device() == Some(device)
+            {
+                r = r.and(self.inner.set_value(&mut s.doc, param, value));
+            }
+        }
+        self.inner.end_gesture(&mut s.doc);
         r
     }
 
     /// The user let go of the open device's controls.
     pub fn end_gesture(&mut self) {
-        let device = self.inner.device();
+        self.gesture = None;
         crate::state::with(|s| {
             s.end_drag();
-            let r = match device {
-                Some(d) => s
-                    .mixer
-                    .release_device(&mut s.doc, s.engine.session_mut(), d),
-                None => Ok(()),
-            };
-            self.inner.end_gesture(&mut s.doc);
+            let r = self.release(s);
             s.sync();
             if let Err(e) = r {
                 s.report(e);
@@ -923,6 +999,33 @@ mod tests {
         assert!(!panel.view(doc.project()).unwrap().can_move(-1));
         panel.move_by(&mut doc, -1).unwrap();
         assert_eq!(doc.project().tracks[0].devices[0].id, ids[0]);
+    }
+
+    #[test]
+    fn take_tolerance_follows_the_range_and_taper() {
+        let info = daw_core::plugin::ParamInfo {
+            id: 1,
+            name: "Cutoff".into(),
+            min: 0.0,
+            max: 2000.0,
+            default: 0.0,
+            automatable: true,
+        };
+        let linear = ParamDesc::from_info(&info);
+        assert_eq!(linear.tolerance(), 2.0);
+        let mut log = linear.clone();
+        log.min = 20.0;
+        log.max = 20000.0;
+        log.control = ParamControl::Continuous { log: true };
+        // About 0.7% of the value at the bottom of the range.
+        assert!(
+            (log.tolerance() - 0.138).abs() < 1e-3,
+            "{}",
+            log.tolerance()
+        );
+        let mut flat = linear;
+        flat.max = flat.min;
+        assert!(flat.tolerance() > 0.0);
     }
 
     #[test]

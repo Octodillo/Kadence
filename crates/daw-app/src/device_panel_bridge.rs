@@ -159,6 +159,8 @@ const ROLES: &[&str] = &[
     "isDefault",
     // An automation lane plays the parameter.
     "automated",
+    // Moving it during playback records into its lane.
+    "writable",
 ];
 const USER_ROLE: i32 = 0x0100;
 
@@ -224,7 +226,7 @@ impl qobject::DevicePanel {
     }
 
     fn close(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().panel.inner.close();
+        self.as_mut().rust_mut().panel.close();
         self.reload();
     }
 
@@ -405,6 +407,7 @@ impl qobject::DevicePanel {
             }
             Some("isDefault") => QVariant::from(&p.is_default()),
             Some("automated") => QVariant::from(&p.automated),
+            Some("writable") => QVariant::from(&p.writable),
             _ => QVariant::default(),
         }
     }
