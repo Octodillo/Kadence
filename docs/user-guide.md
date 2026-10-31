@@ -149,8 +149,9 @@ master.
 - **Add Effect** adds a built-in effect (EQ, compressor, delay, reverb,
   utility) or a plugin. Click an effect to open its device panel, where you
   set its parameters, bypass it or move it. Double-click a control to reset
-  it. For a plugin, **Show Plugin Interface** opens its own window, and
-  **Reload Plugin** starts it again if it crashed.
+  it. For a plugin, **Show Plugin Interface** opens its own window (an X11
+  window, through XWayland on a Wayland session), and **Reload Plugin**
+  starts it again if it crashed.
 - **Add Send** sends the track to a bus. **Pre** sends before the fader
   instead of after it.
 - The output button at the bottom chooses where the track goes: the master
