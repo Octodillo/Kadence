@@ -252,12 +252,6 @@ Item {
             window.playAction.trigger();
         },
         () => {
-            // The compressor is metered once the engine has run the new
-            // graph, which can take more than one tick on a slow runner.
-            if (Mixer.levels[0 * 5 + 4] < 0 && test.waits < 25) {
-                return false;
-            }
-            test.waits = 0;
             check(Project.undoText === "Add Device", "mixer edits undo");
             check(Mixer.levels.some(v => v > 0), "meters move while playing");
             check(Mixer.levels[0 * 5 + 4] >= 0, "compressor gain reduction metered");
