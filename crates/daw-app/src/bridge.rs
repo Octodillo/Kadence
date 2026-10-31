@@ -228,33 +228,6 @@ fn to_qlist(values: &[u32]) -> QList<i32> {
 
 impl cxx_qt::Initialize for qobject::Engine {
     fn initialize(mut self: Pin<&mut Self>) {
-        let (devices, backend, rates, sizes) = state::with(|s| {
-            let e = &s.engine;
-            (
-                e.audio_devices(),
-                e.backend_kind(),
-                e.supported_sample_rates(),
-                e.supported_buffer_sizes(),
-            )
-        });
-        let mut names = QStringList::default();
-        // QML replaces this entry, and empty device names, with translated
-        // labels.
-        names.append(QString::from(""));
-        for device in &devices {
-            names.append(QString::from(device.name.as_str()));
-        }
-        self.as_mut().rust_mut().device_ids = devices.into_iter().map(|d| d.id).collect();
-        let backend = match backend {
-            BackendKind::Jack => qobject::Backend::JackBackend,
-            BackendKind::Silent => qobject::Backend::SilentBackend,
-            BackendKind::Stub => qobject::Backend::StubBackend,
-        };
-        self.as_mut().set_backend_kind(backend.repr);
-        self.as_mut().set_device_names(names);
-        self.as_mut().set_sample_rates(to_qlist(&rates));
-        self.as_mut().set_buffer_sizes(to_qlist(&sizes));
-
         // Most likely failure: the saved device was unplugged.
         let saved = settings::load_audio_config(&KConfigStore);
         let error = state::with(|s| {
@@ -387,8 +360,52 @@ impl qobject::Engine {
         })
     }
 
+    /// Re-reads what the engine offers: after a restart it may be another
+    /// backend (a JACK server came or went) with other devices and rates.
+    fn refresh_devices(mut self: Pin<&mut Self>) {
+        let (devices, backend, rates, sizes) = state::with(|s| {
+            let e = &s.engine;
+            (
+                e.audio_devices(),
+                e.backend_kind(),
+                e.supported_sample_rates(),
+                e.supported_buffer_sizes(),
+            )
+        });
+        let ids: Vec<String> = devices.iter().map(|d| d.id.clone()).collect();
+        let backend = match backend {
+            BackendKind::Jack => qobject::Backend::JackBackend,
+            BackendKind::Silent => qobject::Backend::SilentBackend,
+            BackendKind::Stub => qobject::Backend::StubBackend,
+        };
+        // Setting a property to its value still notifies, and QML would
+        // rebuild the combo boxes; only set what changed.
+        if ids != self.device_ids || self.device_names.len() != devices.len() as isize + 1 {
+            let mut names = QStringList::default();
+            // QML replaces this entry, and empty device names, with
+            // translated labels.
+            names.append(QString::from(""));
+            for device in &devices {
+                names.append(QString::from(device.name.as_str()));
+            }
+            self.as_mut().rust_mut().device_ids = ids;
+            self.as_mut().set_device_names(names);
+        }
+        if self.backend_kind != backend.repr {
+            self.as_mut().set_backend_kind(backend.repr);
+        }
+        let (rates, sizes) = (to_qlist(&rates), to_qlist(&sizes));
+        if self.sample_rates != rates {
+            self.as_mut().set_sample_rates(rates);
+        }
+        if self.buffer_sizes != sizes {
+            self.as_mut().set_buffer_sizes(sizes);
+        }
+    }
+
     /// Copy engine state into the Qt properties.
     fn sync(mut self: Pin<&mut Self>) {
+        self.as_mut().refresh_devices();
         let (config, status, playing) = state::with(|s| {
             (
                 s.engine.audio_config(),

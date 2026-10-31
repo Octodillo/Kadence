@@ -9,10 +9,12 @@ import org.kde.kirigami as Kirigami
 import io.github.octodillo.daw
 
 // One row of the track list beside the timeline: colour, drag handle,
-// name, instrument (on instrument tracks), record arm, audio input, mute,
-// solo, and the button that shows the track's automation lanes, whose
-// headers follow under it. Everything is read from Project and Automation
-// by index; `revision` re-reads it after any change.
+// name, instrument (on instrument tracks), MIDI input, record arm, audio
+// input, mute, solo, and the button that shows the track's automation
+// lanes, whose headers follow under it. Everything is read from Project and
+// Automation by index; `revision` re-reads it after any change. The
+// bindings use `revision` in an expression: a bare `revision;` statement is
+// dropped by the QML compiler, and then the binding never re-reads.
 // Dragging the handle reorders tracks; the list view shows where the track
 // will land (`dragFrom`, `dragTo`).
 Column {
@@ -23,8 +25,8 @@ Column {
     required property ArrangeView arrange
     readonly property int revision: Project.revision + Automation.revision
 
-    readonly property bool expanded: { revision; return Automation.expanded(index); }
-    readonly property int laneCount: { revision; return Automation.laneCount(index); }
+    readonly property bool expanded: revision >= 0 ? Automation.expanded(index) : false
+    readonly property int laneCount: revision >= 0 ? Automation.laneCount(index) : 0
 
     // The list reuses headers that scroll out of view for other tracks. A
     // hidden item keeps its focus and open menus, so close them, or the
@@ -48,12 +50,12 @@ Column {
         width: row.width
         height: row.arrange.trackHeight
 
-        readonly property int kind: { revision; return Project.trackKind(index); }
-        readonly property string trackName: { revision; return Project.trackName(index); }
-        readonly property bool muted: { revision; return Project.trackMuted(index); }
-        readonly property bool soloed: { revision; return Project.trackSoloed(index); }
-        readonly property color trackColor: { revision; return Project.trackColor(index); }
-        readonly property string instrument: { revision; return kind === 1 ? Project.trackInstrument(index) : ""; }
+        readonly property int kind: revision >= 0 ? Project.trackKind(index) : -1
+        readonly property string trackName: revision >= 0 ? Project.trackName(index) : ""
+        readonly property bool muted: revision >= 0 ? Project.trackMuted(index) : false
+        readonly property bool soloed: revision >= 0 ? Project.trackSoloed(index) : false
+        readonly property color trackColor: revision >= 0 ? Project.trackColor(index) : "transparent"
+        readonly property string instrument: revision >= 0 && kind === 1 ? Project.trackInstrument(index) : ""
         readonly property bool armed: revision >= 0 ? Project.trackArmed(index) : false
         readonly property int input: revision >= 0 ? Project.trackInput(index) : 0
         readonly property bool inputStereo: revision >= 0 ? Project.trackInputStereo(index) : false
@@ -184,24 +186,46 @@ Column {
             InstrumentButton {
                 id: instrumentButton
                 Layout.alignment: Qt.AlignVCenter
-                Layout.maximumWidth: Kirigami.Units.gridUnit * 6
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 5
                 visible: header.kind === 1
                 instrument: header.instrument
-                currentChoice: { header.revision; return Project.trackInstrumentChoice(header.index); }
+                currentChoice: header.revision >= 0 ? Project.trackInstrumentChoice(header.index) : -1
                 onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
                 onSettingsRequested: DevicePanel.open(Project.trackInstrumentDevice(header.index))
             }
 
+            MidiInputButton {
+                Layout.alignment: Qt.AlignVCenter
+                visible: header.kind === 1
+                trackIndex: header.index
+            }
+
+            // Audio and instrument tracks record. Breeze's record icon is
+            // always red, so draw the light: a ring when off, filled red when
+            // armed.
             QQC2.ToolButton {
+                id: armButton
                 Layout.alignment: Qt.AlignVCenter
                 visible: header.canRecord
-                icon.name: "media-record"
+                contentItem: Item {
+                    implicitWidth: Kirigami.Units.iconSizes.smallMedium
+                    implicitHeight: Kirigami.Units.iconSizes.smallMedium
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: Math.round(parent.width * 0.6)
+                        height: width
+                        radius: width / 2
+                        color: armButton.checked ? Kirigami.Theme.negativeTextColor : "transparent"
+                        border.width: 2
+                        border.color: armButton.checked ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+                    }
+                }
                 checkable: true
                 checked: header.armed
                 display: QQC2.AbstractButton.IconOnly
                 text: i18nc("@action:button arm track for recording", "Arm")
                 onToggled: Project.setTrackArmed(header.index, checked)
-                QQC2.ToolTip.text: i18nc("@info:tooltip", "Arm for recording")
+                QQC2.ToolTip.text: i18nc("@info:tooltip", "Arm for recording. An armed instrument track plays what you play live.")
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             }

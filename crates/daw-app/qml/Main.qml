@@ -213,6 +213,7 @@ Kirigami.ApplicationWindow {
     FileDialog {
         id: openDialog
         title: i18nc("@title:window", "Open Project")
+        currentFolder: AppSettings.projectFolderUrl
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         onAccepted: {
             const url = selectedFile;
@@ -231,6 +232,7 @@ Kirigami.ApplicationWindow {
     FileDialog {
         id: saveDialog
         title: i18nc("@title:window", "Save Project As")
+        currentFolder: AppSettings.projectFolderUrl
         fileMode: FileDialog.SaveFile
         nameFilters: [i18nc("@item:inlistbox", "Kadence projects (*.kadence)")]
         // Runs after a successful save, when saving was asked for before
@@ -397,6 +399,14 @@ Kirigami.ApplicationWindow {
         }
         onClosed: pickHandler = null
         onConfigureRequested: root.openSettings()
+    }
+
+    // MIDI devices plugged in or out.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: true
+        onTriggered: AppSettings.refreshMidi()
     }
 
     Kirigami.Action {
@@ -589,8 +599,8 @@ Kirigami.ApplicationWindow {
     function openSettings(): Item {
         return pageStack.pushDialogLayer(Qt.resolvedUrl("SettingsPage.qml"), {}, {
             title: i18nc("@title:window", "Configure — Kadence"),
-            width: Kirigami.Units.gridUnit * 30,
-            height: Kirigami.Units.gridUnit * 22
+            width: Kirigami.Units.gridUnit * 32,
+            height: Kirigami.Units.gridUnit * 24
         });
     }
 

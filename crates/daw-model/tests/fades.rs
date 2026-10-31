@@ -61,7 +61,7 @@ fn fades_round_trip_and_are_written_in_the_current_version() {
     p.name = "Song".into();
     let json = bundle::to_json(&p).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["version"], 3);
+    assert_eq!(v["version"], bundle::SCHEMA_VERSION);
     let content = &v["project"]["tracks"][0]["clips"][0]["content"];
     assert_eq!(content["fade_in"]["length"], 120);
     assert_eq!(content["fade_in"]["shape"], "s_curve");
