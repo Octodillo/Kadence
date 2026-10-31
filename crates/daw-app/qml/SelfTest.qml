@@ -336,6 +336,11 @@ Item {
             check(!DevicePanel.active, "panel closed");
         },
         () => {
+            // The drawer closes with an animation, slow on a loaded machine.
+            if (window.devicePanel.drawerOpen && test.waits < 25) {
+                return false;
+            }
+            test.waits = 0;
             check(!window.devicePanel.drawerOpen, "device panel closed");
             // The plugin browser, as Add Effect opens it.
             test.browser = window.browsePlugins(2, (format, pluginId, name) => {
