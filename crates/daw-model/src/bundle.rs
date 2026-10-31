@@ -188,10 +188,23 @@ impl Bundle {
 
     /// Opens an existing bundle, given either its directory or its project
     /// file. Backups and autosaves are not bundles; read them with
-    /// [`read_project`].
+    /// [`read_project`]. A `Name.kadence` path that doesn't exist opens the
+    /// bundle directory `Name` beside it, which is where saving as
+    /// `Name.kadence` puts the project.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FormatError> {
         let path = path.as_ref();
         let invalid = |msg: &str| FormatError::io(path)(std::io::Error::other(msg.to_owned()));
+        if !path.exists()
+            && let Some(dir) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| strip_suffix_ci(n, PROJECT_SUFFIX))
+                .filter(|stem| !stem.is_empty())
+                .map(|stem| path.with_file_name(stem))
+                .filter(|dir| dir.is_dir())
+        {
+            return Self::open(dir);
+        }
         if !path.is_file() {
             let mut files = project_files(path)?;
             if files.is_empty() {

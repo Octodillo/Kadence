@@ -116,6 +116,21 @@ fn save_and_open_bundle() {
 }
 
 #[test]
+fn opens_the_path_given_to_save_as() {
+    // Saving as "My Song.kadence" makes the bundle directory "My Song"
+    // (#133); that same path opens it again.
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(sample_project());
+    doc.save_as(dir.path().join("My Song")).unwrap();
+    let reopened = Document::open(dir.path().join("My Song.kadence")).unwrap();
+    assert_eq!(reopened.project(), doc.project());
+    let any_case = Document::open(dir.path().join("My Song.KADENCE")).unwrap();
+    assert_eq!(any_case.project(), doc.project());
+    // A missing project is still an error.
+    assert!(Document::open(dir.path().join("Other.kadence")).is_err());
+}
+
+#[test]
 fn saves_keep_rotating_backups() {
     let dir = tempfile::tempdir().unwrap();
     let mut doc = Document::new(sample_project());
