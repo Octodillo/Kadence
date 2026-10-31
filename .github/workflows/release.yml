@@ -24,6 +24,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+    # TEMPORARY, reverted before merge: a trial run of this PR's branch.
+    branches: [claude/project-thread-8c35b7]
   workflow_dispatch:
     inputs:
       tag:
@@ -34,12 +36,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || 'v0.1.0-test.1' }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
-  TAG: ${{ inputs.tag || github.ref_name }}
+  TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || 'v0.1.0-test.1' }}
 
 jobs:
   source:
