@@ -159,6 +159,8 @@ const ROLES: &[&str] = &[
     "isDefault",
     // An automation lane plays the parameter.
     "automated",
+    // Moving it during playback records into its lane.
+    "writable",
 ];
 const USER_ROLE: i32 = 0x0100;
 
@@ -224,7 +226,7 @@ impl qobject::DevicePanel {
     }
 
     fn close(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().panel.inner.close();
+        self.as_mut().rust_mut().panel.close();
         self.reload();
     }
 
@@ -232,13 +234,10 @@ impl qobject::DevicePanel {
         let Some(param) = self.param(row).map(|p| p.desc.id) else {
             return;
         };
-        self.as_mut().rust_mut().panel.edit(|p, doc| {
-            let r = p.set_value(doc, param, value);
-            if !dragging {
-                p.end_gesture(doc);
-            }
-            r
-        });
+        self.as_mut()
+            .rust_mut()
+            .panel
+            .set_param(param, value, dragging);
         self.reload();
     }
 
@@ -255,10 +254,7 @@ impl qobject::DevicePanel {
     }
 
     fn end_gesture(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().panel.edit(|p, doc| {
-            p.end_gesture(doc);
-            Ok(())
-        });
+        self.as_mut().rust_mut().panel.end_gesture();
     }
 
     fn reset(mut self: Pin<&mut Self>, row: i32) {
@@ -411,6 +407,7 @@ impl qobject::DevicePanel {
             }
             Some("isDefault") => QVariant::from(&p.is_default()),
             Some("automated") => QVariant::from(&p.automated),
+            Some("writable") => QVariant::from(&p.writable),
             _ => QVariant::default(),
         }
     }

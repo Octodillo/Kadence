@@ -374,10 +374,25 @@ Kirigami.Page {
                             view.hover(m.x, m.y);
                         }
                     }
-                    onReleased: (m) => view.release(m.x, m.y, m.modifiers)
+                    // Off the timeline: no clip is hovered.
+                    onExited: if (!pressed) view.hover(-1, -1)
+                    onReleased: (m) => {
+                        view.release(m.x, m.y, m.modifiers);
+                        // The drag may have ended over another clip, or
+                        // off the timeline (no exit comes after release).
+                        if (containsMouse) {
+                            view.hover(m.x, m.y);
+                        } else {
+                            view.hover(-1, -1);
+                        }
+                    }
                     onDoubleClicked: (m) => view.doubleClick(m.x, m.y, m.modifiers)
                     onCanceled: view.cancelDrag()
-                    onWheel: (w) => page.forwardWheel(w, w.x, w.y)
+                    onWheel: (w) => {
+                        page.forwardWheel(w, w.x, w.y);
+                        // The content moved under the pointer.
+                        view.hover(w.x, w.y);
+                    }
 
                     Keys.onEscapePressed: view.cancelDrag()
                     Keys.onLeftPressed: Project.nudge(-1)
