@@ -27,7 +27,12 @@ fn plugin_folder() -> &'static Path {
         // SAFETY: flock only reads the descriptor, which `lock` keeps open
         // until the end of this closure; closing it releases the lock.
         let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
-        assert_eq!(locked, 0, "lock the plugin target folder");
+        assert_eq!(
+            locked,
+            0,
+            "lock the plugin target folder: {}",
+            std::io::Error::last_os_error()
+        );
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let status = Command::new(cargo)
             .args([
