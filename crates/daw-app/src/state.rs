@@ -20,7 +20,7 @@ use daw_session::catalog::PluginCatalog;
 use crate::engine::{EngineHandle, default_engine};
 use crate::message::{Context, Fields, Message};
 use crate::recovery::{self, Candidate, DirLock, Scratch};
-use crate::settings::{self, MemoryStore, SettingsStore};
+use crate::settings::{self, MemoryStore, MidiSettings, SettingsStore};
 
 pub struct AppState {
     pub doc: Document,
@@ -36,6 +36,8 @@ pub struct AppState {
     pub export: Option<daw_session::export::ExportJob>,
     /// The audio takes in progress.
     pub audio_recording: Option<crate::recording::AudioRecording>,
+    /// Automation lane modes and device parameter names.
+    pub lanes: crate::lanes::Lanes,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -62,6 +64,14 @@ pub struct AppState {
     pub editor_title_format: String,
     /// The master track's name, for editor titles, in the user's language.
     pub master_name: String,
+    /// Which MIDI sources get ports of their own.
+    pub midi: MidiSettings,
+    /// How often a changed project is autosaved; `None` turns it off.
+    pub autosave_every: Option<Duration>,
+    /// When the last autosave was tried.
+    last_autosave: Option<Instant>,
+    /// The MIDI inputs last asked of the engine.
+    midi_tried: Option<Vec<String>>,
     /// The metronome and count-in.
     pub(crate) click: crate::settings::ClickSettings,
     /// The document revision right after the last tempo change and when it
@@ -130,15 +140,19 @@ impl AppState {
     }
 
     pub(crate) fn with_engine(engine: Box<dyn EngineHandle>) -> Self {
+        let lanes = crate::lanes::Lanes::default();
+        let mut arrange = Arrange::new();
+        arrange.params = Some(lanes.params.clone());
         let mut s = Self {
             doc: Document::new(Project::default()),
             engine,
-            arrange: Arrange::new(),
+            arrange,
             piano: PianoRoll::new(),
             instruments: crate::instrument::InstrumentChoices::builtin(),
             recording: None,
             export: None,
             audio_recording: None,
+            lanes,
             synced: None,
             view_revision: 0,
             status: None,
@@ -149,6 +163,10 @@ impl AppState {
             plugin_changes: std::collections::HashMap::new(),
             editor_title_format: "%1 — %2".into(),
             master_name: "Master".into(),
+            midi: MidiSettings::default(),
+            autosave_every: Some(Duration::from_secs(60)),
+            last_autosave: None,
+            midi_tried: None,
             click: Default::default(),
             tempo_edit: None,
             settings: Box::new(MemoryStore::default()),
@@ -182,6 +200,7 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        self.prune_lane_modes();
         self.apply_click();
         self.view_revision += 1;
         self.retitle_editors();
@@ -394,6 +413,12 @@ impl AppState {
         if self.shut_down {
             return;
         }
+        let Some(every) = self.autosave_every else {
+            return;
+        };
+        if self.last_autosave.is_some_and(|at| at.elapsed() < every) {
+            return;
+        }
         if self.doc.bundle().is_none() {
             self.autosave_scratch();
             return;
@@ -407,7 +432,13 @@ impl AppState {
             return;
         }
         match self.doc.autosave() {
-            Ok(_) => self.autosave_failed = None,
+            Ok(wrote) => {
+                self.autosave_failed = None;
+                // The next one waits a whole interval after this one.
+                if wrote {
+                    self.last_autosave = Some(Instant::now());
+                }
+            }
             Err(e) => {
                 self.autosave_failed = Some((revision, Instant::now()));
                 if !failed_here {
@@ -415,6 +446,44 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Gives the MIDI sources the settings use ports of their own, and
+    /// connects any that came back. Returns whether anything the MIDI
+    /// settings show changed.
+    pub fn refresh_midi(&mut self) -> bool {
+        let mut changed = self.engine.refresh_midi();
+        let present: Vec<(String, bool)> = self
+            .engine
+            .midi_sources()
+            .into_iter()
+            .map(|s| (s.name, s.is_physical))
+            .collect();
+        let current: Vec<String> = self.engine.midi_inputs().into_iter().map(|i| i.0).collect();
+        let listened: Vec<String> = self
+            .doc
+            .project()
+            .tracks
+            .iter()
+            .filter_map(|t| t.midi_input.device.clone())
+            .collect();
+        let wanted = self.midi.wanted(&present, &current, &listened);
+        // A source that can't get a port stays wanted; don't retry it
+        // every poll, only when what is wanted changes.
+        if wanted != current && self.midi_tried.as_ref() != Some(&wanted) {
+            self.engine.set_midi_inputs(&wanted);
+            self.midi_tried = Some(wanted);
+            changed = true;
+        }
+        // A source got or lost its port: the session wants a rebuild.
+        if self
+            .engine
+            .session()
+            .is_some_and(|session| session.wants_sync())
+        {
+            self.resync();
+        }
+        changed
     }
 
     /// [`AppState::autosave`] for a project with no bundle: into the scratch
@@ -448,6 +517,8 @@ impl AppState {
             Ok(()) => {
                 self.scratch_saved = Some(at);
                 self.autosave_failed = None;
+                // The next one waits a whole interval after this one.
+                self.last_autosave = Some(Instant::now());
             }
             Err(e) => {
                 self.autosave_failed = Some((revision, Instant::now()));
@@ -841,6 +912,8 @@ impl AppState {
         self.plugin_changes.clear();
         self.doc_serial += 1;
         self.arrange.selection.clear();
+        self.arrange.points = None;
+        self.arrange.expanded.clear();
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;
         self.arrange.scroll_y = 0.0;

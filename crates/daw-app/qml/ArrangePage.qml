@@ -191,6 +191,10 @@ Kirigami.Page {
         target: Project
         function onRevisionChanged() { view.refresh(); }
     }
+    Connections {
+        target: Automation
+        function onRevisionChanged() { view.refresh(); }
+    }
     Timer {
         interval: 16
         repeat: true
@@ -239,8 +243,8 @@ Kirigami.Page {
                 Layout.fillHeight: true
                 // A child that fills makes a layout fill too; pin the width.
                 Layout.fillWidth: false
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 12
-                Layout.maximumWidth: Kirigami.Units.gridUnit * 12
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 21
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 21
                 spacing: 0
 
                 Rectangle {
@@ -269,7 +273,7 @@ Kirigami.Page {
                     property int dragTo: -1
                     delegate: TrackHeader {
                         width: headers.width
-                        height: view.trackHeight
+                        arrange: view
                     }
 
                     // Where a dragged track will land.
@@ -280,7 +284,13 @@ Kirigami.Page {
                         width: headers.width
                         height: 2
                         color: Kirigami.Theme.highlightColor
-                        y: (headers.dragTo > headers.dragFrom ? headers.dragTo + 1 : headers.dragTo) * view.trackHeight - 1
+                        y: {
+                            const item = headers.itemAtIndex(headers.dragTo);
+                            if (!item) {
+                                return 0;
+                            }
+                            return (headers.dragTo > headers.dragFrom ? item.y + item.height : item.y) - 1;
+                        }
                     }
 
                     WheelHandler {
@@ -306,6 +316,7 @@ Kirigami.Page {
                         bottom: hbar.top
                     }
                     rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
+                    laneHeight: Math.round(Kirigami.Units.gridUnit * 2.2)
                     backgroundColor: Kirigami.Theme.backgroundColor
                     alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
                     textColor: Kirigami.Theme.textColor
@@ -330,6 +341,11 @@ Kirigami.Page {
                     onContextMenuRequested: (x, y, onClip) => {
                         (onClip ? clipMenu : laneMenu).popup(view, x, y);
                     }
+                    onAutomationMenuRequested: (x, y, onPoint) => {
+                        pointMenu.shape = onPoint ? Automation.pointShape() : -1;
+                        pointMenu.popup(view, x, y);
+                    }
+                    onLaneHeightChanged: refresh()
 
                     Accessible.role: Accessible.Canvas
                     Accessible.name: i18nc("@info:accessible", "Timeline")
@@ -520,6 +536,49 @@ Kirigami.Page {
             icon.name: "edit-reset"
             enabled: Project.audioSelected
             onTriggered: Project.resetClipGain()
+        }
+    }
+
+    // On an automation lane: the selected points' shape.
+    QQC2.Menu {
+        id: pointMenu
+        // The selected points' shape, -1 when the menu is for the lane.
+        property int shape: -1
+
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu automation segment shape", "Linear")
+            enabled: pointMenu.shape >= 0
+            checkable: true
+            checked: pointMenu.shape === 0
+            onTriggered: Automation.setPointShape(0)
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu automation segment shape", "Step")
+            enabled: pointMenu.shape >= 0
+            checkable: true
+            checked: pointMenu.shape === 1
+            onTriggered: Automation.setPointShape(1)
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu automation segment shape", "Slow Start")
+            enabled: pointMenu.shape >= 0
+            checkable: true
+            checked: pointMenu.shape === 2
+            onTriggered: Automation.setPointShape(2)
+        }
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu automation segment shape", "Fast Start")
+            enabled: pointMenu.shape >= 0
+            checkable: true
+            checked: pointMenu.shape === 3
+            onTriggered: Automation.setPointShape(3)
+        }
+        QQC2.MenuSeparator {}
+        QQC2.MenuItem {
+            text: i18nc("@action:inmenu", "Delete Point")
+            icon.name: "edit-delete"
+            enabled: pointMenu.shape >= 0
+            onTriggered: Automation.deletePoints()
         }
     }
 

@@ -484,6 +484,25 @@ pub enum TrackOutput {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Color(pub u8, pub u8, pub u8);
 
+/// Which live MIDI an instrument track listens to.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MidiInput {
+    /// The source's port name (`client:port`, as the audio system lists
+    /// it). `None` takes every input.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// MIDI channel, 0 to 15. `None` takes every channel.
+    #[serde(default)]
+    pub channel: Option<u8>,
+}
+
+impl MidiInput {
+    /// Whether an event on `channel` passes the channel filter.
+    pub fn accepts_channel(&self, channel: u8) -> bool {
+        self.channel.is_none_or(|c| c == channel)
+    }
+}
+
 /// Which hardware inputs an audio track records, counted from 0.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -556,6 +575,9 @@ pub struct Track {
     /// What an audio track records. Other kinds ignore it.
     #[serde(default)]
     pub audio_input: AudioInput,
+    /// The live MIDI an instrument track takes.
+    #[serde(default)]
+    pub midi_input: MidiInput,
     pub output: TrackOutput,
     /// Sorted by start tick.
     #[serde(default)]
@@ -581,6 +603,7 @@ impl Track {
             mute: false,
             solo: false,
             armed: false,
+            midi_input: MidiInput::default(),
             audio_input: AudioInput::default(),
             output: TrackOutput::Master,
             clips: Vec::new(),
@@ -598,6 +621,9 @@ impl Track {
         check_finite(self.volume_db, "volume")?;
         if !(-1.0..=1.0).contains(&self.pan) {
             return bad(format!("track {} pan out of range", self.id));
+        }
+        if self.midi_input.channel.is_some_and(|c| c > 15) {
+            return bad(format!("track {} MIDI channel out of range", self.id));
         }
         if !self.clips.is_sorted_by_key(|c| c.start) {
             return bad(format!("clips on track {} are not sorted", self.id));
@@ -948,6 +974,28 @@ pub enum AutomationTarget {
     DeviceParam { device: DeviceId, param: ParamId },
 }
 
+/// Level lanes ramp from this level up: a ramp between silence (or any
+/// lower level) and a louder level plays from here, as the arrange view
+/// draws it, instead of spending most of its length far below hearing.
+pub const LEVEL_FLOOR_DB: f64 = -60.0;
+
+impl AutomationTarget {
+    /// Whether the target is a level in dB (volume, send level).
+    pub fn is_level(self) -> bool {
+        matches!(self, Self::Volume | Self::SendLevel { .. })
+    }
+
+    /// The lowest value ramps on this target pass through: see
+    /// [`LEVEL_FLOOR_DB`]. Other targets ramp over their whole range.
+    pub fn ramp_floor(self) -> f64 {
+        if self.is_level() {
+            LEVEL_FLOOR_DB
+        } else {
+            f64::NEG_INFINITY
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutomationLane {
     pub id: LaneId,
@@ -966,7 +1014,26 @@ impl AutomationLane {
             points: Vec::new(),
         }
     }
+
+    /// The lane's value at `tick`: the first point's value before it, the
+    /// last one's after it, and in between the segment's shape (see
+    /// [`AutomationPoint::shape`]). `None` without points.
+    pub fn value_at(&self, tick: TickTime) -> Option<f64> {
+        let after = self.points.partition_point(|p| p.tick <= tick);
+        let Some(p) = after.checked_sub(1).map(|i| &self.points[i]) else {
+            return self.points.first().map(|p| p.value);
+        };
+        let Some(next) = self.points.get(after) else {
+            return Some(p.value);
+        };
+        let x = (tick.0 - p.tick.0) as f64 / (next.tick.0 - p.tick.0) as f64;
+        Some(p.towards(next.value, x, self.target.ramp_floor()))
+    }
 }
+
+/// The strongest bend [`AutomationPoint::curve`] is played with; larger
+/// values count as this.
+pub const MAX_CURVE: f64 = 4.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutomationPoint {
@@ -981,4 +1048,47 @@ pub struct AutomationPoint {
     /// Hold this value until the next point, then jump.
     #[serde(default)]
     pub step: bool,
+}
+
+impl AutomationPoint {
+    /// A point starting a straight segment.
+    pub fn new(tick: TickTime, value: f64) -> Self {
+        Self {
+            tick,
+            value,
+            curve: 0.0,
+            step: false,
+        }
+    }
+
+    /// How far the segment from this point has moved toward the next
+    /// point's value, `x` (0 to 1) of the way along it: `x` raised to
+    /// `2^-curve`, so 0 is a straight line, positive curves rise early and
+    /// negative ones late. `curve` is clamped to [`MAX_CURVE`]. A step
+    /// stays at 0 until the end.
+    pub fn shape(&self, x: f64) -> f64 {
+        let x = x.clamp(0.0, 1.0);
+        if self.step {
+            return if x >= 1.0 { 1.0 } else { 0.0 };
+        }
+        let c = self.curve.clamp(-MAX_CURVE, MAX_CURVE);
+        if c == 0.0 { x } else { x.powf((-c).exp2()) }
+    }
+
+    /// The value `x` (0 to 1) of the way from this point to the next one,
+    /// whose value is `next`. Between the points both ends count as at
+    /// least `floor` (see [`AutomationTarget::ramp_floor`]), unless both
+    /// are below it.
+    pub fn towards(&self, next: f64, x: f64, floor: f64) -> f64 {
+        let s = self.shape(x);
+        if s <= 0.0 && x < 1.0 {
+            return self.value;
+        }
+        if x >= 1.0 {
+            return next;
+        }
+        let floor = floor.min(self.value.max(next));
+        let (a, b) = (self.value.max(floor), next.max(floor));
+        a + (b - a) * s
+    }
 }

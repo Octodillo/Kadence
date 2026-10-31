@@ -402,6 +402,7 @@ pub enum TrackField {
     Mute(bool),
     Solo(bool),
     Armed(bool),
+    MidiInput(MidiInput),
     AudioInput(AudioInput),
     Output(TrackOutput),
 }
@@ -429,6 +430,7 @@ impl SetTrack {
             TrackField::Mute(v) => mem::swap(&mut t.mute, v),
             TrackField::Solo(v) => mem::swap(&mut t.solo, v),
             TrackField::Armed(v) => mem::swap(&mut t.armed, v),
+            TrackField::MidiInput(v) => mem::swap(&mut t.midi_input, v),
             TrackField::AudioInput(v) => mem::swap(&mut t.audio_input, v),
             TrackField::Output(v) => mem::swap(&mut t.output, v),
         }
@@ -446,6 +448,7 @@ impl Command for SetTrack {
             TrackField::Mute(_) => "Mute Track",
             TrackField::Solo(_) => "Solo Track",
             TrackField::Armed(_) => "Arm Track",
+            TrackField::MidiInput(_) => "Change MIDI Input",
             TrackField::AudioInput(_) => "Change Track Input",
             TrackField::Output(_) => "Change Track Output",
         }
@@ -458,6 +461,11 @@ impl Command for SetTrack {
             TrackField::VolumeDb(v) => check_finite(v, "volume")?,
             TrackField::Pan(v) if !(-1.0..=1.0).contains(&v) => {
                 return Err(invalid("pan must be within -1..1"));
+            }
+            TrackField::MidiInput(MidiInput {
+                channel: Some(c), ..
+            }) if c > 15 => {
+                return Err(invalid("MIDI channel must be within 0..15"));
             }
             TrackField::Armed(true)
                 if !matches!(track.kind, TrackKind::Audio | TrackKind::Instrument) =>

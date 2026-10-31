@@ -99,7 +99,9 @@ pub struct GraphDesc {
     pub(crate) nodes: Vec<NodeEntry>,
     pub(crate) audio_edges: Vec<AudioEdge>,
     pub(crate) event_edges: Vec<EventEdge>,
-    pub(crate) external_events: Vec<NodeId>,
+    /// Nodes that get external events, each from one source or (`None`)
+    /// from all of them.
+    pub(crate) external_events: Vec<(NodeId, Option<usize>)>,
     pub(crate) input: NodeId,
     pub(crate) master: NodeId,
     pub(crate) live: Arc<LiveNodes>,
@@ -307,9 +309,18 @@ impl GraphDesc {
 
     /// Delivers the events passed to
     /// [`EngineProcessor::process`](crate::EngineProcessor::process) (backend
-    /// MIDI, UI parameter changes) to `to`.
+    /// MIDI, UI parameter changes) to `to`, from every source.
     pub fn route_external_events(&mut self, to: NodeId) {
-        self.external_events.push(to);
+        self.external_events.push((to, None));
+    }
+
+    /// Delivers only the events of source `source` of
+    /// [`EngineProcessor::process_sources`](crate::EngineProcessor::process_sources)
+    /// to `to`. A source past
+    /// [`EngineConfig::event_sources`](crate::EngineConfig::event_sources)
+    /// reaches no node this way.
+    pub fn route_external_events_from(&mut self, to: NodeId, source: usize) {
+        self.external_events.push((to, Some(source)));
     }
 
     pub fn kind(&self, id: NodeId) -> Option<NodeKind> {
