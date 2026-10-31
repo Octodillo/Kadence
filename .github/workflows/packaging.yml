@@ -112,24 +112,22 @@ jobs:
       # Before git is installed, so this is a plain download; nothing
       # below needs the history.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Add the KDE neon archive
-        # Skips the job on an archive outage; see the script.
+      - name: Install system packages, with the KDE neon archive
+        # Skips the job on a neon archive outage; see the script.
         id: neon
-        run: bash ci/neon-archive.sh
-      - name: Install system packages
+        run: >-
+          bash ci/neon-archive.sh
+          build-essential git cmake ninja-build clang lld pkg-config
+          qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-wayland
+          kf6-kirigami-dev qml6-module-org-kde-kirigami kf6-qqc2-desktop-style
+          qml6-module-qtquick-dialogs
+          kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev
+          kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme
+          extra-cmake-modules gettext python3 libjack-jackd2-dev liblilv-dev
+          weston xvfb xauth
+      - name: Install Rust
         if: steps.neon.outputs.available == 'true'
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get install -y --no-install-recommends \
-            build-essential git cmake ninja-build clang lld pkg-config \
-            qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-wayland \
-            kf6-kirigami-dev qml6-module-org-kde-kirigami kf6-qqc2-desktop-style \
-            qml6-module-qtquick-dialogs \
-            kf6-kcoreaddons-dev kf6-ki18n-dev kf6-kcrash-dev kf6-kconfig-dev \
-            kf6-kcolorscheme-dev kf6-kiconthemes-dev kf6-breeze-icon-theme \
-            extra-cmake-modules gettext python3 libjack-jackd2-dev liblilv-dev \
-            weston xvfb xauth
           # A pinned rustup-init, checked against its sha256, rather than curl | sh.
           curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
           echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
