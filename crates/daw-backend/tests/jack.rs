@@ -199,6 +199,23 @@ fn connections_of(port: &str) -> Vec<String> {
     v
 }
 
+/// Waits for `port`'s connections to read `expected`: JACK shows a graph
+/// change to other clients from its next cycle on.
+fn wait_connections(port: &str, expected: &[&str]) {
+    let end = Instant::now() + Duration::from_secs(2);
+    loop {
+        let now = connections_of(port);
+        if now == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < end,
+            "{port} is connected to {now:?}, not {expected:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 #[ignore = "needs a running JACK server"]
 fn connections_survive_stop_and_start() {
@@ -239,22 +256,55 @@ fn connections_survive_stop_and_start() {
 
     b.stop().unwrap();
     b.start(Box::new(|_| {})).unwrap();
-    assert_eq!(
-        connections_of("wu2-keep:audio_out_1"),
-        ["system:playback_2"]
-    );
-    assert_eq!(
-        connections_of("wu2-keep:audio_out_2"),
-        ["system:playback_1"]
-    );
-    assert_eq!(connections_of("wu2-keep:audio_in_1"), ["system:capture_1"]);
+    wait_connections("wu2-keep:audio_out_1", &["system:playback_2"]);
+    wait_connections("wu2-keep:audio_out_2", &["system:playback_1"]);
+    wait_connections("wu2-keep:audio_in_1", &["system:capture_1"]);
 
     // A disconnect while stopped stays disconnected after start.
     b.stop().unwrap();
     b.disconnect("wu2-keep:audio_out_2", "system:playback_1")
         .unwrap();
     b.start(Box::new(|_| {})).unwrap();
+    let cycles = b.stats().cycles;
+    wait(&b, |s| s.cycles >= cycles + 5);
     assert!(connections_of("wu2-keep:audio_out_2").is_empty());
+    assert_eq!(b.stats().rt_alloc_violations, 0);
+    b.close().unwrap();
+}
+
+/// JACK shows a new link from its next cycle on, so a stop right after a
+/// connect or a start must still keep the links it can't see yet.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn links_made_just_before_stop_are_kept() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 0,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-quick")
+    })
+    .unwrap();
+    for _ in 0..20 {
+        b.start(Box::new(|_| {})).unwrap();
+        b.connect("wu2-quick:audio_out_1", "system:playback_1")
+            .unwrap();
+        b.stop().unwrap();
+        // Restored on start, then stopped before a cycle shows it.
+        b.start(Box::new(|_| {})).unwrap();
+        b.stop().unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        wait_connections("wu2-quick:audio_out_1", &["system:playback_1"]);
+        b.disconnect("wu2-quick:audio_out_1", "system:playback_1")
+            .unwrap();
+        b.stop().unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        let cycles = b.stats().cycles;
+        wait(&b, |s| s.cycles >= cycles + 5);
+        assert!(connections_of("wu2-quick:audio_out_1").is_empty());
+        b.stop().unwrap();
+    }
     assert_eq!(b.stats().rt_alloc_violations, 0);
     b.close().unwrap();
 }
@@ -452,4 +502,71 @@ fn added_midi_inputs_keep_their_sources_apart() {
     assert_eq!(dst.stats().rt_alloc_violations, 0);
     src.close().unwrap();
     dst.close().unwrap();
+}
+
+struct Idle;
+
+impl jack::ProcessHandler for Idle {
+    fn process(&mut self, _: &jack::Client, _: &jack::ProcessScope) -> jack::Control {
+        jack::Control::Continue
+    }
+}
+
+/// A link between two other clients made through us isn't ours to keep: a
+/// disconnect while stopped must reach JACK, not just a saved list.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn other_clients_links_are_not_saved_over_a_stop() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (other, _) = jack::Client::new("wu2-other", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let _input = other.register_port("in", jack::AudioIn::default()).unwrap();
+    let other = other.activate_async((), Idle).unwrap();
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 0,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-foreign")
+    })
+    .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    b.connect("system:capture_1", "wu2-other:in").unwrap();
+    b.stop().unwrap();
+    wait_connections("wu2-other:in", &["system:capture_1"]);
+    b.disconnect("system:capture_1", "wu2-other:in").unwrap();
+    wait_connections("wu2-other:in", &[]);
+    b.close().unwrap();
+    drop(other);
+}
+
+/// A patchbay that undoes our link right away has the last word.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn a_patchbay_change_after_ours_is_kept() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (patchbay, _) =
+        jack::Client::new("wu2-patchbay2", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 0,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-undone")
+    })
+    .unwrap();
+    for _ in 0..10 {
+        b.start(Box::new(|_| {})).unwrap();
+        b.connect("wu2-undone:audio_out_1", "system:playback_1")
+            .unwrap();
+        patchbay
+            .disconnect_ports_by_name("wu2-undone:audio_out_1", "system:playback_1")
+            .unwrap();
+        b.stop().unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        let cycles = b.stats().cycles;
+        wait(&b, |s| s.cycles >= cycles + 5);
+        assert!(connections_of("wu2-undone:audio_out_1").is_empty());
+        b.stop().unwrap();
+    }
+    b.close().unwrap();
 }
