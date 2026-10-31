@@ -312,6 +312,27 @@ pub fn save_click_settings(store: &mut dyn SettingsStore, click: &ClickSettings)
     store.sync();
 }
 
+const LAYOUT: &str = "Layout";
+
+/// A size the user gave part of the window (a splitter, a column width),
+/// under `key`; `fallback` when none was saved or it isn't a number.
+pub fn load_layout_value(store: &dyn SettingsStore, key: &str, fallback: f64) -> f64 {
+    store
+        .read(LAYOUT, key)
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(fallback)
+}
+
+/// Remembers a size for [`load_layout_value`]; a value that isn't a
+/// number is ignored.
+pub fn save_layout_value(store: &mut dyn SettingsStore, key: &str, value: f64) {
+    if value.is_finite() {
+        store.write(LAYOUT, key, &value.to_string());
+        store.sync();
+    }
+}
+
 const RECENT: &str = "RecentProjects";
 /// How many projects Open Recent lists.
 pub const RECENT_KEPT: usize = 10;
@@ -403,6 +424,20 @@ pub fn save_plugin_folders(store: &mut dyn SettingsStore, folders: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_values_fall_back_when_missing_or_broken() {
+        let mut store = MemoryStore::default();
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 7.0);
+        save_layout_value(&mut store, "MixerStripWidth", 9.5);
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 9.5);
+        save_layout_value(&mut store, "MixerStripWidth", f64::NAN);
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 9.5);
+        store.write(LAYOUT, "MixerStripWidth", "wide");
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 7.0);
+        store.write(LAYOUT, "MixerStripWidth", "inf");
+        assert_eq!(load_layout_value(&store, "MixerStripWidth", 7.0), 7.0);
+    }
 
     #[test]
     fn empty_store_gives_defaults() {

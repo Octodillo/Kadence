@@ -371,6 +371,7 @@ Kirigami.ApplicationWindow {
     readonly property alias relinkDialog: relinkDialog
     readonly property alias recoveryDialog: recoveryDialog
     readonly property alias unsavedDialog: unsavedDialog
+    readonly property alias devicePanelDrawer: devicePanel
 
     // Set once the user agreed to close with the project as it is.
     property bool closeConfirmed: false
@@ -479,6 +480,11 @@ Kirigami.ApplicationWindow {
     pageStack.initialPage: arrangePage
     pageStack.globalToolBar.style: Kirigami.ApplicationHeaderStyle.ToolBar
     pageStack.columnView.columnResizeMode: Kirigami.ColumnView.SingleColumn
+    // The device panel beside the page takes its room rather than covering
+    // the page's toolbar (Play, Write Automation) and the strips under it.
+    // The window mirrors layouts right to left, which moves this margin
+    // to the left, where the drawer is then.
+    pageStack.anchors.rightMargin: devicePanel.besidePage
 
     // The status line is on the Arrange page; elsewhere (recording from
     // the Mix or Edit page, a mixer error) a new message pops up instead.

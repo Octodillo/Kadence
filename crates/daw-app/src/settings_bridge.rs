@@ -76,6 +76,13 @@ pub mod qobject {
         fn choose_autosave_minutes(self: Pin<&mut AppSettings>, minutes: i32);
         #[qinvokable]
         fn choose_preview_notes(self: Pin<&mut AppSettings>, on: bool);
+
+        /// A size the user gave part of the window under `key`, or
+        /// `fallback`. Sizes are in grid units, so they suit any scale.
+        #[qinvokable]
+        fn layout_value(self: &AppSettings, key: &QString, fallback: f64) -> f64;
+        #[qinvokable]
+        fn set_layout_value(self: &AppSettings, key: &QString, value: f64);
     }
 
     impl cxx_qt::Initialize for AppSettings {}
@@ -265,6 +272,14 @@ impl qobject::AppSettings {
         };
         settings::save_general_settings(&mut KConfigStore, &general);
         self.as_mut().apply_general(general);
+    }
+
+    fn layout_value(&self, key: &QString, fallback: f64) -> f64 {
+        settings::load_layout_value(&KConfigStore, &key.to_string(), fallback)
+    }
+
+    fn set_layout_value(&self, key: &QString, value: f64) {
+        settings::save_layout_value(&mut KConfigStore, &key.to_string(), value);
     }
 
     fn choose_preview_notes(mut self: Pin<&mut Self>, on: bool) {
