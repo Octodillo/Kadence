@@ -27,6 +27,9 @@ Kirigami.OverlayDrawer {
     topPadding: 0
     bottomPadding: 0
 
+    // How much of the window's width it takes from the page beside it.
+    readonly property real besidePage: modal ? 0 : width * position
+
     readonly property string masterName: i18nc("@title name of the master bus", "Master")
 
     // Kirigami closes the drawer when it turns modal or back (the window
@@ -232,6 +235,41 @@ Kirigami.OverlayDrawer {
             }
         }
 
+        // A plugin that doesn't play, and why; a crashed one can restart.
+        Kirigami.InlineMessage {
+            id: pluginMessage
+            objectName: "pluginMessage"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            readonly property string status: DevicePanel.pluginStatus
+            visible: status !== "" && status !== "running"
+            type: status === "crashed" || status === "failed" ? Kirigami.MessageType.Error
+                                                               : Kirigami.MessageType.Warning
+            text: {
+                switch (status) {
+                case "crashed":
+                    return i18nc("@info", "The plugin stopped working and is bypassed.");
+                case "missing":
+                    return i18nc("@info", "The plugin isn't installed on this computer, so it is bypassed.");
+                case "failed":
+                    return DevicePanel.pluginError
+                           ? i18nc("@info %1 is the plugin's own error message", "The plugin couldn't be loaded, so it is bypassed: %1", DevicePanel.pluginError)
+                           : i18nc("@info", "The plugin couldn't be loaded, so it is bypassed.");
+                case "unavailable":
+                    return i18nc("@info", "Plugins can't be loaded right now, so this one is bypassed.");
+                }
+                return "";
+            }
+            actions: [
+                Kirigami.Action {
+                    icon.name: "view-refresh"
+                    text: i18nc("@action:button restart a crashed plugin", "Reload Plugin")
+                    visible: pluginMessage.status === "crashed"
+                    onTriggered: DevicePanel.reloadPlugin()
+                }
+            ]
+        }
+
         QQC2.ScrollView {
             id: scroll
             Layout.fillWidth: true
@@ -340,7 +378,9 @@ Kirigami.OverlayDrawer {
             QQC2.ToolTip.visible: hovered && !pressed
             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             TapHandler {
-                onDoubleTapped: DevicePanel.reset(row.index)
+                // After the slider's own release, which would otherwise
+                // move it back to where the second click landed.
+                onDoubleTapped: Qt.callLater(() => DevicePanel.reset(row.index))
             }
         }
 

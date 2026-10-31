@@ -59,6 +59,14 @@ fn process_never_allocates() {
             rig.handle.collect_garbage();
             rig.handle.drain_captured().for_each(drop);
         }
+        if round % 3 == 0 {
+            let key = (round % 2 == 0).then_some(daw_midi::player::Preview {
+                key: 50 + (round % 20) as u8,
+                channel: 0,
+                velocity: 0.5,
+            });
+            rig.handle.preview(key);
+        }
         // Jump every so often to exercise chase.
         if round % 7 == 0 {
             pos = (round * 1234) % 15_000;

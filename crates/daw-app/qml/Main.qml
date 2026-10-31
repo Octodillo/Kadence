@@ -81,6 +81,16 @@ Kirigami.ApplicationWindow {
         onTriggered: Project.toggleRecord()
     }
 
+    // Stop leaves reverb and delay tails ringing; this cuts them off.
+    Kirigami.Action {
+        id: stopAllSoundAction
+        text: i18nc("@action", "Stop All Sound")
+        icon.name: "media-playback-stop"
+        shortcut: root.buttonHasKeyboardFocus ? "" : "Shift+Space"
+        tooltip: i18nc("@info:tooltip", "Stop playback and cut off every effect tail and held note")
+        onTriggered: Project.stopAllSound()
+    }
+
     Kirigami.Action {
         id: goToStartAction
         text: i18nc("@action", "Go to Start")
@@ -361,7 +371,7 @@ Kirigami.ApplicationWindow {
     readonly property alias relinkDialog: relinkDialog
     readonly property alias recoveryDialog: recoveryDialog
     readonly property alias unsavedDialog: unsavedDialog
-    readonly property alias devicePanel: devicePanel
+    readonly property alias devicePanelDrawer: devicePanel
 
     // Set once the user agreed to close with the project as it is.
     property bool closeConfirmed: false
@@ -422,9 +432,11 @@ Kirigami.ApplicationWindow {
         onTriggered: root.openSettings()
     }
 
+    // Shown in the drawer like the pages: checked while About is open.
     readonly property Kirigami.Action aboutAction: Kirigami.Action {
         text: i18nc("@action:inmenu", "About Kadence")
         icon.name: "help-about"
+        checkable: true
         onTriggered: root.openAbout()
     }
 
@@ -455,6 +467,7 @@ Kirigami.ApplicationWindow {
             root.historyActions[0],
             root.historyActions[1],
             goToStartAction,
+            stopAllSoundAction,
             separatorAction,
             arrangeAction,
             mixAction,
@@ -469,6 +482,11 @@ Kirigami.ApplicationWindow {
     pageStack.initialPage: arrangePage
     pageStack.globalToolBar.style: Kirigami.ApplicationHeaderStyle.ToolBar
     pageStack.columnView.columnResizeMode: Kirigami.ColumnView.SingleColumn
+    // The device panel beside the page takes its room rather than covering
+    // the page's toolbar (Play, Write Automation) and the strips under it.
+    // The window mirrors layouts right to left, which moves this margin
+    // to the left, where the drawer is then.
+    pageStack.anchors.rightMargin: devicePanel.besidePage
 
     // The status line is on the Arrange page; elsewhere (recording from
     // the Mix or Edit page, a mixer error) a new message pops up instead.
@@ -507,8 +525,19 @@ Kirigami.ApplicationWindow {
     Component {
         id: aboutComponent
         Kirigami.AboutPage {
+            id: aboutPage
             objectName: "aboutPage"
             aboutData: root.aboutData
+
+            // Escape closes it too, besides the back button (and Back,
+            // which the page stack handles) and picking a page in the
+            // drawer. Only while it is on top: it stays visible during
+            // transitions, and on a phone Settings can be pushed over it.
+            Shortcut {
+                sequence: StandardKey.Cancel
+                enabled: aboutPage.visible
+                onActivated: root.closeAbout()
+            }
         }
     }
 
@@ -584,11 +613,33 @@ Kirigami.ApplicationWindow {
     }
 
     function showPage(page: Kirigami.Page, action: Kirigami.Action): void {
-        for (const a of pageActions) {
-            a.checked = a === action;
+        // Picking a page leaves About, as it would leave any other page.
+        while (pageStack.layers.depth > 1) {
+            pageStack.layers.pop();
         }
         if (pageStack.currentItem !== page) {
             pageStack.replace(page);
+        }
+        syncPageChecks();
+    }
+
+    // The drawer marks the view on screen: About while it is open, else
+    // the current page. Clicking a checked entry unchecks it, so set every
+    // entry each time.
+    function syncPageChecks(): void {
+        // A layer (About, or Settings on a phone) covers the page.
+        const covered = pageStack.layers.depth > 1;
+        aboutAction.checked = covered && pageStack.layers.currentItem?.objectName === "aboutPage";
+        const pages = [arrangePage, mixPage, editPage];
+        for (let i = 0; i < pageActions.length; ++i) {
+            pageActions[i].checked = !covered && pageStack.currentItem === pages[i];
+        }
+    }
+
+    Connections {
+        target: root.pageStack.layers
+        function onCurrentItemChanged(): void {
+            root.syncPageChecks();
         }
     }
 
@@ -609,12 +660,19 @@ Kirigami.ApplicationWindow {
         });
     }
 
+    function closeAbout(): void {
+        if (pageStack.layers.currentItem?.objectName === "aboutPage") {
+            pageStack.layers.pop();
+        }
+    }
+
     function openAbout(): Item {
         // The drawer stays clickable next to the layer on a wide window, so
         // don't stack a second About page on the first.
         // instanceof does not match QML-defined Kirigami types, so compare
         // the objectName set on aboutComponent instead.
         if (pageStack.layers.currentItem?.objectName === "aboutPage") {
+            syncPageChecks();
             return pageStack.layers.currentItem;
         }
         return pageStack.layers.push(aboutComponent);

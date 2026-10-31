@@ -219,6 +219,15 @@ pub trait MixerHandle {
     }
     /// The user grabbed (`pressed`) or let go of a control.
     fn touch(&mut self, _id: StripId, _control: Control, _pressed: bool) {}
+    /// A double-click on a control: back to its default.
+    fn reset(&mut self, id: StripId, control: Control) {
+        match control {
+            Control::Volume => self.set_volume(id, 0.0),
+            Control::Pan => self.set_pan(id, 0.0),
+            Control::Send(target) => self.set_send_level(id, target, 0.0),
+            Control::Param { .. } => {}
+        }
+    }
 }
 
 /// A strip control that can be automated.

@@ -53,6 +53,8 @@ pub mod qobject {
         /// 0 turns autosave off.
         #[qproperty(i32, autosave_minutes)]
         #[qproperty(i32, max_autosave_minutes)]
+        /// The piano roll plays the keys and notes pressed in it.
+        #[qproperty(bool, preview_notes)]
         type AppSettings = super::AppSettingsRust;
 
         /// Uses `name` or stops using it, and remembers the choice.
@@ -72,6 +74,15 @@ pub mod qobject {
         fn choose_project_folder(self: Pin<&mut AppSettings>, url: &QUrl);
         #[qinvokable]
         fn choose_autosave_minutes(self: Pin<&mut AppSettings>, minutes: i32);
+        #[qinvokable]
+        fn choose_preview_notes(self: Pin<&mut AppSettings>, on: bool);
+
+        /// A size the user gave part of the window under `key`, or
+        /// `fallback`. Sizes are in grid units, so they suit any scale.
+        #[qinvokable]
+        fn layout_value(self: &AppSettings, key: &QString, fallback: f64) -> f64;
+        #[qinvokable]
+        fn set_layout_value(self: &AppSettings, key: &QString, value: f64);
     }
 
     impl cxx_qt::Initialize for AppSettings {}
@@ -91,6 +102,7 @@ pub struct AppSettingsRust {
     project_folder_url: QUrl,
     autosave_minutes: i32,
     max_autosave_minutes: i32,
+    preview_notes: bool,
     general: GeneralSettings,
 }
 
@@ -262,11 +274,31 @@ impl qobject::AppSettings {
         self.as_mut().apply_general(general);
     }
 
+    fn layout_value(&self, key: &QString, fallback: f64) -> f64 {
+        settings::load_layout_value(&KConfigStore, &key.to_string(), fallback)
+    }
+
+    fn set_layout_value(&self, key: &QString, value: f64) {
+        settings::save_layout_value(&mut KConfigStore, &key.to_string(), value);
+    }
+
+    fn choose_preview_notes(mut self: Pin<&mut Self>, on: bool) {
+        let general = GeneralSettings {
+            preview_notes: on,
+            ..self.general.clone()
+        };
+        settings::save_general_settings(&mut KConfigStore, &general);
+        self.as_mut().apply_general(general);
+    }
+
     fn apply_general(mut self: Pin<&mut Self>, general: GeneralSettings) {
         state::with(|s| {
             s.autosave_every = (general.autosave_minutes > 0)
                 .then(|| Duration::from_secs(u64::from(general.autosave_minutes) * 60));
+            s.preview_notes = general.preview_notes;
+            s.sync_audition();
         });
+        self.as_mut().set_preview_notes(general.preview_notes);
         let folder = general.project_folder.clone().unwrap_or_default();
         let url = if folder.is_empty() {
             QUrl::default()

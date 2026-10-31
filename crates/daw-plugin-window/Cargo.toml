@@ -1,0 +1,15 @@
+[package]
+name = "daw-plugin-window"
+description = "The top-level X11 window Kadence embeds plugin editors into"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+x11rb = "0.13"
+
+[lints]
+workspace = true

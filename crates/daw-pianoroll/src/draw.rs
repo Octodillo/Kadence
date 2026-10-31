@@ -182,16 +182,26 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
     };
     let white_key = light.mix(dark, 0.06);
     let black_key = dark.mix(light, 0.12);
+    let sounding = pr.audition().map(|a| a.key);
     s.push(Prim::PushClip(kb));
     s.rect(kb, white_key);
     for key in rows {
         let y = n.y + v.key_to_y(key);
-        if is_black(key) {
+        if sounding == Some(key) {
+            // The key being auditioned, pressed down.
+            let w = if is_black(key) {
+                pr.keyboard_width * 0.62
+            } else {
+                pr.keyboard_width
+            };
+            s.rect(Rect::new(0.0, y, w, pr.key_height), pal.highlight);
+        } else if is_black(key) {
             s.rect(
                 Rect::new(0.0, y, pr.keyboard_width * 0.62, pr.key_height),
                 black_key,
             );
-        } else {
+        }
+        if !is_black(key) {
             s.hline(
                 y + pr.key_height - 0.5,
                 0.0,

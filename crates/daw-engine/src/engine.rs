@@ -76,6 +76,7 @@ enum Command {
     Graph(Box<CompiledGraph>),
     Transport(TransportCommand),
     Timeline(Arc<Timeline>),
+    Silence,
     Param {
         node: NodeId,
         param: ParamId,
@@ -244,6 +245,14 @@ impl EngineController {
 
     pub fn stop(&mut self) -> Result<(), EngineError> {
         self.transport(TransportCommand::Stop)
+    }
+
+    /// Cuts off effect tails and held voices in the running graph at the
+    /// start of the next cycle; see [`GraphDesc::set_tail`]. The
+    /// transport is left as it is. Ordered with the other commands, so it
+    /// reaches the graph sent last before it.
+    pub fn silence(&mut self) -> Result<(), EngineError> {
+        self.send(Command::Silence)
     }
 
     pub fn locate(&mut self, position: SampleTime) -> Result<(), EngineError> {
@@ -497,6 +506,11 @@ impl EngineProcessor {
                 // The controller still holds the old timeline, so this
                 // doesn't free it.
                 Command::Timeline(t) => drop(self.transport.set_timeline(t)),
+                Command::Silence => {
+                    if let Some(g) = self.graph.as_deref_mut() {
+                        g.silence();
+                    }
+                }
                 Command::Param { node, param, value } => {
                     let queued = self
                         .graph
