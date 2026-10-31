@@ -150,28 +150,6 @@ impl ParamSpec {
         if self.is_discrete() { v.round() } else { v }
     }
 
-    /// Map a plain value to `0..=1` along the taper.
-    pub fn to_normalized(&self, value: f64) -> f64 {
-        let v = self.sanitize(value);
-        if self.max <= self.min {
-            return 0.0;
-        }
-        match self.taper {
-            Taper::Linear => (v - self.min) / (self.max - self.min),
-            Taper::Log => (v / self.min).ln() / (self.max / self.min).ln(),
-        }
-    }
-
-    /// Map `0..=1` along the taper to a plain value.
-    pub fn from_normalized(&self, normalized: f64) -> f64 {
-        let n = normalized.clamp(0.0, 1.0);
-        let v = match self.taper {
-            Taper::Linear => self.min + n * (self.max - self.min),
-            Taper::Log => self.min * (self.max / self.min).powf(n),
-        };
-        self.sanitize(v)
-    }
-
     /// Human-readable value with its unit, e.g. `-6.0 dB` or `Saw`.
     pub fn display(&self, value: f64) -> String {
         let v = self.sanitize(value);
@@ -255,14 +233,6 @@ mod tests {
     const LOG: ParamSpec =
         ParamSpec::new(0, "f", "Freq", 20.0, 20000.0, 1000.0, ParamUnit::Hertz).log();
     const CHOICE: ParamSpec = ParamSpec::choice(1, "w", "Wave", &["A", "B", "C"], 1);
-
-    #[test]
-    fn normalized_round_trip() {
-        for v in [20.0, 100.0, 1000.0, 20000.0] {
-            assert!((LOG.from_normalized(LOG.to_normalized(v)) - v).abs() < 1e-9);
-        }
-        assert!((LOG.to_normalized(632.455_532) - 0.5).abs() < 1e-6);
-    }
 
     #[test]
     fn sanitize_and_display() {

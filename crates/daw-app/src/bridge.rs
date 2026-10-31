@@ -9,6 +9,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList};
 
 use crate::engine::{AudioConfig, BackendKind, EngineError, EngineHandle, EngineStatus};
+use crate::qt_lists::{list, string_list};
 use crate::settings::{self, KConfigStore};
 use crate::state;
 
@@ -219,11 +220,7 @@ fn status_error(current: i32, status: EngineStatus) -> StatusError {
 }
 
 fn to_qlist(values: &[u32]) -> QList<i32> {
-    let mut list = QList::default();
-    for &v in values {
-        list.append(i32::try_from(v).unwrap_or(i32::MAX));
-    }
-    list
+    list(values.iter().map(|&v| i32::try_from(v).unwrap_or(i32::MAX)))
 }
 
 impl cxx_qt::Initialize for qobject::Engine {
@@ -381,13 +378,10 @@ impl qobject::Engine {
         // Setting a property to its value still notifies, and QML would
         // rebuild the combo boxes; only set what changed.
         if ids != self.device_ids || self.device_names.len() != devices.len() as isize + 1 {
-            let mut names = QStringList::default();
-            // QML replaces this entry, and empty device names, with
+            // QML replaces the first entry, and empty device names, with
             // translated labels.
-            names.append(QString::from(""));
-            for device in &devices {
-                names.append(QString::from(device.name.as_str()));
-            }
+            let names =
+                string_list(std::iter::once("").chain(devices.iter().map(|d| d.name.as_str())));
             self.as_mut().rust_mut().device_ids = ids;
             self.as_mut().set_device_names(names);
         }
