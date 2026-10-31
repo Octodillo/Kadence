@@ -255,7 +255,7 @@ fn selected_points_move_together_and_delete() {
     r.arrange.press(&mut r.doc, ctrl(x1, y1));
     r.arrange.release(&mut r.doc, ctrl(x1, y1));
     assert_eq!(
-        r.arrange.points.as_ref().unwrap().1,
+        r.arrange.lanes.selection(r.doc.project()).unwrap().1,
         [0, 2].into_iter().collect()
     );
     r.drag(
@@ -293,7 +293,7 @@ fn shapes_and_curve_bending() {
     r.arrange.set_point_shape(&mut r.doc, PointShape::Step);
     assert!(r.points(lane)[0].step);
     assert_eq!(
-        r.arrange.selected_shape(r.doc.project()),
+        r.arrange.lanes.selected_shape(r.doc.project()),
         Some(PointShape::Step)
     );
     r.arrange.set_point_shape(&mut r.doc, PointShape::SlowStart);
@@ -486,9 +486,9 @@ fn undo_and_cancel_drop_a_point_selection_they_made_stale() {
     // Adding a point between selects it (index 1); undo takes it away, and
     // Delete must not then remove the point at 4 bars in its place.
     r.click(r.x(2 * BAR), r.y(0, 0, 0.75));
-    assert!(r.arrange.points_selected(r.doc.project()));
+    assert!(r.arrange.lanes.points_selected(r.doc.project()));
     r.doc.undo().unwrap();
-    assert!(!r.arrange.points_selected(r.doc.project()));
+    assert!(!r.arrange.lanes.points_selected(r.doc.project()));
     r.arrange.delete_selection(&mut r.doc);
     assert_eq!(r.points(lane).len(), 2);
     assert_eq!(r.points(lane)[1].tick, TickTime(4 * BAR));
@@ -502,13 +502,13 @@ fn undo_and_cancel_drop_a_point_selection_they_made_stale() {
     assert_eq!(r.points(lane).len(), 2);
     let tempo = r.tempo.clone();
     r.arrange.scene(&r.doc.project().clone(), &env(&tempo));
-    assert!(r.arrange.points.is_none());
+    assert!(r.arrange.lanes.selection(r.doc.project()).is_none());
 
     // Edits made here keep it.
     r.click(r.x(4 * BAR), r.y(0, 0, 0.5));
     r.arrange.set_point_shape(&mut r.doc, PointShape::Step);
     r.arrange.set_point_shape(&mut r.doc, PointShape::Linear);
-    assert!(r.arrange.points_selected(r.doc.project()));
+    assert!(r.arrange.lanes.points_selected(r.doc.project()));
 }
 
 #[test]

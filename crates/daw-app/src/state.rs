@@ -984,7 +984,7 @@ impl AppState {
         self.doc_serial += 1;
         self.arrange.selection.clear();
         self.arrange.hovered = None;
-        self.arrange.points = None;
+        self.arrange.lanes.clear_selection();
         self.arrange.expanded.clear();
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;

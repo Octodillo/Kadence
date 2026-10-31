@@ -1,26 +1,20 @@
-//! Automation lanes under the tracks: their value ranges, hit testing and
-//! point editing.
-//!
-//! An expanded track (see [`Arrange::expanded`]) shows one lane row per
-//! automation lane, in the model's order, under its clips. A click on a lane
-//! adds a point there and drags it; a point can be dragged in time (snapped
-//! unless Shift is held) and value, deleted with a double click or Delete,
-//! and given a shape from the context menu. Alt-dragging between two points
-//! bends the segment. Every gesture is one undoable [`SetLane`] edit.
+//! Automation lanes: their value ranges, the targets a lane can have, and
+//! the arrange view's lane rows under its tracks. Point editing and drawing
+//! are the [`lane_editor`](crate::lane_editor)'s, shared with other views.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use daw_core::event::ParamId;
 use daw_core::time::TickTime;
 use daw_model::commands::{AddLane, LaneField, RemoveLane, SetLane};
 use daw_model::{
-    AutomationLane, AutomationPoint, AutomationTarget, Device, Document, LaneId, MAX_CURVE,
-    Project, Track, TrackId, TrackKind,
+    AutomationLane, AutomationPoint, AutomationTarget, Device, Document, LaneId, Project, Track,
+    TrackId, TrackKind,
 };
 
+use crate::lane_editor::{LaneFrame, lane_of};
 use crate::scene::Rect;
-use crate::{Arrange, Button, Drag, Hit, Outcome, Pointer};
+use crate::{Arrange, Button, Hit, Outcome, Pointer};
 
 /// Levels at the bottom of a dB lane are stored as this (what the mixer
 /// stores for a fader pulled all the way down).
@@ -29,13 +23,6 @@ pub const SILENCE_DB: f64 = -144.0;
 /// from it (see [`AutomationTarget::ramp_floor`]).
 pub const LEVEL_FLOOR_DB: f64 = daw_model::LEVEL_FLOOR_DB;
 pub const LEVEL_MAX_DB: f64 = 6.0;
-
-/// Pixels a point's square is wide.
-const POINT_PX: f64 = 7.0;
-/// Space kept free above and below a lane's curve.
-const LANE_PAD: f64 = 4.0;
-/// Pixels of vertical drag that bend a segment by 1.
-const CURVE_PX: f64 = 40.0;
 
 /// How a lane maps its target's values to heights.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -161,7 +148,20 @@ pub enum PointShape {
 impl PointShape {
     const BEND: f64 = 1.5;
 
-    fn apply(self, p: &mut AutomationPoint) {
+    /// The shape of the segment after `p`.
+    pub fn of(p: &AutomationPoint) -> Self {
+        if p.step {
+            Self::Step
+        } else if p.curve < 0.0 {
+            Self::SlowStart
+        } else if p.curve > 0.0 {
+            Self::FastStart
+        } else {
+            Self::Linear
+        }
+    }
+
+    pub(crate) fn apply(self, p: &mut AutomationPoint) {
         (p.step, p.curve) = match self {
             Self::Linear => (false, 0.0),
             Self::Step => (true, 0.0),
@@ -202,46 +202,67 @@ pub fn lane_targets(
     out
 }
 
+/// How `target` on `track` maps to heights; device parameters by `params`.
+pub fn lane_scale(
+    params: Option<&Arc<dyn ParamCatalog>>,
+    track: &Track,
+    target: AutomationTarget,
+) -> LaneScale {
+    match target {
+        AutomationTarget::Volume | AutomationTarget::SendLevel { .. } => LaneScale::LEVEL,
+        AutomationTarget::Pan => LaneScale::PAN,
+        AutomationTarget::DeviceParam { device, param } => track
+            .devices
+            .iter()
+            .find(|d| d.id == device)
+            .and_then(|d| params?.scale(d, param))
+            .unwrap_or(LaneScale::UNIT),
+    }
+}
+
+/// The value `target` has when no lane plays: the fader, pan knob, send
+/// level or device parameter as set.
+pub fn static_value(
+    params: Option<&Arc<dyn ParamCatalog>>,
+    track: &Track,
+    target: AutomationTarget,
+) -> f64 {
+    match target {
+        AutomationTarget::Volume => track.volume_db,
+        AutomationTarget::Pan => track.pan,
+        AutomationTarget::SendLevel { send } => track
+            .sends
+            .iter()
+            .find(|s| s.id == send)
+            .map_or(0.0, |s| s.level_db),
+        AutomationTarget::DeviceParam { device, param } => {
+            let Some(d) = track.devices.iter().find(|d| d.id == device) else {
+                return 0.0;
+            };
+            d.params
+                .get(&param)
+                .copied()
+                .or_else(|| params?.default_value(d, param))
+                .unwrap_or(0.0)
+        }
+    }
+}
+
+/// The arrange view's lanes: one row per lane under each expanded track
+/// (see [`Arrange::expanded`]), in the model's order, edited by its
+/// [`LaneEditor`](crate::lane_editor::LaneEditor).
 impl Arrange {
     // -----------------------------------------------------------------------
     // Lanes: ranges, values and geometry
 
     /// How `target` on `track` maps to heights.
     pub fn lane_scale(&self, track: &Track, target: AutomationTarget) -> LaneScale {
-        match target {
-            AutomationTarget::Volume | AutomationTarget::SendLevel { .. } => LaneScale::LEVEL,
-            AutomationTarget::Pan => LaneScale::PAN,
-            AutomationTarget::DeviceParam { device, param } => track
-                .devices
-                .iter()
-                .find(|d| d.id == device)
-                .and_then(|d| self.params.as_ref()?.scale(d, param))
-                .unwrap_or(LaneScale::UNIT),
-        }
+        lane_scale(self.params.as_ref(), track, target)
     }
 
-    /// The value `target` has when no lane plays: the fader, pan knob,
-    /// send level or device parameter as set.
+    /// The value `target` has when no lane plays.
     pub fn static_value(&self, track: &Track, target: AutomationTarget) -> f64 {
-        match target {
-            AutomationTarget::Volume => track.volume_db,
-            AutomationTarget::Pan => track.pan,
-            AutomationTarget::SendLevel { send } => track
-                .sends
-                .iter()
-                .find(|s| s.id == send)
-                .map_or(0.0, |s| s.level_db),
-            AutomationTarget::DeviceParam { device, param } => {
-                let Some(d) = track.devices.iter().find(|d| d.id == device) else {
-                    return 0.0;
-                };
-                d.params
-                    .get(&param)
-                    .copied()
-                    .or_else(|| self.params.as_ref()?.default_value(d, param))
-                    .unwrap_or(0.0)
-            }
-        }
+        static_value(self.params.as_ref(), track, target)
     }
 
     /// The rectangle lane row `index` of track row `row` covers.
@@ -249,33 +270,40 @@ impl Arrange {
         Rect::new(0.0, self.lane_y(row, index), self.width, self.lane_height)
     }
 
-    /// The y of height `n` (0 to 1) inside a lane rectangle.
-    pub(crate) fn norm_to_y(&self, r: &Rect, n: f64) -> f64 {
-        let pad = LANE_PAD.min(r.h / 4.0);
-        r.bottom() - pad - n * (r.h - 2.0 * pad)
+    /// The frame of lane row `index` of track row `row`, for `target`.
+    pub(crate) fn frame_at(
+        &self,
+        project: &Project,
+        track: &Track,
+        row: usize,
+        index: usize,
+        target: AutomationTarget,
+    ) -> LaneFrame {
+        LaneFrame {
+            view: self.view,
+            snap: self.snap,
+            meter: self.meter(project),
+            rect: self.lane_rect(row, index),
+            scale: self.lane_scale(track, target),
+        }
     }
 
-    fn y_to_norm(&self, r: &Rect, y: f64) -> f64 {
-        let pad = LANE_PAD.min(r.h / 4.0);
-        ((r.bottom() - pad - y) / (r.h - 2.0 * pad).max(1.0)).clamp(0.0, 1.0)
-    }
-
-    /// Where point `p` of a lane in `r` is drawn.
-    pub fn point_pos(&self, r: &Rect, scale: LaneScale, p: &AutomationPoint) -> (f64, f64) {
-        (
-            self.view.tick_to_x(p.tick),
-            self.norm_to_y(r, scale.to_norm(p.value)),
-        )
-    }
-
-    pub(crate) fn point_px(&self) -> f64 {
-        POINT_PX
+    /// The frame `lane` is drawn in, if it shows.
+    pub fn lane_frame(&self, project: &Project, lane: LaneId) -> Option<LaneFrame> {
+        let (t, l) = lane_of(project, lane)?;
+        if !self.expanded.contains(&t.id) {
+            return None;
+        }
+        let row = project.tracks.iter().position(|x| x.id == t.id)?;
+        let index = t.automation.iter().position(|x| x.id == lane)?;
+        Some(self.frame_at(project, t, row, index, l.target))
     }
 
     /// The automation part of [`hit`](Self::hit): `y` is below the clips of
     /// track row `row`.
     pub(crate) fn lane_hit(
         &self,
+        project: &Project,
         track: &Track,
         row: usize,
         x: f64,
@@ -285,343 +313,55 @@ impl Arrange {
         let index = ((y - self.lane_y(row, 0)) / self.lane_height)
             .floor()
             .max(0.0) as usize;
-        let Some(lane) = track.automation.get(index) else {
-            return Hit::Automation {
-                track: track.id,
-                row,
-                lane: None,
-                tick,
-                point: None,
-            };
-        };
-        let r = self.lane_rect(row, index);
-        let scale = self.lane_scale(track, lane.target);
-        let reach = POINT_PX / 2.0 + 2.0;
-        // The nearest point within reach; later points paint on top.
-        let point = lane
-            .points
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(i, p)| {
-                let (px, py) = self.point_pos(&r, scale, p);
-                (i, (px - x).abs().max((py - y).abs()))
-            })
-            .filter(|&(_, d)| d <= reach)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i);
+        let lane = track.automation.get(index);
+        let point = lane.and_then(|l| {
+            self.frame_at(project, track, row, index, l.target)
+                .point_at(l, x, y)
+        });
         Hit::Automation {
             track: track.id,
             row,
-            lane: Some(lane.id),
+            lane: lane.map(|l| l.id),
             tick,
             point,
         }
     }
 
-    /// Notes the selected lane's points as they are now, after a gesture
-    /// here selected or edited them.
-    pub(crate) fn saw_points(&mut self, project: &Project) {
-        self.points_seen.clear();
-        if let Some((_, l)) = self
-            .points
-            .as_ref()
-            .and_then(|(lane, _)| Self::lane_of(project, *lane))
-        {
-            self.points_seen.extend_from_slice(&l.points);
-        }
-    }
-
-    /// The point selection, if its lane's points are as this view left them.
-    fn valid_points(&self, project: &Project) -> Option<&(LaneId, BTreeSet<usize>)> {
-        self.points.as_ref().filter(|(lane, _)| {
-            Self::lane_of(project, *lane).is_some_and(|(_, l)| l.points == self.points_seen)
-        })
-    }
-
-    /// Drops a point selection that something else (undo, a take) has
-    /// made stale.
-    pub(crate) fn check_points(&mut self, project: &Project) {
-        if self.valid_points(project).is_none() {
-            self.points = None;
-        }
-    }
-
-    fn lane_of(project: &Project, lane: LaneId) -> Option<(&Track, &AutomationLane)> {
-        let (track, index) = project.lane_location(lane)?;
-        let t = project.track(track)?;
-        Some((t, t.automation.get(index)?))
-    }
-
-    // -----------------------------------------------------------------------
-    // Pointer input on lanes
-
+    /// A press on a lane row (see [`press`](Self::press)).
     pub(crate) fn press_lane(&mut self, doc: &mut Document, p: Pointer, hit: Hit) -> Outcome {
         let Hit::Automation {
             track,
             row,
             lane,
-            tick,
             point,
+            ..
         } = hit
         else {
             return Outcome::default();
         };
         self.selected_track = Some(track);
         self.selection.clear();
+        let menu = (p.button == Button::Right).then_some(hit);
         let Some(lane) = lane else {
-            self.points = None;
+            self.lanes.clear_selection();
             return Outcome {
-                context_menu: (p.button == Button::Right).then_some(hit),
+                context_menu: menu,
                 ..Outcome::view()
             };
         };
-        if p.button == Button::Middle {
-            return Outcome::default();
-        }
-        // The selection belongs to one lane.
-        if self.points.as_ref().is_some_and(|(l, _)| *l != lane) {
-            self.points = None;
-        }
-        let selected = |a: &Self, i: usize| a.points.as_ref().is_some_and(|(_, s)| s.contains(&i));
-        if p.button == Button::Right {
-            if let Some(i) = point
-                && !selected(self, i)
-            {
-                self.points = Some((lane, BTreeSet::from([i])));
-            }
-            return Outcome {
-                context_menu: Some(hit),
-                ..Outcome::view()
-            };
-        }
         let project = doc.project();
-        let Some((t, l)) = Self::lane_of(project, lane) else {
+        let frame = project.track(track).and_then(|t| {
+            let index = t.automation.iter().position(|x| x.id == lane)?;
+            Some(self.frame_at(project, t, row, index, t.automation[index].target))
+        });
+        let Some(frame) = frame else {
             return Outcome::view();
         };
-        let orig = l.points.clone();
-        match point {
-            Some(i) => {
-                if p.ctrl {
-                    let sel = &mut self.points.get_or_insert_with(|| (lane, BTreeSet::new())).1;
-                    if !sel.remove(&i) {
-                        sel.insert(i);
-                    }
-                    // Toggling isn't a drag.
-                    return Outcome::view();
-                }
-                if !selected(self, i) {
-                    let sel = &mut self.points.get_or_insert_with(|| (lane, BTreeSet::new())).1;
-                    if !p.shift {
-                        sel.clear();
-                    }
-                    sel.insert(i);
-                }
-                let moving = self
-                    .points
-                    .as_ref()
-                    .map(|(_, s)| s.iter().copied().collect())
-                    .unwrap_or_default();
-                doc.seal();
-                self.drag = Some(Drag::Points {
-                    lane,
-                    tick: self.view.x_to_tick(p.x),
-                    y: p.y,
-                    lead: i,
-                    orig,
-                    moving,
-                    edited: false,
-                });
-                Outcome::view()
-            }
-            None if p.alt => {
-                // Bend the segment under the pointer.
-                let after = orig.partition_point(|q| q.tick <= tick);
-                let Some(index) = after.checked_sub(1).filter(|&i| i + 1 < orig.len()) else {
-                    return Outcome::view();
-                };
-                doc.seal();
-                self.points = None;
-                self.drag = Some(Drag::Curve {
-                    lane,
-                    index,
-                    y: p.y,
-                    orig,
-                    edited: false,
-                });
-                Outcome::view()
-            }
-            None => {
-                // Add a point here and drag it.
-                let index = t.automation.iter().position(|x| x.id == lane).unwrap_or(0);
-                let r = self.lane_rect(row, index);
-                let scale = self.lane_scale(t, l.target);
-                let at = if p.shift {
-                    tick
-                } else {
-                    self.snap
-                        .apply(tick, self.view.px_per_tick(), &self.meter(project))
-                };
-                let at = TickTime(at.0.max(0));
-                let value = scale.from_norm(self.y_to_norm(&r, p.y));
-                let mut points = orig.clone();
-                let i = points.partition_point(|q| q.tick < at);
-                let mut new = AutomationPoint::new(at, value);
-                if let Some(q) = points.get(i).filter(|q| q.tick == at) {
-                    // A point is already there: replace its value.
-                    new.curve = q.curve;
-                    new.step = q.step;
-                    points[i] = new;
-                } else {
-                    // Keep the shape of the segment the point splits.
-                    if let Some(prev) = i.checked_sub(1).map(|j| &points[j]) {
-                        new.step = prev.step;
-                    }
-                    points.insert(i, new);
-                }
-                doc.seal();
-                let r = doc
-                    .execute(SetLane {
-                        id: lane,
-                        field: LaneField::Points(points.clone()),
-                    })
-                    .map(|_| ());
-                if r.is_err() {
-                    return Outcome::from_result(r);
-                }
-                self.points = Some((lane, BTreeSet::from([i])));
-                self.drag = Some(Drag::Points {
-                    lane,
-                    tick: at,
-                    y: p.y,
-                    lead: i,
-                    orig: points,
-                    moving: vec![i],
-                    edited: true,
-                });
-                Outcome::document()
-            }
+        let o = self.lanes.press(doc, &frame, p, lane, point);
+        Outcome {
+            context_menu: menu,
+            ..o
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn drag_points(
-        &mut self,
-        doc: &mut Document,
-        p: Pointer,
-        lane: LaneId,
-        tick: TickTime,
-        y: f64,
-        lead: usize,
-        orig: &[AutomationPoint],
-        moving: &[usize],
-    ) -> Outcome {
-        let project = doc.project();
-        let Some((t, l)) = Self::lane_of(project, lane) else {
-            self.end_drag(doc);
-            return Outcome::default();
-        };
-        if moving.iter().any(|&i| i >= orig.len()) || lead >= orig.len() {
-            self.end_drag(doc);
-            return Outcome::default();
-        }
-        let (Some(row), Some(index)) = (
-            project.tracks.iter().position(|x| x.id == t.id),
-            t.automation.iter().position(|x| x.id == lane),
-        ) else {
-            return Outcome::default();
-        };
-        let r = self.lane_rect(row, index);
-        let scale = self.lane_scale(t, l.target);
-
-        // Time: snap the grabbed point, move the rest with it, and keep
-        // every moved point between its unmoved neighbours.
-        let raw = TickTime(orig[lead].tick.0 + (self.view.x_to_tick(p.x).0 - tick.0));
-        let snapped = if p.shift {
-            raw
-        } else {
-            self.snap
-                .apply(raw, self.view.px_per_tick(), &self.meter(project))
-        };
-        let mut delta = snapped.0 - orig[lead].tick.0;
-        let is_moving = |i: usize| moving.contains(&i);
-        for &i in moving {
-            let lo = (0..i)
-                .rev()
-                .find(|&j| !is_moving(j))
-                .map_or(0, |j| orig[j].tick.0 + 1);
-            let hi = (i + 1..orig.len())
-                .find(|&j| !is_moving(j))
-                .map(|j| orig[j].tick.0 - 1);
-            delta = delta.max(lo - orig[i].tick.0);
-            if let Some(hi) = hi {
-                delta = delta.min(hi - orig[i].tick.0);
-            }
-        }
-        // Value: by the same height for all.
-        let pad = LANE_PAD.min(r.h / 4.0);
-        let dn = (y - p.y) / (r.h - 2.0 * pad).max(1.0);
-        let mut points = orig.to_vec();
-        for &i in moving {
-            let q = &mut points[i];
-            q.tick = TickTime(orig[i].tick.0 + delta);
-            // Moving only in time keeps values exactly, even ones outside
-            // what the lane shows.
-            if dn != 0.0 {
-                q.value = scale.from_norm(scale.to_norm(orig[i].value) + dn);
-            }
-        }
-        if points == l.points {
-            return Outcome::default();
-        }
-        let r = doc
-            .execute(SetLane {
-                id: lane,
-                field: LaneField::Points(points),
-            })
-            .map(|_| ());
-        self.saw_points(doc.project());
-        Outcome::from_result(r)
-    }
-
-    pub(crate) fn drag_curve(
-        &mut self,
-        doc: &mut Document,
-        p: Pointer,
-        lane: LaneId,
-        index: usize,
-        y: f64,
-        orig: &[AutomationPoint],
-    ) -> Outcome {
-        let Some((t, l)) = Self::lane_of(doc.project(), lane) else {
-            self.end_drag(doc);
-            return Outcome::default();
-        };
-        let (Some(a), Some(b)) = (orig.get(index), orig.get(index + 1)) else {
-            self.end_drag(doc);
-            return Outcome::default();
-        };
-        let scale = self.lane_scale(t, l.target);
-        // Dragging up lifts the middle of the segment, whichever way it
-        // goes: a rising segment rises early, a falling one falls late.
-        let up = (y - p.y) / CURVE_PX;
-        let rising = scale.to_norm(b.value) >= scale.to_norm(a.value);
-        let bend = if rising { up } else { -up };
-        let mut points = orig.to_vec();
-        let q = &mut points[index];
-        q.step = false;
-        q.curve = ((a.curve + bend) * 10.0).round() / 10.0;
-        q.curve = q.curve.clamp(-MAX_CURVE, MAX_CURVE);
-        if points == l.points {
-            return Outcome::default();
-        }
-        let r = doc
-            .execute(SetLane {
-                id: lane,
-                field: LaneField::Points(points),
-            })
-            .map(|_| ());
-        Outcome::from_result(r)
     }
 
     // -----------------------------------------------------------------------
@@ -630,78 +370,13 @@ impl Arrange {
     /// Deletes the selected automation points.
     pub fn delete_points(&mut self, doc: &mut Document) -> Outcome {
         self.end_drag(doc);
-        self.check_points(doc.project());
-        let Some((lane, sel)) = self.points.take() else {
-            return Outcome::default();
-        };
-        let Some((_, l)) = Self::lane_of(doc.project(), lane) else {
-            return Outcome::view();
-        };
-        let points: Vec<AutomationPoint> = l
-            .points
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !sel.contains(i))
-            .map(|(_, p)| p.clone())
-            .collect();
-        if points.len() == l.points.len() {
-            return Outcome::view();
-        }
-        self.set_points(doc, lane, points)
+        self.lanes.delete_points(doc)
     }
 
     /// Gives the segments after the selected points `shape`.
     pub fn set_point_shape(&mut self, doc: &mut Document, shape: PointShape) -> Outcome {
         self.end_drag(doc);
-        self.check_points(doc.project());
-        let Some((lane, sel)) = self.points.clone() else {
-            return Outcome::default();
-        };
-        let Some((_, l)) = Self::lane_of(doc.project(), lane) else {
-            return Outcome::view();
-        };
-        let mut points = l.points.clone();
-        for i in sel {
-            if let Some(p) = points.get_mut(i) {
-                shape.apply(p);
-            }
-        }
-        let o = self.set_points(doc, lane, points);
-        self.saw_points(doc.project());
-        o
-    }
-
-    /// The shape of the segment after the first selected point, for the
-    /// context menu to check.
-    pub fn selected_shape(&self, project: &Project) -> Option<PointShape> {
-        let (lane, sel) = self.valid_points(project)?;
-        let p = Self::lane_of(project, *lane)?.1.points.get(*sel.first()?)?;
-        Some(if p.step {
-            PointShape::Step
-        } else if p.curve < 0.0 {
-            PointShape::SlowStart
-        } else if p.curve > 0.0 {
-            PointShape::FastStart
-        } else {
-            PointShape::Linear
-        })
-    }
-
-    fn set_points(
-        &mut self,
-        doc: &mut Document,
-        lane: LaneId,
-        points: Vec<AutomationPoint>,
-    ) -> Outcome {
-        doc.seal();
-        let r = doc
-            .execute(SetLane {
-                id: lane,
-                field: LaneField::Points(points),
-            })
-            .map(|_| ());
-        doc.seal();
-        Outcome::from_result(r)
+        self.lanes.set_point_shape(doc, shape)
     }
 
     /// Adds a lane for `target` on `track` and shows the track's lanes.
@@ -726,9 +401,7 @@ impl Arrange {
 
     pub fn remove_lane(&mut self, doc: &mut Document, lane: LaneId) -> Outcome {
         self.end_drag(doc);
-        if self.points.as_ref().is_some_and(|(l, _)| *l == lane) {
-            self.points = None;
-        }
+        self.lanes.forget_lanes(|l| l == lane);
         let r = doc.execute(RemoveLane::new(lane)).map(|_| ());
         doc.seal();
         self.relayout(doc.project());
@@ -738,7 +411,7 @@ impl Arrange {
     /// Turns a lane on (it plays) or off (the control keeps its own value).
     pub fn set_lane_enabled(&mut self, doc: &mut Document, lane: LaneId, on: bool) -> Outcome {
         self.end_drag(doc);
-        if Self::lane_of(doc.project(), lane).is_some_and(|(_, l)| l.enabled == on) {
+        if lane_of(doc.project(), lane).is_some_and(|(_, l)| l.enabled == on) {
             return Outcome::default();
         }
         doc.seal();
@@ -759,13 +432,9 @@ impl Arrange {
         } else {
             self.expanded.remove(&track)
         };
-        if !on
-            && self
-                .points
-                .as_ref()
-                .is_some_and(|(l, _)| project.lane_location(*l).is_some_and(|(t, _)| t == track))
-        {
-            self.points = None;
+        if !on {
+            self.lanes
+                .forget_lanes(|l| project.lane_location(l).is_some_and(|(t, _)| t == track));
         }
         self.relayout(project);
         self.clamp_scroll(project);
@@ -774,12 +443,6 @@ impl Arrange {
         } else {
             Outcome::default()
         }
-    }
-
-    /// Whether automation points are selected (for enabling Delete).
-    pub fn points_selected(&self, project: &Project) -> bool {
-        self.valid_points(project)
-            .is_some_and(|(_, s)| !s.is_empty())
     }
 }
 
