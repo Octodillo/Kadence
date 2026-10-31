@@ -24,7 +24,7 @@ Item {
     property real slack: 0
 
     // What the box shows; one item, which fills it.
-    property alias box: box.data
+    property alias box: boxArea.data
     default property alias controls: controls.data
 
     implicitWidth: widthSize.pixels
@@ -41,19 +41,22 @@ Item {
             right: parent.right
         }
     }
+    // In the strip's right margin: the next strip is drawn over anything
+    // past its edge.
     SplitHandle {
         anchors {
             top: parent.top
             bottom: parent.bottom
             right: parent.right
-            rightMargin: -width / 2
         }
+        width: Kirigami.Units.smallSpacing + 1
         z: 1
         orientation: Qt.Vertical
         lineVisible: false
         ratio: frame.position + 1
         onStarted: frame.widthSize.begin(frame.width, Infinity)
         onMoved: (delta, done) => frame.widthSize.drag(delta, done)
+        onCanceled: frame.widthSize.cancel()
         onReset: frame.widthSize.reset()
     }
 
@@ -90,7 +93,7 @@ Item {
         }
 
         Item {
-            id: box
+            id: boxArea
             Layout.fillWidth: true
             Layout.preferredHeight: frame.boxSize.pixels
             Layout.minimumHeight: frame.boxSize.minimumPixels
@@ -99,8 +102,9 @@ Item {
             Layout.fillWidth: true
             Layout.topMargin: -Kirigami.Units.smallSpacing
             Layout.bottomMargin: -Kirigami.Units.smallSpacing
-            onStarted: frame.boxSize.begin(box.height, box.height + Math.max(0, frame.slack))
+            onStarted: frame.boxSize.begin(boxArea.height, boxArea.height + Math.max(0, frame.slack))
             onMoved: (delta, done) => frame.boxSize.drag(delta, done)
+            onCanceled: frame.boxSize.cancel()
             onReset: frame.boxSize.reset()
         }
 

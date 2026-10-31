@@ -20,9 +20,11 @@ QtObject {
     readonly property real pixels: units * Kirigami.Units.gridUnit
     readonly property real minimumPixels: minimumUnits * Kirigami.Units.gridUnit
 
-    // The drag's start and the most it may grow to, in pixels.
+    // The drag's start and the most it may grow to, in pixels, and the
+    // size before it.
     property real from: 0
     property real most: Infinity
+    property real before: units
 
     function clamp(units: real): real {
         return Math.max(minimumUnits, Math.min(maximumUnits, units));
@@ -32,6 +34,12 @@ QtObject {
     function begin(start: real, limit: real): void {
         from = start;
         most = limit;
+        before = units;
+    }
+
+    // Back to the size before the drag, which stays remembered.
+    function cancel(): void {
+        units = before;
     }
 
     function drag(delta: real, done: bool): void {

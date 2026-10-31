@@ -16,8 +16,8 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
+use crate::double_click::Clicks;
 use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
 use daw_core::plugin::PluginFormatKind;
@@ -106,25 +106,13 @@ pub struct SessionMixer {
     pub write_lanes: HashSet<LaneId>,
     takes: Vec<Take>,
     effects: Vec<EffectChoice>,
-    /// The control held now, with the revision it was grabbed at.
-    held: Option<(StripId, Control, u64)>,
-    /// The last press that edited a control: the first click of a
-    /// double-click, which a reset takes back.
-    click: Option<Click>,
+    /// The control held now, with the document's revision and undo length
+    /// when it was grabbed.
+    held: Option<((StripId, Control), u64, usize)>,
+    /// Presses that just edited a control, which a double-click's reset
+    /// takes back.
+    clicks: Option<Clicks<(StripId, Control)>>,
 }
-
-/// A press that edited `control`, leaving the document at `revision`.
-#[derive(Clone, Copy, Debug)]
-struct Click {
-    id: StripId,
-    control: Control,
-    revision: u64,
-    at: Instant,
-}
-
-/// The longest a double-click's two clicks can be apart, as for the device
-/// panel.
-const DOUBLE_CLICK: Duration = Duration::from_millis(600);
 
 impl Default for SessionMixer {
     fn default() -> Self {
@@ -134,7 +122,7 @@ impl Default for SessionMixer {
             takes: Vec::new(),
             effects: effect_choices(),
             held: None,
-            click: None,
+            clicks: None,
         }
     }
 }
@@ -654,22 +642,17 @@ impl SessionMixer {
         pressed: bool,
     ) -> Result<(), Message> {
         if pressed {
-            self.held = Some((id, control, doc.revision()));
+            // A press is its own undo step, apart from wheel or key edits.
+            doc.seal();
+            self.held = Some(((id, control), doc.revision(), doc.history().undo_len()));
         }
         let r = self.touch_with(doc, session, id, control, pressed, None);
         if !pressed {
-            // Remember a press that changed something, for a reset.
-            self.click = match self.held.take() {
-                Some((i, c, before)) if i == id && c == control && doc.revision() != before => {
-                    Some(Click {
-                        id,
-                        control,
-                        revision: doc.revision(),
-                        at: Instant::now(),
-                    })
-                }
-                _ => None,
-            };
+            if let Some((key, before, undo_len)) = self.held.take()
+                && key == (id, control)
+            {
+                self.clicks = Clicks::after_edit(self.clicks, key, before, undo_len, doc);
+            }
             // Also without a session, the next edit is its own step.
             doc.seal();
         }
@@ -677,9 +660,8 @@ impl SessionMixer {
     }
 
     /// Puts a control back to its default (0 dB, centre) as one undo step,
-    /// written into automation like a touch while writing. A press on the
-    /// same control just before is a double-click's first click: its edit
-    /// is taken back.
+    /// written into automation like a touch while writing. The edits of a
+    /// double-click's clicks on it just before are taken back.
     pub fn reset(
         &mut self,
         doc: &mut Document,
@@ -691,14 +673,7 @@ impl SessionMixer {
             Control::Volume | Control::Pan | Control::Send(_) => 0.0,
             Control::Param { .. } => return Ok(()),
         };
-        if let Some(c) = self.click.take()
-            && c.id == id
-            && c.control == control
-            && c.revision == doc.revision()
-            && c.at.elapsed() < DOUBLE_CLICK
-        {
-            doc.undo().map_err(Message::from)?;
-        }
+        Clicks::take_back(self.clicks.take(), (id, control), doc).map_err(Message::from)?;
         doc.seal();
         self.touch_with(doc, session.as_deref_mut(), id, control, true, None)?;
         let r = self.set(doc, session.as_deref_mut(), id, control, value);
@@ -1464,6 +1439,34 @@ mod tests {
             -6.0,
             "undo the reset, not the click"
         );
+    }
+
+    #[test]
+    fn reset_takes_back_both_clicks_of_a_double_click() {
+        for second in [-40.0, -39.0] {
+            let mut r = rig();
+            r.set("Drums", Control::Volume, -6.0);
+            // A wheel turn: no press, so not a click.
+            r.set("Drums", Control::Volume, -5.0);
+            // Both clicks reach the mixer before the reset; the second
+            // edits only if it lands somewhere else.
+            for v in [-40.0, second] {
+                r.touch("Drums", Control::Volume, true);
+                r.set("Drums", Control::Volume, v);
+                r.touch("Drums", Control::Volume, false);
+            }
+            let id = r.id("Drums");
+            r.mixer
+                .reset(&mut r.doc, Some(&mut r.session), id, Control::Volume)
+                .unwrap();
+            assert_eq!(r.track("Drums").volume_db, 0.0);
+            r.doc.undo().unwrap();
+            assert_eq!(
+                r.track("Drums").volume_db,
+                -5.0,
+                "one undo back to before the clicks, keeping the wheel turn"
+            );
+        }
     }
 
     #[test]

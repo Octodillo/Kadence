@@ -8,6 +8,7 @@ import org.kde.kirigami as Kirigami
 //   SplitHandle {
 //       onStarted: size.begin(size.pixels, Infinity)
 //       onMoved: (delta, done) => size.drag(delta, done)
+//       onCanceled: size.cancel()
 //       onReset: size.reset()
 //   }
 Item {
@@ -27,6 +28,8 @@ Item {
     // `delta`: how much bigger, in pixels, since `started`; `done` once
     // let go.
     signal moved(delta: real, done: bool)
+    // The drag was taken away: go back to the size at `started`.
+    signal canceled()
     signal reset()
 
     implicitWidth: Kirigami.Units.smallSpacing * 2
@@ -48,37 +51,49 @@ Item {
         // In the window, as the handle itself moves while it resizes.
         property point start
         property bool dragging: false
+        // After a double-click, until let go: its reset stands.
+        property bool resetting: false
 
-        function delta(mouse: var): real {
+        // How far the pointer moved along the drag, in the window.
+        function travel(mouse: var): real {
             const p = mapToItem(null, mouse.x, mouse.y);
             // Right to left, a sideways line moves the other way.
-            const t = !handle.sideways ? p.y - start.y
+            return !handle.sideways ? p.y - start.y
                 : handle.LayoutMirroring.enabled ? start.x - p.x : p.x - start.x;
-            return t / handle.ratio;
         }
         onPressed: mouse => {
             start = mapToItem(null, mouse.x, mouse.y);
             dragging = false;
         }
         onPositionChanged: mouse => {
+            const t = travel(mouse);
             if (!dragging) {
+                // A click that shakes a little is not a drag.
+                if (resetting || Math.abs(t) < Qt.styleHints.startDragDistance) {
+                    return;
+                }
                 dragging = true;
                 handle.started();
             }
-            handle.moved(delta(mouse), false);
+            handle.moved(t / handle.ratio, false);
         }
         onReleased: mouse => {
             if (dragging) {
-                handle.moved(delta(mouse), true);
-                dragging = false;
+                handle.moved(travel(mouse) / handle.ratio, true);
             }
+            dragging = false;
+            resetting = false;
         }
         onCanceled: {
             if (dragging) {
-                dragging = false;
-                handle.moved(0, true);
+                handle.canceled();
             }
+            dragging = false;
+            resetting = false;
         }
-        onDoubleClicked: handle.reset()
+        onDoubleClicked: {
+            resetting = true;
+            handle.reset();
+        }
     }
 }
