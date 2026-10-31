@@ -19,10 +19,6 @@
 //!
 //! CI runs this as its own step; set `KADENCE_SMOKE_OUT` to a directory to
 //! keep the exported files.
-//!
-//! Features still on open pull requests have hooks marked `TODO(#n)`; extend
-//! this test when they merge:
-//! * #95 sends from the mixer: add the keys' send there.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,12 +39,12 @@ use daw_engine::EngineConfig;
 use daw_media::{AudioData, FileFormat, FlacBits, WavFormat, decode_file, write_wav};
 use daw_model::bundle::to_json;
 use daw_model::commands::{
-    AddClip, AddNotes, AddSend, ClipField, RemoveDevice, RemoveSend, SetClip, SetTempo,
+    AddClip, AddNotes, ClipField, RemoveDevice, RemoveSend, SetClip, SetTempo,
 };
 use daw_model::{
     AudioClip, AutomationPoint, AutomationTarget, Clip, ClipContent, DeviceId, DeviceSource,
-    Document, Fade, FadeShape, LaneId, MeterPoint, MidiClip, Note, Project, Send, SendId,
-    TempoData, TempoPoint, Track, TrackId, TrackKind,
+    Document, Fade, FadeShape, LaneId, MeterPoint, MidiClip, Note, Project, SendId, TempoData,
+    TempoPoint, Track, TrackId, TrackKind,
 };
 use daw_plugin_host::{HostLauncher, SandboxConfig};
 use daw_session::export::{
@@ -83,7 +79,9 @@ const PLUGIN_LATENCY: usize = 32;
 /// What the test needs to find again after building the song.
 struct Song {
     doc: Document,
+    pluck: TrackId,
     keys: TrackId,
+    bus: TrackId,
     keys_send: SendId,
     plugin: DeviceId,
     /// The device panel, open on the reverb.
@@ -291,11 +289,16 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         .set_value(&mut doc, daw_devices::devices::reverb::MIX, 1.0)
         .unwrap();
     panel.end_gesture(&mut doc);
-    // TODO(#95): add the send from the mixer.
-    let send = Send::new(bus);
-    let keys_send = send.id;
-    doc.execute(AddSend { track: keys, send }).unwrap();
-    doc.seal();
+    // The keys' send into the reverb bus, added from the keys' strip.
+    let choices = mixer
+        .strips(doc.project(), None)
+        .into_iter()
+        .find(|s| s.id == strip(keys))
+        .unwrap()
+        .send_choices;
+    assert!(choices.iter().any(|c| c.id == strip(bus)), "{choices:?}");
+    assert!(mixer.add_send(&mut doc, strip(keys), strip(bus)));
+    let keys_send = doc.project().track(keys).unwrap().sends[0].id;
 
     // Automation drawn in the arrange view: the keys' volume at full level
     // for the first chord and -12 dB from the second on, and their send
@@ -319,7 +322,9 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
 
     Song {
         doc,
+        pluck,
         keys,
+        bus,
         keys_send,
         plugin: plugin_id,
         panel,
@@ -329,6 +334,11 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         instruments,
         mixer,
     }
+}
+
+/// The reverb on the bus.
+fn reverb_of(doc: &Document, bus: TrackId) -> DeviceId {
+    doc.project().track(bus).unwrap().devices[0].id
 }
 
 fn builtin_source(kind: &str) -> DeviceSource {
@@ -571,7 +581,9 @@ fn make_save_reload_and_render_a_song() {
     let bundle = tmp.path().join("Smoke Song");
     let Song {
         mut doc,
+        pluck: pluck_track,
         keys,
+        bus,
         keys_send,
         plugin,
         mut panel,
@@ -742,6 +754,48 @@ fn make_save_reload_and_render_a_song() {
     assert!(
         (0.2..0.32).contains(&ratio),
         "the volume lane turns the second chord down ({ratio})"
+    );
+
+    // Tapped before the fader, the send no longer follows the volume lane
+    // down 12 dB: the second chord's tail is four times as loud.
+    mixer
+        .set_send_pre_fader(&mut doc, strip(keys), strip(bus), true)
+        .unwrap();
+    let pre = render(&mut doc);
+    doc.undo().unwrap();
+    let ratio = rms(&pre, 12.5, 15.5) / tail;
+    assert!(
+        (3.8..4.2).contains(&ratio),
+        "a pre-fader send ignores the fader (tail x{ratio})"
+    );
+
+    // Routed to the reverb bus instead of the master, the pluck goes
+    // through the bus's fully wet reverb; with the reverb bypassed, the
+    // bus passes it on unchanged.
+    mixer
+        .set_output(&mut doc, strip(pluck_track), strip(bus))
+        .unwrap();
+    let routed = render(&mut doc);
+    let routed_pluck = rms(&routed, 0.1, 3.0);
+    panel.open(reverb_of(&doc, bus));
+    panel.set_enabled(&mut doc, false).unwrap();
+    let through = render(&mut doc);
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    assert!(
+        (routed_pluck / pluck - 1.0).abs() > 0.1,
+        "the output routing sends the pluck through the reverb ({routed_pluck} vs {pluck})"
+    );
+    let at4 = (4.0 * BEAT as f64) as usize;
+    for c in 0..2 {
+        assert!(
+            through.channels[c][..at4] == song.channels[c][..at4],
+            "through the bypassed bus, bar 1 sounds as it does from the master"
+        );
+    }
+    assert!(
+        !doc.is_modified(),
+        "undo routes the pluck back to the master"
     );
 
     // The tail comes from the send into the reverb bus: without the send
