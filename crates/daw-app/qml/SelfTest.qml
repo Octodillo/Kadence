@@ -243,8 +243,13 @@ Item {
             check(window.pageStack.currentItem.title === i18nc("@title", "Mix"), "switch to Mix");
         },
         () => {
-            // The mixer has caught up with the project on its clock.
+            // The mixer catches up with the project on its own clock, which
+            // a loaded machine can take a few ticks for.
             // The demo's three tracks, its reverb bus and the master.
+            if (Mixer.levels.length !== 5 * 5 && test.waits < 25) {
+                return false;
+            }
+            test.waits = 0;
             check(Mixer.levels.length === 5 * 5, "a strip per track");
             const compressor = Mixer.effectNames.indexOf("Compressor");
             check(compressor >= 0 && Mixer.addInsert(0, compressor), "add a compressor to Bass");
@@ -309,6 +314,7 @@ Item {
             check(id !== "" && DevicePanel.open(id), "open the compressor's panel");
             check(DevicePanel.active && DevicePanel.deviceKind === "daw.compressor", "panel shows the compressor");
             check(DevicePanel.paramCount > 0, "compressor parameters listed");
+            check(!PluginEditors.hasEditor(id), "a built-in device has no plugin interface");
             // Drag the threshold: one undo step.
             Project.tick();
             const before = Project.undoText;
