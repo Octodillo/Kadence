@@ -24,7 +24,6 @@
 //! * #95 sends from the mixer: add the keys' send there.
 //! * #98 device parameters: set the reverb and the plugin's gain through the
 //!   device panel's commands, and check bypass.
-//! * #103 plugin browser: add the plugin the way the browser does.
 //! * #108 automation lanes: also automate a device parameter and a send
 //!   level the way the arrange view writes them.
 
@@ -44,13 +43,13 @@ use daw_engine::EngineConfig;
 use daw_media::{AudioData, FileFormat, FlacBits, WavFormat, decode_file, write_wav};
 use daw_model::bundle::to_json;
 use daw_model::commands::{
-    AddClip, AddDevice, AddLane, AddNotes, AddSend, ClipField, RemoveDevice, RemoveSend, SetClip,
-    SetParam, SetTempo,
+    AddClip, AddLane, AddNotes, AddSend, ClipField, RemoveDevice, RemoveSend, SetClip, SetParam,
+    SetTempo,
 };
 use daw_model::{
-    AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Device,
-    DeviceId, DeviceSource, Document, Fade, FadeShape, MeterPoint, MidiClip, Note, Project, Send,
-    SendId, TempoData, TempoPoint, Track, TrackId, TrackKind,
+    AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, DeviceId,
+    DeviceSource, Document, Fade, FadeShape, MeterPoint, MidiClip, Note, Project, Send, SendId,
+    TempoData, TempoPoint, Track, TrackId, TrackKind,
 };
 use daw_plugin_host::{HostLauncher, SandboxConfig};
 use daw_session::export::{
@@ -198,23 +197,18 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     .unwrap();
     doc.seal();
     assert!(mixer.add_insert(&mut doc, strip(pluck), "daw.eq"));
-    // After the EQ, the CLAP test plugin at half gain.
-    // TODO(#103): add it the way the plugin browser does.
-    let plugin = Device::new(
+    // After the EQ, the CLAP test plugin at half gain, added the way the
+    // mixer's plugin browser adds it.
+    assert!(mixer.add_plugin_insert(
+        &mut doc,
+        strip(pluck),
+        PluginFormatKind::Clap,
+        PLUGIN_ID,
         "Test Gain",
-        DeviceSource::Plugin {
-            format: PluginFormatKind::Clap,
-            id: PLUGIN_ID.into(),
-        },
-    );
-    let plugin_id = plugin.id;
-    doc.execute(AddDevice {
-        track: pluck,
-        index: 1,
-        device: plugin,
-    })
-    .unwrap();
-    doc.seal();
+    ));
+    let added = &doc.project().track(pluck).unwrap().devices;
+    assert_eq!(added.len(), 2, "the plugin goes after the EQ");
+    let plugin_id = added[1].id;
     // TODO(#98): set this through the device panel.
     doc.execute(SetParam {
         device: plugin_id,
