@@ -93,5 +93,5 @@ rm -rf "$config"
 # make this `%%files -f %%{name}.lang`; it fails while there are none.
 
 %changelog
-* Thu Oct 29 2026 Octodillo <14184084+Octodillo@users.noreply.github.com> - 0.1.0-1
-- First package
+* Sat Oct 31 2026 Octodillo <14184084+Octodillo@users.noreply.github.com> - 0.1.0-1
+- Kadence 0.1.0, the first release

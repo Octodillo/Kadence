@@ -116,6 +116,41 @@ fn save_and_open_bundle() {
 }
 
 #[test]
+fn opens_the_path_given_to_save_as() {
+    // Saving as "My Song.kadence" makes the bundle directory "My Song"
+    // (#133); that same path opens it again.
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(sample_project());
+    doc.save_as(dir.path().join("My Song")).unwrap();
+    let reopened = Document::open(dir.path().join("My Song.kadence")).unwrap();
+    assert_eq!(reopened.project(), doc.project());
+    let any_case = Document::open(dir.path().join("My Song.KADENCE")).unwrap();
+    assert_eq!(any_case.project(), doc.project());
+    // Both paths name the same bundle, which the app relies on to tell
+    // whether a project is already open.
+    assert_eq!(
+        Bundle::open(dir.path().join("My Song.kadence"))
+            .unwrap()
+            .root(),
+        Bundle::open(dir.path().join("My Song")).unwrap().root()
+    );
+    // A missing project is still an error, naming the path asked for, also
+    // when a folder without a project sits beside it.
+    assert!(Document::open(dir.path().join("Other.kadence")).is_err());
+    std::fs::create_dir(dir.path().join("Empty")).unwrap();
+    let asked = dir.path().join("Empty.kadence");
+    match Bundle::open(&asked) {
+        Err(FormatError::Io { path, source }) => {
+            assert_eq!(path, asked);
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+    // "..kadence" names no bundle beside it, not the parent folder.
+    assert!(Bundle::open(dir.path().join("My Song").join("..kadence")).is_err());
+}
+
+#[test]
 fn saves_keep_rotating_backups() {
     let dir = tempfile::tempdir().unwrap();
     let mut doc = Document::new(sample_project());

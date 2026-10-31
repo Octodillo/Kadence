@@ -1,0 +1,310 @@
+# Builds the release artifacts for a version tag and attaches them to a
+# DRAFT GitHub release. It never publishes: a maintainer reviews the draft
+# and publishes it by hand (docs/releasing.md).
+#
+# - Source tarball with every crate vendored (packaging/make-dist.sh).
+# - Arch package from packaging/arch/release/PKGBUILD, plus that PKGBUILD
+#   with its checksum filled in, ready for the AUR.
+# - Fedora RPM and source RPM from packaging/fedora/kadence.spec.
+# - Flatpak bundle from the KDE runtime manifest.
+# - SHA256SUMS over all of them.
+#
+# Each package is installed and smoke-tested before it is attached.
+#
+# Tags are vX.Y.Z for a release, or vX.Y.Z-suffix (for example
+# v0.1.0-test.1) for a trial run, which makes a draft marked as a
+# prerelease. X.Y.Z must match the version in Cargo.toml and the packaging.
+#
+# Run it from the Actions tab (workflow_dispatch) to build an existing tag
+# again, or, for a trial tag that doesn't exist yet, to build the chosen
+# branch: the draft then targets that commit, and GitHub creates the tag
+# only if the draft is ever published.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build, for example v0.1.0 (or a trial tag such as v0.1.0-test.1)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  source:
+    name: Check versions, source tarball
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      ref: ${{ steps.ref.outputs.ref }}
+      tagged: ${{ steps.ref.outputs.tagged }}
+    steps:
+      - name: What to build
+        id: ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            case $TAG in
+              *-*)
+                echo "::notice::$TAG doesn't exist; building $GITHUB_SHA ($GITHUB_REF_NAME) as a trial."
+                echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+                echo "tagged=false" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::Tag $TAG doesn't exist. Push it first; only trial tags (vX.Y.Z-suffix) can build a branch."
+                exit 1
+                ;;
+            esac
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+      - name: Check the tag against every version in the tree
+        id: version
+        run: ci/check-release-version.sh "$TAG" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Source tarball (vendored crates)
+        run: packaging/make-dist.sh dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source
+          path: dist/kadence-*.tar.gz
+          if-no-files-found: error
+
+  arch:
+    name: Arch Linux package
+    needs: source
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git github-cli namcap sudo \
+            weston xorg-server-xvfb xorg-xauth
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.source.outputs.ref }}
+      - name: Source tarball from the source job
+        run: |
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n source -D /tmp/source
+          mkdir /home/builder/pkg
+          cp packaging/arch/release/PKGBUILD /tmp/source/kadence-"$VERSION".tar.gz /home/builder/pkg/
+          cd /home/builder/pkg
+          sum=$(sha256sum kadence-"$VERSION".tar.gz | cut -d' ' -f1)
+          sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" PKGBUILD
+          grep -qx "sha256sums=('$sum')" PKGBUILD
+          chown -R builder /home/builder/pkg
+      - name: makepkg
+        # The tarball sits next to the PKGBUILD, so makepkg uses it instead
+        # of downloading the (not yet published) release asset.
+        run: |
+          cd /home/builder/pkg
+          sudo -u builder makepkg --syncdeps --noconfirm
+      - name: namcap
+        # namcap exits 0 whatever it finds, so fail on its error lines.
+        run: |
+          set -o pipefail
+          namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-"$VERSION"-*.pkg.tar.zst | tee namcap.log
+          ! grep -q ' E: ' namcap.log
+      - name: Install
+        run: pacman -U --noconfirm /home/builder/pkg/kadence-"$VERSION"-*.pkg.tar.zst
+      - name: Smoke test (installed)
+        run: sudo -u builder env REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence
+      - name: Collect
+        run: |
+          mkdir out
+          cp /home/builder/pkg/kadence-"$VERSION"-*.pkg.tar.zst out/
+          cp /home/builder/pkg/PKGBUILD out/PKGBUILD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: arch
+          path: out/*
+          if-no-files-found: error
+
+  fedora:
+    name: Fedora package
+    needs: source
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install build tools
+        run: |
+          dnf -y install git gh rpm-build rpmlint dnf-plugins-core \
+            weston xorg-x11-server-Xvfb xorg-x11-xauth
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.source.outputs.ref }}
+      - name: Source tarball from the source job
+        run: |
+          mkdir -p ~/rpmbuild/SOURCES
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n source -D ~/rpmbuild/SOURCES
+          test -f ~/rpmbuild/SOURCES/kadence-"$VERSION".tar.gz
+      - name: rpmbuild
+        run: |
+          dnf -y builddep packaging/fedora/kadence.spec
+          rpmbuild -ba packaging/fedora/kadence.spec
+      - name: rpmlint
+        run: rpmlint packaging/fedora/kadence.spec ~/rpmbuild/RPMS/*/kadence-"$VERSION"-*.rpm
+      - name: Install
+        run: dnf -y install ~/rpmbuild/RPMS/*/kadence-"$VERSION"-*.rpm
+      - name: Smoke test (installed)
+        run: |
+          useradd -m tester
+          su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
+      - name: Collect
+        run: |
+          mkdir out
+          cp ~/rpmbuild/RPMS/*/kadence-"$VERSION"-*.rpm ~/rpmbuild/SRPMS/kadence-"$VERSION"-*.src.rpm out/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fedora
+          path: out/*
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak bundle
+    needs: source
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+      # flatpak-builder sandboxes each build step with bubblewrap.
+      options: --privileged
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+    steps:
+      - name: Install Flatpak and the runtimes
+        run: |
+          dnf -y install flatpak flatpak-builder git python3
+          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y --noninteractive flathub \
+            org.kde.Sdk//6.11 org.kde.Platform//6.11 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+            org.freedesktop.Sdk.Extension.llvm21//25.08
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.source.outputs.ref }}
+      - name: Crate sources from Cargo.lock
+        run: packaging/flatpak/cargo-sources.py
+      - name: flatpak-builder
+        run: |
+          flatpak-builder --disable-rofiles-fuse --force-clean \
+            --state-dir=/tmp/flatpak-state --repo=/tmp/repo /tmp/build \
+            packaging/flatpak/io.github.octodillo.daw.yml
+          mkdir out
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            /tmp/repo out/kadence-"$VERSION"-x86_64.flatpak io.github.octodillo.daw
+      - name: Install and smoke test in the sandbox
+        run: |
+          flatpak install -y --noninteractive out/kadence-"$VERSION"-x86_64.flatpak
+          flatpak run --command=sh io.github.octodillo.daw -c 'ldconfig -p | grep -F libjack.so.0'
+          rm -rf ~/.var/app/io.github.octodillo.daw
+          set -o pipefail
+          flatpak run \
+            --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software \
+            --env=QT_FORCE_STDERR_LOGGING=1 \
+            io.github.octodillo.daw --smoke-test 2>&1 | tee smoke.log
+          grep -q "smoke test: passed" smoke.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flatpak
+          path: out/*
+          if-no-files-found: error
+
+  draft:
+    name: Draft GitHub release
+    needs: [source, arch, fedora, flatpak]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      # Creating a release and uploading its assets.
+      contents: write
+    env:
+      VERSION: ${{ needs.source.outputs.version }}
+      PRERELEASE: ${{ needs.source.outputs.prerelease }}
+      TAGGED: ${{ needs.source.outputs.tagged }}
+      REF: ${{ needs.source.outputs.ref }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.source.outputs.ref }}
+      - name: Gather the artifacts
+        run: |
+          gh run download "$GITHUB_RUN_ID" -D artifacts
+          mkdir assets
+          find artifacts -type f -exec mv -t assets {} +
+          # The AUR wants the file called PKGBUILD; on the release it needs a
+          # name that says what it is.
+          mv assets/PKGBUILD assets/kadence-"$VERSION"-PKGBUILD
+          (cd assets && sha256sum -- * > SHA256SUMS)
+          ls -l assets
+          cat assets/SHA256SUMS
+      - name: Create the draft
+        # Only ever a draft. If a published release already has this tag,
+        # stop rather than change what users may have downloaded. Drafts
+        # from earlier runs of this tag are replaced, so the new one has
+        # exactly this run's files and points at this run's commit.
+        run: |
+          notes=docs/releases/"$VERSION".md
+          releases=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | \"\(.id) \(.draft)\"")
+          if printf '%s\n' "$releases" | grep -q ' false$'; then
+            echo "::error::A published release for $TAG already exists; not touching it."
+            exit 1
+          fi
+          printf '%s\n' "$releases" | while read -r id _; do
+            if [ -n "$id" ]; then
+              echo "Replacing the earlier draft $id"
+              gh api -X DELETE "repos/$GH_REPO/releases/$id"
+            fi
+          done
+          flags=--draft
+          if [ "$PRERELEASE" = true ]; then flags="$flags --prerelease"; fi
+          if [ "$TAGGED" = true ]; then
+            flags="$flags --verify-tag"
+          else
+            # A trial of a commit: the tag is made only on publishing.
+            flags="$flags --target $REF"
+          fi
+          # shellcheck disable=SC2086
+          url=$(gh release create "$TAG" $flags \
+            --title "Kadence $VERSION" --notes-file "$notes" assets/*)
+          echo "Draft release: $url" >> "$GITHUB_STEP_SUMMARY"
+          # Exactly one release has this tag now, and it is a draft.
+          state=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .draft")
+          test "$state" = true

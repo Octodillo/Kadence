@@ -8,7 +8,11 @@ Its app ID is `io.github.octodillo.daw`.
 - Audio and MIDI through PipeWire's JACK interface (or JACK2).
 - CLAP, LV2 and VST3 plugin hosting.
 
-Early development. Nothing runs yet beyond the test suite.
+Kadence 0.1 can record, arrange, edit, mix and export a song. Start with
+the [user guide](docs/user-guide.md). Packages for Arch, Fedora and Flatpak
+are attached to each [release](https://github.com/Octodillo/Kadence/releases);
+[packaging/README.md](packaging/README.md) covers building them, and
+[docs/releasing.md](docs/releasing.md) making a release.
 
 ## Layout
 

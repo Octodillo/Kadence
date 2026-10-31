@@ -10,7 +10,7 @@ There is no separate plugin host to install: each plugin runs in its own
 
 | Where | Recipe | Tested in CI (`.github/workflows/packaging.yml`) |
 |---|---|---|
-| Arch Linux, SteamOS (distrobox), Manjaro | `arch/PKGBUILD` (`kadence-git`) | makepkg, namcap, install, smoke test |
+| Arch Linux, SteamOS (distrobox), Manjaro | `arch/PKGBUILD` (`kadence-git`); `arch/release/PKGBUILD` (`kadence`, built by the release workflow) | makepkg, namcap, install, smoke test |
 | Fedora KDE | `fedora/kadence.spec` | offline rpmbuild, rpmlint, install, smoke test |
 | KDE neon, Kubuntu | CMake from source, or the Flatpak | install to `/usr`, smoke test |
 | Debian 13 and newer | CMake from source, or the Flatpak | install to `/usr`, smoke test (oldest supported: Qt 6.8, KF 6.13) |
@@ -52,7 +52,11 @@ cd packaging/arch
 makepkg -si
 ```
 
-The PKGBUILD builds from git. To build a local checkout instead:
+`arch/PKGBUILD` (`kadence-git`) builds from git. `arch/release/PKGBUILD`
+(`kadence`) builds a release offline from its vendored source tarball; the
+release workflow fills in its checksum and attaches it to each release.
+
+To build a local checkout with the git PKGBUILD:
 
 ```sh
 KADENCE_SOURCE="git+file://$PWD/../..#commit=$(git rev-parse HEAD)" makepkg -si

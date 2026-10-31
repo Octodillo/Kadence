@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Maintainer: Octodillo <https://github.com/Octodillo>
+#
+# Release package, built offline from the source tarball attached to the
+# GitHub release (packaging/make-dist.sh: the tagged tree plus every crate
+# vendored). The release workflow fills in sha256sums and attaches this
+# file to the release, ready for the AUR. To build a local tarball, put it
+# next to this file and run `updpkgsums && makepkg -si`.
+#
+# The development package that builds from git is ../PKGBUILD (kadence-git).
+
+pkgname=kadence
+_appid=io.github.octodillo.daw
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Digital audio workstation for KDE Plasma'
+arch=(x86_64 aarch64)
+url='https://github.com/Octodillo/Kadence'
+# Kadence, plus the crates statically linked into it (symphonia is MPL-2.0).
+# Their notices are in THIRD-PARTY-LICENSES next to LICENSE.
+license=(GPL-3.0-or-later MPL-2.0 Apache-2.0 MIT Zlib)
+depends=(
+  glibc
+  hicolor-icon-theme
+  kcolorscheme
+  kconfig
+  kcoreaddons
+  kcrash
+  ki18n
+  kiconthemes
+  kirigami
+  qqc2-desktop-style
+  qt6-base
+  qt6-declarative
+  # libjack is loaded at run time; PipeWire's is the usual one on Plasma.
+  jack
+  # LV2 plugin hosting.
+  lilv
+)
+makedepends=(
+  cargo
+  clang
+  cmake
+  extra-cmake-modules
+  lld
+  ninja
+  python
+)
+optdepends=(
+  'breeze-icons: icons outside Plasma'
+)
+conflicts=(kadence-git)
+options=(!lto !debug)
+source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+sha256sums=(SKIP)
+
+build() {
+  export RUSTUP_TOOLCHAIN=stable
+  # Every crate is vendored in the tarball.
+  export CARGO_NET_OFFLINE=true
+  cmake -S "$pkgname-$pkgver" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DKADENCE_LICENSE_DIR="share/licenses/$pkgname"
+  cmake --build build
+}
+
+check() {
+  local config
+  config=$(mktemp -d)
+  XDG_CONFIG_HOME="$config" QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+    build/cargo/release/kadence --smoke-test
+  rm -rf "$config"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}
