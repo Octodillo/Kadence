@@ -656,6 +656,8 @@ pub enum ClipField {
     AudioOffset(SampleTime),
     /// Audio clips only.
     AudioGainDb(f64),
+    /// Audio clips only: the file it plays, as in [`AudioClip::source`].
+    AudioSource(std::path::PathBuf),
     /// Audio clips only.
     FadeIn(Fade),
     /// Audio clips only.
@@ -683,6 +685,7 @@ impl SetClip {
             (ClipField::Muted(v), _) => mem::swap(&mut c.muted, v),
             (ClipField::AudioOffset(v), ClipContent::Audio(a)) => mem::swap(&mut a.offset, v),
             (ClipField::AudioGainDb(v), ClipContent::Audio(a)) => mem::swap(&mut a.gain_db, v),
+            (ClipField::AudioSource(v), ClipContent::Audio(a)) => mem::swap(&mut a.source, v),
             (ClipField::FadeIn(v), ClipContent::Audio(a)) => mem::swap(&mut a.fade_in, v),
             (ClipField::FadeOut(v), ClipContent::Audio(a)) => mem::swap(&mut a.fade_out, v),
             _ => return Err(invalid("that property only applies to audio clips")),
@@ -699,6 +702,7 @@ impl Command for SetClip {
             ClipField::Muted(_) => "Mute Clip",
             ClipField::AudioOffset(_) => "Slip Clip",
             ClipField::AudioGainDb(_) => "Change Clip Gain",
+            ClipField::AudioSource(_) => "Relink Audio",
             ClipField::FadeIn(_) => "Change Fade In",
             ClipField::FadeOut(_) => "Change Fade Out",
         }
@@ -717,6 +721,9 @@ impl Command for SetClip {
                 return Err(invalid("audio offset must not be negative"));
             }
             ClipField::AudioGainDb(g) => check_finite(g, "clip gain")?,
+            ClipField::AudioSource(ref p) if p.as_os_str().is_empty() => {
+                return Err(invalid("audio clip needs a source file"));
+            }
             ClipField::FadeIn(f) | ClipField::FadeOut(f) if f.length.0 < 0 => {
                 return Err(invalid("fade length must not be negative"));
             }
@@ -728,6 +735,7 @@ impl Command for SetClip {
                 | ClipField::AudioGainDb(_)
                 | ClipField::FadeIn(_)
                 | ClipField::FadeOut(_)
+                | ClipField::AudioSource(_)
         );
         if audio_only && !matches!(clip.content, ClipContent::Audio(_)) {
             return Err(invalid("that property only applies to audio clips"));

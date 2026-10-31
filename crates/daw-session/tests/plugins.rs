@@ -20,6 +20,7 @@ use daw_model::{
     DeviceId, DeviceSource, Document, Project, Track, TrackId, TrackKind,
 };
 use daw_plugin_host::{HostLauncher, SandboxConfig};
+use daw_session::catalog::{Filter, PluginCatalog, PluginKind};
 use daw_session::{PluginStatus, SandboxLoader, Session, SessionConfig, Warning};
 
 #[global_allocator]
@@ -87,6 +88,33 @@ fn loader_with(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> SandboxLo
     registry.set_search_paths(PluginFormatKind::Lv2, vec![]);
     registry.set_search_paths(PluginFormatKind::Vst3, vec![]);
     loader
+}
+
+/// A catalog that scans only `extra` (as the user's added folders), with the sandbox host as
+/// its scanner, caching in `cache`.
+fn catalog(extra: Vec<PathBuf>, cache: PathBuf) -> PluginCatalog {
+    let (_, host) = binaries();
+    let scanner = HostLauncher::new(host, Vec::<String>::new()).scanner();
+    let mut catalog = PluginCatalog::new(scanner)
+        .with_cache_file(cache)
+        .with_folders(PluginFormatKind::Clap, vec![])
+        .with_folders(PluginFormatKind::Lv2, vec![])
+        .with_folders(PluginFormatKind::Vst3, vec![]);
+    catalog.set_extra_folders(extra);
+    catalog
+}
+
+/// Polls `catalog` as the app's timer would until its scan ends.
+fn finish_scan(catalog: &mut PluginCatalog) {
+    let start = Instant::now();
+    while catalog.is_scanning() {
+        catalog.poll();
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "the scan did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn config() -> SessionConfig {
@@ -518,6 +546,96 @@ fn without_a_loader_plugins_are_bypassed() {
         rig.session.warnings(),
         [Warning::PluginNotLoaded { .. }]
     ));
+    rig.settles_at(LEVEL);
+}
+
+#[test]
+fn the_catalog_scans_added_folders_in_the_background() {
+    let (plugins, _) = binaries();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache").join("plugins.json");
+    let mut catalog = catalog(vec![plugins.clone()], cache.clone());
+    assert!(!catalog.has_scanned() && catalog.progress().is_none());
+
+    let revision = catalog.revision();
+    catalog.scan(false);
+    assert!(catalog.is_scanning() && catalog.progress().is_some());
+    // Asked again while it runs: queued, not started twice.
+    catalog.scan(false);
+    finish_scan(&mut catalog);
+    assert!(catalog.has_scanned());
+    assert!(catalog.revision() > revision);
+    assert!(catalog.failed().is_empty(), "{:?}", catalog.failed());
+    let found = catalog
+        .find(&PluginFormatKind::Clap, ID)
+        .expect("the test plugin is listed");
+    assert!(!found.is_instrument);
+    assert!(found.path.starts_with(plugins));
+    assert!(cache.is_file(), "results are cached");
+
+    let effects = Filter {
+        text: "gain".into(),
+        kind: Some(PluginKind::Effect),
+        ..Default::default()
+    };
+    assert_eq!(catalog.filtered(&effects).count(), 1);
+    let instruments = Filter {
+        kind: Some(PluginKind::Instrument),
+        ..Default::default()
+    };
+    assert_eq!(catalog.filtered(&instruments).count(), 0);
+
+    // The same plugins again: the list counts as unchanged.
+    let list = catalog.list_revision();
+    catalog.scan(false);
+    finish_scan(&mut catalog);
+    assert_eq!(catalog.list_revision(), list);
+
+    // Without the folder the plugin is gone, even though the cache still has it.
+    catalog.set_extra_folders(vec![]);
+    catalog.scan(true);
+    finish_scan(&mut catalog);
+    assert!(catalog.plugins().is_empty());
+    assert_ne!(catalog.list_revision(), list);
+}
+
+#[test]
+fn a_missing_plugin_loads_once_a_scan_finds_it() {
+    let mut rig = Rig::new();
+    // A loader that finds nothing by itself, as when the plugin is in a folder the user added.
+    let mut blind = loader();
+    for format in daw_session::catalog::FORMATS {
+        blind.registry_mut().set_search_paths(format, vec![]);
+    }
+    rig.session.set_plugin_loader(Some(Box::new(blind)));
+    let mut second = gain_plugin();
+    second.name = "Second".into();
+    let second_id = second.id;
+    rig.doc
+        .execute(AddDevice {
+            track: rig.track,
+            index: 1,
+            device: second,
+        })
+        .unwrap();
+    rig.sync();
+    assert_eq!(
+        rig.session.plugin_status(second_id),
+        Some(PluginStatus::Missing)
+    );
+
+    let (plugins, _) = binaries();
+    let dir = tempfile::tempdir().unwrap();
+    let mut catalog = catalog(vec![plugins.clone()], dir.path().join("plugins.json"));
+    catalog.scan(false);
+    finish_scan(&mut catalog);
+    rig.session.set_known_plugins(catalog.plugins());
+    rig.sync();
+    assert_eq!(
+        rig.session.plugin_status(second_id),
+        Some(PluginStatus::Running)
+    );
+    // Two gains of 1 in a row.
     rig.settles_at(LEVEL);
 }
 
