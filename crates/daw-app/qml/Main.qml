@@ -361,6 +361,7 @@ Kirigami.ApplicationWindow {
     readonly property alias relinkDialog: relinkDialog
     readonly property alias recoveryDialog: recoveryDialog
     readonly property alias unsavedDialog: unsavedDialog
+    readonly property alias devicePanel: devicePanel
 
     // Set once the user agreed to close with the project as it is.
     property bool closeConfirmed: false

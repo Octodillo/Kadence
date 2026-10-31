@@ -17,6 +17,9 @@ Kirigami.OverlayDrawer {
     // Beside the page on a wide window, so the mixer stays usable; over it
     // on a narrow one.
     modal: !applicationWindow().wideScreen
+    // Kirigami opens a drawer that isn't modal; this one opens only for a
+    // device.
+    drawerOpen: false
     handleVisible: false
     width: Math.min(Kirigami.Units.gridUnit * 22, applicationWindow().width * 0.8)
     leftPadding: 0

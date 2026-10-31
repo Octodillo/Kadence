@@ -70,6 +70,7 @@ Item {
         () => {
             check(window.visible, "window visible");
             check(window.pageStack.currentItem.title === i18nc("@title", "Arrange"), "starts on Arrange");
+            check(!window.devicePanel.drawerOpen, "no device panel at start");
             shoot(window.title, "arrange");
         },
         () => {
@@ -239,6 +240,8 @@ Item {
             shoot(window.title, "arrange-played");
         },
         () => {
+            // The export's notification would cover the screenshots below.
+            window.hidePassiveNotification();
             window.pageActions[1].trigger();
             check(window.pageStack.currentItem.title === i18nc("@title", "Mix"), "switch to Mix");
         },
@@ -331,6 +334,7 @@ Item {
             check(!DevicePanel.active, "panel closed");
         },
         () => {
+            check(!window.devicePanel.drawerOpen, "device panel closed");
             // The plugin browser, as Add Effect opens it.
             test.browser = window.browsePlugins(2, (format, pluginId, name) => {
                 test.picked = [format, pluginId, name];
