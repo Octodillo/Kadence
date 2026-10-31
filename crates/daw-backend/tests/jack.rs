@@ -503,3 +503,70 @@ fn added_midi_inputs_keep_their_sources_apart() {
     src.close().unwrap();
     dst.close().unwrap();
 }
+
+struct Idle;
+
+impl jack::ProcessHandler for Idle {
+    fn process(&mut self, _: &jack::Client, _: &jack::ProcessScope) -> jack::Control {
+        jack::Control::Continue
+    }
+}
+
+/// A link between two other clients made through us isn't ours to keep: a
+/// disconnect while stopped must reach JACK, not just a saved list.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn other_clients_links_are_not_saved_over_a_stop() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (other, _) = jack::Client::new("wu2-other", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let _input = other.register_port("in", jack::AudioIn::default()).unwrap();
+    let other = other.activate_async((), Idle).unwrap();
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 0,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-foreign")
+    })
+    .unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    b.connect("system:capture_1", "wu2-other:in").unwrap();
+    b.stop().unwrap();
+    wait_connections("wu2-other:in", &["system:capture_1"]);
+    b.disconnect("system:capture_1", "wu2-other:in").unwrap();
+    wait_connections("wu2-other:in", &[]);
+    b.close().unwrap();
+    drop(other);
+}
+
+/// A patchbay that undoes our link right away has the last word.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn a_patchbay_change_after_ours_is_kept() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (patchbay, _) =
+        jack::Client::new("wu2-patchbay2", jack::ClientOptions::NO_START_SERVER).unwrap();
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 0,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-undone")
+    })
+    .unwrap();
+    for _ in 0..10 {
+        b.start(Box::new(|_| {})).unwrap();
+        b.connect("wu2-undone:audio_out_1", "system:playback_1")
+            .unwrap();
+        patchbay
+            .disconnect_ports_by_name("wu2-undone:audio_out_1", "system:playback_1")
+            .unwrap();
+        b.stop().unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        let cycles = b.stats().cycles;
+        wait(&b, |s| s.cycles >= cycles + 5);
+        assert!(connections_of("wu2-undone:audio_out_1").is_empty());
+        b.stop().unwrap();
+    }
+    b.close().unwrap();
+}

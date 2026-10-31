@@ -1,6 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
+use std::time::{Duration, Instant};
 
 use daw_core::event::EventList;
 use jack::{
@@ -16,9 +17,11 @@ use crate::{
 };
 use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
-/// How many cycles after a change `stop` still adds it to what
-/// `get_connections` reports: JACK shows it from the next cycle on.
+/// JACK shows a graph change from its next cycle on: after this many of
+/// our cycles, `get_connections` has it.
 const RECENT_CYCLES: u64 = 2;
+/// How long `stop` waits for those cycles before trusting its own record.
+const SETTLE: Duration = Duration::from_millis(250);
 
 const AUDIO_TYPE: &str = jack::jack_sys::FLOAT_MONO_AUDIO;
 const MIDI_TYPE: &str = jack::jack_sys::RAW_MIDI_TYPE;
@@ -38,9 +41,9 @@ pub struct JackBackend {
     /// client's ports, so while stopped they are kept here: `stop` saves the
     /// live ones and `connect`/`disconnect` edit the list.
     links: Vec<(String, String)>,
-    /// Links made (true) or removed (false) through us while running, with
-    /// the cycle count then. JACK applies a graph change at the next cycle,
-    /// so `stop` can't see the newest ones in `get_connections` yet.
+    /// Links of ours made (true) or removed (false) while running, with the
+    /// cycle count then. JACK shows a graph change from its next cycle on,
+    /// so `stop` waits for that, or keeps these if the server has stalled.
     recent: Vec<(bool, (String, String), u64)>,
     /// Auto-connect has run since `open`. Later starts restore `links`
     /// instead, so ports the user unplugged stay unplugged.
@@ -171,6 +174,13 @@ impl JackBackend {
             return Err("port types differ".into());
         }
         Ok(client.is_mine(&a) || client.is_mine(&b))
+    }
+
+    /// One of the two ports is ours: only such links are saved over a stop.
+    fn involves_us(client: &Client, from: &str, to: &str) -> bool {
+        [from, to]
+            .iter()
+            .any(|n| client.port_by_name(n).is_some_and(|p| client.is_mine(&p)))
     }
 
     fn auto_connect(&mut self, client: &Client, cfg: &BackendConfig) {
@@ -397,10 +407,21 @@ impl AudioBackend for JackBackend {
                     && !self.shared.server_gone.load(Relaxed)
                 {
                     let client = active.as_client();
+                    // Let JACK run past our newest change, so the snapshot
+                    // has it and anything a patchbay did after it.
+                    if let Some(&(_, _, last)) = self.recent.last() {
+                        let end = Instant::now() + SETTLE;
+                        while self.shared.cycles.load(Relaxed) <= last + RECENT_CYCLES
+                            && Instant::now() < end
+                            && !self.shared.server_gone.load(Relaxed)
+                        {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    }
                     let mut links = self.live_links(client, cfg);
                     let now = self.shared.cycles.load(Relaxed);
-                    // Older changes are in the snapshot already, or were
-                    // undone since by someone else.
+                    // Only when the server stalled: keep our newest changes
+                    // rather than lose them. Older ones are in the snapshot.
                     for (made, link, at) in self.recent.drain(..) {
                         if now > at + RECENT_CYCLES {
                             continue;
@@ -513,8 +534,10 @@ impl AudioBackend for JackBackend {
                 client
                     .connect_ports_by_name(from, to)
                     .map_err(|e| err(e.to_string()))?;
-                let link = (Self::full_name(client, from), Self::full_name(client, to));
-                self.note_change(true, link);
+                if Self::involves_us(client, from, to) {
+                    let link = (Self::full_name(client, from), Self::full_name(client, to));
+                    self.note_change(true, link);
+                }
                 Ok(())
             }
         }
@@ -546,8 +569,10 @@ impl AudioBackend for JackBackend {
                 client
                     .disconnect_ports_by_name(from, to)
                     .map_err(|e| err(e.to_string()))?;
-                let link = (Self::full_name(client, from), Self::full_name(client, to));
-                self.note_change(false, link);
+                if Self::involves_us(client, from, to) {
+                    let link = (Self::full_name(client, from), Self::full_name(client, to));
+                    self.note_change(false, link);
+                }
                 Ok(())
             }
         }
@@ -598,6 +623,8 @@ impl AudioBackend for JackBackend {
         }
         // Links saved while stopped would fail to come back.
         self.links.retain(|(a, b)| *a != name && *b != name);
+        self.recent
+            .retain(|(_, (a, b), _)| *a != name && *b != name);
         self.apply_extra_now();
         Ok(())
     }
