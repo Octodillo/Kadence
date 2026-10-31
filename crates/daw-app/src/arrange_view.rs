@@ -100,6 +100,10 @@ pub mod qobject {
         /// From the scroll bars.
         #[qinvokable]
         fn scroll_to(self: Pin<&mut ArrangeView>, x: f64, y: f64);
+        /// Whether a one-finger touch drag from (x, y) scrolls the view
+        /// instead of editing (see `Arrange::touch_pans`).
+        #[qinvokable]
+        fn touch_pans(self: &ArrangeView, x: f64, y: f64) -> bool;
         /// Adds a dropped audio file at view position (x, y). Returns false
         /// if it could not; `Project.status` says why.
         #[qinvokable]
@@ -426,10 +430,7 @@ impl qobject::ArrangeView {
 
     fn wheel(self: Pin<&mut Self>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32) {
         let p = pointer(x, y, 0, modifiers);
-        let out = state::with(|s| {
-            let project = s.doc.project().clone();
-            s.arrange.wheel(&project, p, dx, dy)
-        });
+        let out = state::with(|s| s.arrange.wheel(s.doc.project(), p, dx, dy));
         self.after(out);
     }
 
@@ -448,6 +449,10 @@ impl qobject::ArrangeView {
             s.touch();
         });
         self.refresh();
+    }
+
+    fn touch_pans(&self, x: f64, y: f64) -> bool {
+        state::with(|s| s.arrange.touch_pans(s.doc.project(), x, y))
     }
 
     fn row_height(&self, row: i32) -> f64 {

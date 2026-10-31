@@ -163,6 +163,16 @@ pub(crate) struct Built {
     pub params: HashMap<(NodeKey, u32), f64>,
     /// Parameters an automation lane drives in this graph.
     pub automated: HashSet<(NodeKey, u32)>,
+    /// What each automated (or, during touch write, suspended) device
+    /// parameter the document leaves unset goes back to when its lane
+    /// stops. See `build::rest_value`.
+    pub rest: HashMap<(NodeKey, u32), f64>,
+    /// Parameters whose lane stopped in this graph, with their [`rest`]
+    /// values; sent by the next parameter sync unless the document has a
+    /// value of its own for them.
+    ///
+    /// [`rest`]: Self::rest
+    pub restore: HashMap<(NodeKey, u32), f64>,
     /// The clips each player was last given, to spot clip edits.
     pub clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Gain reduction meters of devices that have one.
@@ -196,6 +206,10 @@ pub struct Session {
     suspended: HashSet<LaneId>,
     /// Parameters held at a value the document doesn't have yet.
     live: HashMap<(NodeKey, u32), f64>,
+    /// What each plugin parameter in `live` had before it was first held:
+    /// for a lane written by hand, the value removing the lane goes back
+    /// to. Kept only while held, or until the next rebuild after.
+    pub(crate) pre_live: HashMap<(NodeKey, u32), f64>,
     /// MIDI source port names, by the engine event source their own port
     /// feeds. Tracks that pick one of these devices get only its events.
     midi_sources: HashMap<String, usize>,
@@ -265,6 +279,7 @@ impl Session {
             master: None,
             suspended: HashSet::new(),
             live: HashMap::new(),
+            pre_live: HashMap::new(),
             midi_sources: HashMap::new(),
             midi_sources_changed: false,
             gates: Vec::new(),
@@ -370,9 +385,13 @@ impl Session {
         // Paths may resolve differently now; rebuild everything but the
         // input taps, whose nodes hold takes being recorded (saving a new
         // project while recording moves its root).
-        let taps = self.built.take().map(|b| b.taps).unwrap_or_default();
+        let old = self.built.take().unwrap_or_default();
+        // So a lane removed later still puts its parameter back.
         self.built = Some(Built {
-            taps,
+            taps: old.taps,
+            automated: old.automated,
+            rest: old.rest,
+            restore: old.restore,
             ..Default::default()
         });
     }
@@ -427,6 +446,7 @@ impl Session {
                 .keys()
                 .map(|&t| (t, old.structure.live_input(t)))
                 .collect();
+            let running = old.automated.clone();
             let (desc, built) = build::graph(self, snapshot, structure, old);
             // Kept only once the engine has the graph: a refused graph's players never
             // ran, so the next build must not take their handles for the running ones.
@@ -435,6 +455,15 @@ impl Session {
                     .retry
                     .map_or(RETRY_MIN, |(b, _)| (b * 2).min(RETRY_MAX));
                 self.retry = Some((backoff, std::time::Instant::now() + backoff));
+                // The old graph plays on with its lanes: the next build starts
+                // from them, knowing what each goes back to.
+                self.built = Some(Built {
+                    automated: running,
+                    rest: built.rest,
+                    restore: built.restore,
+                    ..Default::default()
+                });
+                self.force_rebuild = true;
                 return Err(e.into());
             }
             self.retry = None;
@@ -448,6 +477,9 @@ impl Session {
                 }
             }
             self.built = Some(built);
+            // Taken into `rest` by this build, if a lane came of it.
+            let live = &self.live;
+            self.pre_live.retain(|k, _| live.contains_key(k));
             let ids: HashSet<DeviceId> = snapshot
                 .all_tracks()
                 .flat_map(|t| t.devices.iter().map(|d| d.id))
@@ -771,6 +803,14 @@ impl Session {
                     let key = build::device_key(d.id);
                     if let Some(b) = &mut self.built {
                         b.params.retain(|(k, _), _| *k != key);
+                        // The loaded state is what a lane now goes back to.
+                        b.restore.retain(|(k, _), _| *k != key);
+                        for (&(_, p), v) in b.rest.iter_mut().filter(|((k, _), _)| *k == key) {
+                            let now = l.handle.with(|i| i.param_value(p));
+                            if now.is_finite() {
+                                *v = now;
+                            }
+                        }
                     }
                 }
                 Err(e) => self.warnings.push(Warning::DeviceStateRejected {
@@ -855,12 +895,39 @@ impl Session {
             self.live.remove(&(key, param));
             return Ok(());
         };
+        if !self.live.contains_key(&(key, param))
+            && let Some(before) = self.plugin_param(key, param)
+        {
+            self.pre_live.entry((key, param)).or_insert(before);
+        }
         self.live.insert((key, param), value);
         self.controller.set_param_by_key(key, param, value)?;
         if let Some(b) = &mut self.built {
             b.params.insert((key, param), value);
         }
         Ok(())
+    }
+
+    /// What a plugin device's parameter is now, by node key: what the
+    /// session last sent it, else what the plugin reports. `None` for other
+    /// nodes.
+    fn plugin_param(&self, key: NodeKey, param: u32) -> Option<f64> {
+        let d = self
+            .last
+            .as_ref()?
+            .all_tracks()
+            .flat_map(|t| t.devices.iter())
+            .find(|d| build::device_key(d.id) == key)?;
+        if !matches!(d.source, daw_model::DeviceSource::Plugin { .. }) {
+            return None;
+        }
+        let sent = self
+            .built
+            .as_ref()
+            .and_then(|b| b.params.get(&(key, param)));
+        sent.copied()
+            .or_else(|| self.with_plugin(d.id, |p| p.param_value(param)))
+            .filter(|v| v.is_finite())
     }
 
     /// The engine node key for a send.
@@ -966,6 +1033,24 @@ impl Session {
                 self.controller.set_param_by_key(key, param, value)?;
                 built.params.insert((key, param), value);
             }
+        }
+        // A lane that stopped driving a parameter the document doesn't set
+        // left its last value in the device: put back what it had before.
+        // Kept until sent, so a full queue retries on the next sync.
+        let restore: Vec<_> = built.restore.iter().map(|(&k, &v)| (k, v)).collect();
+        for ((key, param), value) in restore {
+            if let std::collections::hash_map::Entry::Vacant(e) = built.params.entry((key, param)) {
+                let value = self.live.get(&(key, param)).copied().unwrap_or(value);
+                match self.controller.set_param_by_key(key, param, value) {
+                    Ok(()) => {
+                        e.insert(value);
+                    }
+                    // The device is gone; nothing to put back.
+                    Err(daw_engine::EngineError::UnknownKey(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            built.restore.remove(&(key, param));
         }
         Ok(())
     }
@@ -1074,12 +1159,26 @@ impl Session {
         self.controller.is_counting_in()
     }
 
+    /// Stops the transport. Effects and instruments ring out as they
+    /// would; [`silence`](Self::silence) cuts them off.
     pub fn stop(&mut self) -> Result<(), SessionError> {
         self.controller.stop()?;
         self.playing = false;
         // Wherever playback got to; the audio thread reports it.
         self.parked = None;
         self.update_monitors();
+        Ok(())
+    }
+
+    /// Stops the transport and cuts off everything still sounding: every
+    /// device is reset (reverb and delay tails, held voices, plugins
+    /// through their own reset) and latency compensation is cleared.
+    /// Players and recordings are left alone. LV2 has no reset a host may
+    /// call while audio runs, so an LV2 plugin only gets all notes and
+    /// sounds off.
+    pub fn silence(&mut self) -> Result<(), SessionError> {
+        self.stop()?;
+        self.controller.silence()?;
         Ok(())
     }
 
