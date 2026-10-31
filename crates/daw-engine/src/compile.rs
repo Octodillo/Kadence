@@ -117,6 +117,8 @@ pub(crate) struct Step {
     ports: PortLayout,
     meter: Option<Arc<NodeMeter>>,
     automation: Vec<(ParamId, Arc<AutomationLane>)>,
+    /// Reset by [`CompiledGraph::silence`].
+    tail: bool,
     node: Box<dyn Node>,
     n_in: usize,
     n_out: usize,
@@ -276,6 +278,7 @@ impl CompiledGraph {
                     ports: ports.clone(),
                     meter: entry.meter,
                     automation: entry.automation,
+                    tail: entry.tail,
                     latency: entry.node.latency(),
                     node: entry.node,
                     n_in,
@@ -407,6 +410,19 @@ impl CompiledGraph {
     /// Calls `reset` on every node and clears every delay line.
     pub fn reset(&mut self) {
         for s in &mut self.steps {
+            s.node.reset();
+        }
+        for d in &mut self.delays {
+            d.reset();
+        }
+    }
+
+    /// Cuts off what is still sounding: resets every node marked with
+    /// [`GraphDesc::set_tail`] and clears every delay line, so reverb and
+    /// delay tails and held voices stop at once. Other nodes (players,
+    /// strips) keep their state. RT-safe as long as the nodes' `reset` is.
+    pub(crate) fn silence(&mut self) {
+        for s in self.steps.iter_mut().filter(|s| s.tail) {
             s.node.reset();
         }
         for d in &mut self.delays {

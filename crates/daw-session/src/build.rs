@@ -353,6 +353,8 @@ pub(crate) fn graph(
                     id
                 }
             };
+            // Silencing (`Session::silence`) cuts its tail or held voices.
+            g.set_tail(id);
             // A switched-off device stays in the graph, so it keeps its
             // state, but audio goes around it.
             if d.enabled {
@@ -504,11 +506,22 @@ pub(crate) fn graph(
     };
     g.connect(click, g.master());
 
-    automate(session, snapshot, &mut g, &strips, &mut built);
+    automate(session, snapshot, &mut g, &strips, &mut built, &old);
     // A lane that stopped playing (switched off, removed, emptied) left
-    // its last value behind: send the control's own value again.
-    for k in old.automated.difference(&built.automated) {
-        built.params.remove(k);
+    // its last value behind: send the control's own value again, or the
+    // one it had before the lane, when the document has none.
+    for &(key, param) in old.automated.difference(&built.automated) {
+        built.params.remove(&(key, param));
+        if let Some(v) = rest_value(session, snapshot, key, param, &old) {
+            built.restore.insert((key, param), v);
+        }
+    }
+    // Not sent yet (a full queue), not taken over by a lane again, and the
+    // device still there.
+    for (k, &v) in &old.restore {
+        if !built.automated.contains(k) && find(&g, k.0).is_some() {
+            built.restore.entry(*k).or_insert(v);
+        }
     }
     (g, built)
 }
@@ -564,12 +577,13 @@ fn automate(
     g: &mut GraphDesc,
     strips: &HashMap<TrackId, NodeId>,
     built: &mut Built,
+    old: &Built,
 ) {
     for t in project.all_tracks() {
         for lane in t
             .automation
             .iter()
-            .filter(|l| l.enabled && !l.points.is_empty() && !session.suspended.contains(&l.id))
+            .filter(|l| l.enabled && !l.points.is_empty())
         {
             let (node, param, to_value): (Option<NodeId>, u32, fn(f64) -> f64) = match lane.target {
                 AutomationTarget::Volume => (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain),
@@ -582,11 +596,66 @@ fn automate(
                 }
             };
             let Some(node) = node else { continue };
-            if let Some(key) = g.key(node) {
+            let key = g.key(node);
+            if session.suspended.contains(&lane.id) {
+                // Overwritten by hand for now: the value from before the
+                // lane still is what removing the lane goes back to.
+                if let Some(k) = key
+                    && let Some(&v) = old.rest.get(&(k, param))
+                {
+                    built.rest.insert((k, param), v);
+                }
+                continue;
+            }
+            if let Some(key) = key {
                 built.automated.insert((key, param));
+                if let Some(rest) = rest_value(session, project, key, param, old) {
+                    built.rest.insert((key, param), rest);
+                }
             }
             g.automate(node, param, session.playback_lane(lane, to_value));
         }
+    }
+}
+
+/// What the device parameter `param` of the device node `key` goes back to
+/// when its lane stops, if the document has no value for it (with one, the
+/// document's value is sent again). `None` for other nodes.
+///
+/// A built-in device goes back to its default, as when the document's
+/// value is reset. A plugin goes back to what it had before the lane took
+/// over: the value taken when the lane started (or still waiting to be put
+/// back), else what it had before a take held it by hand, else the value
+/// last sent to it, else what it reports now (a lane that plays from the
+/// start).
+fn rest_value(
+    session: &Session,
+    project: &Project,
+    key: NodeKey,
+    param: u32,
+    old: &Built,
+) -> Option<f64> {
+    let d = project
+        .all_tracks()
+        .flat_map(|t| t.devices.iter())
+        .find(|d| device_key(d.id) == key)?;
+    if d.params.contains_key(&param) {
+        return None;
+    }
+    match &d.source {
+        DeviceSource::Builtin { kind } => daw_devices::param_specs(kind)?
+            .iter()
+            .find(|s| s.id == param)
+            .map(|s| s.default),
+        DeviceSource::Plugin { .. } => old
+            .rest
+            .get(&(key, param))
+            .or(old.restore.get(&(key, param)))
+            .or(session.pre_live.get(&(key, param)))
+            .or(old.params.get(&(key, param)))
+            .copied()
+            .or_else(|| session.with_plugin(d.id, |p| p.param_value(param)))
+            .filter(|v| v.is_finite()),
     }
 }
 

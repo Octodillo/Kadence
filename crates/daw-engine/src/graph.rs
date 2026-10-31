@@ -70,6 +70,7 @@ pub(crate) struct NodeEntry {
     pub reuse: Option<usize>,
     pub meter: Option<Arc<NodeMeter>>,
     pub automation: Vec<(ParamId, Arc<AutomationLane>)>,
+    pub tail: bool,
 }
 
 /// What the controller remembers about a keyed node in the graph it sent
@@ -165,6 +166,7 @@ impl GraphDesc {
             reuse: None,
             meter: None,
             automation: Vec::new(),
+            tail: false,
         });
         id
     }
@@ -250,6 +252,17 @@ impl GraphDesc {
         if let Some(n) = self.nodes.get_mut(id.0 as usize) {
             n.automation.retain(|(p, _)| *p != param);
             n.automation.push((param, lane.into()));
+        }
+    }
+
+    /// Marks `id` as a node that can ring on after its input stops (a
+    /// reverb's tail, an instrument's held voices), so
+    /// [`EngineController::silence`](crate::EngineController::silence)
+    /// resets it. Like automation, it isn't carried over by
+    /// [`reuse`](Self::reuse): mark the node again in each graph.
+    pub fn set_tail(&mut self, id: NodeId) {
+        if let Some(n) = self.nodes.get_mut(id.0 as usize) {
+            n.tail = true;
         }
     }
 
