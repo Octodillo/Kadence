@@ -31,6 +31,7 @@ mod recording;
 pub mod recovery;
 pub mod session_mixer;
 pub mod settings;
+pub mod settings_bridge;
 pub mod state;
 mod test_helper;
 mod transport;

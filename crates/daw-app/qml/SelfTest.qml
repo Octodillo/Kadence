@@ -84,6 +84,18 @@ Item {
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
             check(Project.undoText in editNames.names, "undo name has a translation");
+            // Arm it and pick a MIDI input: both undoable, both translated.
+            Project.setTrackArmed(0, true);
+            check(Project.trackArmed(0) && Project.undoText === "Arm Track", "arm a track");
+            Project.setTrackMidiInput(0, "Midi-Bridge:USB Keyboard (capture)", 9);
+            check(Project.trackMidiDevice(0) === "Midi-Bridge:USB Keyboard (capture)"
+                  && Project.trackMidiChannel(0) === 9
+                  && Project.undoText === "Change MIDI Input"
+                  && Project.undoText in editNames.names, "choose a MIDI input");
+            Project.undo();
+            check(Project.trackMidiDevice(0) === "" && Project.trackMidiChannel(0) === -1, "undo the MIDI input");
+            Project.undo();
+            check(!Project.trackArmed(0), "undo arming");
             Project.undo();
             Project.undo();
             check(Project.trackCount === 0, "undo back to empty");
@@ -117,6 +129,15 @@ Item {
             // so both timers are overdue at once; refresh before reading.
             Project.tick();
             check(Project.trackCount === 4, "demo has three tracks and a bus");
+            // Show an armed instrument track listening to one channel.
+            for (let i = 0; i < Project.trackCount; i++) {
+                if (Project.trackKind(i) === 1) {
+                    Project.setTrackArmed(i, true);
+                    Project.setTrackMidiInput(i, "", 0);
+                    break;
+                }
+            }
+            Project.tick();
             // Peaks load in the background; give them a step, then shoot.
             window.pageStack.currentItem.view.refresh();
             shoot(window.title, "arrange-demo");
@@ -487,7 +508,29 @@ Item {
             check(settingsPage !== null, "open settings");
         },
         () => {
+            check(settingsPage.currentTab === 0, "settings open on General");
+            shoot(settingsPage.Window.window.title, "settings-general");
+            settingsPage.currentTab = 1;
+        },
+        () => {
             shoot(settingsPage.Window.window.title, "settings");
+            settingsPage.currentTab = 2;
+        },
+        () => {
+            // The stub offers two devices and a program: hardware is used
+            // by default, programs only when turned on.
+            const keys = "Midi-Bridge:USB Keyboard (capture)";
+            if (Engine.backendKind === Engine.StubBackend) {
+                check(AppSettings.midiSourceNames.includes(keys), "stub MIDI device listed");
+                check(AppSettings.midiInputNames.includes(keys), "hardware used by default");
+                check(!AppSettings.midiInputNames.includes("Sequencer:out"), "programs not used by default");
+                check(AppSettings.midiLabel(keys) === "USB Keyboard (capture)", "MIDI label without the program");
+                AppSettings.useMidiSource("Sequencer:out", true);
+                check(AppSettings.midiInputNames.includes("Sequencer:out"), "turn a program on");
+                AppSettings.useMidiSource("Sequencer:out", false);
+                check(!AppSettings.midiInputNames.includes("Sequencer:out"), "and off again");
+            }
+            shoot(settingsPage.Window.window.title, "settings-midi");
         },
         () => {
             if (!window.smokeTest) {

@@ -12,7 +12,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use daw_backend::{DummyBackend, Pacing, PortDirection, PortKind};
 use daw_plugin_host::{HostLauncher, SandboxConfig};
+pub use daw_session::host::MidiSource;
 use daw_session::host::{AudioHost, HostConfig, HostKind};
 use daw_session::{PluginLoader, SandboxLoader, Session};
 
@@ -138,6 +140,52 @@ pub trait EngineHandle {
     /// that has to be synced with the document again.
     fn session(&self) -> Option<&Session>;
     fn session_mut(&mut self) -> Option<&mut Session>;
+
+    /// MIDI sources other programs and devices offer now.
+    fn midi_sources(&self) -> Vec<MidiSource> {
+        Vec::new()
+    }
+
+    /// Gives each source in `sources` a MIDI port of its own (see
+    /// `AudioHost::set_midi_inputs`). Returns the ones that failed.
+    fn set_midi_inputs(&mut self, sources: &[String]) -> Vec<String> {
+        sources.to_vec()
+    }
+
+    /// The sources with ports, each with whether it is connected now.
+    fn midi_inputs(&self) -> Vec<(String, bool)> {
+        Vec::new()
+    }
+
+    /// Connects sources plugged back in. Returns whether any came or went.
+    fn refresh_midi(&mut self) -> bool {
+        false
+    }
+}
+
+/// The MIDI calls of [`EngineHandle`], for engines built on an [`AudioHost`].
+macro_rules! host_midi {
+    () => {
+        fn midi_sources(&self) -> Vec<MidiSource> {
+            self.host.midi_sources()
+        }
+
+        fn set_midi_inputs(&mut self, sources: &[String]) -> Vec<String> {
+            self.host
+                .set_midi_inputs(sources)
+                .into_iter()
+                .map(|(source, _)| source)
+                .collect()
+        }
+
+        fn midi_inputs(&self) -> Vec<(String, bool)> {
+            self.host.midi_inputs()
+        }
+
+        fn refresh_midi(&mut self) -> bool {
+            self.host.refresh_midi()
+        }
+    };
 }
 
 /// Loads plugins in sandbox host processes: this executable again, which
@@ -324,6 +372,8 @@ impl EngineHandle for SessionEngine {
     fn session_mut(&mut self) -> Option<&mut Session> {
         Some(self.host.session_mut())
     }
+
+    host_midi!();
 }
 
 /// A pretend engine with two devices, for testing the settings UI without
@@ -337,13 +387,24 @@ pub struct StubEngine {
 
 impl Default for StubEngine {
     fn default() -> Self {
+        let dummy = DummyBackend::new(Pacing::RealTime);
+        let system = dummy.system();
+        for (name, physical) in Self::MIDI_SOURCES {
+            system.add_port(name, PortKind::Midi, PortDirection::Output, physical);
+        }
+        let config = HostConfig {
+            use_server: false,
+            ..Default::default()
+        };
         Self {
             config: AudioConfig::default(),
             running: false,
-            host: start_host(HostConfig {
-                use_server: false,
-                ..Default::default()
-            }),
+            host: {
+                let mut host = AudioHost::with_backend(Box::new(dummy), &config)
+                    .expect("the dummy backend always opens");
+                host.session_mut().set_plugin_loader(plugin_loader());
+                host
+            },
         }
     }
 }
@@ -361,6 +422,14 @@ impl StubEngine {
     const DEVICES: [(&'static str, &'static str); 2] = [
         ("stub:default", "Default output (stub)"),
         ("stub:usb", "USB audio interface (stub)"),
+    ];
+
+    /// Pretend MIDI sources besides the dummy system's own: two devices
+    /// and a program.
+    const MIDI_SOURCES: [(&'static str, bool); 3] = [
+        ("Midi-Bridge:USB Keyboard (capture)", true),
+        ("Midi-Bridge:Drum Pads (capture)", true),
+        ("Sequencer:out", false),
     ];
 }
 
@@ -446,6 +515,8 @@ impl EngineHandle for StubEngine {
     fn session_mut(&mut self) -> Option<&mut Session> {
         Some(self.host.session_mut())
     }
+
+    host_midi!();
 }
 
 #[cfg(test)]
