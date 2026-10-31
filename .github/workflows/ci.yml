@@ -155,8 +155,10 @@ jobs:
     steps:
       - name: Add the KDE neon archive
         # archive.neon.kde.org has had outages (502s for hours). When it is
-        # unreachable on a pull request, skip this job with a warning instead
-        # of failing it; once it answers, build and test failures still fail.
+        # unreachable on a pull request or a push, skip this job with a
+        # warning instead of failing it; once it answers, build and test
+        # failures still fail. The weekly Packaging run stays red on an
+        # outage, so a long one still gets noticed.
         id: neon
         shell: bash
         env:
@@ -175,11 +177,11 @@ jobs:
             echo "deb [signed-by=/usr/share/keyrings/neon.gpg] $neon/user noble main" \
               > /etc/apt/sources.list.d/neon.list
             echo "available=true" >> "$GITHUB_OUTPUT"
-          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$GITHUB_EVENT_NAME" = push ]; then
             echo "::warning title=KDE neon archive unreachable::Skipping this job: $neon did not answer. This is not a failure of the code under test."
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
-            # On main and scheduled runs, stay red so the gap gets noticed.
+            # Any other run (a manual one) stays red.
             echo "::error title=KDE neon archive unreachable::$neon did not answer."
             exit 1
           fi
