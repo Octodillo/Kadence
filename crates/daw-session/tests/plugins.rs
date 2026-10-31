@@ -363,6 +363,18 @@ fn plugin_params_follow_automation() {
     rig.sync();
     rig.settles_at(LEVEL * 0.25);
 
+    // Overwritten by hand for a while (touch write), then playing again: the
+    // value from before the lane is still what it goes back to.
+    let key = Session::device_key(rig.device);
+    rig.session.set_suspended_lanes([id].into());
+    rig.session.set_live_param(key, GAIN, Some(0.6)).unwrap();
+    rig.sync();
+    rig.settles_at(LEVEL * 0.6);
+    rig.session.set_live_param(key, GAIN, None).unwrap();
+    rig.session.set_suspended_lanes(Default::default());
+    rig.sync();
+    rig.settles_at(LEVEL * 0.25);
+
     // Without the lane, the plugin goes back to the value it had before.
     rig.doc
         .execute(daw_model::commands::RemoveLane::new(id))

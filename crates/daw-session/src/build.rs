@@ -510,10 +510,10 @@ pub(crate) fn graph(
     // A lane that stopped playing (switched off, removed, emptied) left
     // its last value behind: send the control's own value again, or the
     // one it had before the lane, when the document has none.
-    for k in old.automated.difference(&built.automated) {
-        built.params.remove(k);
-        if let Some(&v) = old.rest.get(k).or(old.restore.get(k)) {
-            built.restore.insert(*k, v);
+    for &(key, param) in old.automated.difference(&built.automated) {
+        built.params.remove(&(key, param));
+        if let Some(v) = rest_value(session, snapshot, key, param, &old) {
+            built.restore.insert((key, param), v);
         }
     }
     // Not sent yet (a full queue) and not taken over by a lane again.
@@ -582,7 +582,7 @@ fn automate(
         for lane in t
             .automation
             .iter()
-            .filter(|l| l.enabled && !l.points.is_empty() && !session.suspended.contains(&l.id))
+            .filter(|l| l.enabled && !l.points.is_empty())
         {
             let (node, param, to_value): (Option<NodeId>, u32, fn(f64) -> f64) = match lane.target {
                 AutomationTarget::Volume => (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain),
@@ -595,11 +595,20 @@ fn automate(
                 }
             };
             let Some(node) = node else { continue };
-            if let Some(key) = g.key(node) {
-                built.automated.insert((key, param));
-                if let AutomationTarget::DeviceParam { device, .. } = lane.target
-                    && let Some(rest) = rest_value(session, t, device, key, param, old)
+            let key = g.key(node);
+            if session.suspended.contains(&lane.id) {
+                // Overwritten by hand for now: the value from before the
+                // lane still is what removing the lane goes back to.
+                if let Some(k) = key
+                    && let Some(&v) = old.rest.get(&(k, param))
                 {
+                    built.rest.insert((k, param), v);
+                }
+                continue;
+            }
+            if let Some(key) = key {
+                built.automated.insert((key, param));
+                if let Some(rest) = rest_value(session, project, key, param, old) {
                     built.rest.insert((key, param), rest);
                 }
             }
@@ -608,38 +617,39 @@ fn automate(
     }
 }
 
-/// What a device parameter goes back to when its lane stops, if the
-/// document has no value for it (with one, the document's value is sent).
-/// Taken when the lane starts, before it plays: the value last sent, else
-/// what a plugin reports or a built-in device's default.
+/// What the device parameter `param` of the device node `key` goes back to
+/// when its lane stops, if the document has no value for it (with one, the
+/// document's value is sent again). `None` for other nodes.
+///
+/// A built-in device goes back to its default, as when the document's
+/// value is reset. A plugin goes back to what it had before the lane took
+/// over: the value taken when the lane started, else the value last sent
+/// to it, else what it reports now (a lane that plays from the start).
 fn rest_value(
     session: &Session,
-    track: &Track,
-    device: DeviceId,
+    project: &Project,
     key: NodeKey,
     param: u32,
     old: &Built,
 ) -> Option<f64> {
-    let d = track.devices.iter().find(|d| d.id == device)?;
+    let d = project
+        .all_tracks()
+        .flat_map(|t| t.devices.iter())
+        .find(|d| device_key(d.id) == key)?;
     if d.params.contains_key(&param) {
         return None;
-    }
-    if old.automated.contains(&(key, param)) {
-        return old.rest.get(&(key, param)).copied();
-    }
-    if let Some(&v) = old.restore.get(&(key, param)) {
-        return Some(v);
-    }
-    if let Some(&v) = old.params.get(&(key, param)) {
-        return Some(v);
     }
     match &d.source {
         DeviceSource::Builtin { kind } => daw_devices::param_specs(kind)?
             .iter()
             .find(|s| s.id == param)
             .map(|s| s.default),
-        DeviceSource::Plugin { .. } => session
-            .with_plugin(device, |p| p.param_value(param))
+        DeviceSource::Plugin { .. } => old
+            .rest
+            .get(&(key, param))
+            .or(old.params.get(&(key, param)))
+            .copied()
+            .or_else(|| session.with_plugin(d.id, |p| p.param_value(param)))
             .filter(|v| v.is_finite()),
     }
 }

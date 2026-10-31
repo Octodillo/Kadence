@@ -163,9 +163,9 @@ pub(crate) struct Built {
     pub params: HashMap<(NodeKey, u32), f64>,
     /// Parameters an automation lane drives in this graph.
     pub automated: HashSet<(NodeKey, u32)>,
-    /// What each automated device parameter the document leaves unset goes
-    /// back to when its lane stops: the value it had before the lane took
-    /// it over.
+    /// What each automated (or, during touch write, suspended) device
+    /// parameter the document leaves unset goes back to when its lane
+    /// stops. See `build::rest_value`.
     pub rest: HashMap<(NodeKey, u32), f64>,
     /// Parameters whose lane stopped in this graph, with their [`rest`]
     /// values; sent by the next parameter sync unless the document has a
