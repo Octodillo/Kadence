@@ -512,12 +512,14 @@ Kirigami.ApplicationWindow {
             objectName: "aboutPage"
             aboutData: root.aboutData
 
-            // Close it the way the other layers close, as well as with the
-            // back button and by picking a page in the drawer.
+            // Escape closes it too, besides the back button (and Back,
+            // which the page stack handles) and picking a page in the
+            // drawer. Only while it is on top: it stays visible during
+            // transitions, and on a phone Settings can be pushed over it.
             Shortcut {
-                sequences: [StandardKey.Cancel, StandardKey.Back]
+                sequence: StandardKey.Cancel
                 enabled: aboutPage.visible
-                onActivated: root.pageStack.layers.pop()
+                onActivated: root.closeAbout()
             }
         }
     }
@@ -608,11 +610,12 @@ Kirigami.ApplicationWindow {
     // the current page. Clicking a checked entry unchecks it, so set every
     // entry each time.
     function syncPageChecks(): void {
-        const aboutOpen = pageStack.layers.currentItem?.objectName === "aboutPage";
-        aboutAction.checked = aboutOpen;
+        // A layer (About, or Settings on a phone) covers the page.
+        const covered = pageStack.layers.depth > 1;
+        aboutAction.checked = covered && pageStack.layers.currentItem?.objectName === "aboutPage";
         const pages = [arrangePage, mixPage, editPage];
         for (let i = 0; i < pageActions.length; ++i) {
-            pageActions[i].checked = !aboutOpen && pageStack.currentItem === pages[i];
+            pageActions[i].checked = !covered && pageStack.currentItem === pages[i];
         }
     }
 
@@ -638,6 +641,12 @@ Kirigami.ApplicationWindow {
             width: Kirigami.Units.gridUnit * 32,
             height: Kirigami.Units.gridUnit * 24
         });
+    }
+
+    function closeAbout(): void {
+        if (pageStack.layers.currentItem?.objectName === "aboutPage") {
+            pageStack.layers.pop();
+        }
     }
 
     function openAbout(): Item {
