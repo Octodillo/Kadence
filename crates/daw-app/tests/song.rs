@@ -222,6 +222,11 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
         Box::new(BuiltinParams),
         Box::new(plugin_params.clone()),
     ]);
+    // The plugin starts out at a quarter gain (from its saved state), so
+    // what the panel shows can only come from the plugin, not from the
+    // parameter's default of 1.
+    doc.store_plugin_state(plugin_id, Some(gain_state(0.25).into()))
+        .unwrap();
     {
         let (mut session, _proc) = Session::new(config());
         session.set_root(doc.bundle().map(|b| b.root().to_path_buf()));
@@ -236,12 +241,13 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     let device = &doc.project().track(pluck).unwrap().devices[1];
     assert_eq!(
         plugin_params.current(device, GAIN),
-        Some(1.0),
+        Some(0.25),
         "the panel reads the plugin's own gain from the plugin"
     );
     panel.open(plugin_id);
     let view = panel.view(doc.project()).unwrap();
-    assert!(view.params.iter().any(|p| p.desc.id == GAIN));
+    let gain = view.params.iter().find(|p| p.desc.id == GAIN).unwrap();
+    assert_eq!(gain.value, 0.25, "the panel shows the plugin's own gain");
     for value in [0.8, 0.65, 0.5] {
         panel.set_value(&mut doc, GAIN, value).unwrap();
     }
@@ -341,6 +347,13 @@ fn reverb_of(doc: &Document, bus: TrackId) -> DeviceId {
     doc.project().track(bus).unwrap().devices[0].id
 }
 
+/// The test plugin's state for `gain`: its state is its gain.
+fn gain_state(gain: f64) -> Vec<u8> {
+    let mut s = b"DAWT".to_vec();
+    s.extend_from_slice(&gain.to_le_bytes());
+    s
+}
+
 fn builtin_source(kind: &str) -> DeviceSource {
     DeviceSource::Builtin { kind: kind.into() }
 }
@@ -357,7 +370,7 @@ fn draw_lane(
 ) -> LaneId {
     let t = doc.project().track(track).unwrap();
     assert!(
-        lane_targets(t, None).contains(&target),
+        lane_targets(t, arrange.params.as_ref()).contains(&target),
         "{target:?} is offered"
     );
     assert!(arrange.add_lane(doc, track, target).document);
@@ -375,9 +388,9 @@ fn draw_lane(
         arrange.release(doc, Pointer::left(x + 1.0, y));
         // The first point is a ramp; later ones take the shape of the one
         // before.
-        let points = &doc.project().track(track).unwrap().automation[index].points;
-        if points.len() == 1 {
-            assert!(!points[0].step);
+        let drawn_so_far = &doc.project().track(track).unwrap().automation[index].points;
+        if drawn_so_far.len() == 1 {
+            assert!(!drawn_so_far[0].step);
             assert!(arrange.set_point_shape(doc, PointShape::Step).document);
         }
     }
@@ -550,10 +563,11 @@ fn play(doc: &mut Document, plugin: DeviceId, n: usize) -> AudioData {
     for s in states {
         assert_eq!(s.device, plugin);
         let state = s.state.unwrap();
-        // The test plugin's state is its gain.
-        let mut gain = b"DAWT".to_vec();
-        gain.extend_from_slice(&0.5f64.to_le_bytes());
-        assert_eq!(&*state.0, &gain[..], "the plugin took the gain parameter");
+        assert_eq!(
+            &*state.0,
+            &gain_state(0.5)[..],
+            "the plugin took the gain parameter"
+        );
         doc.store_plugin_state(s.device, Some(state)).unwrap();
     }
     AudioData {
@@ -609,7 +623,7 @@ fn make_save_reload_and_render_a_song() {
     while doc.redo().unwrap().is_some() {}
     assert_eq!(to_json(doc.project()).unwrap(), made, "redo restores it");
 
-    // Play the first bar live, which also stores the plugin's state, and
+    // Play the whole song live, which also stores the plugin's state, and
     // save.
     let live = play(&mut doc, plugin, SONG_END_BEATS + TAIL_BEATS);
     doc.save().unwrap();
@@ -768,10 +782,23 @@ fn make_save_reload_and_render_a_song() {
         (3.8..4.2).contains(&ratio),
         "a pre-fader send ignores the fader (tail x{ratio})"
     );
+    for c in 0..2 {
+        assert!(
+            pre.channels[c][..at(8.0)] == song.channels[c][..at(8.0)],
+            "with the fader at 0 dB, the tap point changes nothing"
+        );
+    }
 
     // Routed to the reverb bus instead of the master, the pluck goes
     // through the bus's fully wet reverb; with the reverb bypassed, the
     // bus passes it on unchanged.
+    let outputs = mixer
+        .strips(doc.project(), None)
+        .into_iter()
+        .find(|s| s.id == strip(pluck_track))
+        .unwrap()
+        .output_choices;
+    assert!(outputs.iter().any(|c| c.id == strip(bus)), "{outputs:?}");
     mixer
         .set_output(&mut doc, strip(pluck_track), strip(bus))
         .unwrap();
