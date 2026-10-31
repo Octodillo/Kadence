@@ -23,6 +23,17 @@ Kirigami.Page {
     readonly property alias view: view
     readonly property alias transportBar: transportBar
 
+    // The automation lanes' height, dragged at a lane header's lower edge.
+    readonly property LayoutSize laneSize: LayoutSize {
+        key: "AutomationLaneHeight"
+        defaultUnits: 2.2
+        minimumUnits: 1.5
+        maximumUnits: 12
+    }
+    // The tracks' height in grid units, as last left (by a header's edge
+    // or zooming); 0 for the timeline's own default.
+    readonly property string trackHeightKey: "ArrangeTrackHeight"
+
     // A project in the welcome list was clicked: open Project.recentProjects[index].
     signal recentActivated(int index)
 
@@ -282,6 +293,7 @@ Kirigami.Page {
                     delegate: TrackHeader {
                         width: headers.width
                         arrange: view
+                        laneSize: page.laneSize
                     }
 
                     // Where a dragged track will land.
@@ -340,7 +352,10 @@ Kirigami.Page {
                         bottom: hbar.top
                     }
                     rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
-                    laneHeight: Math.round(Kirigami.Units.gridUnit * 2.2)
+                    laneHeight: Math.round(page.laneSize.pixels)
+                    // Remember the track height however it changed, once it
+                    // settles.
+                    onTrackHeightChanged: saveTrackHeight.restart()
                     backgroundColor: Kirigami.Theme.backgroundColor
                     alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
                     textColor: Kirigami.Theme.textColor
@@ -355,6 +370,11 @@ Kirigami.Page {
                     onTextColorChanged: refresh()
                     onHighlightColorChanged: refresh()
                     Component.onCompleted: {
+                        const units = AppSettings.layoutValue(page.trackHeightKey, 0);
+                        if (units > 0) {
+                            resizeTracks(units * Kirigami.Units.gridUnit, rulerHeight);
+                        }
+                        saveTrackHeight.armed = true;
                         setDefaultNames(
                             i18nc("@label default name of a new MIDI clip", "MIDI clip"),
                             i18nc("@label default name of audio from a file without a name", "Audio"),
@@ -373,6 +393,14 @@ Kirigami.Page {
 
                     Accessible.role: Accessible.Canvas
                     Accessible.name: i18nc("@info:accessible", "Timeline")
+
+                    Timer {
+                        id: saveTrackHeight
+                        // Not for the height set while starting up.
+                        property bool armed: false
+                        interval: 1000
+                        onTriggered: if (armed) AppSettings.setLayoutValue(page.trackHeightKey, view.trackHeight / Kirigami.Units.gridUnit)
+                    }
                 }
 
                 MouseArea {

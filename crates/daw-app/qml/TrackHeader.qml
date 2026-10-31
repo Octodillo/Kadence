@@ -23,10 +23,21 @@ Column {
     required property int index
     // The timeline, for row geometry.
     required property ArrangeView arrange
+    // The automation lanes' height (see ArrangePage).
+    required property LayoutSize laneSize
     readonly property int revision: Project.revision + Automation.revision
 
     readonly property bool expanded: revision >= 0 ? Automation.expanded(index) : false
     readonly property int laneCount: revision >= 0 ? Automation.laneCount(index) : 0
+
+    // Where this row starts in the timeline's content, as laid out now.
+    function top(): real {
+        let y = 0;
+        for (let i = 0; i < index; ++i) {
+            y += arrange.rowHeight(i);
+        }
+        return y;
+    }
 
     // The list reuses headers that scroll out of view for other tracks. A
     // hidden item keeps its focus and open menus, so close them, or the
@@ -392,6 +403,26 @@ Column {
                 menu.popup(parent, point.position.x, point.position.y);
             }
         }
+
+        // Drag the lower edge to make every track taller or shorter (the
+        // timeline has one track height), double-click for the default.
+        // This row's top stays put, so the edge follows the pointer.
+        SplitHandle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            lineVisible: false
+            property real from: 0
+            property real anchorY: 0
+            onStarted: {
+                from = row.arrange.trackHeight;
+                anchorY = row.y - row.arrange.scrollY + row.arrange.rulerHeight;
+            }
+            onMoved: (delta, done) => row.arrange.resizeTracks(from + delta, anchorY)
+            onCanceled: row.arrange.resizeTracks(from, anchorY)
+            onReset: row.arrange.resizeTracks(row.arrange.defaultTrackHeight(), row.y - row.arrange.scrollY + row.arrange.rulerHeight)
+            Accessible.ignored: true
+        }
     }
 
     // The lanes' headers, one per lane row the timeline shows.
@@ -405,6 +436,36 @@ Column {
             track: row.index
             lane: index < row.laneCount ? index : -1
             revision: row.revision
+
+            // Drag the lower edge to resize every automation lane,
+            // double-click for the default. This track's top stays put and
+            // the lanes above the edge share the movement (`ratio`), so the
+            // edge follows the pointer.
+            SplitHandle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                lineVisible: false
+                ratio: index + 1
+                property real anchorY: 0
+                function keepTop(): void {
+                    row.arrange.scrollTo(row.arrange.scrollX, row.top() - anchorY);
+                }
+                onStarted: {
+                    anchorY = row.top() - row.arrange.scrollY;
+                    row.laneSize.begin(row.arrange.laneHeight, Infinity);
+                }
+                onMoved: (delta, done) => {
+                    row.laneSize.drag(delta, done);
+                    keepTop();
+                }
+                onCanceled: {
+                    row.laneSize.cancel();
+                    keepTop();
+                }
+                onReset: row.laneSize.reset()
+                Accessible.ignored: true
+            }
         }
     }
 }

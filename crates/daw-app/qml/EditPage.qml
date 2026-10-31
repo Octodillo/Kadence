@@ -12,6 +12,15 @@ Kirigami.Page {
     id: page
 
     property list<Kirigami.Action> transportActions
+
+    // The velocity lane's height, dragged at its upper edge. The lane gets
+    // less when the window is too short to leave the notes three rows.
+    readonly property LayoutSize velocitySize: LayoutSize {
+        key: "VelocityLaneHeight"
+        defaultUnits: 4
+        minimumUnits: 2
+        maximumUnits: 20
+    }
     readonly property alias roll: roll
 
     title: roll.hasClip ? i18nc("@title %1 is a clip name", "Edit — %1", roll.clipName)
@@ -230,7 +239,8 @@ Kirigami.Page {
             }
             rulerHeight: Math.round(Kirigami.Units.gridUnit * 1.4)
             keyboardWidth: Kirigami.Units.gridUnit * 3
-            velocityHeight: Kirigami.Units.gridUnit * 4
+            readonly property real maximumVelocityHeight: Math.max(page.velocitySize.minimumPixels, height - rulerHeight - Kirigami.Units.gridUnit * 3)
+            velocityHeight: Math.round(Math.min(page.velocitySize.pixels, maximumVelocityHeight))
             backgroundColor: Kirigami.Theme.backgroundColor
             alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
             textColor: Kirigami.Theme.textColor
@@ -241,6 +251,7 @@ Kirigami.Page {
 
             onWidthChanged: refresh()
             onHeightChanged: refresh()
+            onVelocityHeightChanged: refresh()
             onBackgroundColorChanged: refresh()
             onTextColorChanged: refresh()
             onHighlightColorChanged: refresh()
@@ -287,6 +298,20 @@ Kirigami.Page {
             Keys.onEscapePressed: roll.cancelDrag()
             Keys.onLeftPressed: (e) => roll.nudge(-1)
             Keys.onRightPressed: (e) => roll.nudge(1)
+        }
+
+        // Between the notes and the velocity lane: drag it to resize the
+        // lane (up is taller), double-click for the default.
+        SplitHandle {
+            visible: roll.hasClip
+            x: roll.x
+            width: roll.width
+            y: roll.y + roll.height - roll.velocityHeight - height / 2
+            onStarted: page.velocitySize.begin(roll.velocityHeight, roll.maximumVelocityHeight)
+            onMoved: (delta, done) => page.velocitySize.drag(-delta, done)
+            onCanceled: page.velocitySize.cancel()
+            onReset: page.velocitySize.reset()
+            Accessible.ignored: true
         }
 
         // Two-finger zoom on touch screens.

@@ -79,8 +79,17 @@ Item {
             check(Project.trackCount === 1, "add instrument track");
             check(Project.trackName(0) === i18nc("@item default track name, %1 is a number", "Instrument %1", 1),
                   "default track name worded in QML");
-            // Double-click the first lane: a one-bar MIDI clip appears.
+            // Dragging a header's lower edge resizes every track.
             const v = arrange.view;
+            const before = v.trackHeight;
+            const target = before > 40 ? before - 10 : before + 10;
+            v.resizeTracks(target, v.rulerHeight);
+            check(v.trackHeight === target && v.rowHeight(0) === target, "resize tracks");
+            v.resizeTracks(1, v.rulerHeight);
+            check(v.trackHeight >= 24, "tracks keep a minimum height");
+            v.resizeTracks(before, v.rulerHeight);
+            check(v.trackHeight === before, "resize tracks back");
+            // Double-click the first lane: a one-bar MIDI clip appears.
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
             check(Project.undoText in editNames.names, "undo name has a translation");
@@ -151,6 +160,16 @@ Item {
             Automation.setExpanded(0, true);
             Automation.setExpanded(2, true);
             check(Automation.expanded(0) && v.rowHeight(0) === v.trackHeight + v.laneHeight, "Bass shows its lane");
+            // A lane header's lower edge resizes the lanes, within limits;
+            // a double-click puts the default back.
+            const lanes = window.pageStack.currentItem.laneSize;
+            lanes.begin(v.laneHeight, Infinity);
+            lanes.drag(Kirigami.Units.gridUnit, false);
+            check(Math.abs(v.laneHeight - Math.round(lanes.pixels)) < 1 && lanes.units > lanes.defaultUnits, "resize lanes");
+            lanes.drag(-1000, true);
+            check(lanes.units === lanes.minimumUnits, "lanes keep a minimum height");
+            lanes.reset();
+            check(lanes.units === lanes.defaultUnits && v.rowHeight(0) === v.trackHeight + v.laneHeight, "lane height reset");
             const y = v.rulerHeight + v.trackHeight + v.laneHeight / 2;
             v.press(v.width * 0.45, y, 1, 0);
             v.release(v.width * 0.45, y, 0);
@@ -414,6 +433,17 @@ Item {
         () => {
             const roll = window.pageStack.currentItem.roll;
             check(roll.hasClip, "piano roll has the clip");
+            // Dragging the velocity lane's edge up makes it taller, but
+            // never so tall the notes lose their last three rows.
+            const velocity = window.pageStack.currentItem.velocitySize;
+            velocity.begin(roll.velocityHeight, roll.maximumVelocityHeight);
+            velocity.drag(Kirigami.Units.gridUnit, true);
+            check(Math.abs(roll.velocityHeight - Math.round(velocity.pixels)) < 1, "resize the velocity lane");
+            velocity.begin(roll.velocityHeight, roll.maximumVelocityHeight);
+            velocity.drag(100000, true);
+            check(roll.velocityHeight <= roll.maximumVelocityHeight, "the velocity lane leaves room for notes");
+            velocity.reset();
+            check(velocity.units === velocity.defaultUnits, "velocity lane reset");
             const notes = TestHelper.pianoNoteCount();
             check(notes === 12, "demo clip has 12 notes");
             // Double-click empty space low in the grid: a note is added.
