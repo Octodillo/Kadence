@@ -1432,7 +1432,7 @@ impl PluginInstance for Vst3Instance {
             .editor_title
             .as_deref()
             .unwrap_or(&self.descriptor.name);
-        let editor = Editor::open(&self.controller, title).map_err(PluginError::Editor)?;
+        let editor = Editor::open(&self.controller, title)?;
         self.editor = Some(editor);
         Ok(())
     }

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use daw_arrange::{Arrange, Env};
+use daw_core::plugin::PluginError;
 use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
 use daw_midi::player::Preview;
@@ -147,6 +148,16 @@ pub fn with<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
     })
 }
 
+/// What the user calls a device: its name, or for an unnamed one its plugin
+/// or kind.
+fn device_label(d: &daw_model::Device) -> String {
+    match (&d.source, d.name.is_empty()) {
+        (_, false) => d.name.clone(),
+        (daw_model::DeviceSource::Plugin { id, .. }, true) => id.clone(),
+        (daw_model::DeviceSource::Builtin { kind }, true) => kind.clone(),
+    }
+}
+
 impl AppState {
     fn new() -> Self {
         Self::with_engine(default_engine())
@@ -231,11 +242,7 @@ impl AppState {
         let (track, d) = project
             .all_tracks()
             .find_map(|t| t.devices.iter().find(|d| d.id == device).map(|d| (t, d)))?;
-        let device_name = match (&d.source, d.name.is_empty()) {
-            (_, false) => d.name.clone(),
-            (daw_model::DeviceSource::Plugin { id, .. }, true) => id.clone(),
-            (daw_model::DeviceSource::Builtin { kind }, true) => kind.clone(),
-        };
+        let device_name = device_label(d);
         let track_name = if track.id == master && track.name.is_empty() {
             self.master_name.clone()
         } else {
@@ -264,7 +271,7 @@ impl AppState {
                     .open_plugin_editor(device, &title)
                     .map(|()| baseline)
             }
-            None => Err("audio is not running".into()),
+            None => Err(PluginError::Editor("audio is not running".into())),
         };
         match opened {
             Ok(baseline) => {
@@ -276,12 +283,11 @@ impl AppState {
                 self.touch();
                 true
             }
-            Err(detail) => {
+            Err(e) => {
                 let device = self.device_name(device);
-                self.report(Message::Warning(daw_session::Warning::PluginEditorFailed {
-                    device,
-                    detail,
-                }));
+                self.report(Message::Warning(daw_session::Warning::editor_failed(
+                    device, &e,
+                )));
                 false
             }
         }
@@ -293,7 +299,7 @@ impl AppState {
             .all_tracks()
             .flat_map(|t| t.devices.iter())
             .find(|d| d.id == device)
-            .map(|d| d.name.clone())
+            .map(device_label)
             .unwrap_or_default()
     }
 
