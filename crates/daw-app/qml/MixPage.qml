@@ -30,18 +30,8 @@ Kirigami.Page {
     Kirigami.Theme.colorSet: Kirigami.Theme.View
     Kirigami.Theme.inherit: false
 
-    // Meters run only while the page is on screen.
-    Timer {
-        interval: 33
-        repeat: true
+    MeterClock {
         running: page.visible
-        property double last: Date.now()
-        onRunningChanged: last = Date.now()
-        onTriggered: {
-            const now = Date.now();
-            Mixer.tick(Project.playing, (now - last) / 1000);
-            last = now;
-        }
     }
 
     // Every strip's width and effects box height.

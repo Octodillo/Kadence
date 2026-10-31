@@ -21,7 +21,24 @@ Kirigami.Page {
         minimumUnits: 2
         maximumUnits: 20
     }
+    // The clip's track's channel strip, at the right; its width and box
+    // height are its own, not the Mix page's.
+    readonly property LayoutSize stripWidth: LayoutSize {
+        key: "EditStripWidth"
+        defaultUnits: 8
+        minimumUnits: 5
+        maximumUnits: 20
+    }
+    readonly property LayoutSize stripBoxHeight: LayoutSize {
+        key: "EditStripSlotsHeight"
+        defaultUnits: 11
+        minimumUnits: 4
+        maximumUnits: 60
+    }
+    // Whether the strip is shown, remembered with the layout (1 or 0).
+    property bool stripShown: AppSettings.layoutValue("EditStripShown", 1) > 0
     readonly property alias roll: roll
+    readonly property alias trackStrip: trackStrip
 
     title: roll.hasClip ? i18nc("@title %1 is a clip name", "Edit — %1", roll.clipName)
                         : i18nc("@title", "Edit")
@@ -173,6 +190,19 @@ Kirigami.Page {
             onTriggered: roll.zoom(1 / 1.5)
         },
         Kirigami.Action {
+            text: i18nc("@action:button", "Track Strip")
+            icon.name: "view-media-equalizer"
+            checkable: true
+            checked: page.stripShown
+            enabled: page.visible
+            tooltip: i18nc("@info:tooltip", "Show the mixer strip of the clip's track beside the notes")
+            onToggled: {
+                page.stripShown = checked;
+                AppSettings.setLayoutValue("EditStripShown", checked ? 1 : 0);
+                checked = Qt.binding(() => page.stripShown);
+            }
+        },
+        Kirigami.Action {
             text: i18nc("@action:button", "Preview Notes")
             icon.name: "audio-volume-high"
             checkable: true
@@ -211,12 +241,19 @@ Kirigami.Page {
         page.editActions[18],
         page.editActions[19],
         page.editActions[20],
-        page.editActions[21]
+        page.editActions[21],
+        page.editActions[22]
     ]
 
+    // The strip's row follows the project, so the Mixer's rows must too
+    // before the roll says which row is the clip's track.
+    function refresh(): void {
+        Mixer.sync();
+        roll.refresh();
+    }
     Connections {
         target: Project
-        function onRevisionChanged() { roll.refresh(); }
+        function onRevisionChanged() { page.refresh(); }
     }
     Timer {
         interval: 16
@@ -224,10 +261,31 @@ Kirigami.Page {
         running: Project.playing && page.visible
         onTriggered: roll.refresh()
     }
-    onVisibleChanged: if (visible) roll.refresh()
+    onVisibleChanged: if (visible) page.refresh()
+    MeterClock {
+        running: page.visible && trackStrip.shown
+    }
+
+    TrackStrip {
+        id: trackStrip
+        anchors {
+            top: parent.top
+            right: parent.right
+            bottom: parent.bottom
+        }
+        visible: page.stripShown
+        row: page.stripShown ? roll.stripRow : -1
+        widthSize: page.stripWidth
+        boxSize: page.stripBoxHeight
+    }
 
     Item {
-        anchors.fill: parent
+        anchors {
+            left: parent.left
+            top: parent.top
+            right: trackStrip.left
+            bottom: parent.bottom
+        }
 
         PianoRoll {
             id: roll

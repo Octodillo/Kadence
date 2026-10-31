@@ -16,6 +16,7 @@ use daw_midi::edit::{Quantize, QuantizeEnds};
 
 use crate::arrange_view::{cursor_shape, pointer, to_qcolor, to_rgba};
 use crate::paint::{self, PaintOp};
+use crate::session_mixer::strip_row;
 use crate::state;
 
 #[cxx_qt::bridge]
@@ -53,6 +54,8 @@ pub mod qobject {
         /// Whether a MIDI clip is open.
         #[qproperty(bool, has_clip)]
         #[qproperty(QString, clip_name)]
+        /// The `Mixer` row of the open clip's track; -1 without a clip.
+        #[qproperty(i32, strip_row)]
         #[qproperty(bool, has_selection)]
         /// A Qt::CursorShape for the pointer's position.
         #[qproperty(i32, cursor_shape)]
@@ -152,6 +155,7 @@ pub struct PianoRollRust {
     content_height: f64,
     has_clip: bool,
     clip_name: QString,
+    strip_row: i32,
     has_selection: bool,
     cursor_shape: i32,
     ops: Vec<PaintOp>,
@@ -180,6 +184,7 @@ impl Default for PianoRollRust {
             content_height: 0.0,
             has_clip: false,
             clip_name: QString::default(),
+            strip_row: -1,
             has_selection: false,
             cursor_shape: 0,
             ops: Vec::new(),
@@ -251,17 +256,21 @@ impl qobject::PianoRoll {
                 p.has_clip(project),
                 p.clip_name(project).unwrap_or_default(),
                 !p.selection.is_empty(),
+                p.track(project)
+                    .and_then(|t| strip_row(project, t))
+                    .map_or(-1, |row| row as i32),
             );
             (scene, geometry)
         });
         self.as_mut().store(scene);
-        let (sx, sy, ch, has, name, sel) = geometry;
+        let (sx, sy, ch, has, name, sel, row) = geometry;
         self.as_mut().set_scroll_x(sx);
         self.as_mut().set_scroll_y(sy);
         self.as_mut().set_content_height(ch);
         self.as_mut().set_has_clip(has);
         self.as_mut().set_clip_name(QString::from(name.as_str()));
         self.as_mut().set_has_selection(sel);
+        self.as_mut().set_strip_row(row);
         self.update();
     }
 

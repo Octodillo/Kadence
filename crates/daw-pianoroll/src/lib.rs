@@ -41,7 +41,9 @@ use daw_midi::player::Preview;
 use daw_midi::view::{Drag, DragKind, NotePart, PianoRollView, VelocityLane};
 use daw_midi::{EditNote, NoteData};
 use daw_model::commands::EditNotes;
-use daw_model::{Clip, ClipContent, ClipId, Command, Document, MidiClip, Note, NoteUid, Project};
+use daw_model::{
+    Clip, ClipContent, ClipId, Command, Document, MidiClip, Note, NoteUid, Project, TrackId,
+};
 
 /// Smallest and largest key row height in logical pixels.
 pub const MIN_KEY_HEIGHT: f64 = 6.0;
@@ -282,6 +284,12 @@ impl PianoRoll {
     /// The open clip's name, for the page title.
     pub fn clip_name(&self, project: &Project) -> Option<String> {
         self.clip(project).map(|(c, _)| c.name.clone())
+    }
+
+    /// The track of the open clip, while it is a MIDI clip that exists.
+    pub fn track(&self, project: &Project) -> Option<TrackId> {
+        self.clip(project)?;
+        project.clip_location(self.clip?).map(|(track, _)| track)
     }
 
     // -----------------------------------------------------------------------

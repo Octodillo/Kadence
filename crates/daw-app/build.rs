@@ -21,6 +21,8 @@ const QML_FILES: &[&str] = &[
     "qml/ChannelStrip.qml",
     "qml/MetronomeStrip.qml",
     "qml/StripFrame.qml",
+    "qml/TrackStrip.qml",
+    "qml/MeterClock.qml",
     "qml/SplitHandle.qml",
     "qml/LayoutSize.qml",
     "qml/DevicePanelDrawer.qml",

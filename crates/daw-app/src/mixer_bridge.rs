@@ -125,6 +125,11 @@ pub mod qobject {
         /// refreshes `levels`; `seconds` since the last call.
         #[qinvokable]
         fn tick(self: Pin<&mut Mixer>, playing: bool, seconds: f64);
+
+        /// Re-reads the strips now rather than at the next `tick`, so rows
+        /// match the project (after an edit another view made).
+        #[qinvokable]
+        fn sync(self: Pin<&mut Mixer>);
     }
 
     unsafe extern "RustQt" {
@@ -552,11 +557,15 @@ impl qobject::Mixer {
         self.as_mut().set_any_soloed(soloed);
     }
 
-    fn tick(mut self: Pin<&mut Self>, playing: bool, seconds: f64) {
-        self.as_mut().rust_mut().mixer.tick(playing, seconds);
+    fn sync(mut self: Pin<&mut Self>) {
         if self.mixer.revision() != self.revision {
             self.as_mut().reload();
         }
+    }
+
+    fn tick(mut self: Pin<&mut Self>, playing: bool, seconds: f64) {
+        self.as_mut().rust_mut().mixer.tick(playing, seconds);
+        self.as_mut().sync();
         let mut rust = self.as_mut().rust_mut();
         let levels = rust.mixer.levels();
         let meters = rust.ballistics.update(&levels, seconds).to_vec();

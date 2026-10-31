@@ -445,6 +445,19 @@ Item {
         () => {
             const roll = window.pageStack.currentItem.roll;
             check(roll.hasClip, "piano roll has the clip");
+            // Beside the notes: the mixer strip of the clip's track (the
+            // demo's bus comes last, so its rows are track numbers).
+            const edit = window.pageStack.currentItem;
+            const strip = edit.trackStrip.strip;
+            check(strip !== null && strip.index === roll.stripRow && strip.kind === "track"
+                  && strip.name === Project.trackName(roll.stripRow), "the Edit page shows the clip's track strip");
+            check(strip !== null && strip.edge === Qt.LeftEdge
+                  && Math.abs(edit.trackStrip.width - edit.stripWidth.pixels) < 1, "the track strip has its own width");
+            const stripToggle = edit.editActions[21];
+            stripToggle.trigger();
+            check(!edit.stripShown && !edit.trackStrip.shown && edit.trackStrip.width === 0, "hide the track strip");
+            stripToggle.trigger();
+            check(edit.stripShown && edit.trackStrip.shown, "show the track strip again");
             // Dragging the velocity lane's edge up makes it taller, but
             // never so tall the notes lose their last three rows.
             const velocity = window.pageStack.currentItem.velocitySize;
