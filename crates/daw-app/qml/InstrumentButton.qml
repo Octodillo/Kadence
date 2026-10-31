@@ -32,6 +32,11 @@ QQC2.ToolButton {
     QQC2.ToolTip.visible: hovered
     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
 
+    // Closes the menu, if open.
+    function dismiss(): void {
+        menu.dismiss();
+    }
+
     onClicked: {
         Instruments.refresh();
         menu.popup(button, 0, button.height);

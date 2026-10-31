@@ -14,6 +14,7 @@ Kirigami.ApplicationWindow {
     // Set from C++ (see kadence.cpp).
     required property var aboutData
     required property bool smokeTest
+    required property bool benchmark
     required property string screenshotDir
 
     // A project that was never named or saved has an empty name. This is %1
@@ -100,6 +101,15 @@ Kirigami.ApplicationWindow {
             icon.name: "document-open"
             shortcut: StandardKey.Open
             onTriggered: openDialog.open()
+        },
+        Kirigami.Action {
+            // A project is a folder. A file dialog can't pick one whose name
+            // ends in .kadence (the filter makes it look like a file), and
+            // without the project file inside it there's nothing to pick,
+            // so offer the folder itself too.
+            text: i18nc("@action:inmenu", "Open Project Folder…")
+            icon.name: "folder-open"
+            onTriggered: openFolderDialog.open()
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Save")
@@ -208,6 +218,14 @@ Kirigami.ApplicationWindow {
         onAccepted: {
             const url = selectedFile;
             root.whenChangesHandled(() => root.opened(Project.openProject(url), url));
+        }
+    }
+
+    FolderDialog {
+        id: openFolderDialog
+        title: i18nc("@title:window", "Open Project Folder")
+        onAccepted: {
+            root.notify(Project.openProject(selectedFolder));
         }
     }
 
@@ -602,6 +620,14 @@ Kirigami.ApplicationWindow {
     Loader {
         active: root.smokeTest || root.screenshotDir !== ""
         sourceComponent: SelfTest {
+            window: root
+        }
+    }
+
+    // `--benchmark`: frame times while scrolling a large project.
+    Loader {
+        active: root.benchmark
+        sourceComponent: Benchmark {
             window: root
         }
     }

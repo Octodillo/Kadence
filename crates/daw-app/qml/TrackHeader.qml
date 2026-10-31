@@ -28,6 +28,21 @@ Column {
     readonly property bool expanded: revision >= 0 ? Automation.expanded(index) : false
     readonly property int laneCount: revision >= 0 ? Automation.laneCount(index) : 0
 
+    // The list reuses headers that scroll out of view for other tracks. A
+    // hidden item keeps its focus and open menus, so close them, or the
+    // next track shown here would be renamed, moved or deleted instead.
+    ListView.onPooled: {
+        nameField.focus = false;
+        nameField.visible = false;
+        menu.dismiss();
+        inputMenu.dismiss();
+        instrumentButton.dismiss();
+        midiInputButton.dismiss();
+        for (let i = 0; i < lanes.count; ++i) {
+            lanes.itemAt(i).dismiss();
+        }
+    }
+
     QQC2.ItemDelegate {
         id: header
 
@@ -170,6 +185,7 @@ Column {
             }
 
             InstrumentButton {
+                id: instrumentButton
                 Layout.alignment: Qt.AlignVCenter
                 Layout.maximumWidth: Kirigami.Units.gridUnit * 5
                 visible: header.kind === 1
@@ -180,6 +196,7 @@ Column {
             }
 
             MidiInputButton {
+                id: midiInputButton
                 Layout.alignment: Qt.AlignVCenter
                 visible: header.kind === 1
                 trackIndex: header.index
@@ -362,6 +379,7 @@ Column {
 
     // The lanes' headers, one per lane row the timeline shows.
     Repeater {
+        id: lanes
         model: row.expanded ? Math.max(1, row.laneCount) : 0
         delegate: LaneHeader {
             required property int index
