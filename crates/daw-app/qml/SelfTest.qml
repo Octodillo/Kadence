@@ -15,6 +15,8 @@ Item {
     property int step: 0
     property Item settingsPage
     property int failures: 0
+    // Made by TestHelper.makeFilesTest().
+    property string filesDir
     property var browser
     property var picked: null
     // Times steps have asked to be run again.
@@ -279,6 +281,80 @@ Item {
             check(refused.context === Project.ExportContext && refused.reason === Project.EmptyRange,
                   "empty range refused");
             window.openExport().close();
+        },
+        () => {
+            // A project with a file outside it and a missing one.
+            filesDir = TestHelper.makeFilesTest();
+            check(filesDir !== "", "make the files test project");
+            const url = "file://" + filesDir + "/Files";
+            const result = Project.openProject(url);
+            check(result.context === undefined, "open the files test project");
+            check(Project.recentProjects.length === 1 && Project.recentProjects[0] === filesDir + "/Files",
+                  "an opened project is recent");
+            check(Project.missingCount === 1 && Project.missingFiles[0] === filesDir + "/moved/snare.wav",
+                  "missing file found");
+            check(Project.missingClipCount(0) === 1, "missing file's clips counted");
+            check(Project.externalCount === 1, "file outside the project found");
+            window.opened(result, url);
+            check(window.relinkDialog.visible, "relink dialog offered");
+        },
+        () => {
+            shoot(window.title, "relink");
+        },
+        () => {
+            check(Project.relink(0, "file://" + filesDir + "/found/snare.wav") === 1, "relink");
+            check(Project.missingCount === 0, "nothing missing after relink");
+            check(!window.relinkDialog.opened, "relink dialog closes when nothing is missing");
+            check(Project.undoText === "Relink Audio" && Project.undoText in editNames.names, "relink undoes");
+            check(Project.externalCount === 2, "both files are outside the project");
+            check(Project.collectFiles() === 2, "collect copies both files");
+            check(Project.externalCount === 0, "nothing outside the project after collect");
+            check(Project.undoText === "Collect Audio Files" && Project.undoText in editNames.names,
+                  "collect undoes");
+            Project.undo();
+            check(Project.externalCount === 2, "undo collect");
+            Project.redo();
+            check(Project.externalCount === 0, "redo collect");
+            // Unsaved changes: replacing the project asks first.
+            check(Project.modified, "collect is an unsaved change");
+            window.fileActions[0].trigger();
+            check(window.unsavedDialog.visible, "New asks about unsaved changes");
+        },
+        () => {
+            shoot(window.title, "unsaved");
+        },
+        () => {
+            window.unsavedDialog.reject();
+            check(Project.trackCount === 1, "cancel keeps the project");
+            window.fileActions[0].trigger();
+            window.unsavedDialog.discarded();
+            check(!window.unsavedDialog.opened, "discard closes the question");
+            check(Project.trackCount === 0 && !Project.modified, "discard makes the new project");
+            check(!TestHelper.fileExists("file://" + filesDir + "/Files/Files.kadence.autosave"),
+                  "discarding removes the autosave");
+        },
+        () => {
+            // The welcome placeholder lists the recent project.
+            shoot(window.title, "welcome");
+            check(TestHelper.offerTestRecovery(), "leave unsaved work behind");
+            Project.tick();
+            check(Project.recoveryCount === 1 && Project.recoveryName(0) === "", "unsaved untitled work offered");
+            window.recoveryDialog.open();
+        },
+        () => {
+            shoot(window.title, "recover");
+        },
+        () => {
+            const result = Project.recoverSession(0);
+            check(result.context === undefined, "recover");
+            check(Project.trackCount === 1 && Project.trackName(0) === "Recovered", "recovered tracks");
+            check(Project.modified && !Project.savedBefore, "recovered work is unsaved");
+            check(Project.recoveryCount === 0 && !window.recoveryDialog.opened, "nothing left to recover");
+            // Open Recent goes through the same question.
+            window.openRecent(0);
+            check(window.unsavedDialog.visible, "Open Recent asks about unsaved changes");
+            window.unsavedDialog.discarded();
+            check(Project.name === "Files" && Project.trackCount === 1, "open recent");
         },
         () => {
             settingsPage = window.openSettings();
