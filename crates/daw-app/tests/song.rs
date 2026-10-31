@@ -468,10 +468,14 @@ fn play(doc: &mut Document, plugin: DeviceId, n: usize) -> AudioData {
         .expect("open the plugin's editor");
     assert!(session.plugin_editor_open(plugin));
     let mut reported = false;
-    for _ in 0..400 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
         let mut outs: [&mut [f32]; 2] = [&mut l[..], &mut r[..]];
         proc.process(BLOCK, &[], &mut outs, &events);
-        if session.tick().state_changed.contains(&plugin) {
+        let report = session.tick();
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.warnings, [], "the editor opens without warnings");
+        if report.state_changed.contains(&plugin) {
             reported = true;
             break;
         }
