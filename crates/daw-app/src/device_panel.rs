@@ -550,6 +550,9 @@ pub struct AppDevicePanel {
     /// Counts plugin snapshot changes, so the view refreshes when a plugin
     /// loads or its own values change.
     loads: Cell<u64>,
+    /// [`AppState::plugin_values_epoch`](crate::state::AppState) when the
+    /// snapshot was taken.
+    epoch: Cell<u64>,
 }
 
 impl Default for AppDevicePanel {
@@ -561,6 +564,7 @@ impl Default for AppDevicePanel {
             inner,
             plugins,
             loads: Cell::new(0),
+            epoch: Cell::new(0),
         }
     }
 }
@@ -598,6 +602,11 @@ impl AppDevicePanel {
     fn update_plugins(&self) {
         let device = self.inner.device();
         let changed = crate::state::with(|s| {
+            // A plugin's editor may have moved its values without the
+            // document changing.
+            if self.epoch.replace(s.plugin_values_epoch) != s.plugin_values_epoch {
+                self.plugins.clear();
+            }
             let revision = (s.doc_serial << 40) ^ s.doc.revision();
             self.plugins.update(s.engine.session(), device, revision)
         });

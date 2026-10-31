@@ -6,7 +6,8 @@
 //! clip with notes on an instrument track (which starts with the synth), a
 //! tempo change, effect inserts (one of them a CLAP plugin running in its
 //! sandbox host), a bus fed by a send, and volume automation. Then it checks
-//! undo and redo, plays the song live, exports it to WAV and FLAC the way the
+//! undo and redo, plays the song live (opening and closing the plugin's own
+//! editor, headless), exports it to WAV and FLAC the way the
 //! app's Export Song does, swaps the instrument to the sampler and back,
 //! saves, reopens a moved copy, and checks that what comes out is
 //! music-shaped: not silent, each part audible where it should be, and the
@@ -459,6 +460,27 @@ fn play(doc: &mut Document, plugin: DeviceId, n: usize) -> AudioData {
         assert!(report.error.is_none(), "{:?}", report.error);
         assert_eq!(report.warnings, [], "the song plays without warnings");
     }
+    // The plugin's own editor: the test plugin's opens no window, and
+    // showing it reports a state change, as a knob turned in it would.
+    assert!(session.plugin_has_editor(plugin));
+    session
+        .open_plugin_editor(plugin, "DAW Test Gain — Pluck")
+        .expect("open the plugin's editor");
+    assert!(session.plugin_editor_open(plugin));
+    let mut reported = false;
+    for _ in 0..400 {
+        let mut outs: [&mut [f32]; 2] = [&mut l[..], &mut r[..]];
+        proc.process(BLOCK, &[], &mut outs, &events);
+        if session.tick().state_changed.contains(&plugin) {
+            reported = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(reported, "the editor's change reaches the app");
+    session.close_plugin_editor(plugin);
+    assert!(!session.plugin_editor_open(plugin));
+
     let states = session.plugin_states();
     assert_eq!(states.len(), 1, "the plugin has a state to save");
     for s in states {

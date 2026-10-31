@@ -64,6 +64,10 @@ pub struct AppState {
     pub editor_title_format: String,
     /// The master track's name, for editor titles, in the user's language.
     pub master_name: String,
+    /// Bumped when plugins' own values may have changed without the
+    /// document saying so (an editor closed, a state recorded), so the
+    /// device panel reads them again.
+    pub plugin_values_epoch: u64,
     /// Which MIDI sources get ports of their own.
     pub midi: MidiSettings,
     /// How often a changed project is autosaved; `None` turns it off.
@@ -161,6 +165,7 @@ impl AppState {
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
             plugin_changes: std::collections::HashMap::new(),
+            plugin_values_epoch: 0,
             editor_title_format: "%1 — %2".into(),
             master_name: "Master".into(),
             midi: MidiSettings::default(),
@@ -286,6 +291,7 @@ impl AppState {
         if let Some(session) = self.engine.session_mut() {
             session.close_plugin_editor(device);
         }
+        self.plugin_values_epoch += 1;
         self.touch();
     }
 
@@ -390,7 +396,10 @@ impl AppState {
                 self.doc.seal();
                 match result {
                     // So the next report compares against this state.
-                    Ok(_) => self.sync(),
+                    Ok(_) => {
+                        self.plugin_values_epoch += 1;
+                        self.sync();
+                    }
                     // Removed since it reported: nothing to keep the state for.
                     Err(daw_model::ModelError::DeviceNotFound(_)) => {}
                     Err(e) => self.report(e.into()),
