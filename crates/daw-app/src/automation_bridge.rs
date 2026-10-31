@@ -63,17 +63,25 @@ pub mod qobject {
         /// or the parameter's plain value.
         #[qinvokable]
         fn lane_value(self: &Automation, track: i32, lane: i32) -> f64;
-        /// Whether the lane plays its points, so its control follows them
-        /// and can't be moved.
+        /// Whether the lane plays its points, so its control follows them.
         #[qinvokable]
         fn lane_following(self: &Automation, track: i32, lane: i32) -> bool;
+        /// Whether moving the lane's control during playback records over
+        /// the lane, so it can move while the lane follows its points.
+        #[qinvokable]
+        fn lane_writes(self: &Automation, track: i32, lane: i32) -> bool;
+        /// The user grabbed the lane's control (also around a key press):
+        /// starts an undo step, and a take when writing during playback.
+        #[qinvokable]
+        fn begin_lane_control(self: Pin<&mut Automation>, track: i32, lane: i32);
         /// Moves what the lane controls (fader, pan, send, device
-        /// parameter) to `position` on its scale. Moves until
-        /// `endLaneControl` are one undo step.
+        /// parameter) to `position` on its scale, as the same control on
+        /// the Mix page or device panel would.
         #[qinvokable]
         fn set_lane_position(self: Pin<&mut Automation>, track: i32, lane: i32, position: f64);
+        /// The user let go of the lane's control.
         #[qinvokable]
-        fn end_lane_control(self: Pin<&mut Automation>);
+        fn end_lane_control(self: Pin<&mut Automation>, track: i32, lane: i32);
         /// For device-parameter lanes, how ValueText words the value: the
         /// control kind, the unit and a choice parameter's labels (see
         /// `ParamDesc`); empty for other lanes.
@@ -199,20 +207,22 @@ impl qobject::Automation {
         state::with(|s| s.lane_control(track, lane).is_some_and(|c| c.following))
     }
 
-    // Not through `edit`: that bumps `revision`, which re-reads every
-    // header, on each step of a drag. The header re-reads its own value.
-    fn set_lane_position(self: Pin<&mut Self>, track: i32, lane: i32, position: f64) {
-        state::with(|s| {
-            if let Err(e) = s.set_lane_control(track, lane, position) {
-                s.report(e);
-            }
-            s.sync();
-            s.touch();
-        });
+    fn lane_writes(&self, track: i32, lane: i32) -> bool {
+        state::with(|s| s.lane_control(track, lane).is_some_and(|c| c.writes))
     }
 
-    fn end_lane_control(self: Pin<&mut Self>) {
-        state::with(|s| s.end_lane_control());
+    // These play the change and bump the view's revision themselves (see
+    // `AppState::control_lane`); the lanes' own revision doesn't change.
+    fn begin_lane_control(self: Pin<&mut Self>, track: i32, lane: i32) {
+        state::with(|s| s.begin_lane_control(track, lane));
+    }
+
+    fn set_lane_position(self: Pin<&mut Self>, track: i32, lane: i32, position: f64) {
+        state::with(|s| s.set_lane_control(track, lane, position));
+    }
+
+    fn end_lane_control(self: Pin<&mut Self>, track: i32, lane: i32) {
+        state::with(|s| s.end_lane_control(track, lane));
     }
 
     fn lane_control_kind(&self, track: i32, lane: i32) -> QString {

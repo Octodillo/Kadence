@@ -32,6 +32,8 @@ Rectangle {
     readonly property int kind: revision >= 0 && !placeholder ? Automation.laneKind(track, lane) : -1
     property real value: 0
     property bool following: false
+    // Moving the control during playback records over the lane.
+    property bool writes: false
     // How a device parameter's value is worded (see ValueText.param).
     readonly property string paramControl: kind === 3 && revision >= 0 ? Automation.laneControlKind(track, lane) : ""
     readonly property string paramUnit: kind === 3 && revision >= 0 ? Automation.laneUnit(track, lane) : ""
@@ -43,6 +45,7 @@ Rectangle {
         }
         value = Automation.laneValue(track, lane);
         following = Automation.laneFollowing(track, lane);
+        writes = Automation.laneWrites(track, lane);
         if (!levelSlider.pressed) {
             levelSlider.value = Automation.lanePosition(track, lane);
         }
@@ -60,13 +63,24 @@ Rectangle {
         running: laneHeader.following && Project.playing && laneHeader.visible
         onTriggered: laneHeader.readValue()
     }
+    // So does moving the playhead while stopped.
+    Connections {
+        target: Project
+        enabled: laneHeader.following && !Project.playing
+        function onPositionTextChanged() {
+            laneHeader.readValue();
+        }
+        function onTimeTextChanged() {
+            laneHeader.readValue();
+        }
+    }
 
     // The value with its unit, for the tooltip and screen readers.
     readonly property string valueText: {
         switch (kind) {
         case 0: // volume
         case 2: // send
-            return ValueText.level(value, ValueText.faderFloorDb);
+            return ValueText.level(value);
         case 1:
             return ValueText.pan(value);
         case 3:
@@ -129,12 +143,29 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
             from: 0
             to: 1
-            enabled: !laneHeader.following
-            onMoved: {
+            enabled: !laneHeader.following || laneHeader.writes
+            // A press and its release are one gesture, and one undo step;
+            // a key press is a gesture of its own.
+            function move(): void {
                 Automation.setLanePosition(laneHeader.track, laneHeader.lane, value);
                 laneHeader.value = Automation.laneValue(laneHeader.track, laneHeader.lane);
             }
-            onPressedChanged: if (!pressed) Automation.endLaneControl()
+            onMoved: {
+                if (pressed) {
+                    move();
+                    return;
+                }
+                Automation.beginLaneControl(laneHeader.track, laneHeader.lane);
+                move();
+                Automation.endLaneControl(laneHeader.track, laneHeader.lane);
+            }
+            onPressedChanged: {
+                if (pressed) {
+                    Automation.beginLaneControl(laneHeader.track, laneHeader.lane);
+                } else {
+                    Automation.endLaneControl(laneHeader.track, laneHeader.lane);
+                }
+            }
             Accessible.name: laneHeader.laneText
             Accessible.description: laneHeader.valueText
             // Disabled controls get no hover, so only while it can move.

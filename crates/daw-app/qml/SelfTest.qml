@@ -164,16 +164,24 @@ Item {
             // An off lane's control sets the fader; a playing one follows
             // its points and can't be moved.
             check(!Automation.laneFollowing(0, 0), "an off lane doesn't follow its points");
+            check(!Automation.laneWrites(0, 0), "a lane in read mode doesn't write");
             const volume = Automation.laneValue(0, 0);
+            Automation.beginLaneControl(0, 0);
             Automation.setLanePosition(0, 0, 0.25);
             Automation.setLanePosition(0, 0, 1);
-            Automation.endLaneControl();
+            Automation.endLaneControl(0, 0);
             Project.tick();
             check(Automation.laneValue(0, 0) > volume && Automation.lanePosition(0, 0) === 1, "lane control sets the volume");
+            // The next gesture (a key press) is its own undo step.
+            Automation.beginLaneControl(0, 0);
+            Automation.setLanePosition(0, 0, 0.5);
+            Automation.endLaneControl(0, 0);
+            Project.undo();
+            check(Automation.lanePosition(0, 0) === 1, "each lane control gesture is its own undo step");
             Project.undo();
             check(Automation.laneValue(0, 0) === volume, "a lane control drag is one undo step");
             Automation.setLaneMode(0, 0, 2);
-            check(Automation.laneMode(0, 0) === 2, "lane in write mode");
+            check(Automation.laneMode(0, 0) === 2 && Automation.laneWrites(0, 0), "lane in write mode writes");
             Automation.setLaneMode(0, 0, 1);
             Project.undo();
             Project.undo();

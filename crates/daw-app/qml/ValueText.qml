@@ -6,7 +6,8 @@ import QtQuick
 
 // Words control values with their units, in the user's language, the same
 // way wherever they show: levels, pan positions and device parameters.
-// A singleton: ValueText.level(-6, ValueText.faderFloorDb).
+// A singleton: ValueText.level(-6). It words values as the channel strip
+// (levels, pan) and device panel (parameters) do.
 QtObject {
     // daw-app mixer::SILENT_DB: a fader or send at or below it is silent.
     readonly property real faderFloorDb: -60
@@ -23,10 +24,11 @@ QtObject {
         return (v > 0 ? "+" : "") + number(v, decimals);
     }
 
-    // A level in dB; at or below `floorDb` it is silence.
-    function level(db: real, floorDb: real): string {
-        return db <= floorDb ? i18nc("@label silence in decibels", "−∞ dB")
-                             : i18nc("@label decibels", "%1 dB", signed(Math.round(db * 10) / 10, 1));
+    // A fader or send level in dB, signed; at or below faderFloorDb it is
+    // silence.
+    function level(db: real): string {
+        return db <= faderFloorDb ? i18nc("@label fader at silence", "−∞")
+                                  : i18nc("@label decibels", "%1 dB", signed(Math.round(db * 10) / 10, 1));
     }
 
     // A pan position from -1 (left) to 1 (right).
@@ -54,7 +56,8 @@ QtObject {
         }
         switch (unit) {
         case "dB":
-            return level(value, deviceFloorDb);
+            return value <= deviceFloorDb ? i18nc("@label silence in decibels", "−∞ dB")
+                                          : i18nc("@label decibels", "%1 dB", number(value, 1));
         case "Hz":
             return value >= 1000 ? i18nc("@label kilohertz", "%1 kHz", number(value / 1000, 2))
                                  : i18nc("@label hertz", "%1 Hz", number(value, 0));
