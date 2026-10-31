@@ -85,6 +85,16 @@ pub mod qobject {
         /// Appends the effect at `effect` in `effect_names` to the strip.
         #[qinvokable]
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
+        /// Appends plugin `plugin` (a plugin id) of `format` ("clap",
+        /// "lv2" or "vst3") to the strip, as a device called `name`.
+        #[qinvokable]
+        fn add_plugin_insert(
+            self: Pin<&mut Mixer>,
+            row: i32,
+            format: &QString,
+            plugin: &QString,
+            name: &QString,
+        ) -> bool;
         #[qinvokable]
         fn remove_insert(self: Pin<&mut Mixer>, row: i32, insert: i32);
         /// Swaps the strip's instrument for row `choice` of `Instruments`
@@ -392,6 +402,29 @@ impl qobject::Mixer {
             return false;
         };
         let added = self.as_mut().rust_mut().mixer.add_insert(id, &device);
+        if added {
+            self.reload();
+        }
+        added
+    }
+
+    fn add_plugin_insert(
+        mut self: Pin<&mut Self>,
+        row: i32,
+        format: &QString,
+        plugin: &QString,
+        name: &QString,
+    ) -> bool {
+        let format = daw_plugins::kind_from_name(&format.to_string());
+        let (Some(id), Some(format)) = (self.strip_id(row), format) else {
+            return false;
+        };
+        let added = self.as_mut().rust_mut().mixer.add_plugin_insert(
+            id,
+            format,
+            &plugin.to_string(),
+            &name.to_string(),
+        );
         if added {
             self.reload();
         }

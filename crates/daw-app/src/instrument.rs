@@ -9,6 +9,10 @@
 //! the built-in instruments; plugin instruments join it with
 //! [`InstrumentChoices::push`] once plugins load in the session.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
+
+use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
 use daw_devices::DeviceCategory;
 use daw_model::commands::{AddDevice, AddTrack, Batch, RemoveDevice};
 use daw_model::{Command, Device, DeviceSource, Project, Track, TrackId, TrackKind};
@@ -107,19 +111,70 @@ impl InstrumentChoices {
 }
 
 /// Whether a device from `source` makes sound from notes: a built-in
-/// instrument, or any plugin (a plugin in the instrument slot is there
-/// because it was chosen as one; its descriptor isn't needed to tell).
-///
-/// Adding effects appends them, so a plugin effect lands in slot 0 only on
-/// an instrument track with an empty chain. Once plugin effects can be
-/// inserted, ask the plugin catalog here instead of assuming.
+/// instrument, or a plugin the last scan did not find to be an effect (see
+/// [`set_plugin_effects`]). A plugin that is not installed counts as an
+/// instrument: in the instrument slot it was chosen as one.
 pub fn is_instrument(source: &DeviceSource) -> bool {
     match source {
         DeviceSource::Builtin { kind } => daw_devices::devices()
             .iter()
             .any(|e| e.info.id == kind && e.info.category == DeviceCategory::Instrument),
-        DeviceSource::Plugin { .. } => true,
+        DeviceSource::Plugin { format, id } => {
+            PLUGIN_EFFECTS.with(|e| !e.borrow().contains(&(format.clone(), id.clone())))
+        }
     }
+}
+
+thread_local! {
+    /// Installed plugins that are effects, by format and id.
+    static PLUGIN_EFFECTS: RefCell<HashSet<(PluginFormatKind, String)>> =
+        RefCell::new(HashSet::new());
+}
+
+/// Records which installed plugins are effects, from a plugin scan, so a
+/// plugin effect at the start of an instrument track's chain is not taken
+/// for its instrument.
+pub fn set_plugin_effects<'a>(plugins: impl IntoIterator<Item = &'a PluginDescriptor>) {
+    let effects = plugins
+        .into_iter()
+        .filter(|d| !d.is_instrument)
+        .map(|d| (d.format.clone(), d.id.clone()))
+        .collect();
+    PLUGIN_EFFECTS.with(|e| *e.borrow_mut() = effects);
+}
+
+/// The instrument choices for the plugin instruments in `plugins`, named
+/// after them. A name more than one plugin has gets its format added, as
+/// in "Surge XT (CLAP)", and its vendor too if that is not enough.
+pub fn plugin_choices(plugins: &[PluginDescriptor]) -> Vec<InstrumentChoice> {
+    let instruments: Vec<&PluginDescriptor> = plugins.iter().filter(|d| d.is_instrument).collect();
+    let shared = |d: &PluginDescriptor, same_format: bool| {
+        instruments
+            .iter()
+            .filter(|o| o.name == d.name && (!same_format || o.format == d.format))
+            .count()
+            > 1
+    };
+    instruments
+        .iter()
+        .map(|d| {
+            let format = crate::plugins_bridge::format_label(&d.format);
+            let name = if shared(d, true) && !d.vendor.is_empty() {
+                format!("{} ({}, {format})", d.name, d.vendor)
+            } else if shared(d, false) {
+                format!("{} ({format})", d.name)
+            } else {
+                d.name.clone()
+            };
+            InstrumentChoice {
+                source: DeviceSource::Plugin {
+                    format: d.format.clone(),
+                    id: d.id.clone(),
+                },
+                name,
+            }
+        })
+        .collect()
 }
 
 /// The track's instrument: the first device of an instrument track, if it
@@ -199,6 +254,77 @@ mod tests {
 
     fn builtin(kind: &str) -> DeviceSource {
         DeviceSource::Builtin { kind: kind.into() }
+    }
+
+    fn plugin(
+        format: PluginFormatKind,
+        id: &str,
+        name: &str,
+        instrument: bool,
+    ) -> PluginDescriptor {
+        PluginDescriptor {
+            format,
+            id: id.into(),
+            name: name.into(),
+            vendor: String::new(),
+            path: std::path::PathBuf::new(),
+            is_instrument: instrument,
+            ports: (0, 2),
+        }
+    }
+
+    #[test]
+    fn plugin_choices_are_the_instruments_named_by_format_when_shared() {
+        let plugins = [
+            plugin(PluginFormatKind::Clap, "surge", "Surge XT", true),
+            plugin(PluginFormatKind::Vst3, "surge3", "Surge XT", true),
+            plugin(PluginFormatKind::Lv2, "urn:dexed", "Dexed", true),
+            plugin(PluginFormatKind::Clap, "gain", "Gain", false),
+            PluginDescriptor {
+                vendor: "One".into(),
+                ..plugin(PluginFormatKind::Clap, "one.pad", "Pad", true)
+            },
+            PluginDescriptor {
+                vendor: "Two".into(),
+                ..plugin(PluginFormatKind::Clap, "two.pad", "Pad", true)
+            },
+        ];
+        let names: Vec<String> = plugin_choices(&plugins)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Surge XT (CLAP)",
+                "Surge XT (VST3)",
+                "Dexed",
+                "Pad (One, CLAP)",
+                "Pad (Two, CLAP)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scanned_plugin_effect_is_not_an_instrument() {
+        let gain = plugin(PluginFormatKind::Clap, "gain", "Gain", false);
+        let source = DeviceSource::Plugin {
+            format: PluginFormatKind::Clap,
+            id: "gain".into(),
+        };
+        let unknown = DeviceSource::Plugin {
+            format: PluginFormatKind::Clap,
+            id: "elsewhere".into(),
+        };
+        assert!(
+            is_instrument(&source),
+            "unscanned plugins count as instruments"
+        );
+        set_plugin_effects([&gain]);
+        assert!(!is_instrument(&source));
+        assert!(is_instrument(&unknown));
+        set_plugin_effects([]);
+        assert!(is_instrument(&source));
     }
 
     fn doc_with_track(kind: TrackKind) -> (Document, TrackId) {
