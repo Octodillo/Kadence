@@ -15,6 +15,7 @@ pub mod command;
 pub mod commands;
 pub mod document;
 pub mod error;
+pub mod files;
 pub mod id;
 pub mod model;
 mod serde_util;

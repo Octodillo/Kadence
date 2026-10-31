@@ -147,6 +147,8 @@ QtObject {
                           "The audio system missed %1 cycle while recording, so the take may have a gap or click.",
                           "The audio system missed %1 cycles while recording, so the takes may have gaps or clicks.",
                           m.number);
+        case Project.AlreadyOpen:
+            return i18nc("@info", "It is open in another Kadence window.");
         }
         return "";
     }
@@ -179,6 +181,11 @@ QtObject {
             return i18nc("@info %1 is the reason, a full sentence", "That edit could not be made. %1", why);
         case Project.PlaybackContext:
             return i18nc("@info %1 is the reason, a full sentence", "Playback may be incomplete. %1", why);
+        case Project.CollectContext:
+            return i18nc("@info %1 is the reason, a full sentence",
+                         "Could not copy the audio files into the project. %1", why);
+        case Project.RecoverContext:
+            return i18nc("@info %1 is the reason, a full sentence", "Could not recover the unsaved changes. %1", why);
         case Project.ExportContext:
             switch (m.reason) {
             case Project.Exported:

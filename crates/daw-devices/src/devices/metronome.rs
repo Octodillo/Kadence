@@ -1,7 +1,7 @@
 //! Metronome click that follows the transport.
 
 use daw_core::event::ParamId;
-use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
+use daw_core::node::{CountIn, Node, PortLayout, ProcessContext, TransportState};
 use daw_core::time::{MusicalPosition, Timeline};
 
 use crate::dsp::db_to_gain;
@@ -13,15 +13,16 @@ pub static INFO: DeviceInfo = DeviceInfo {
     id: "daw.metronome",
     name: "Metronome",
     category: DeviceCategory::Utility,
-    description: "Click on every beat of the time signature while the transport plays",
+    description: "Click on every beat of the time signature while the transport plays or counts in",
 };
 
 pub const VOLUME: ParamId = 0;
 pub const BEATS_PER_BAR: ParamId = 1;
 pub const ACCENT: ParamId = 2;
 pub const PITCH: ParamId = 3;
+pub const PLAYBACK: ParamId = 4;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::new(
         VOLUME,
         "volume",
@@ -54,6 +55,8 @@ static PARAMS: &[ParamSpec] = &[
         ParamUnit::Hertz,
     )
     .log(),
+    // Off: click only during a count-in.
+    ParamSpec::toggle(PLAYBACK, "playback", "Click During Playback", true),
 ];
 
 /// Accented clicks are this much higher and louder.
@@ -140,10 +143,20 @@ impl Segmented for Metronome {
         let volume = db_to_gain(self.params.get(VOLUME)) as f32;
         let group = self.params.get(BEATS_PER_BAR).round() as i64;
         let accent = self.params.get_bool(ACCENT);
+        let playback = self.params.get_bool(PLAYBACK);
         let per_sample = t.beats_per_sample();
         for i in start..end {
             let pos = t.position.0 + i as i64;
-            if !t.playing || pos < 0 {
+            if let Some(c) = &t.count_in {
+                let at = c.elapsed + i as i64;
+                if let Some(beat) = count_in_beat(c, at) {
+                    self.trigger(accent && c.is_downbeat(beat));
+                }
+                // Playback starts on a fresh beat: a click there if it is
+                // on one.
+                self.last_beat = None;
+                self.expected = None;
+            } else if !t.playing || pos < 0 || !playback {
                 self.last_beat = None;
                 self.expected = None;
             } else {
@@ -177,6 +190,20 @@ impl Segmented for Metronome {
             output(ctx, i, y, y);
         }
     }
+}
+
+/// The count-in click that starts on sample `at` of the count-in, if one
+/// does: click `k` sounds on the first sample at or after `k * beat_len`.
+fn count_in_beat(c: &CountIn, at: i64) -> Option<u32> {
+    if at < 0 || at >= c.len() || c.beat_len <= 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let index = |s: i64| (s as f64 / c.beat_len).floor();
+    let k = index(at);
+    let starts = at == 0 || k > index(at - 1);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    (starts && k < f64::from(c.beats)).then_some(k as u32)
 }
 
 /// The beat that `beats` (quarter notes) falls in, as (bar, beat in bar), with

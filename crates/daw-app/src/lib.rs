@@ -8,6 +8,8 @@
 pub mod arrange_view;
 pub mod bridge;
 mod demo;
+pub mod device_panel;
+pub mod device_panel_bridge;
 pub mod engine;
 pub mod export;
 // `Exporter.start` takes the export dialog's fields one by one.
@@ -24,11 +26,13 @@ pub mod piano_roll;
 pub mod plugins_bridge;
 pub mod project;
 mod recording;
+pub mod recovery;
 pub mod session_mixer;
 pub mod settings;
 pub mod settings_bridge;
 pub mod state;
 mod test_helper;
+mod transport;
 
 /// Runs a plugin sandbox host or scanner if the arguments ask for one
 /// (`--plugin-host <socket>` or `--scan <format> <bundle>`), which the

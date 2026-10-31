@@ -151,6 +151,7 @@ QQC2.ItemDelegate {
             instrument: header.instrument
             currentChoice: header.revision >= 0 ? Project.trackInstrumentChoice(header.index) : -1
             onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
+            onSettingsRequested: DevicePanel.open(Project.trackInstrumentDevice(header.index))
         }
 
         MidiInputButton {

@@ -22,7 +22,7 @@ pub const WIDTH: ParamId = 2;
 pub const MIX: ParamId = 3;
 pub const PRE_DELAY: ParamId = 4;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::new(SIZE, "size", "Room Size", 0.0, 1.0, 0.6, ParamUnit::Percent),
     ParamSpec::new(
         DAMPING,

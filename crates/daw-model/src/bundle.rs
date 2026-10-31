@@ -473,6 +473,12 @@ pub fn read_project(path: &Path) -> Result<Project, FormatError> {
     from_json(&json)
 }
 
+/// Writes a project file on its own, atomically, such as the autosave of a
+/// project that has no bundle yet. Read it back with [`read_project`].
+pub fn write_project(path: &Path, project: &Project) -> Result<(), FormatError> {
+    write_atomic(path, path, project)
+}
+
 /// Writes to a temporary file next to `path`, syncs it, then renames it over
 /// `path`, so a crash never leaves a half-written project. The new file keeps
 /// the permissions of `path`, or of `like` if `path` doesn't exist yet. A

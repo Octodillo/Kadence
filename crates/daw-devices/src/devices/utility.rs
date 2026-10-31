@@ -21,7 +21,7 @@ pub const WIDTH: ParamId = 2;
 pub const INVERT_L: ParamId = 3;
 pub const INVERT_R: ParamId = 4;
 
-static PARAMS: &[ParamSpec] = &[
+pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::new(GAIN, "gain", "Gain", -70.0, 24.0, 0.0, ParamUnit::Decibels),
     ParamSpec::new(PAN, "pan", "Pan", -1.0, 1.0, 0.0, ParamUnit::Pan),
     ParamSpec::new(WIDTH, "width", "Width", 0.0, 2.0, 1.0, ParamUnit::Percent),
