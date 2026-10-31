@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use daw_plugin_window::HostWindow;
+use daw_plugin_window::{HostWindow, WindowEvent};
 use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait, ViewType};
 use vst3::Steinberg::{
@@ -10,23 +10,9 @@ use vst3::Steinberg::{
     kPlatformTypeX11EmbedWindowID, kResultFalse, kResultOk, kResultTrue, tresult,
 };
 use vst3::{Class, ComPtr, ComWrapper};
-use x11rb::connection::Connection;
-use x11rb::protocol::Event;
 
 use crate::host::host;
 use crate::runloop::forward_run_loop;
-
-/// The window the editor lives in. Shared with the frame so `resizeView` can resize it.
-struct Window {
-    host: HostWindow,
-    resizable: bool,
-}
-
-impl Window {
-    fn resize(&self, width: u32, height: u32) {
-        self.host.resize(width, height, !self.resizable);
-    }
-}
 
 fn rect_size(r: &ViewRect) -> (u32, u32) {
     (
@@ -39,7 +25,8 @@ fn rect_size(r: &ViewRect) -> (u32, u32) {
 /// host context. Both forward to the same process-wide loop.
 #[derive(Default)]
 struct PlugFrame {
-    window: Mutex<Option<Arc<Window>>>,
+    /// The window the editor lives in, so `resizeView` can resize it.
+    window: Mutex<Option<Arc<HostWindow>>>,
 }
 
 impl Class for PlugFrame {
@@ -65,7 +52,7 @@ forward_run_loop!(PlugFrame, self => host().run_loop);
 pub struct Editor {
     view: ComPtr<IPlugView>,
     frame: ComWrapper<PlugFrame>,
-    window: Arc<Window>,
+    window: Arc<HostWindow>,
 }
 
 impl Editor {
@@ -98,11 +85,8 @@ impl Editor {
         };
         let (width, height) = rect_size(&rect);
 
-        let window = Arc::new(Window {
-            host: HostWindow::new(title, width, height, !resizable)?,
-            resizable,
-        });
-        let id = window.host.id();
+        let window = Arc::new(HostWindow::new(title, width, height, !resizable)?);
+        let id = window.id();
 
         let frame = ComWrapper::new(PlugFrame::default());
         *frame.window.lock().unwrap() = Some(window.clone());
@@ -119,7 +103,7 @@ impl Editor {
                 return Err("editor failed to attach".into());
             }
         }
-        window.host.show();
+        window.show();
 
         Ok(Editor {
             view,
@@ -129,7 +113,7 @@ impl Editor {
     }
 
     pub fn set_title(&self, title: &str) {
-        self.window.host.set_title(title);
+        self.window.set_title(title);
     }
 
     /// Handles window events and the plugin's run-loop callbacks. Returns false once the user
@@ -137,17 +121,17 @@ impl Editor {
     pub fn pump(&mut self) -> bool {
         let mut open = true;
         let mut resized = None;
-        let window = &self.window.host;
-        while let Ok(Some(event)) = window.connection().poll_for_event() {
+        while let Some(event) = self.window.poll() {
             match event {
-                event if window.is_close(&event) => open = false,
-                Event::ConfigureNotify(c) if c.window == window.id() => {
-                    resized = Some((c.width as i32, c.height as i32));
+                WindowEvent::Closed => {
+                    open = false;
+                    break;
                 }
-                _ => {}
+                WindowEvent::Resized(w, h) => resized = Some((w as i32, h as i32)),
+                WindowEvent::Other(_) => {}
             }
         }
-        if let (Some((w, h)), true) = (resized, self.window.resizable) {
+        if let (Some((w, h)), false) = (resized, self.window.is_fixed()) {
             let mut current = ViewRect {
                 left: 0,
                 top: 0,

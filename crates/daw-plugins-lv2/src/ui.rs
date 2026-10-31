@@ -10,15 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use daw_core::plugin::PluginError;
-use daw_plugin_window::HostWindow;
+use daw_plugin_window::x11rb::connection::Connection;
+use daw_plugin_window::x11rb::protocol::Event as XEvent;
+use daw_plugin_window::x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _};
+use daw_plugin_window::{HostWindow, WindowEvent};
 use lv2_sys::{
     LV2_Extension_Data_Feature, LV2_Feature, LV2UI_Descriptor, LV2UI_Handle, LV2UI_Idle_Interface,
     LV2UI_Resize,
 };
 use rtrb::{Consumer, Producer};
-use x11rb::connection::Connection;
-use x11rb::protocol::Event as XEvent;
-use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _};
 
 use crate::atom::Urids;
 use crate::{ring, uri_to_path};
@@ -34,7 +34,6 @@ const FIXED_SIZE: &str = "http://lv2plug.in/ns/extensions/ui#fixedSize";
 const URID_MAP: &str = "http://lv2plug.in/ns/ext/urid#map";
 const URID_UNMAP: &str = "http://lv2plug.in/ns/ext/urid#unmap";
 const OPTIONS: &str = "http://lv2plug.in/ns/ext/options#options";
-/// Window class, so Plasma groups plugin windows with the app.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UiKind {
@@ -136,29 +135,27 @@ struct X11 {
     host: HostWindow,
     /// The UI's widget, once it has made one.
     child: u32,
-    size: (u16, u16),
-    /// The UI may not be resized by the user (see `UiInfo::fixed_size`).
-    fixed: bool,
+    /// The UI has asked for a size, or the window took its widget's.
+    sized: bool,
 }
 
 impl X11 {
+    /// A `fixed` UI may not be resized by the user (see `UiInfo::fixed_size`).
     fn open(title: &str, fixed: bool) -> Result<Self, String> {
         // The size is a placeholder until the UI asks for one or makes its widget.
         Ok(Self {
-            host: HostWindow::new(title, 400, 300, false)?,
+            host: HostWindow::new(title, 400, 300, fixed)?,
             child: 0,
-            size: (0, 0),
-            fixed,
+            sized: false,
         })
     }
 
-    fn resize(&mut self, w: u16, h: u16) {
-        if (w, h) == self.size || w == 0 || h == 0 {
+    fn resize(&mut self, w: u32, h: u32) {
+        if w == 0 || h == 0 || (self.sized && (w, h) == self.host.size()) {
             return;
         }
-        self.size = (w, h);
-        // A fixed UI's size hints follow, so KWin offers no resize handles.
-        self.host.resize(u32::from(w), u32::from(h), self.fixed);
+        self.sized = true;
+        self.host.resize(w, h);
     }
 }
 
@@ -230,7 +227,7 @@ unsafe extern "C" fn host_resize(handle: *mut c_void, width: c_int, height: c_in
     let c = unsafe { &mut *handle.cast::<Controller>() };
     match &mut c.x11 {
         Some(x) => {
-            x.resize(width.clamp(1, 16384) as u16, height.clamp(1, 16384) as u16);
+            x.resize(width.max(0) as u32, height.max(0) as u32);
             0
         }
         None => 1,
@@ -513,11 +510,11 @@ impl Editor {
         }
         // SAFETY: the controller is ours and the UI is not running right now.
         if let Some(x) = unsafe { (*self.controller).x11.as_mut() } {
-            if x.size == (0, 0) && x.child != 0 {
+            if !x.sized && x.child != 0 {
                 // The UI did not ask for a size: use its widget's.
                 let geometry = x.host.connection().get_geometry(x.child);
                 if let Ok(Ok(g)) = geometry.map(|r| r.reply()) {
-                    x.resize(g.width, g.height);
+                    x.resize(u32::from(g.width), u32::from(g.height));
                 }
             }
             x.host.show();
@@ -610,44 +607,40 @@ impl Editor {
             return false;
         }
         while let Some(x) = unsafe { (*self.controller).x11.as_mut() } {
-            let Ok(Some(ev)) = x.host.connection().poll_for_event() else {
+            let Some(ev) = x.host.poll() else {
                 break;
             };
             let resized = match ev {
-                ev if x.host.is_close(&ev) => return false,
-                XEvent::ConfigureNotify(e) if e.window == x.host.id() => {
-                    if x.fixed {
-                        // A fixed-size UI keeps its size even if the window
-                        // manager ignores the size hints, and `size` stays the
-                        // size the hints pin.
-                        None
-                    } else {
-                        x.size = (e.width, e.height);
-                        if x.child != 0 {
-                            let aux = ConfigureWindowAux::new()
-                                .width(u32::from(e.width))
-                                .height(u32::from(e.height));
-                            let conn = x.host.connection();
-                            let _ = conn.configure_window(x.child, &aux);
-                            let _ = conn.flush();
-                        }
-                        Some((e.width, e.height))
+                WindowEvent::Closed => return false,
+                // A fixed-size UI keeps its size even if the window manager
+                // ignores the size hints.
+                WindowEvent::Resized(..) if x.host.is_fixed() => None,
+                WindowEvent::Resized(w, h) => {
+                    if x.child != 0 {
+                        let aux = ConfigureWindowAux::new().width(w).height(h);
+                        let conn = x.host.connection();
+                        let _ = conn.configure_window(x.child, &aux);
+                        let _ = conn.flush();
                     }
+                    Some((w, h))
                 }
                 // A fixed-size UI that resizes its own widget, without asking
                 // through ui:resize: the window and its hints follow.
-                XEvent::ConfigureNotify(e) if x.fixed && x.child != 0 && e.window == x.child => {
-                    x.resize(e.width, e.height);
+                WindowEvent::Other(XEvent::ConfigureNotify(e))
+                    if x.host.is_fixed() && x.child != 0 && e.window == x.child =>
+                {
+                    x.resize(u32::from(e.width), u32::from(e.height));
                     None
                 }
-                _ => None,
+                WindowEvent::Other(_) => None,
             };
             // `x` is no longer used: the UI may call back into the controller.
             if let (Some((w, h)), Some(r)) = (resized, self.ui_resize) {
                 // SAFETY: the UI's own resize interface. Its `handle` field is
                 // unused; the spec passes the UI handle.
                 if let Some(f) = unsafe { (*r).ui_resize } {
-                    unsafe { f(self.handle, c_int::from(w), c_int::from(h)) };
+                    // Window sizes are at most 16384.
+                    unsafe { f(self.handle, w as c_int, h as c_int) };
                 }
             }
         }

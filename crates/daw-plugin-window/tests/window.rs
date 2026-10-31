@@ -1,9 +1,12 @@
 //! The host window's properties as another X client (a window manager, xdotool) reads them.
 //! Needs an X display; CI runs the tests under Xvfb.
 
-use daw_plugin_window::HostWindow;
+use std::time::{Duration, Instant};
+
+use daw_plugin_window::x11rb;
+use daw_plugin_window::{HostWindow, WindowEvent};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _};
+use x11rb::protocol::xproto::{Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
@@ -78,7 +81,7 @@ fn a_fixed_window_pins_its_size_and_follows_resizes() {
         (h.min_size, h.max_size),
         (Some((300, 200)), Some((300, 200)))
     );
-    window.resize(640, 480, true);
+    window.resize(640, 480);
     // Requests on two connections reach the server in no set order.
     window.connection().sync().unwrap();
     let h = hints(&conn);
@@ -86,8 +89,52 @@ fn a_fixed_window_pins_its_size_and_follows_resizes() {
         (h.min_size, h.max_size),
         (Some((640, 480)), Some((640, 480)))
     );
-    let g = conn.get_geometry(window.id()).unwrap().reply().unwrap();
-    assert_eq!((g.width, g.height), (640, 480));
+    assert_eq!(window.size(), (640, 480));
+}
+
+#[test]
+fn sizes_are_clamped_to_what_x11_allows() {
+    if !display() {
+        return;
+    }
+    let window = HostWindow::new("Clamped", 0, 0, false).unwrap();
+    assert_eq!(
+        window.size(),
+        (1, 1),
+        "a plugin asking for 0x0 gets a 1x1 window"
+    );
+    window.resize(100_000, 200);
+    assert_eq!(window.size(), (16_384, 200));
+}
+
+/// Polls `window` until `want` matches an event, for up to five seconds.
+fn wait_for(window: &HostWindow, want: impl Fn(&WindowEvent) -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match window.poll() {
+            Some(event) if want(&event) => return true,
+            Some(_) => {}
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    false
+}
+
+#[test]
+fn the_window_managers_close_request_reads_as_a_close() {
+    if !display() {
+        return;
+    }
+    let window = HostWindow::new("Close request", 300, 200, false).unwrap();
+    let (conn, _) = x11rb::connect(None).unwrap();
+    let wm_protocols = atom(&conn, "WM_PROTOCOLS");
+    let wm_delete = atom(&conn, "WM_DELETE_WINDOW");
+    // What a window manager sends when the user clicks the close button.
+    let event = ClientMessageEvent::new(32, window.id(), wm_protocols, [wm_delete, 0, 0, 0, 0]);
+    conn.send_event(false, window.id(), EventMask::NO_EVENT, event)
+        .unwrap();
+    conn.flush().unwrap();
+    assert!(wait_for(&window, |e| matches!(e, WindowEvent::Closed)));
 }
 
 #[test]
@@ -99,13 +146,8 @@ fn destroying_the_window_reads_as_a_close() {
     let (conn, _) = x11rb::connect(None).unwrap();
     conn.destroy_window(window.id()).unwrap();
     conn.flush().unwrap();
-    let mut closed = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !closed && std::time::Instant::now() < deadline {
-        match window.connection().poll_for_event().unwrap() {
-            Some(event) => closed |= window.is_close(&event),
-            None => std::thread::sleep(std::time::Duration::from_millis(5)),
-        }
-    }
-    assert!(closed, "DestroyNotify for the window is a close");
+    assert!(
+        wait_for(&window, |e| matches!(e, WindowEvent::Closed)),
+        "DestroyNotify for the window is a close"
+    );
 }

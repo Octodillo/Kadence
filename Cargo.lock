@@ -675,7 +675,6 @@ dependencies = [
  "daw-core",
  "daw-plugin-window",
  "libc",
- "x11rb",
 ]
 
 [[package]]
@@ -692,7 +691,6 @@ dependencies = [
  "lv2_raw",
  "rtrb 0.3.6",
  "tempfile",
- "x11rb",
 ]
 
 [[package]]
@@ -708,7 +706,6 @@ dependencies = [
  "rtrb 0.3.6",
  "tempfile",
  "vst3",
- "x11rb",
 ]
 
 [[package]]
