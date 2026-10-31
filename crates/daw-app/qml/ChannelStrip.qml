@@ -175,6 +175,19 @@ Item {
                                 onTriggered: Mixer.addInsert(strip.index, index)
                             }
                         }
+                        QQC2.MenuSeparator {}
+                        QQC2.MenuItem {
+                            icon.name: "preferences-plugin"
+                            text: i18nc("@action:inmenu", "Browse Plugins…")
+                            onTriggered: {
+                                // The row now: the delegate may be gone by the time a
+                                // plugin is chosen.
+                                const row = strip.index;
+                                applicationWindow().browsePlugins(2, (format, pluginId, name) => {
+                                    Mixer.addPluginInsert(row, format, pluginId, name);
+                                });
+                            }
+                        }
                     }
                 }
                 // Gain reduction of the strip's compressor.

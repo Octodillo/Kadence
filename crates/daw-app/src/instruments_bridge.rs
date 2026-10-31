@@ -23,6 +23,8 @@ pub mod qobject {
         type QAbstractListModel = crate::mixer_bridge::qobject::QAbstractListModel;
         include!("cxx-qt-lib/qhash.h");
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qvariant.h");
         type QVariant = cxx_qt_lib::QVariant;
         include!("cxx-qt-lib/qmodelindex.h");
@@ -44,6 +46,11 @@ pub mod qobject {
         /// Re-reads the list if it changed since the last read.
         #[qinvokable]
         fn refresh(self: Pin<&mut Instruments>);
+
+        /// The row of plugin `plugin` of `format` ("clap", "lv2" or
+        /// "vst3"), or -1. Call `refresh` first.
+        #[qinvokable]
+        fn row_of(self: &Instruments, format: &QString, plugin: &QString) -> i32;
     }
 
     unsafe extern "RustQt" {
@@ -129,6 +136,21 @@ impl qobject::Instruments {
         self.as_mut().end_reset_model();
         self.as_mut().set_count(count);
         self.as_mut().set_revision(revision_i32(revision));
+    }
+
+    fn row_of(&self, format: &QString, plugin: &QString) -> i32 {
+        let Some(format) = daw_plugins::kind_from_name(&format.to_string()) else {
+            return -1;
+        };
+        let source = daw_model::DeviceSource::Plugin {
+            format,
+            id: plugin.to_string(),
+        };
+        self.choices
+            .iter()
+            .position(|c| c.source == source)
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(-1)
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {

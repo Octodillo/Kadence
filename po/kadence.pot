@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/daw/issues\n"
-"POT-Creation-Date: 2026-10-31 00:46+0000\n"
+"POT-Creation-Date: 2026-10-31 02:33+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,8 +18,8 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: crates/daw-app/qml/ArrangePage.qml:20 crates/daw-app/qml/SelfTest.qml:68
-#: crates/daw-app/qml/SelfTest.qml:242
+#: crates/daw-app/qml/ArrangePage.qml:20 crates/daw-app/qml/SelfTest.qml:70
+#: crates/daw-app/qml/SelfTest.qml:291
 msgctxt "@title"
 msgid "Arrange"
 msgstr ""
@@ -36,7 +36,7 @@ msgid ""
 "to set the loop."
 msgstr ""
 
-#: crates/daw-app/qml/ArrangePage.qml:46 crates/daw-app/qml/SelfTest.qml:76
+#: crates/daw-app/qml/ArrangePage.qml:46 crates/daw-app/qml/SelfTest.qml:78
 msgctxt "@item default track name, %1 is a number"
 msgid "Instrument %1"
 msgstr ""
@@ -218,95 +218,95 @@ msgctxt "@action:inmenu"
 msgid "Add Instrument Track"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:38
+#: crates/daw-app/qml/AudioSettings.qml:41
 msgctxt "@info audio system"
 msgid "JACK (PipeWire)"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:40
+#: crates/daw-app/qml/AudioSettings.qml:43
 msgctxt "@info audio system"
 msgid "None (no audio server, playing silently)"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:42
+#: crates/daw-app/qml/AudioSettings.qml:45
 msgctxt "@info audio system"
 msgid "Test (no audio)"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:49
+#: crates/daw-app/qml/AudioSettings.qml:52
 msgctxt "@item:inlistbox audio device"
 msgid "JACK / PipeWire output"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:51
+#: crates/daw-app/qml/AudioSettings.qml:54
 msgctxt "@item:inlistbox audio device"
 msgid "No audio server (silent)"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:53
+#: crates/daw-app/qml/AudioSettings.qml:56
 msgctxt "@item:inlistbox audio device"
 msgid "Test output"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:73
+#: crates/daw-app/qml/AudioSettings.qml:77
 msgctxt "@label"
 msgid "Audio system:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:78
+#: crates/daw-app/qml/AudioSettings.qml:82
 msgctxt "@label"
 msgid "Status:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:79
+#: crates/daw-app/qml/AudioSettings.qml:83
 msgctxt "@info audio engine status"
 msgid "Running"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:80
+#: crates/daw-app/qml/AudioSettings.qml:84
 msgctxt "@info audio engine status"
 msgid "Stopped"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:89
+#: crates/daw-app/qml/AudioSettings.qml:93
 msgctxt "@label:listbox"
 msgid "Device:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:90
+#: crates/daw-app/qml/AudioSettings.qml:94
 msgctxt "@item:inlistbox audio device"
 msgid "System default"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:97
+#: crates/daw-app/qml/AudioSettings.qml:101
 #: crates/daw-app/qml/ExportDialog.qml:134
 msgctxt "@label:listbox"
 msgid "Sample rate:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:102
+#: crates/daw-app/qml/AudioSettings.qml:106
 msgctxt "@item:inlistbox sample rate"
 msgid "%1 Hz"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:109
+#: crates/daw-app/qml/AudioSettings.qml:113
 msgctxt "@label:listbox"
 msgid "Buffer size:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:114
+#: crates/daw-app/qml/AudioSettings.qml:118
 msgctxt "@item:inlistbox buffer size"
 msgid "%1 sample"
 msgid_plural "%1 samples"
 msgstr[0] ""
 msgstr[1] ""
 
-#: crates/daw-app/qml/AudioSettings.qml:120
+#: crates/daw-app/qml/AudioSettings.qml:124
 msgctxt "@label"
 msgid "Latency:"
 msgstr ""
 
-#: crates/daw-app/qml/AudioSettings.qml:122
+#: crates/daw-app/qml/AudioSettings.qml:126
 msgctxt "@info milliseconds"
 msgid "%1 ms"
 msgstr ""
@@ -386,80 +386,86 @@ msgctxt "@action:button"
 msgid "Add Effect"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:185
+#: crates/daw-app/qml/ChannelStrip.qml:181
+#: crates/daw-app/qml/InstrumentButton.qml:71
+msgctxt "@action:inmenu"
+msgid "Browse Plugins…"
+msgstr ""
+
+#: crates/daw-app/qml/ChannelStrip.qml:198
 msgctxt "@label gain reduction, short"
 msgid "GR"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:187
+#: crates/daw-app/qml/ChannelStrip.qml:200
 msgctxt "@info:tooltip"
 msgid "Gain reduction"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:200
+#: crates/daw-app/qml/ChannelStrip.qml:213
 msgctxt "@title:group"
 msgid "Sends"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:227
+#: crates/daw-app/qml/ChannelStrip.qml:240
 msgctxt "@info:tooltip send level to bus"
 msgid "Send to %1: %2"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:229
+#: crates/daw-app/qml/ChannelStrip.qml:242
 msgctxt "@label:slider"
 msgid "Send to %1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:249
-#: crates/daw-app/qml/ChannelStrip.qml:268
+#: crates/daw-app/qml/ChannelStrip.qml:262
+#: crates/daw-app/qml/ChannelStrip.qml:281
 msgctxt "@label:slider"
 msgid "Pan"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:269
+#: crates/daw-app/qml/ChannelStrip.qml:282
 msgctxt "@info:tooltip"
 msgid "Pan: %1 (double-click to centre)"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:294
+#: crates/daw-app/qml/ChannelStrip.qml:307
 msgctxt "@label:slider"
 msgid "Volume"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:295
+#: crates/daw-app/qml/ChannelStrip.qml:308
 msgctxt "@info:tooltip"
 msgid "Volume (double-click for 0 dB)"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:325
+#: crates/daw-app/qml/ChannelStrip.qml:338
 msgctxt "@action:button short for Mute"
 msgid "M"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:326
+#: crates/daw-app/qml/ChannelStrip.qml:339
 #: crates/daw-app/qml/TrackHeader.qml:235
 msgctxt "@action:button"
 msgid "Mute"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:327
+#: crates/daw-app/qml/ChannelStrip.qml:340
 msgctxt "@info:tooltip"
 msgid "Mute"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:336
+#: crates/daw-app/qml/ChannelStrip.qml:349
 msgctxt "@action:button short for Solo"
 msgid "S"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:337
+#: crates/daw-app/qml/ChannelStrip.qml:350
 #: crates/daw-app/qml/TrackHeader.qml:249
 msgctxt "@action:button"
 msgid "Solo"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml:338
+#: crates/daw-app/qml/ChannelStrip.qml:351
 msgctxt "@info:tooltip"
 msgid "Solo"
 msgstr ""
@@ -1405,7 +1411,7 @@ msgctxt "@title %1 is a clip name"
 msgid "Edit — %1"
 msgstr ""
 
-#: crates/daw-app/qml/EditPage.qml:18 crates/daw-app/qml/SelfTest.qml:217
+#: crates/daw-app/qml/EditPage.qml:18 crates/daw-app/qml/SelfTest.qml:266
 msgctxt "@title"
 msgid "Edit"
 msgstr ""
@@ -1496,13 +1502,13 @@ msgid "The audio device “%1” is not available."
 msgstr ""
 
 #: crates/daw-app/qml/EngineErrorText.qml:20
-#: crates/daw-app/qml/SelfTest.qml:298
+#: crates/daw-app/qml/SelfTest.qml:347
 msgctxt "@info %1 is a number"
 msgid "The audio device does not support a sample rate of %1 Hz."
 msgstr ""
 
 #: crates/daw-app/qml/EngineErrorText.qml:23
-#: crates/daw-app/qml/SelfTest.qml:304
+#: crates/daw-app/qml/SelfTest.qml:353
 msgctxt "@info"
 msgid "The audio device does not support a buffer size of %1 sample."
 msgid_plural "The audio device does not support a buffer size of %1 samples."
@@ -1530,7 +1536,7 @@ msgid "The chosen buffer size is not valid."
 msgstr ""
 
 #: crates/daw-app/qml/EngineErrorText.qml:43
-#: crates/daw-app/qml/SelfTest.qml:296
+#: crates/daw-app/qml/SelfTest.qml:345
 msgctxt "@info %1 is the reason, a full sentence"
 msgid "Could not change the audio settings. %1"
 msgstr ""
@@ -1855,38 +1861,38 @@ msgctxt "@title:window"
 msgid "Save Project As"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:183
+#: crates/daw-app/qml/Main.qml:199
 msgctxt "@action:inmenu"
 msgid "Configure Kadence…"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:190
+#: crates/daw-app/qml/Main.qml:206
 msgctxt "@action:inmenu"
 msgid "About Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:196
+#: crates/daw-app/qml/Main.qml:212
 msgctxt "@action:inmenu"
 msgid "Quit"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:203 crates/daw-app/src/cpp/kadence.cpp:114
+#: crates/daw-app/qml/Main.qml:219 crates/daw-app/src/cpp/kadence.cpp:114
 #, kde-format
 msgctxt "@title"
 msgid "Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:317
+#: crates/daw-app/qml/Main.qml:333
 msgctxt "@action:button"
 msgid "Audio Settings…"
 msgstr ""
 
-#: crates/daw-app/qml/Main.qml:343
+#: crates/daw-app/qml/Main.qml:368
 msgctxt "@title:window"
 msgid "Configure — Kadence"
 msgstr ""
 
-#: crates/daw-app/qml/MixPage.qml:16 crates/daw-app/qml/SelfTest.qml:148
+#: crates/daw-app/qml/MixPage.qml:16 crates/daw-app/qml/SelfTest.qml:150
 msgctxt "@title"
 msgid "Mix"
 msgstr ""
@@ -1909,6 +1915,161 @@ msgstr ""
 #: crates/daw-app/qml/MixPage.qml:75
 msgctxt "@info:placeholder"
 msgid "Each track gets a channel strip with volume, pan and effects here."
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:25
+msgctxt "@title:window"
+msgid "Choose Instrument Plugin"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:26
+msgctxt "@title:window"
+msgid "Add Effect Plugin"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:27
+msgctxt "@title:window"
+msgid "Plugins"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:74
+msgctxt "@label:listbox"
+msgid "Plugin type"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:76
+msgctxt "@item:inlistbox plugin type filter"
+msgid "All Types"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:77
+msgctxt "@item:inlistbox plugin type filter"
+msgid "Instruments"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:78
+msgctxt "@item:inlistbox plugin type filter"
+msgid "Effects"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:84
+msgctxt "@label:listbox"
+msgid "Plugin format"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:86
+msgctxt "@item:inlistbox plugin format filter"
+msgid "All Formats"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:146
+msgctxt "@info plugin vendor and format, as in “Surge Synth Team · CLAP”"
+msgid "%1 · %2"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:162
+msgctxt "@info:placeholder"
+msgid "Looking for plugins…"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:164
+msgctxt "@info:placeholder"
+msgid "No plugins found"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:165
+msgctxt "@info:placeholder"
+msgid "No matching plugins"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:168
+msgctxt "@info:placeholder"
+msgid ""
+"Kadence looks for CLAP, VST3 and LV2 plugins in their usual folders. Add "
+"other folders in the plugin settings."
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:179
+msgctxt "@action:button"
+msgid "Plugin Folders…"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:204
+#: crates/daw-app/qml/PluginSettings.qml:28
+msgctxt "@info:status %1 and %2 are numbers"
+msgid "Scanning plugins… %1 of %2"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:205
+#: crates/daw-app/qml/PluginSettings.qml:29
+msgctxt "@info:status"
+msgid "Scanning plugins…"
+msgstr ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:206
+msgctxt "@info:status"
+msgid "%1 plugin installed"
+msgid_plural "%1 plugins installed"
+msgstr[0] ""
+msgstr[1] ""
+
+#: crates/daw-app/qml/PluginBrowser.qml:210
+#: crates/daw-app/qml/PluginSettings.qml:42
+msgctxt "@action:button scan for plugins again"
+msgid "Rescan"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:18
+msgctxt "@title:group"
+msgid "Plugins"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:22
+msgctxt "@label"
+msgid "Installed:"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:30
+msgctxt "@info:status"
+msgid "%1 plugin"
+msgid_plural "%1 plugins"
+msgstr[0] ""
+msgstr[1] ""
+
+#: crates/daw-app/qml/PluginSettings.qml:44
+msgctxt "@info:tooltip"
+msgid ""
+"Look for new, updated or removed plugins, and try again those that failed"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:51
+msgctxt "@label"
+msgid "Other folders:"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:57
+msgctxt "@info"
+msgid "None. CLAP, VST3 and LV2 plugins are found in their usual folders."
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:77
+msgctxt "@action:button %1 is a folder"
+msgid "Remove %1"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:87
+msgctxt "@action:button"
+msgid "Add Folder…"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:93
+msgctxt "@label"
+msgid "Not loaded:"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml:128
+msgctxt "@title:window"
+msgid "Add Plugin Folder"
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:15
@@ -2248,9 +2409,9 @@ msgctxt "@info %1 is the reason, a full sentence"
 msgid "The take could not be added. %1"
 msgstr ""
 
-#: crates/daw-app/qml/SettingsPage.qml:7
+#: crates/daw-app/qml/SettingsPage.qml:8
 msgctxt "@title"
-msgid "Audio"
+msgid "Settings"
 msgstr ""
 
 #: crates/daw-app/qml/TrackHeader.qml:38

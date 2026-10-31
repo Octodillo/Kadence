@@ -166,12 +166,28 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    // Engine position, peak loading, autosave.
+    // Engine position, peak loading, autosave, plugin scan progress.
     Timer {
         interval: 33
         repeat: true
         running: true
-        onTriggered: Project.tick()
+        onTriggered: {
+            Project.tick();
+            Plugins.tick();
+        }
+    }
+
+    // One browser for every place that adds a plugin; see browsePlugins().
+    PluginBrowser {
+        id: pluginBrowser
+        property var pickHandler: null
+        onChosen: (format, pluginId, name) => {
+            if (pickHandler) {
+                pickHandler(format, pluginId, name);
+            }
+        }
+        onClosed: pickHandler = null
+        onConfigureRequested: root.openSettings()
     }
 
     Kirigami.Action {
@@ -336,6 +352,15 @@ Kirigami.ApplicationWindow {
         if (pageStack.currentItem !== page) {
             pageStack.replace(page);
         }
+    }
+
+    // Opens the plugin browser on `kind` (0 any, 1 instruments, 2 effects);
+    // `pick(format, pluginId, name)` runs when the user chooses one.
+    function browsePlugins(kind: int, pick: var): var {
+        pluginBrowser.kind = kind;
+        pluginBrowser.pickHandler = pick;
+        pluginBrowser.open();
+        return pluginBrowser;
     }
 
     function openSettings(): Item {
