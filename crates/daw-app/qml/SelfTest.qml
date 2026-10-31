@@ -320,6 +320,11 @@ Item {
             check(DevicePanel.switchedOn, "switch back on");
         },
         () => {
+            // Beside the page on a wide window, the panel takes room from
+            // it rather than covering its toolbar.
+            if (window.wideScreen) {
+                check(window.pageStack.anchors.rightMargin > 0, "device panel beside the page");
+            }
             shoot(window.title, "mix-device");
         },
         () => {

@@ -44,6 +44,35 @@ Kirigami.Page {
         }
     }
 
+    // Strip width and effects box height, the same for every strip. They
+    // are kept in grid units, so they suit any display scale.
+    readonly property real defaultStripUnits: 7
+    readonly property real defaultSlotsUnits: 11
+    property real stripUnits: clampStrip(AppSettings.layoutValue("MixerStripWidth", defaultStripUnits))
+    property real slotsUnits: clampSlots(AppSettings.layoutValue("MixerSlotsHeight", defaultSlotsUnits))
+    readonly property real stripWidth: stripUnits * Kirigami.Units.gridUnit
+    readonly property real slotsHeight: slotsUnits * Kirigami.Units.gridUnit
+
+    function clampStrip(units: real): real {
+        return Math.max(5, Math.min(20, units));
+    }
+    function clampSlots(units: real): real {
+        return Math.max(4, Math.min(60, units));
+    }
+    // `width` in pixels; remembered once `done`.
+    function setStripWidth(width: real, done: bool): void {
+        stripUnits = clampStrip(width / Kirigami.Units.gridUnit);
+        if (done) {
+            AppSettings.setLayoutValue("MixerStripWidth", stripUnits);
+        }
+    }
+    function setSlotsHeight(height: real, done: bool): void {
+        slotsUnits = clampSlots(height / Kirigami.Units.gridUnit);
+        if (done) {
+            AppSettings.setLayoutValue("MixerSlotsHeight", slotsUnits);
+        }
+    }
+
     background: Rectangle {
         color: Kirigami.Theme.backgroundColor
     }
@@ -60,8 +89,22 @@ Kirigami.Page {
             boundsBehavior: Flickable.StopAtBounds
             clip: true
 
+            // After the master, which it plays through.
+            footer: MetronomeStrip {
+                height: ListView.view.height
+                visible: ListView.view.count > 0
+                stripWidth: page.stripWidth
+                slotsHeight: page.slotsHeight
+            }
+
             delegate: ChannelStrip {
                 height: ListView.view.height
+                stripWidth: page.stripWidth
+                slotsHeight: page.slotsHeight
+                onWidthDragged: (width, done) => page.setStripWidth(width, done)
+                onSlotsHeightDragged: (height, done) => page.setSlotsHeight(height, done)
+                onWidthReset: page.setStripWidth(page.defaultStripUnits * Kirigami.Units.gridUnit, true)
+                onSlotsHeightReset: page.setSlotsHeight(page.defaultSlotsUnits * Kirigami.Units.gridUnit, true)
             }
         }
     }

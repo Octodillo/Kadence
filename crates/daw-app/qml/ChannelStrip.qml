@@ -42,7 +42,17 @@ Item {
     readonly property bool isMaster: kind === "master"
     readonly property string masterName: i18nc("@title name of the master bus", "Master")
 
-    implicitWidth: Kirigami.Units.gridUnit * 7
+    // Every strip has the same width and effects box height, set on the
+    // Mix page; dragging a strip's edge or the line above its pan asks the
+    // page to change them (`done` once the drag ends).
+    property real stripWidth: Kirigami.Units.gridUnit * 7
+    property real slotsHeight: Kirigami.Units.gridUnit * 11
+    signal widthDragged(width: real, done: bool)
+    signal slotsHeightDragged(height: real, done: bool)
+    signal widthReset()
+    signal slotsHeightReset()
+
+    implicitWidth: stripWidth
     width: implicitWidth
 
     function dbText(db: real): string {
@@ -51,6 +61,13 @@ Item {
         }
         const rounded = Math.round(db * 10) / 10;
         return i18nc("@label decibels", "%1 dB", (rounded > 0 ? "+" : "") + rounded.toLocaleString(Qt.locale(), "f", 1));
+    }
+
+    // A slider handles its own release after a TapHandler on it, and puts
+    // the value back where the second click landed; a double-click's reset
+    // runs after that.
+    function later(reset: var): void {
+        Qt.callLater(reset);
     }
 
     function panText(p: real): string {
@@ -72,6 +89,43 @@ Item {
             right: parent.right
         }
     }
+    // Drag the strip's right edge to make every strip wider or narrower;
+    // double-click it for the default width.
+    Item {
+        anchors {
+            top: parent.top
+            bottom: parent.bottom
+            right: parent.right
+            rightMargin: -width / 2
+        }
+        width: Kirigami.Units.smallSpacing * 2
+        z: 1
+        HoverHandler {
+            cursorShape: Qt.SplitHCursor
+        }
+        DragHandler {
+            target: null
+            yAxis.enabled: false
+            // Rather than the mixer scrolling sideways.
+            grabPermissions: PointerHandler.TakeOverForbidden
+            property real startWidth
+            onActiveChanged: {
+                if (active) {
+                    startWidth = strip.stripWidth;
+                } else {
+                    strip.widthDragged(startWidth + persistentTranslation.x, true);
+                }
+            }
+            onTranslationChanged: {
+                if (active) {
+                    strip.widthDragged(startWidth + persistentTranslation.x, false);
+                }
+            }
+        }
+        TapHandler {
+            onDoubleTapped: strip.widthReset()
+        }
+    }
 
     ColumnLayout {
         anchors {
@@ -83,6 +137,7 @@ Item {
 
         // Name
         Kirigami.Heading {
+            id: nameHeading
             Layout.fillWidth: true
             level: 5
             // The master is unnamed unless the user renamed it.
@@ -90,10 +145,18 @@ Item {
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignHCenter
             opacity: strip.silenced ? 0.6 : 1
+            HoverHandler {
+                id: nameHover
+            }
+            // The whole name, when the strip is too narrow for it.
+            QQC2.ToolTip.text: text
+            QQC2.ToolTip.visible: nameHover.hovered && truncated
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         }
         QQC2.Label {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
             font: Kirigami.Theme.smallFont
             color: Kirigami.Theme.disabledTextColor
             text: strip.kind === "bus" ? i18nc("@label strip type", "Bus")
@@ -106,7 +169,7 @@ Item {
         QQC2.ScrollView {
             id: slots
             Layout.fillWidth: true
-            Layout.preferredHeight: Kirigami.Units.gridUnit * 11
+            Layout.preferredHeight: strip.slotsHeight
             Layout.minimumHeight: Kirigami.Units.gridUnit * 4
             QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
             contentWidth: availableWidth
@@ -259,9 +322,12 @@ Item {
                                 value: strip.sendLevels[sendRow.index] ?? -60
                                 onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
                                 onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
-                                QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2", sendRow.target, strip.dbText(value))
+                                QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2 (double-click for 0 dB)", sendRow.target, strip.dbText(value))
                                 QQC2.ToolTip.visible: hovered || pressed
                                 Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.target)
+                                TapHandler {
+                                    onDoubleTapped: strip.later(() => Mixer.setSendLevel(strip.index, sendRow.index, 0))
+                                }
                             }
                             // Pre-fader sends ignore the fader: for monitor
                             // mixes. Post-fader (the default) follows it.
@@ -311,10 +377,50 @@ Item {
         }
 
 
-        // Pan
-        Kirigami.Separator {
+        // Drag the line between the effects and the pan to give every
+        // strip's effects box more or less room; double-click it for the
+        // default height.
+        Item {
             Layout.fillWidth: true
+            implicitHeight: Kirigami.Units.smallSpacing * 2
+            Layout.topMargin: -Kirigami.Units.smallSpacing
+            Layout.bottomMargin: -Kirigami.Units.smallSpacing
+            Kirigami.Separator {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width
+            }
+            HoverHandler {
+                cursorShape: Qt.SplitVCursor
+            }
+            DragHandler {
+                target: null
+                xAxis.enabled: false
+                property real startHeight
+                // As high as the fader may shrink for.
+                property real tallest
+                function chosen(): real {
+                    return Math.min(startHeight + persistentTranslation.y, tallest);
+                }
+                onActiveChanged: {
+                    if (active) {
+                        startHeight = slots.height;
+                        tallest = slots.height + Math.max(0, faderRow.height - faderRow.Layout.minimumHeight);
+                    } else {
+                        strip.slotsHeightDragged(chosen(), true);
+                    }
+                }
+                onTranslationChanged: {
+                    if (active) {
+                        strip.slotsHeightDragged(chosen(), false);
+                    }
+                }
+            }
+            TapHandler {
+                onDoubleTapped: strip.slotsHeightReset()
+            }
         }
+
+        // Pan
         // Master has no pan or mute/solo; their space stays empty so its
         // fader lines up with the others.
         RowLayout {
@@ -346,12 +452,13 @@ Item {
             QQC2.ToolTip.visible: hovered || pressed
             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             TapHandler {
-                onDoubleTapped: Mixer.setPan(strip.index, 0)
+                onDoubleTapped: strip.later(() => Mixer.setPan(strip.index, 0))
             }
         }
 
         // Fader and meter
         RowLayout {
+            id: faderRow
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: Kirigami.Units.gridUnit * 6
@@ -372,7 +479,7 @@ Item {
                 QQC2.ToolTip.visible: hovered && !pressed
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                 TapHandler {
-                    onDoubleTapped: Mixer.setVolume(strip.index, 0)
+                    onDoubleTapped: strip.later(() => Mixer.setVolume(strip.index, 0))
                 }
             }
             LevelMeter {

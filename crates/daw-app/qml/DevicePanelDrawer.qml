@@ -17,12 +17,18 @@ Kirigami.OverlayDrawer {
     // Beside the page on a wide window, so the mixer stays usable; over it
     // on a narrow one.
     modal: !applicationWindow().wideScreen
+    // Kirigami opens a drawer that isn't modal; this one opens only for a
+    // device.
+    drawerOpen: false
     handleVisible: false
     width: Math.min(Kirigami.Units.gridUnit * 22, applicationWindow().width * 0.8)
     leftPadding: 0
     rightPadding: 0
     topPadding: 0
     bottomPadding: 0
+
+    // How much of the window's width it takes from the page beside it.
+    readonly property real besidePage: modal ? 0 : width * position
 
     readonly property string masterName: i18nc("@title name of the master bus", "Master")
 
@@ -304,7 +310,9 @@ Kirigami.OverlayDrawer {
             QQC2.ToolTip.visible: hovered && !pressed
             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             TapHandler {
-                onDoubleTapped: DevicePanel.reset(row.index)
+                // After the slider's own release, which would otherwise
+                // move it back to where the second click landed.
+                onDoubleTapped: Qt.callLater(() => DevicePanel.reset(row.index))
             }
         }
 
