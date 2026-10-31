@@ -323,7 +323,16 @@ Item {
             // Beside the page on a wide window, the panel takes room from
             // it rather than covering its toolbar.
             if (window.wideScreen) {
-                check(window.pageStack.anchors.rightMargin > 0, "device panel beside the page");
+                // The drawer slides in; a slow machine may not have
+                // started the animation yet.
+                const panel = window.devicePanelDrawer;
+                if (window.pageStack.anchors.rightMargin === 0 && test.waits < 10) {
+                    return false;
+                }
+                test.waits = 0;
+                check(window.pageStack.anchors.rightMargin > 0,
+                      "device panel beside the page (modal " + panel.modal + ", visible " + panel.visible
+                      + ", position " + panel.position + ")");
             }
             shoot(window.title, "mix-device");
         },
