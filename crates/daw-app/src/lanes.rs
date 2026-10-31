@@ -9,9 +9,11 @@
 
 use std::collections::HashSet;
 
-use daw_model::{AutomationTarget, LaneId, Project, Track};
+use daw_model::commands::{SendField, SetParam, SetSend, SetTrack, TrackField};
+use daw_model::{AutomationLane, AutomationTarget, Command, LaneId, Project, Track};
 
-use crate::device_panel::BuiltinParams;
+use crate::device_panel::{BuiltinParams, ParamDesc};
+use crate::message::Message;
 use crate::state::AppState;
 
 /// What a lane automates, as the header words it.
@@ -88,6 +90,20 @@ pub fn target_name(
 }
 
 /// The lane modes and parameter names the app keeps beside the document.
+/// A lane's control as its header shows it: what the target is set to,
+/// or what the lane plays at the playhead.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct LaneControl {
+    /// Along the lane's scale, 0 (bottom) to 1 (top), as the timeline
+    /// draws it.
+    pub norm: f64,
+    /// In the target's own unit: dB, pan position or plain value.
+    pub value: f64,
+    /// The lane is on and has points, so it sets the value as it plays and
+    /// the control follows it.
+    pub following: bool,
+}
+
 #[derive(Default)]
 pub struct Lanes {
     /// Lanes in write mode. Not saved with the project: writing is armed
@@ -106,6 +122,82 @@ impl AppState {
     fn lane_id(&self, track: i32, lane: i32) -> Option<LaneId> {
         let t = self.track_at_index(track)?;
         Some(t.automation.get(usize::try_from(lane).ok()?)?.id)
+    }
+
+    fn lane_at(&self, track: i32, lane: i32) -> Option<(&std::sync::Arc<Track>, &AutomationLane)> {
+        let t = self.track_at_index(track)?;
+        let l = t.automation.get(usize::try_from(lane).ok()?)?;
+        Some((t, l))
+    }
+
+    /// The value lane `lane` of track `track` controls, as it is now.
+    pub fn lane_control(&self, track: i32, lane: i32) -> Option<LaneControl> {
+        let (t, l) = self.lane_at(track, lane)?;
+        let scale = self.arrange.lane_scale(t, l.target);
+        let following = l.enabled && !l.points.is_empty();
+        let value = if following {
+            l.value_at(self.playhead())
+        } else {
+            None
+        }
+        .unwrap_or_else(|| self.arrange.static_value(t, l.target));
+        Some(LaneControl {
+            norm: scale.to_norm(value),
+            value,
+            following,
+        })
+    }
+
+    /// Sets what a lane controls (the fader, pan, send level or device
+    /// parameter) to height `norm` on its scale, as the mixer or device
+    /// panel would. Does nothing while the lane plays its points. Moves
+    /// until [`end_lane_control`](Self::end_lane_control) are one undo
+    /// step.
+    pub fn set_lane_control(&mut self, track: i32, lane: i32, norm: f64) -> Result<(), Message> {
+        if !norm.is_finite() {
+            return Ok(());
+        }
+        let Some((t, l)) = self.lane_at(track, lane) else {
+            return Ok(());
+        };
+        if l.enabled && !l.points.is_empty() {
+            return Ok(());
+        }
+        let value = self.arrange.lane_scale(t, l.target).from_norm(norm);
+        if value == self.arrange.static_value(t, l.target) {
+            return Ok(());
+        }
+        let command: Box<dyn Command> = match l.target {
+            AutomationTarget::Volume => Box::new(SetTrack::new(t.id, TrackField::VolumeDb(value))),
+            AutomationTarget::Pan => Box::new(SetTrack::new(t.id, TrackField::Pan(value))),
+            AutomationTarget::SendLevel { send } => Box::new(SetSend {
+                id: send,
+                field: SendField::LevelDb(value),
+            }),
+            AutomationTarget::DeviceParam { device, param } => Box::new(SetParam {
+                device,
+                param,
+                value: Some(value),
+            }),
+        };
+        self.doc.execute_boxed(command).map_err(Message::from)?;
+        Ok(())
+    }
+
+    /// How a device-parameter lane's parameter is described (its unit,
+    /// control and choices); `None` for other lanes and unknown devices.
+    pub fn lane_param(&self, track: i32, lane: i32) -> Option<ParamDesc> {
+        let (t, l) = self.lane_at(track, lane)?;
+        let AutomationTarget::DeviceParam { device, param } = l.target else {
+            return None;
+        };
+        let d = t.devices.iter().find(|d| d.id == device)?;
+        self.lanes.params.param(d, param)
+    }
+
+    /// The user let go of a lane's control.
+    pub fn end_lane_control(&mut self) {
+        self.doc.seal();
     }
 
     pub fn lane_count(&self, track: i32) -> usize {

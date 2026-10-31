@@ -21,11 +21,59 @@ Rectangle {
     // `revision >= 0 ?` makes the bindings depend on it (the QML compiler
     // drops a bare `revision;` statement).
     readonly property string laneText: revision >= 0 && !placeholder
-        ? laneName.text(Automation.laneKind(track, lane),
+        ? laneName.text(kind,
                         Automation.laneDetail(track, lane),
                         Automation.laneParam(track, lane))
         : ""
     readonly property int mode: revision >= 0 && !placeholder ? Automation.laneMode(track, lane) : 1
+
+    // What the lane controls, as it is now: kind (see Automation.laneKind),
+    // value in its unit, and whether the lane's points set it as it plays.
+    readonly property int kind: revision >= 0 && !placeholder ? Automation.laneKind(track, lane) : -1
+    property real value: 0
+    property bool following: false
+    // How a device parameter's value is worded (see ValueText.param).
+    readonly property string paramControl: kind === 3 && revision >= 0 ? Automation.laneControlKind(track, lane) : ""
+    readonly property string paramUnit: kind === 3 && revision >= 0 ? Automation.laneUnit(track, lane) : ""
+    readonly property var paramChoices: kind === 3 && revision >= 0 ? Automation.laneChoices(track, lane) : []
+
+    function readValue(): void {
+        if (placeholder) {
+            return;
+        }
+        value = Automation.laneValue(track, lane);
+        following = Automation.laneFollowing(track, lane);
+        if (!levelSlider.pressed) {
+            levelSlider.value = Automation.lanePosition(track, lane);
+        }
+    }
+
+    onRevisionChanged: readValue()
+    onTrackChanged: readValue()
+    onLaneChanged: readValue()
+    Component.onCompleted: readValue()
+
+    // A playing lane moves its control.
+    Timer {
+        interval: 50
+        repeat: true
+        running: laneHeader.following && Project.playing && laneHeader.visible
+        onTriggered: laneHeader.readValue()
+    }
+
+    // The value with its unit, for the tooltip and screen readers.
+    readonly property string valueText: {
+        switch (kind) {
+        case 0: // volume
+        case 2: // send
+            return ValueText.level(value, ValueText.faderFloorDb);
+        case 1:
+            return ValueText.pan(value);
+        case 3:
+            return ValueText.param(value, paramControl, paramUnit, paramChoices);
+        }
+        return "";
+    }
 
     // Closes the lane's menus, if open.
     function dismiss(): void {
@@ -70,6 +118,29 @@ Rectangle {
         Item {
             visible: laneHeader.placeholder
             Layout.fillWidth: true
+        }
+
+        // The control itself, like the fader, pan knob or parameter
+        // slider elsewhere. It follows the lane while the lane plays.
+        QQC2.Slider {
+            id: levelSlider
+            visible: !laneHeader.placeholder
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 5
+            Layout.alignment: Qt.AlignVCenter
+            from: 0
+            to: 1
+            enabled: !laneHeader.following
+            onMoved: {
+                Automation.setLanePosition(laneHeader.track, laneHeader.lane, value);
+                laneHeader.value = Automation.laneValue(laneHeader.track, laneHeader.lane);
+            }
+            onPressedChanged: if (!pressed) Automation.endLaneControl()
+            Accessible.name: laneHeader.laneText
+            Accessible.description: laneHeader.valueText
+            // Disabled controls get no hover, so only while it can move.
+            QQC2.ToolTip.text: laneHeader.valueText
+            QQC2.ToolTip.visible: hovered || pressed
+            QQC2.ToolTip.delay: pressed ? 0 : Kirigami.Units.toolTipDelay
         }
 
         QQC2.ComboBox {

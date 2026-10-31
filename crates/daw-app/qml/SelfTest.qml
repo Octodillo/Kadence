@@ -161,6 +161,17 @@ Item {
             Automation.setLaneMode(0, 0, 0);
             Project.tick();
             check(Automation.laneMode(0, 0) === 0 && Project.undoText === "Toggle Automation", "lane off");
+            // An off lane's control sets the fader; a playing one follows
+            // its points and can't be moved.
+            check(!Automation.laneFollowing(0, 0), "an off lane doesn't follow its points");
+            const volume = Automation.laneValue(0, 0);
+            Automation.setLanePosition(0, 0, 0.25);
+            Automation.setLanePosition(0, 0, 1);
+            Automation.endLaneControl();
+            Project.tick();
+            check(Automation.laneValue(0, 0) > volume && Automation.lanePosition(0, 0) === 1, "lane control sets the volume");
+            Project.undo();
+            check(Automation.laneValue(0, 0) === volume, "a lane control drag is one undo step");
             Automation.setLaneMode(0, 0, 2);
             check(Automation.laneMode(0, 0) === 2, "lane in write mode");
             Automation.setLaneMode(0, 0, 1);
