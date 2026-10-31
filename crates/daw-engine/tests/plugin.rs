@@ -471,3 +471,42 @@ fn a_plugin_that_splits_only_once_prepared_is_split_from_then_on() {
     let held = plugin.with(|_| run(&mut proc, 2));
     assert_eq!(held[0], ramp(2, 4), "split now: plays during the call");
 }
+
+/// Like [`send_node`], with the node marked to be reset by `silence`.
+fn send_tail(ctl: &mut EngineController, plugin: &PluginHandle) {
+    let mut g = ctl.graph(0, 2);
+    let p = g.add_device("plugin", Box::new(plugin.node(RATE, FRAMES)));
+    g.set_tail(p);
+    g.connect(p, g.master());
+    ctl.set_graph(g).unwrap();
+    ctl.collect_garbage();
+}
+
+#[test]
+fn silence_resets_a_plugin_even_while_the_main_thread_holds_it() {
+    for (plugin, _) in [plugin(1), splitting(1)] {
+        let (mut ctl, mut proc) = engine();
+        send_tail(&mut ctl, &plugin);
+        assert_eq!(run(&mut proc, 3)[0], ramp(1, 4));
+        ctl.silence().unwrap();
+        assert_eq!(run(&mut proc, 2)[0], ramp(1, 3), "the counter starts over");
+
+        // A reset the plugin can't be had for waits for the next block it can.
+        ctl.silence().unwrap();
+        let held = plugin.with(|_| run(&mut proc, 2));
+        if held[0] == vec![0.0; 2] {
+            assert_eq!(run(&mut proc, 2)[0], ramp(1, 3));
+        } else {
+            // A split plugin's audio half isn't held by `with`.
+            assert_eq!(held[0], ramp(1, 3));
+        }
+    }
+
+    // An unmarked node keeps its state.
+    let (plugin, _) = plugin(1);
+    let (mut ctl, mut proc) = engine();
+    send(&mut ctl, &plugin);
+    run(&mut proc, 3);
+    ctl.silence().unwrap();
+    assert_eq!(run(&mut proc, 2)[0], ramp(4, 6));
+}

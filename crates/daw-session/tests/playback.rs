@@ -1256,5 +1256,29 @@ fn a_removed_device_lane_puts_the_parameter_back() {
     rig.doc.execute(RemoveLane::new(id)).unwrap();
     rig.sync();
     let back = settled(&mut rig);
-    assert!((back - at(-6.0)).abs() < 1e-3, "back to the hand-set value: {back}");
+    assert!(
+        (back - at(-6.0)).abs() < 1e-3,
+        "back to the hand-set value: {back}"
+    );
+}
+
+#[test]
+fn stop_lets_tails_ring_and_silence_cuts_them() {
+    let (mut rig, _) = effect_rig(&["daw.delay", "daw.reverb"]);
+    rig.run(BEAT as usize);
+    rig.session.stop().unwrap();
+    // A block for the stop to reach the audio thread.
+    rig.run(BLOCK);
+    let tail = peak(&rig.run(BLOCK));
+    assert!(tail > 1e-3, "stopping leaves the tail ringing: {tail}");
+
+    rig.session.silence().unwrap();
+    assert!(!rig.session.is_playing());
+    let after = peak(&rig.run(4 * BLOCK));
+    assert_eq!(after, 0.0, "silence cuts the tail");
+
+    // Playing again still sounds: the devices were reset, not broken.
+    rig.session.play().unwrap();
+    let again = peak(&rig.run(BEAT as usize));
+    assert!(again > 0.1, "{again}");
 }

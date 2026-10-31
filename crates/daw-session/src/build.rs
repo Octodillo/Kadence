@@ -353,6 +353,8 @@ pub(crate) fn graph(
                     id
                 }
             };
+            // Silencing (`Session::silence`) cuts its tail or held voices.
+            g.set_tail(id);
             // A switched-off device stays in the graph, so it keeps its
             // state, but audio goes around it.
             if d.enabled {

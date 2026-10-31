@@ -348,6 +348,7 @@ impl PluginHandle {
             ports,
             latency,
             rewired: false,
+            reset: false,
         }
     }
 
@@ -408,6 +409,9 @@ pub struct PluginNode {
     latency: u32,
     /// Caught up in `prepare` with other ports than it was made with.
     rewired: bool,
+    /// A reset that waits for the next block this node gets the plugin
+    /// for, so a block the main thread held the plugin through can't lose it.
+    reset: bool,
 }
 
 impl Drop for PluginNode {
@@ -480,7 +484,16 @@ impl Node for PluginNode {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        if self.on_audio(|mut p| p.process(ctx)).is_none() {
+        let reset = self.reset;
+        let played = self.on_audio(|mut p| {
+            if reset {
+                p.reset();
+            }
+            p.process(ctx)
+        });
+        if played.is_some() {
+            self.reset = false;
+        } else {
             for out in ctx.audio_out.iter_mut() {
                 out.fill(0.0);
             }
@@ -492,6 +505,6 @@ impl Node for PluginNode {
     }
 
     fn reset(&mut self) {
-        self.on_audio(|mut p| p.reset());
+        self.reset = true;
     }
 }

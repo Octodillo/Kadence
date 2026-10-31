@@ -1096,12 +1096,26 @@ impl Session {
         self.controller.is_counting_in()
     }
 
+    /// Stops the transport. Effects and instruments ring out as they
+    /// would; [`silence`](Self::silence) cuts them off.
     pub fn stop(&mut self) -> Result<(), SessionError> {
         self.controller.stop()?;
         self.playing = false;
         // Wherever playback got to; the audio thread reports it.
         self.parked = None;
         self.update_monitors();
+        Ok(())
+    }
+
+    /// Stops the transport and cuts off everything still sounding: every
+    /// device is reset (reverb and delay tails, held voices, plugins
+    /// through their own reset) and latency compensation is cleared.
+    /// Players and recordings are left alone. LV2 has no reset a host may
+    /// call while audio runs, so an LV2 plugin only gets all notes and
+    /// sounds off.
+    pub fn silence(&mut self) -> Result<(), SessionError> {
+        self.stop()?;
+        self.controller.silence()?;
         Ok(())
     }
 
