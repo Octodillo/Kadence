@@ -199,6 +199,23 @@ fn connections_of(port: &str) -> Vec<String> {
     v
 }
 
+/// Waits for `port`'s connections to read `expected`: JACK shows a graph
+/// change to other clients from its next cycle on.
+fn wait_connections(port: &str, expected: &[&str]) {
+    let end = Instant::now() + Duration::from_secs(2);
+    loop {
+        let now = connections_of(port);
+        if now == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < end,
+            "{port} is connected to {now:?}, not {expected:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 #[ignore = "needs a running JACK server"]
 fn connections_survive_stop_and_start() {
@@ -239,22 +256,55 @@ fn connections_survive_stop_and_start() {
 
     b.stop().unwrap();
     b.start(Box::new(|_| {})).unwrap();
-    assert_eq!(
-        connections_of("wu2-keep:audio_out_1"),
-        ["system:playback_2"]
-    );
-    assert_eq!(
-        connections_of("wu2-keep:audio_out_2"),
-        ["system:playback_1"]
-    );
-    assert_eq!(connections_of("wu2-keep:audio_in_1"), ["system:capture_1"]);
+    wait_connections("wu2-keep:audio_out_1", &["system:playback_2"]);
+    wait_connections("wu2-keep:audio_out_2", &["system:playback_1"]);
+    wait_connections("wu2-keep:audio_in_1", &["system:capture_1"]);
 
     // A disconnect while stopped stays disconnected after start.
     b.stop().unwrap();
     b.disconnect("wu2-keep:audio_out_2", "system:playback_1")
         .unwrap();
     b.start(Box::new(|_| {})).unwrap();
+    let cycles = b.stats().cycles;
+    wait(&b, |s| s.cycles >= cycles + 5);
     assert!(connections_of("wu2-keep:audio_out_2").is_empty());
+    assert_eq!(b.stats().rt_alloc_violations, 0);
+    b.close().unwrap();
+}
+
+/// JACK shows a new link from its next cycle on, so a stop right after a
+/// connect or a start must still keep the links it can't see yet.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn links_made_just_before_stop_are_kept() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut b = JackBackend::new();
+    b.open(BackendConfig {
+        audio_inputs: 0,
+        audio_outputs: 1,
+        midi_input: false,
+        ..cfg("wu2-quick")
+    })
+    .unwrap();
+    for _ in 0..20 {
+        b.start(Box::new(|_| {})).unwrap();
+        b.connect("wu2-quick:audio_out_1", "system:playback_1")
+            .unwrap();
+        b.stop().unwrap();
+        // Restored on start, then stopped before a cycle shows it.
+        b.start(Box::new(|_| {})).unwrap();
+        b.stop().unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        wait_connections("wu2-quick:audio_out_1", &["system:playback_1"]);
+        b.disconnect("wu2-quick:audio_out_1", "system:playback_1")
+            .unwrap();
+        b.stop().unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        let cycles = b.stats().cycles;
+        wait(&b, |s| s.cycles >= cycles + 5);
+        assert!(connections_of("wu2-quick:audio_out_1").is_empty());
+        b.stop().unwrap();
+    }
     assert_eq!(b.stats().rt_alloc_violations, 0);
     b.close().unwrap();
 }
