@@ -164,6 +164,9 @@ struct Shared {
     rewire: AtomicBool,
     /// Blocks the audio thread output silence for because the main thread held the plugin.
     busy: AtomicU64,
+    /// A reset that waits for the next block a node gets the plugin for. Shared, so one
+    /// asked of a node that a graph swap then retires still reaches the plugin.
+    reset: AtomicBool,
 }
 
 impl Shared {
@@ -286,6 +289,7 @@ impl PluginHandle {
                 stale: AtomicBool::new(false),
                 rewire: AtomicBool::new(false),
                 busy: AtomicU64::new(0),
+                reset: AtomicBool::new(false),
             }),
             _not_send: PhantomData,
         }
@@ -480,7 +484,14 @@ impl Node for PluginNode {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        if self.on_audio(|mut p| p.process(ctx)).is_none() {
+        let shared = self.shared.clone();
+        let played = self.on_audio(|mut p| {
+            if shared.reset.swap(false, Ordering::Acquire) {
+                p.reset();
+            }
+            p.process(ctx)
+        });
+        if played.is_none() {
             for out in ctx.audio_out.iter_mut() {
                 out.fill(0.0);
             }
@@ -491,7 +502,10 @@ impl Node for PluginNode {
         self.latency
     }
 
+    /// Takes effect at the start of the next block the plugin plays, from this node or the
+    /// one that replaces it, so neither a block the main thread holds the plugin through nor
+    /// a graph swap loses it.
     fn reset(&mut self) {
-        self.on_audio(|mut p| p.reset());
+        self.shared.reset.store(true, Ordering::Release);
     }
 }

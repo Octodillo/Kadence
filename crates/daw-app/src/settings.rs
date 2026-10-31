@@ -202,6 +202,8 @@ pub struct GeneralSettings {
     pub project_folder: Option<String>,
     /// Minutes between autosaves of a changed project; 0 turns autosave off.
     pub autosave_minutes: u32,
+    /// Whether the piano roll plays the keys and notes pressed in it.
+    pub preview_notes: bool,
 }
 
 impl Default for GeneralSettings {
@@ -209,6 +211,7 @@ impl Default for GeneralSettings {
         Self {
             project_folder: None,
             autosave_minutes: 1,
+            preview_notes: true,
         }
     }
 }
@@ -261,6 +264,7 @@ pub fn load_general_settings(store: &dyn SettingsStore) -> GeneralSettings {
             .and_then(|v| v.parse().ok())
             .filter(|&m| m <= MAX_AUTOSAVE_MINUTES)
             .unwrap_or(defaults.autosave_minutes),
+        preview_notes: read_bool(store, GENERAL, "PreviewNotes", defaults.preview_notes),
     }
 }
 
@@ -275,6 +279,7 @@ pub fn save_general_settings(store: &mut dyn SettingsStore, settings: &GeneralSe
         "AutosaveMinutes",
         &settings.autosave_minutes.to_string(),
     );
+    store.write(GENERAL, "PreviewNotes", &settings.preview_notes.to_string());
     store.sync();
 }
 
@@ -516,6 +521,7 @@ mod tests {
         let s = GeneralSettings {
             project_folder: Some("/home/me/Music/Projects".into()),
             autosave_minutes: 0,
+            preview_notes: false,
         };
         save_general_settings(&mut store, &s);
         assert_eq!(load_general_settings(&store), s);

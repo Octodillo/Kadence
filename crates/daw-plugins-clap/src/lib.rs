@@ -18,7 +18,6 @@
 //! instance's audio half out as a [`ClapProcessor`], which the audio thread can run while the
 //! main thread goes on using the instance, as CLAP allows.
 
-mod editor;
 mod events;
 mod host;
 mod instance;
