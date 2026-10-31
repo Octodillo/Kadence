@@ -240,54 +240,57 @@ Column {
                 icon.name: "audio-input-microphone"
                 display: QQC2.AbstractButton.IconOnly
                 text: i18nc("@action:button %1 is the chosen input, like Input 1", "Audio input: %1", header.inputText)
-                down: inputMenu.visible
+                down: inputMenu.opened
                 onClicked: inputMenu.popup(inputButton, 0, inputButton.height)
                 QQC2.ToolTip.text: text
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
 
-                QQC2.Menu {
+                LazyMenu {
                     id: inputMenu
+                    menu: QQC2.Menu {
+                        id: inputPopup
 
-                    // Each input on its own, then the pairs 1–2, 3–4 and so on,
-                    // in one model so they stay in order above the separator.
-                    Instantiator {
-                        model: {
-                            const choices = [];
-                            for (let i = 0; i < header.inputCount; ++i) {
-                                choices.push({ first: i, stereo: false });
+                        // Each input on its own, then the pairs 1–2, 3–4 and so on,
+                        // in one model so they stay in order above the separator.
+                        Instantiator {
+                            model: {
+                                const choices = [];
+                                for (let i = 0; i < header.inputCount; ++i) {
+                                    choices.push({ first: i, stereo: false });
+                                }
+                                for (let i = 0; i + 1 < header.inputCount; i += 2) {
+                                    choices.push({ first: i, stereo: true });
+                                }
+                                return choices;
                             }
-                            for (let i = 0; i + 1 < header.inputCount; i += 2) {
-                                choices.push({ first: i, stereo: true });
+                            delegate: QQC2.MenuItem {
+                                required property var modelData
+                                text: modelData.stereo
+                                    ? i18nc("@item:inmenu a pair of audio inputs recorded as stereo, %1 and %2 are input numbers",
+                                            "Inputs %1–%2 (Stereo)", modelData.first + 1, modelData.first + 2)
+                                    : i18nc("@item:inmenu one audio input, %1 is its number", "Input %1", modelData.first + 1)
+                                checkable: true
+                                checked: header.inputStereo === modelData.stereo && header.input === modelData.first
+                                // Re-picking the current choice keeps it checked.
+                                onTriggered: {
+                                    Project.setTrackInput(header.index, modelData.first, modelData.stereo);
+                                    checked = Qt.binding(() => header.inputStereo === modelData.stereo
+                                                               && header.input === modelData.first);
+                                }
                             }
-                            return choices;
+                            onObjectAdded: (i, item) => inputPopup.insertItem(i, item)
+                            onObjectRemoved: (i, item) => inputPopup.removeItem(item)
                         }
-                        delegate: QQC2.MenuItem {
-                            required property var modelData
-                            text: modelData.stereo
-                                ? i18nc("@item:inmenu a pair of audio inputs recorded as stereo, %1 and %2 are input numbers",
-                                        "Inputs %1–%2 (Stereo)", modelData.first + 1, modelData.first + 2)
-                                : i18nc("@item:inmenu one audio input, %1 is its number", "Input %1", modelData.first + 1)
+
+                        QQC2.MenuSeparator {}
+
+                        QQC2.MenuItem {
+                            text: i18nc("@option:check", "Monitor Input While Armed")
                             checkable: true
-                            checked: header.inputStereo === modelData.stereo && header.input === modelData.first
-                            // Re-picking the current choice keeps it checked.
-                            onTriggered: {
-                                Project.setTrackInput(header.index, modelData.first, modelData.stereo);
-                                checked = Qt.binding(() => header.inputStereo === modelData.stereo
-                                                           && header.input === modelData.first);
-                            }
+                            checked: header.monitorAuto
+                            onTriggered: Project.setTrackMonitorAuto(header.index, checked)
                         }
-                        onObjectAdded: (i, item) => inputMenu.insertItem(i, item)
-                        onObjectRemoved: (i, item) => inputMenu.removeItem(item)
-                    }
-
-                    QQC2.MenuSeparator {}
-
-                    QQC2.MenuItem {
-                        text: i18nc("@option:check", "Monitor Input While Armed")
-                        checkable: true
-                        checked: header.monitorAuto
-                        onTriggered: Project.setTrackMonitorAuto(header.index, checked)
                     }
                 }
             }
@@ -327,44 +330,46 @@ Column {
             anchors.bottom: parent.bottom
         }
 
-        QQC2.Menu {
+        LazyMenu {
             id: menu
-            QQC2.MenuItem {
-                text: i18nc("@action:inmenu", "Rename…")
-                icon.name: "edit-rename"
-                onTriggered: {
-                    nameField.text = header.trackName;
-                    nameField.visible = true;
-                    nameField.forceActiveFocus();
-                    nameField.selectAll();
+            menu: QQC2.Menu {
+                QQC2.MenuItem {
+                    text: i18nc("@action:inmenu", "Rename…")
+                    icon.name: "edit-rename"
+                    onTriggered: {
+                        nameField.text = header.trackName;
+                        nameField.visible = true;
+                        nameField.forceActiveFocus();
+                        nameField.selectAll();
+                    }
                 }
-            }
-            QQC2.MenuItem {
-                text: i18nc("@action:inmenu", "Move Up")
-                icon.name: "go-up"
-                enabled: header.index > 0
-                onTriggered: Project.moveTrack(header.index, header.index - 1)
-            }
-            QQC2.MenuItem {
-                text: i18nc("@action:inmenu", "Move Down")
-                icon.name: "go-down"
-                enabled: header.index < Project.trackCount - 1
-                onTriggered: Project.moveTrack(header.index, header.index + 1)
-            }
-            QQC2.MenuSeparator {}
-            AddLaneMenu {
-                track: header.index
-            }
-            QQC2.MenuItem {
-                text: row.expanded ? i18nc("@action:inmenu", "Hide Automation") : i18nc("@action:inmenu", "Show Automation")
-                icon.name: row.expanded ? "arrow-down" : "arrow-right"
-                onTriggered: Automation.setExpanded(header.index, !row.expanded)
-            }
-            QQC2.MenuSeparator {}
-            QQC2.MenuItem {
-                text: i18nc("@action:inmenu", "Delete Track")
-                icon.name: "edit-delete"
-                onTriggered: Project.removeTrack(header.index)
+                QQC2.MenuItem {
+                    text: i18nc("@action:inmenu", "Move Up")
+                    icon.name: "go-up"
+                    enabled: header.index > 0
+                    onTriggered: Project.moveTrack(header.index, header.index - 1)
+                }
+                QQC2.MenuItem {
+                    text: i18nc("@action:inmenu", "Move Down")
+                    icon.name: "go-down"
+                    enabled: header.index < Project.trackCount - 1
+                    onTriggered: Project.moveTrack(header.index, header.index + 1)
+                }
+                QQC2.MenuSeparator {}
+                AddLaneMenu {
+                    track: header.index
+                }
+                QQC2.MenuItem {
+                    text: row.expanded ? i18nc("@action:inmenu", "Hide Automation") : i18nc("@action:inmenu", "Show Automation")
+                    icon.name: row.expanded ? "arrow-down" : "arrow-right"
+                    onTriggered: Automation.setExpanded(header.index, !row.expanded)
+                }
+                QQC2.MenuSeparator {}
+                QQC2.MenuItem {
+                    text: i18nc("@action:inmenu", "Delete Track")
+                    icon.name: "edit-delete"
+                    onTriggered: Project.removeTrack(header.index)
+                }
             }
         }
 
