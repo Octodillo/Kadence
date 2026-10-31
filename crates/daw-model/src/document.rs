@@ -90,8 +90,22 @@ impl Document {
         Ok(Self {
             bundle: Some(bundle),
             saved_at: None,
+            // Not autosaved by this document yet: the next autosave writes,
+            // so the work survives even if the file it came from is removed.
+            autosaved_revision: u64::MAX,
             ..Self::new(project)
         })
+    }
+
+    /// A document for a project that was never saved, recovered from an
+    /// autosave kept outside any bundle. It starts out modified, since the
+    /// recovered state isn't saved.
+    pub fn recovered(project: Project) -> Self {
+        Self {
+            saved_at: None,
+            autosaved_revision: u64::MAX,
+            ..Self::new(project)
+        }
     }
 
     pub fn project(&self) -> &Project {

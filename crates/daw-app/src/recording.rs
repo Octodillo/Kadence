@@ -138,7 +138,9 @@ impl AppState {
             Err(e) if audio => self.report(e),
             Err(e) => return Err(e),
         }
-        self.engine.play();
+        // Capture waits for the count-in: takes only record while the
+        // transport moves.
+        self.play_for_recording();
         Ok(())
     }
 

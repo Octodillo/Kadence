@@ -3,8 +3,8 @@ mod common;
 use common::*;
 use daw_core::node::Node;
 use daw_core::time::{Meter, MeterPoint, PPQ, SegmentTempoMap, TickTime, Timeline};
-use daw_devices::Metronome;
 use daw_devices::devices::metronome::*;
+use daw_devices::{Device, Metronome};
 
 fn onsets(x: &[f32]) -> Vec<usize> {
     let mut v = Vec::new();
@@ -221,4 +221,98 @@ fn silent_before_the_project_start() {
         });
         assert!(out[0].iter().all(|&x| x == 0.0), "block {block}");
     }
+}
+
+/// Renders `frames` samples starting with a count-in of `bars` bars at
+/// sample 0 of `timeline`, the way the engine runs one: the position holds
+/// at 0 until the count-in ends, in blocks that end where it does.
+fn render_count_in(m: &mut Metronome, bars: u32, frames: usize, timeline: &Timeline) -> Vec<f32> {
+    use daw_core::event::EventList;
+    use daw_core::node::{CountIn, ProcessContext, TransportState};
+    use daw_core::time::SampleTime;
+    const SR: f64 = 48_000.0;
+    const BLOCK: usize = 97;
+    m.prepare(SR, BLOCK as u32);
+    let start = TransportState::at(timeline, false, SampleTime(0), SR);
+    let mut count_in = CountIn::bars(bars, &start.music, start.bpm, SR);
+    let mut out = vec![0.0f32; frames];
+    let (mut done, mut position) = (0, 0i64);
+    let events = EventList::with_capacity(4);
+    let mut events_out = EventList::with_capacity(4);
+    while done < frames {
+        let mut n = BLOCK.min(frames - done);
+        if let Some(c) = &count_in {
+            n = n.min(c.remaining() as usize);
+        }
+        let mut t = TransportState::at(timeline, count_in.is_none(), SampleTime(position), SR);
+        t.count_in = count_in;
+        let mut l = vec![0.0f32; n];
+        let mut r = vec![0.0f32; n];
+        {
+            let mut outs: Vec<&mut [f32]> = vec![&mut l, &mut r];
+            let mut ctx = ProcessContext {
+                frames: n as u32,
+                transport: &t,
+                audio_in: &[],
+                audio_out: &mut outs,
+                events_in: &events,
+                events_out: &mut events_out,
+            };
+            m.process(&mut ctx);
+        }
+        out[done..done + n].copy_from_slice(&l);
+        match &mut count_in {
+            Some(c) => {
+                c.elapsed += n as i64;
+                if c.is_empty() {
+                    count_in = None;
+                }
+            }
+            None => position += n as i64,
+        }
+        done += n;
+    }
+    out
+}
+
+fn onsets_at(x: &[f32]) -> Vec<usize> {
+    onsets(x).iter().map(|i| i - 1).collect()
+}
+
+#[test]
+fn count_in_clicks_a_bar_then_playback_carries_on() {
+    // One bar of 3/4 at 120 bpm: three clicks, then the song's beats.
+    let timeline = Timeline::constant(120.0, 3, 4);
+    let mut m = Metronome::new();
+    let out = render_count_in(&mut m, 1, 150_000, &timeline);
+    let found = onsets_at(&out);
+    assert_eq!(
+        found,
+        vec![0, 24_000, 48_000, 72_000, 96_000, 120_000, 144_000]
+    );
+    let p = |at: usize| peak(&out[at..at + 2000]);
+    // The count-in's downbeat and the song's are accented.
+    let accented: Vec<usize> = found
+        .into_iter()
+        .filter(|&at| p(at) > p(24_000) * 1.3)
+        .collect();
+    assert_eq!(accented, vec![0, 72_000, 144_000]);
+}
+
+#[test]
+fn with_playback_off_only_the_count_in_clicks() {
+    let timeline = Timeline::default();
+    let mut m = Metronome::new();
+    m.set_param(PLAYBACK, 0.0);
+    let out = render_count_in(&mut m, 2, 300_000, &timeline);
+    // Eight clicks over two bars of 4/4, then silence.
+    assert_eq!(
+        onsets_at(&out),
+        (0..8).map(|i| i * 24_000).collect::<Vec<_>>()
+    );
+    // Off without a count-in: silent.
+    let mut m = Metronome::new();
+    m.set_param(PLAYBACK, 0.0);
+    let r = render(&mut m, 48_000, &[], &[], Setup::default());
+    assert!(r.channels.iter().all(|c| c.iter().all(|&x| x == 0.0)));
 }
