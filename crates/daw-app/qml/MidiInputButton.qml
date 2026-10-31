@@ -29,11 +29,11 @@ QQC2.ToolButton {
     icon.color: deviceMissing ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
     display: QQC2.AbstractButton.IconOnly
     text: i18nc("@action:button", "MIDI Input")
-    down: menu.visible
+    down: menu.opened
     onClicked: menu.popup(button, 0, button.height)
 
     QQC2.ToolTip.text: i18nc("@info:tooltip %1 is the MIDI input, %2 the channel", "MIDI input: %1, %2", deviceText, channelText)
-    QQC2.ToolTip.visible: hovered && !menu.visible
+    QQC2.ToolTip.visible: hovered && !menu.opened
     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
 
     // Closes the menu, if open.
@@ -45,67 +45,70 @@ QQC2.ToolButton {
         Project.setTrackMidiInput(trackIndex, newDevice, newChannel);
     }
 
-    QQC2.Menu {
+    LazyMenu {
         id: menu
-
-        QQC2.MenuItem {
-            text: i18nc("@item:inmenu MIDI input", "All Inputs")
-            checkable: true
-            checked: button.device === ""
-            onTriggered: button.choose("", button.channel)
-        }
-
-        // A Repeater can't add items to a Menu; insert them after "All
-        // Inputs".
-        Instantiator {
-            model: AppSettings.midiInputNames
-            delegate: QQC2.MenuItem {
-                required property int index
-                required property string modelData
-                text: AppSettings.midiInputLabels[index] ?? modelData
-                checkable: true
-                checked: button.device === modelData
-                onTriggered: button.choose(modelData, button.channel)
-            }
-            onObjectAdded: (index, object) => menu.insertItem(index + 1, object)
-            onObjectRemoved: (index, object) => menu.removeItem(object)
-        }
-
-        QQC2.MenuItem {
-            visible: button.deviceMissing
-            height: visible ? implicitHeight : 0
-            text: i18nc("@item:inmenu %1 is a MIDI device that is not in use", "%1 (not in use)", AppSettings.midiLabel(button.device))
-            checkable: true
-            checked: true
-        }
-
-        QQC2.MenuSeparator {}
-
-        QQC2.Menu {
-            id: channelMenu
-            title: button.channelText
+        menu: QQC2.Menu {
+            id: menuPopup
 
             QQC2.MenuItem {
-                text: i18nc("@item:inmenu MIDI channel", "All Channels")
+                text: i18nc("@item:inmenu MIDI input", "All Inputs")
                 checkable: true
-                checked: button.channel < 0
-                onTriggered: button.choose(button.device, -1)
+                checked: button.device === ""
+                onTriggered: button.choose("", button.channel)
+            }
+
+            // A Repeater can't add items to a Menu; insert them after "All
+            // Inputs".
+            Instantiator {
+                model: AppSettings.midiInputNames
+                delegate: QQC2.MenuItem {
+                    required property int index
+                    required property string modelData
+                    text: AppSettings.midiInputLabels[index] ?? modelData
+                    checkable: true
+                    checked: button.device === modelData
+                    onTriggered: button.choose(modelData, button.channel)
+                }
+                onObjectAdded: (index, object) => menuPopup.insertItem(index + 1, object)
+                onObjectRemoved: (index, object) => menuPopup.removeItem(object)
+            }
+
+            QQC2.MenuItem {
+                visible: button.deviceMissing
+                height: visible ? implicitHeight : 0
+                text: i18nc("@item:inmenu %1 is a MIDI device that is not in use", "%1 (not in use)", AppSettings.midiLabel(button.device))
+                checkable: true
+                checked: true
             }
 
             QQC2.MenuSeparator {}
 
-            Instantiator {
-                model: 16
-                delegate: QQC2.MenuItem {
-                    required property int index
-                    text: i18nc("@item:inmenu %1 is a MIDI channel number", "Channel %1", index + 1)
+            QQC2.Menu {
+                id: channelMenu
+                title: button.channelText
+
+                QQC2.MenuItem {
+                    text: i18nc("@item:inmenu MIDI channel", "All Channels")
                     checkable: true
-                    checked: button.channel === index
-                    onTriggered: button.choose(button.device, index)
+                    checked: button.channel < 0
+                    onTriggered: button.choose(button.device, -1)
                 }
-                // After "All Channels" and the separator.
-                onObjectAdded: (index, object) => channelMenu.insertItem(index + 2, object)
-                onObjectRemoved: (index, object) => channelMenu.removeItem(object)
+
+                QQC2.MenuSeparator {}
+
+                Instantiator {
+                    model: 16
+                    delegate: QQC2.MenuItem {
+                        required property int index
+                        text: i18nc("@item:inmenu %1 is a MIDI channel number", "Channel %1", index + 1)
+                        checkable: true
+                        checked: button.channel === index
+                        onTriggered: button.choose(button.device, index)
+                    }
+                    // After "All Channels" and the separator.
+                    onObjectAdded: (index, object) => channelMenu.insertItem(index + 2, object)
+                    onObjectRemoved: (index, object) => channelMenu.removeItem(object)
+                }
             }
         }
     }
