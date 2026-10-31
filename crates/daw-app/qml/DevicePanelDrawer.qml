@@ -229,6 +229,41 @@ Kirigami.OverlayDrawer {
             }
         }
 
+        // A plugin that doesn't play, and why; a crashed one can restart.
+        Kirigami.InlineMessage {
+            id: pluginMessage
+            objectName: "pluginMessage"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            readonly property string status: DevicePanel.pluginStatus
+            visible: status !== "" && status !== "running"
+            type: status === "crashed" || status === "failed" ? Kirigami.MessageType.Error
+                                                               : Kirigami.MessageType.Warning
+            text: {
+                switch (status) {
+                case "crashed":
+                    return i18nc("@info", "The plugin stopped working and is bypassed.");
+                case "missing":
+                    return i18nc("@info", "The plugin isn't installed on this computer, so it is bypassed.");
+                case "failed":
+                    return DevicePanel.pluginError
+                           ? i18nc("@info %1 is the plugin's own error message", "The plugin couldn't be loaded, so it is bypassed: %1", DevicePanel.pluginError)
+                           : i18nc("@info", "The plugin couldn't be loaded, so it is bypassed.");
+                case "unavailable":
+                    return i18nc("@info", "Plugins can't be loaded right now, so this one is bypassed.");
+                }
+                return "";
+            }
+            actions: [
+                Kirigami.Action {
+                    icon.name: "view-refresh"
+                    text: i18nc("@action:button restart a crashed plugin", "Reload Plugin")
+                    visible: pluginMessage.status === "crashed"
+                    onTriggered: DevicePanel.reloadPlugin()
+                }
+            ]
+        }
+
         QQC2.ScrollView {
             id: scroll
             Layout.fillWidth: true

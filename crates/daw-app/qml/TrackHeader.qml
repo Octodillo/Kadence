@@ -119,6 +119,9 @@ Column {
                     id: drag
                     target: null
                     xAxis.enabled: false
+                    // Keep the drag from the list's touch scrolling, which
+                    // would otherwise take it over once the finger moves.
+                    grabPermissions: PointerHandler.CanTakeOverFromAnything | PointerHandler.ApprovesTakeOverByNone
                     // The row the dragged track's middle is over.
                     readonly property int to: {
                         const mid = row.y + header.height / 2 + activeTranslation.y;
@@ -378,6 +381,15 @@ Column {
             onTapped: {
                 Project.selectTrack(header.index);
                 menu.popup();
+            }
+        }
+        // Touch screens have no right button: hold a finger instead.
+        TapHandler {
+            acceptedDevices: PointerDevice.TouchScreen
+            onLongPressed: {
+                Project.selectTrack(header.index);
+                // Under the finger: a touch doesn't move the mouse cursor.
+                menu.popup(parent, point.position.x, point.position.y);
             }
         }
     }

@@ -281,6 +281,7 @@ impl qobject::PianoRoll {
         let any = out.document || out.view || out.locate.is_some() || out.set_loop.is_some();
         let menu = state::with(|s| {
             s.apply(out);
+            s.sync_audition();
             s.piano.take_menu_request()
         });
         if any {

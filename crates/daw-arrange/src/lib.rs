@@ -737,6 +737,17 @@ impl Arrange {
         Outcome::view()
     }
 
+    /// Whether a one-finger touch drag from `(x, y)` should scroll the view
+    /// rather than edit: on empty lane space, an automation row with no lane
+    /// in it, and below the last track. On a clip, the ruler or an
+    /// automation lane it edits, as a mouse would.
+    pub fn touch_pans(&self, project: &Project, x: f64, y: f64) -> bool {
+        matches!(
+            self.hit(project, x, y),
+            Hit::Lane { .. } | Hit::Empty(_) | Hit::Automation { lane: None, .. }
+        )
+    }
+
     /// A pinch gesture: `scale` relative to the previous update, centred on
     /// `x`.
     pub fn pinch(&mut self, project: &Project, scale: f64, x: f64) -> Outcome {
