@@ -7,14 +7,11 @@
 //! during playback records over it, as with the mixer's Write Automation
 //! switch).
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::collections::HashSet;
 
-use daw_arrange::{LaneScale, ParamCatalog};
-use daw_core::event::ParamId;
-use daw_devices::{ParamKind, ParamSpec, Taper};
-use daw_model::{AutomationTarget, Device, DeviceSource, LaneId, Project, Track};
+use daw_model::{AutomationTarget, LaneId, Project, Track};
 
+use crate::device_panel::BuiltinParams;
 use crate::state::AppState;
 
 /// What a lane automates, as the header words it.
@@ -52,61 +49,6 @@ pub struct TargetName {
     pub detail: String,
     /// The parameter's name (device parameters only).
     pub param: String,
-}
-
-/// Parameter ranges of the built-in devices, looked up once per kind.
-#[derive(Default)]
-pub struct BuiltinParams {
-    specs: Mutex<HashMap<String, &'static [ParamSpec]>>,
-}
-
-impl BuiltinParams {
-    fn specs(&self, device: &Device) -> &'static [ParamSpec] {
-        let DeviceSource::Builtin { kind } = &device.source else {
-            // Plugins describe their parameters once they are loaded.
-            return &[];
-        };
-        let mut cache = self.specs.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&specs) = cache.get(kind) {
-            return specs;
-        }
-        let specs = daw_devices::param_specs(kind).unwrap_or(&[]);
-        cache.insert(kind.clone(), specs);
-        specs
-    }
-
-    fn spec(&self, device: &Device, param: ParamId) -> Option<ParamSpec> {
-        self.specs(device).iter().find(|p| p.id == param).copied()
-    }
-
-    /// The name of a parameter, for headers.
-    pub fn name(&self, device: &Device, param: ParamId) -> Option<&'static str> {
-        self.spec(device, param).map(|s| s.name)
-    }
-}
-
-impl ParamCatalog for BuiltinParams {
-    fn automatable(&self, device: &Device) -> Vec<ParamId> {
-        self.specs(device)
-            .iter()
-            .filter(|p| p.automatable)
-            .map(|p| p.id)
-            .collect()
-    }
-
-    fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
-        let s = self.spec(device, param)?;
-        Some(LaneScale::Range {
-            min: s.min,
-            max: s.max,
-            log: s.taper == Taper::Log && s.min > 0.0,
-            steps: !matches!(s.kind, ParamKind::Continuous),
-        })
-    }
-
-    fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
-        self.spec(device, param).map(|s| s.default)
-    }
 }
 
 /// Names `target` on `track`.
@@ -277,8 +219,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daw_arrange::{LaneScale, ParamCatalog};
     use daw_model::commands::AddDevice;
-    use daw_model::{Document, TrackKind};
+    use daw_model::{Device, DeviceSource, Document, TrackKind};
 
     fn eq_device() -> Device {
         Device::new(
@@ -291,7 +234,7 @@ mod tests {
 
     #[test]
     fn builtin_params_have_ranges_and_names() {
-        let p = BuiltinParams::default();
+        let p = BuiltinParams;
         let d = eq_device();
         let ids = p.automatable(&d);
         assert!(!ids.is_empty());
@@ -313,6 +256,51 @@ mod tests {
         assert!(p.automatable(&unknown).is_empty());
     }
 
+    /// Every built-in parameter's slider and lane run along its taper:
+    /// halfway is the geometric mean on a log taper, the midpoint
+    /// otherwise, and discrete parameters land on whole numbers.
+    #[test]
+    fn every_builtin_param_maps_along_its_taper() {
+        use daw_devices::{ParamKind, Taper};
+        let p = BuiltinParams;
+        for entry in daw_devices::devices() {
+            let d = Device::new(
+                entry.info.name,
+                DeviceSource::Builtin {
+                    kind: entry.info.id.into(),
+                },
+            );
+            for spec in entry.params {
+                let desc = p.param(&d, spec.id).expect("described");
+                let half = desc.from_normalized(0.5);
+                let expected =
+                    if spec.taper == Taper::Log && matches!(spec.kind, ParamKind::Continuous) {
+                        (spec.min * spec.max).sqrt()
+                    } else if matches!(spec.kind, ParamKind::Continuous) {
+                        (spec.min + spec.max) / 2.0
+                    } else {
+                        ((spec.min + spec.max) / 2.0).round()
+                    };
+                assert!(
+                    (half - expected).abs() < 1e-9 * expected.abs().max(1.0),
+                    "{} {}",
+                    entry.info.id,
+                    spec.name
+                );
+                assert!((desc.from_normalized(0.0) - spec.min).abs() < 1e-9);
+                assert!(
+                    (desc.from_normalized(1.0) - spec.max).abs() < 1e-9 * spec.max.abs().max(1.0)
+                );
+                assert!(
+                    (desc.to_normalized(half) - 0.5).abs() < 1e-9
+                        || !matches!(spec.kind, ParamKind::Continuous)
+                );
+                // The lanes' catalog uses the same scale.
+                assert_eq!(p.scale(&d, spec.id), Some(desc.scale()));
+            }
+        }
+    }
+
     #[test]
     fn target_names_name_devices_and_params() {
         let mut doc = Document::new(Project::new("t"));
@@ -327,14 +315,11 @@ mod tests {
             device: d,
         })
         .unwrap();
-        let p = BuiltinParams::default();
+        let p = BuiltinParams;
         let track = doc.project().track(id).unwrap().clone();
         let targets = daw_arrange::automation::lane_targets(
             &track,
-            Some(
-                &(std::sync::Arc::new(BuiltinParams::default())
-                    as std::sync::Arc<dyn ParamCatalog>),
-            ),
+            Some(&(std::sync::Arc::new(BuiltinParams) as std::sync::Arc<dyn ParamCatalog>)),
         );
         let last = *targets.last().unwrap();
         let n = target_name(doc.project(), &p, &track, last);

@@ -4,15 +4,14 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{
-    QColor, QList, QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant,
-};
+use cxx_qt_lib::{QColor, QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant};
 use daw_core::time::{PPQ, TickTime};
 use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
 use daw_model::{FadeShape, InputChannels, MidiInput, Monitoring, Track, TrackKind};
 
 use crate::instrument;
 use crate::message::{Context, Fields, Message, Reason};
+use crate::qt_lists::string_list;
 use crate::recovery::Candidate;
 use crate::settings::{self, ClickSettings, KConfigStore};
 use crate::state::{self, AppState};
@@ -744,11 +743,7 @@ impl qobject::Project {
         });
         self.as_mut()
             .set_recovery_count(i32::try_from(recovery).unwrap_or(i32::MAX));
-        let mut list = QList::<QString>::default();
-        for p in &recent {
-            list.append(QString::from(p.as_str()));
-        }
-        let list = QStringList::from(&list);
+        let list = string_list(&recent);
         if self.recent_projects != list {
             self.as_mut().set_recent_projects(list);
         }
@@ -759,11 +754,8 @@ impl qobject::Project {
                 r.files_seen = Some(at);
                 r.missing = missing;
             }
-            let mut names = QList::<QString>::default();
-            for f in &self.missing {
-                names.append(QString::from(f.source.display().to_string().as_str()));
-            }
-            self.as_mut().set_missing_files(QStringList::from(&names));
+            let names = string_list(self.missing.iter().map(|f| f.source.display().to_string()));
+            self.as_mut().set_missing_files(names);
             self.as_mut().set_missing_count(count);
             self.as_mut()
                 .set_external_count(i32::try_from(external).unwrap_or(i32::MAX));
