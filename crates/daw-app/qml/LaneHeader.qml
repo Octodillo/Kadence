@@ -18,13 +18,14 @@ Rectangle {
     property int revision: 0
 
     readonly property bool placeholder: lane < 0
-    readonly property string laneText: {
-        revision;
-        return placeholder ? "" : laneName.text(Automation.laneKind(track, lane),
-                                                 Automation.laneDetail(track, lane),
-                                                 Automation.laneParam(track, lane));
-    }
-    readonly property int mode: { revision; return placeholder ? 1 : Automation.laneMode(track, lane); }
+    // `revision >= 0 ?` makes the bindings depend on it (the QML compiler
+    // drops a bare `revision;` statement).
+    readonly property string laneText: revision >= 0 && !placeholder
+        ? laneName.text(Automation.laneKind(track, lane),
+                        Automation.laneDetail(track, lane),
+                        Automation.laneParam(track, lane))
+        : ""
+    readonly property int mode: revision >= 0 && !placeholder ? Automation.laneMode(track, lane) : 1
 
     // Closes the lane's menus, if open.
     function dismiss(): void {
@@ -111,26 +112,30 @@ Rectangle {
         opacity: 0.5
     }
 
-    AddLaneMenu {
+    LazyMenu {
         id: addMenu
-        track: laneHeader.track
-    }
-
-    QQC2.Menu {
-        id: laneMenu
-        AddLaneMenu {
+        menu: AddLaneMenu {
             track: laneHeader.track
         }
-        QQC2.MenuItem {
-            visible: !laneHeader.placeholder
-            text: i18nc("@action:inmenu", "Remove Lane")
-            icon.name: "list-remove"
-            onTriggered: Automation.removeLane(laneHeader.track, laneHeader.lane)
-        }
-        QQC2.MenuItem {
-            text: i18nc("@action:inmenu", "Hide Automation")
-            icon.name: "arrow-down"
-            onTriggered: Automation.setExpanded(laneHeader.track, false)
+    }
+
+    LazyMenu {
+        id: laneMenu
+        menu: QQC2.Menu {
+            AddLaneMenu {
+                track: laneHeader.track
+            }
+            QQC2.MenuItem {
+                visible: !laneHeader.placeholder
+                text: i18nc("@action:inmenu", "Remove Lane")
+                icon.name: "list-remove"
+                onTriggered: Automation.removeLane(laneHeader.track, laneHeader.lane)
+            }
+            QQC2.MenuItem {
+                text: i18nc("@action:inmenu", "Hide Automation")
+                icon.name: "arrow-down"
+                onTriggered: Automation.setExpanded(laneHeader.track, false)
+            }
         }
     }
 

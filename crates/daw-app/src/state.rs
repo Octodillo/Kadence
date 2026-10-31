@@ -38,6 +38,9 @@ pub struct AppState {
     pub audio_recording: Option<crate::recording::AudioRecording>,
     /// Automation lane modes and device parameter names.
     pub lanes: crate::lanes::Lanes,
+    /// The mixer and its touch-write takes (the Mix page's faders and the
+    /// device panel's controls record into it).
+    pub mixer: crate::session_mixer::SessionMixer,
     /// The document revision the engine last played.
     synced: Option<u64>,
     /// Bumped whenever anything a view shows changed: the document, the
@@ -64,6 +67,11 @@ pub struct AppState {
     pub editor_title_format: String,
     /// The master track's name, for editor titles, in the user's language.
     pub master_name: String,
+    /// Bumped when plugins' own values may have changed without the
+    /// document saying so (an editor closed), so the device panel reads
+    /// them again. A recorded state changes the document, which the panel
+    /// notices on its own.
+    pub plugin_values_epoch: u64,
     /// Which MIDI sources get ports of their own.
     pub midi: MidiSettings,
     /// How often a changed project is autosaved; `None` turns it off.
@@ -153,6 +161,7 @@ impl AppState {
             export: None,
             audio_recording: None,
             lanes,
+            mixer: Default::default(),
             synced: None,
             view_revision: 0,
             status: None,
@@ -161,6 +170,7 @@ impl AppState {
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
             plugin_changes: std::collections::HashMap::new(),
+            plugin_values_epoch: 0,
             editor_title_format: "%1 — %2".into(),
             master_name: "Master".into(),
             midi: MidiSettings::default(),
@@ -611,6 +621,20 @@ impl AppState {
         (!ours && recovery::is_locked(&root)).then_some(root)
     }
 
+    /// Records the touch-write takes in progress at the playhead, and
+    /// ends them when playback stops. Called with [`tick_engine`](Self::tick_engine).
+    pub fn tick_mixer(&mut self) {
+        if !self.mixer.recording() {
+            return;
+        }
+        self.mixer.write_lanes.clone_from(&self.lanes.write);
+        let r = self.mixer.tick(&mut self.doc, self.engine.session_mut());
+        self.sync();
+        if let Err(e) = r {
+            self.report(e);
+        }
+    }
+
     /// Runs the plugins' main-thread work and frees what the audio thread
     /// is done with. Called by the UI's refresh timer, about 60 times a
     /// second.
@@ -912,6 +936,7 @@ impl AppState {
         self.plugin_changes.clear();
         self.doc_serial += 1;
         self.arrange.selection.clear();
+        self.arrange.hovered = None;
         self.arrange.points = None;
         self.arrange.expanded.clear();
         self.arrange.selected_track = None;

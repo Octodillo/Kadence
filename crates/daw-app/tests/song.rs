@@ -5,26 +5,21 @@
 //! send: a project bundle, an imported audio clip on an audio track, a MIDI
 //! clip with notes on an instrument track (which starts with the synth), a
 //! tempo change, effect inserts (one of them a CLAP plugin running in its
-//! sandbox host), a bus fed by a send, and volume automation. Then it checks
-//! undo and redo, plays the song live, exports it to WAV and FLAC the way the
+//! sandbox host) set up through the device panel, a bus fed by a send, and
+//! volume and send automation drawn in the arrange view. Then it checks
+//! undo and redo, plays the song live (opening and closing
+//! the plugin's own editor, headless), exports it to WAV and FLAC the way the
 //! app's Export Song does, swaps the instrument to the sampler and back,
 //! saves, reopens a moved copy, and checks that what comes out is
 //! music-shaped: not silent, each part audible where it should be, and the
 //! same after the round trip.
 //!
-//! No Qt runs here; it lives in this crate because the track, instrument
-//! and mixer code it drives does. The plugin is `daw-clap-test-plugin`, a
+//! No Qt runs here; it lives in this crate because the track, instrument,
+//! mixer and device panel code it drives does. The plugin is `daw-clap-test-plugin`, a
 //! gain, built with the sandbox host the first time the test needs them.
 //!
 //! CI runs this as its own step; set `KADENCE_SMOKE_OUT` to a directory to
 //! keep the exported files.
-//!
-//! Features still on open pull requests have hooks marked `TODO(#n)`; extend
-//! this test when they merge:
-//! * #98 device parameters: set the reverb and the plugin's gain through the
-//!   device panel's commands, and check bypass.
-//! * #108 automation lanes: also automate a device parameter and a send
-//!   level the way the arrange view writes them.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,9 +27,12 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
+use daw_app::device_panel::{BuiltinParams, DevicePanel, ParamSource, PluginParams};
 use daw_app::instrument::{self, InstrumentChoices};
 use daw_app::mixer::{Control, StripId};
 use daw_app::session_mixer::SessionMixer;
+use daw_arrange::automation::lane_targets;
+use daw_arrange::{Arrange, PointShape, Pointer};
 use daw_core::event::EventList;
 use daw_core::plugin::PluginFormatKind;
 use daw_core::time::{PPQ, SampleTime, TickTime};
@@ -42,12 +40,12 @@ use daw_engine::EngineConfig;
 use daw_media::{AudioData, FileFormat, FlacBits, WavFormat, decode_file, write_wav};
 use daw_model::bundle::to_json;
 use daw_model::commands::{
-    AddClip, AddLane, AddNotes, ClipField, RemoveDevice, RemoveSend, SetClip, SetParam, SetTempo,
+    AddClip, AddNotes, ClipField, RemoveDevice, RemoveSend, SetClip, SetTempo,
 };
 use daw_model::{
-    AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, DeviceId,
-    DeviceSource, Document, Fade, FadeShape, MeterPoint, MidiClip, Note, Project, SendId,
-    TempoData, TempoPoint, Track, TrackId, TrackKind,
+    AudioClip, AutomationPoint, AutomationTarget, Clip, ClipContent, DeviceId, DeviceSource,
+    Document, Fade, FadeShape, LaneId, MeterPoint, MidiClip, Note, Project, SendId, TempoData,
+    TempoPoint, Track, TrackId, TrackKind,
 };
 use daw_plugin_host::{HostLauncher, SandboxConfig};
 use daw_session::export::{
@@ -63,11 +61,13 @@ const BLOCK: usize = 256;
 const BPM: f64 = 100.0;
 /// Samples per beat at [`BPM`].
 const BEAT: usize = (RATE * 60.0 / BPM) as usize;
-/// Undo steps [`make_song`] makes.
-const EDITS: usize = 16;
+/// Undo steps [`make_song`] makes. A drag in the device panel is one; a
+/// lane is one to add, one per point, and one for the first point's shape.
+const EDITS: usize = 23;
 /// The song's clips end after three bars of 4/4.
 const SONG_END_BEATS: usize = 12;
-/// The export's tail, a fourth bar for the reverb to ring on.
+/// The export's tail, a fourth bar for the second chord's reverb to ring
+/// on.
 const TAIL_BEATS: usize = 4;
 /// The test plugin, a gain, and its gain parameter.
 const PLUGIN_ID: &str = "org.daw.test.gain";
@@ -80,9 +80,15 @@ const PLUGIN_LATENCY: usize = 32;
 /// What the test needs to find again after building the song.
 struct Song {
     doc: Document,
+    pluck: TrackId,
     keys: TrackId,
+    bus: TrackId,
     keys_send: SendId,
     plugin: DeviceId,
+    /// The device panel, open on the reverb.
+    panel: DevicePanel,
+    arrange: Arrange,
+    send_lane: LaneId,
     instruments: InstrumentChoices,
     mixer: SessionMixer,
     /// The project file of the new, empty project.
@@ -137,7 +143,9 @@ fn strip(track: TrackId) -> StripId {
 ///
 /// Bar 1: the audio track's pluck. Bars 2 and 3: the same chord twice on
 /// the instrument track, the second 12 dB quieter through volume
-/// automation. Bar 4: only the reverb tail the keys send to the bus.
+/// automation. Bar 4: only the reverb tail of the second chord, which the
+/// keys send to the bus 6 dB down through send automation (the first
+/// chord's has died away by then).
 fn make_song(bundle: &Path, source: &Path) -> Song {
     let mut doc = Document::new(Project::new("Smoke Song"));
     doc.save_as(bundle).unwrap();
@@ -207,14 +215,44 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     let added = &doc.project().track(pluck).unwrap().devices;
     assert_eq!(added.len(), 2, "the plugin goes after the EQ");
     let plugin_id = added[1].id;
-    // TODO(#98): set this through the device panel.
-    doc.execute(SetParam {
-        device: plugin_id,
-        param: GAIN,
-        value: Some(0.5),
-    })
-    .unwrap();
-    doc.seal();
+    // Turn its gain down to half in the device panel, which knows a
+    // plugin's parameters once the plugin is loaded. A drag is one undo
+    // step.
+    let plugin_params = PluginParams::default();
+    let mut panel = DevicePanel::new(vec![
+        Box::new(BuiltinParams),
+        Box::new(plugin_params.clone()),
+    ]);
+    // The plugin starts out at a quarter gain (from its saved state), so
+    // what the panel shows can only come from the plugin, not from the
+    // parameter's default of 1.
+    doc.store_plugin_state(plugin_id, Some(gain_state(0.25).into()))
+        .unwrap();
+    {
+        let (mut session, _proc) = Session::new(config());
+        session.set_root(doc.bundle().map(|b| b.root().to_path_buf()));
+        session.set_plugin_loader(Some(Box::new(plugin_loader(|c| c))));
+        session.sync(&doc.snapshot()).unwrap();
+        assert!(
+            plugin_params.update(Some(&session), Some(plugin_id), doc.revision()),
+            "the device panel can describe the loaded plugin: {:?}",
+            session.plugin_status(plugin_id)
+        );
+    }
+    let device = &doc.project().track(pluck).unwrap().devices[1];
+    assert_eq!(
+        plugin_params.current(device, GAIN),
+        Some(0.25),
+        "the panel reads the plugin's own gain from the plugin"
+    );
+    panel.open(plugin_id);
+    let view = panel.view(doc.project()).unwrap();
+    let gain = view.params.iter().find(|p| p.desc.id == GAIN).unwrap();
+    assert_eq!(gain.value, 0.25, "the panel shows the plugin's own gain");
+    for value in [0.8, 0.65, 0.5] {
+        panel.set_value(&mut doc, GAIN, value).unwrap();
+    }
+    panel.end_gesture(&mut doc);
     mixer
         .set(&mut doc, None, strip(pluck), Control::Pan, -0.2)
         .unwrap();
@@ -253,14 +291,11 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     let bus = add_track(&mut doc, 2, TrackKind::Bus, "Reverb");
     assert!(mixer.add_insert(&mut doc, strip(bus), "daw.reverb"));
     let reverb = doc.project().track(bus).unwrap().devices[0].id;
-    // TODO(#98): set this through the device panel.
-    doc.execute(SetParam {
-        device: reverb,
-        param: daw_devices::devices::reverb::MIX,
-        value: Some(1.0),
-    })
-    .unwrap();
-    doc.seal();
+    panel.open(reverb);
+    panel
+        .set_value(&mut doc, daw_devices::devices::reverb::MIX, 1.0)
+        .unwrap();
+    panel.end_gesture(&mut doc);
     // The keys' send into the reverb bus, added from the keys' strip.
     let choices = mixer
         .strips(doc.project(), None)
@@ -272,37 +307,102 @@ fn make_song(bundle: &Path, source: &Path) -> Song {
     assert!(mixer.add_send(&mut doc, strip(keys), strip(bus)));
     let keys_send = doc.project().track(keys).unwrap().sends[0].id;
 
-    // Volume automation: full level for the first chord, -12 dB from the
-    // second on.
-    // TODO(#108): draw this lane the way the arrange view does, and add a
-    // device parameter and send level lane.
-    let mut lane = AutomationLane::new(AutomationTarget::Volume);
-    lane.points = vec![point(0.0, 0.0), point(8.0, -12.0)];
-    doc.execute(AddLane { track: keys, lane }).unwrap();
-    doc.seal();
+    // Automation drawn in the arrange view: the keys' volume at full level
+    // for the first chord and -12 dB from the second on, and their send
+    // 6 dB down from the second chord on.
+    let mut arrange = Arrange::new();
+    arrange.resize(doc.project(), 1000.0, 600.0);
+    draw_lane(
+        &mut arrange,
+        &mut doc,
+        keys,
+        AutomationTarget::Volume,
+        &[(0.0, 0.0), (8.0, -12.0)],
+    );
+    let send_lane = draw_lane(
+        &mut arrange,
+        &mut doc,
+        keys,
+        AutomationTarget::SendLevel { send: keys_send },
+        &[(0.0, 0.0), (8.0, -6.0)],
+    );
 
     Song {
         doc,
+        pluck,
         keys,
+        bus,
         keys_send,
         plugin: plugin_id,
+        panel,
+        arrange,
+        send_lane,
         empty,
         instruments,
         mixer,
     }
 }
 
+/// The reverb on the bus.
+fn reverb_of(doc: &Document, bus: TrackId) -> DeviceId {
+    doc.project().track(bus).unwrap().devices[0].id
+}
+
+/// The test plugin's state for `gain`: its state is its gain.
+fn gain_state(gain: f64) -> Vec<u8> {
+    let mut s = b"DAWT".to_vec();
+    s.extend_from_slice(&gain.to_le_bytes());
+    s
+}
+
 fn builtin_source(kind: &str) -> DeviceSource {
     DeviceSource::Builtin { kind: kind.into() }
 }
 
-fn point(beat: f64, db: f64) -> AutomationPoint {
-    AutomationPoint {
-        tick: beats(beat),
-        value: db,
-        curve: 0.0,
-        step: true,
+/// Adds a lane for `target` (one the track's Add Lane menu offers) on
+/// `track` in the arrange view and clicks in its `points` (beat, value),
+/// each holding until the next, as the user does. Returns the lane.
+fn draw_lane(
+    arrange: &mut Arrange,
+    doc: &mut Document,
+    track: TrackId,
+    target: AutomationTarget,
+    points: &[(f64, f64)],
+) -> LaneId {
+    let t = doc.project().track(track).unwrap();
+    assert!(
+        lane_targets(t, arrange.params.as_ref()).contains(&target),
+        "{target:?} is offered"
+    );
+    assert!(arrange.add_lane(doc, track, target).document);
+    let project = doc.project();
+    let row = project.tracks.iter().position(|t| t.id == track).unwrap();
+    let t = project.track(track).unwrap();
+    let index = t.automation.len() - 1;
+    let lane = t.automation[index].id;
+    let scale = arrange.lane_scale(t, target);
+    let rect = arrange.lane_rect(row, index);
+    for &(beat, value) in points {
+        let (x, y) = arrange.point_pos(&rect, scale, &AutomationPoint::new(beats(beat), value));
+        // A pixel late: the click snaps to the beat.
+        assert!(arrange.press(doc, Pointer::left(x + 1.0, y)).document);
+        arrange.release(doc, Pointer::left(x + 1.0, y));
+        // The first point is a ramp; later ones take the shape of the one
+        // before.
+        let drawn_so_far = &doc.project().track(track).unwrap().automation[index].points;
+        if drawn_so_far.len() == 1 {
+            assert!(!drawn_so_far[0].step);
+            assert!(arrange.set_point_shape(doc, PointShape::Step).document);
+        }
     }
+    let drawn = &doc.project().track(track).unwrap().automation[index].points;
+    assert_eq!(drawn.len(), points.len());
+    for (p, &(beat, value)) in drawn.iter().zip(points) {
+        assert_eq!(p.tick, beats(beat), "points land on the beat");
+        assert!((p.value - value).abs() < 1e-6, "{} vs {value}", p.value);
+        assert!(p.step);
+    }
+    lane
 }
 
 /// Builds the test plugin and the sandbox host into their own target
@@ -315,6 +415,9 @@ fn plugin_binaries() -> &'static (PathBuf, PathBuf) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let target = root.join("target").join("clap-test-plugin");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        // The same build as every other test that uses this target directory: a
+        // different package set unifies features differently and rebuilds the
+        // plugin while another test process is copying or loading it.
         let status = Command::new(cargo)
             .args([
                 "build",
@@ -459,15 +562,41 @@ fn play(doc: &mut Document, plugin: DeviceId, n: usize) -> AudioData {
         assert!(report.error.is_none(), "{:?}", report.error);
         assert_eq!(report.warnings, [], "the song plays without warnings");
     }
+    // The plugin's own editor: the test plugin's opens no window, and
+    // showing it reports a state change, as a knob turned in it would.
+    assert!(session.plugin_has_editor(plugin));
+    session
+        .open_plugin_editor(plugin, "DAW Test Gain — Pluck")
+        .expect("open the plugin's editor");
+    assert!(session.plugin_editor_open(plugin));
+    let mut reported = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        let mut outs: [&mut [f32]; 2] = [&mut l[..], &mut r[..]];
+        proc.process(BLOCK, &[], &mut outs, &events);
+        let report = session.tick();
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.warnings, [], "the editor opens without warnings");
+        if report.state_changed.contains(&plugin) {
+            reported = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(reported, "the editor's change reaches the app");
+    session.close_plugin_editor(plugin);
+    assert!(!session.plugin_editor_open(plugin));
+
     let states = session.plugin_states();
     assert_eq!(states.len(), 1, "the plugin has a state to save");
     for s in states {
         assert_eq!(s.device, plugin);
         let state = s.state.unwrap();
-        // The test plugin's state is its gain.
-        let mut gain = b"DAWT".to_vec();
-        gain.extend_from_slice(&0.5f64.to_le_bytes());
-        assert_eq!(&*state.0, &gain[..], "the plugin took the gain parameter");
+        assert_eq!(
+            &*state.0,
+            &gain_state(0.5)[..],
+            "the plugin took the gain parameter"
+        );
         doc.store_plugin_state(s.device, Some(state)).unwrap();
     }
     AudioData {
@@ -495,9 +624,14 @@ fn make_save_reload_and_render_a_song() {
     let bundle = tmp.path().join("Smoke Song");
     let Song {
         mut doc,
+        pluck: pluck_track,
         keys,
+        bus,
         keys_send,
         plugin,
+        mut panel,
+        mut arrange,
+        send_lane,
         empty,
         instruments,
         mut mixer,
@@ -518,7 +652,7 @@ fn make_save_reload_and_render_a_song() {
     while doc.redo().unwrap().is_some() {}
     assert_eq!(to_json(doc.project()).unwrap(), made, "redo restores it");
 
-    // Play the first bar live, which also stores the plugin's state, and
+    // Play the whole song live, which also stores the plugin's state, and
     // save.
     let live = play(&mut doc, plugin, SONG_END_BEATS + TAIL_BEATS);
     doc.save().unwrap();
@@ -595,16 +729,8 @@ fn make_save_reload_and_render_a_song() {
         "the pan moves the pluck left (R/L {balance})"
     );
     let loud = rms(&song, 4.5, 7.0);
-    let quiet = rms(&song, 8.5, 11.0);
     assert!(loud > 0.01, "the MIDI clip plays the synth ({loud})");
-    let ratio = quiet / loud;
-    // -12 dB is 0.25; the reverb tail of the first chord adds a little.
-    assert!(
-        (0.2..0.32).contains(&ratio),
-        "volume automation turns the second chord down ({quiet} / {loud} = {ratio})"
-    );
     let tail = rms(&song, 12.5, 15.5);
-    eprintln!("pluck {pluck:.4}, chord {loud:.4} then {quiet:.4}, reverb tail {tail:.5}");
 
     // The plugin halves the pluck: without it, bar 1 is twice as loud.
     doc.execute(RemoveDevice::new(plugin)).unwrap();
@@ -627,15 +753,115 @@ fn make_save_reload_and_render_a_song() {
         "the export starts at the top of the song"
     );
 
-    // The tail in bar 4 comes from the send into the reverb bus: without
-    // the send it (nearly) goes away.
+    // Bypassing the plugin in the device panel takes it out, latency and
+    // all: the song sounds as it does without it.
+    panel.open(plugin);
+    panel.set_enabled(&mut doc, false).unwrap();
+    let bypassed = render(&mut doc);
+    doc.undo().unwrap();
+    assert!(
+        bypassed.channels == unplugged.channels,
+        "bypass takes the plugin out"
+    );
+
+    // The send lane sends the second chord 6 dB down: with the lane off,
+    // its tail in bar 4 is twice as loud, and nothing before it changes.
+    assert!(
+        arrange
+            .set_lane_enabled(&mut doc, send_lane, false)
+            .document
+    );
+    let unlaned = render(&mut doc);
+    doc.undo().unwrap();
+    let full_tail = rms(&unlaned, 12.5, 15.5);
+    eprintln!(
+        "pluck {pluck:.4}, chord {loud:.4} then {:.4}, reverb tail {tail:.5} \
+         ({full_tail:.5} with the send lane off)",
+        rms(&song, 8.5, 11.0)
+    );
+    let ratio = tail / full_tail;
+    assert!(
+        (0.47..0.53).contains(&ratio),
+        "the send lane sends the second chord 6 dB down (tail x{ratio})"
+    );
+    let at = |beat: f64| (beat * BEAT as f64) as usize;
+    for c in 0..2 {
+        assert!(
+            song.channels[c][..at(8.0)] == unlaned.channels[c][..at(8.0)],
+            "the send lane leaves the first chord alone"
+        );
+    }
+    // With both chords sent alike, they differ by the volume lane: -12 dB
+    // is 0.25, and the reverb tail of the first chord adds a little.
+    let ratio = rms(&unlaned, 8.5, 11.0) / rms(&unlaned, 4.5, 7.0);
+    assert!(
+        (0.2..0.32).contains(&ratio),
+        "the volume lane turns the second chord down ({ratio})"
+    );
+
+    // Tapped before the fader, the send no longer follows the volume lane
+    // down 12 dB: the second chord's tail is four times as loud.
+    mixer
+        .set_send_pre_fader(&mut doc, strip(keys), strip(bus), true)
+        .unwrap();
+    let pre = render(&mut doc);
+    doc.undo().unwrap();
+    let ratio = rms(&pre, 12.5, 15.5) / tail;
+    assert!(
+        (3.8..4.2).contains(&ratio),
+        "a pre-fader send ignores the fader (tail x{ratio})"
+    );
+    for c in 0..2 {
+        assert!(
+            pre.channels[c][..at(8.0)] == song.channels[c][..at(8.0)],
+            "with the fader at 0 dB, the tap point changes nothing"
+        );
+    }
+
+    // Routed to the reverb bus instead of the master, the pluck goes
+    // through the bus's fully wet reverb; with the reverb bypassed, the
+    // bus passes it on unchanged.
+    let outputs = mixer
+        .strips(doc.project(), None)
+        .into_iter()
+        .find(|s| s.id == strip(pluck_track))
+        .unwrap()
+        .output_choices;
+    assert!(outputs.iter().any(|c| c.id == strip(bus)), "{outputs:?}");
+    mixer
+        .set_output(&mut doc, strip(pluck_track), strip(bus))
+        .unwrap();
+    let routed = render(&mut doc);
+    let routed_pluck = rms(&routed, 0.1, 3.0);
+    panel.open(reverb_of(&doc, bus));
+    panel.set_enabled(&mut doc, false).unwrap();
+    let through = render(&mut doc);
+    doc.undo().unwrap();
+    doc.undo().unwrap();
+    assert!(
+        (routed_pluck / pluck - 1.0).abs() > 0.1,
+        "the output routing sends the pluck through the reverb ({routed_pluck} vs {pluck})"
+    );
+    let at4 = (4.0 * BEAT as f64) as usize;
+    for c in 0..2 {
+        assert!(
+            through.channels[c][..at4] == song.channels[c][..at4],
+            "through the bypassed bus, bar 1 sounds as it does from the master"
+        );
+    }
+    assert!(
+        !doc.is_modified(),
+        "undo routes the pluck back to the master"
+    );
+
+    // The tail comes from the send into the reverb bus: without the send
+    // it goes away.
     doc.execute(RemoveSend::new(keys_send)).unwrap();
     let dry = render(&mut doc);
     doc.undo().unwrap();
     let dry_tail = rms(&dry, 12.5, 15.5);
     assert!(
-        // The reverb's default 30% mix leaves about a third of this.
-        tail > 5e-4 && tail > 4.0 * dry_tail,
+        tail > 2.5e-4 && tail > 4.0 * dry_tail,
         "the send feeds the reverb bus (tail {tail}, without the send {dry_tail})"
     );
     assert!(!doc.is_modified(), "undo returns to the saved state");
@@ -660,7 +886,6 @@ fn make_save_reload_and_render_a_song() {
     assert!(keys_part < 1e-4, "an empty sampler is silent ({keys_part})");
     // Up to the MIDI clip at beat 4 nothing changes; the synth sounds
     // right from there.
-    let at = |beat: f64| (beat * BEAT as f64) as usize;
     for c in 0..2 {
         assert_eq!(
             swapped.channels[c][..at(4.0)],
