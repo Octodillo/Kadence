@@ -20,11 +20,14 @@
 //! - **Input gate.** [`PlayerHandle::set_input`] decides which live input
 //!   passes (none, or one channel or all). Live notes that the gate closes
 //!   on are stopped, so nothing hangs.
+//! - **Preview.** [`PlayerHandle::preview`] sounds one note for an editor
+//!   (a key clicked in the piano roll, a note being dragged) whether or not
+//!   the transport plays. It bypasses the input gate and is never recorded.
 //!
 //! `process` never allocates, locks or blocks.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
 use daw_core::event::{Event, EventKind, EventList, NoteId};
@@ -87,6 +90,34 @@ impl InputGate {
 /// `InputGate::channel` in an atomic: this means every channel.
 const ALL_CHANNELS: u8 = u8::MAX;
 
+/// A note the editor wants to hear, see [`PlayerHandle::preview`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Preview {
+    pub key: u8,
+    pub channel: u8,
+    /// 0 to 1.
+    pub velocity: f32,
+}
+
+/// The preview request in one atomic word: bits 0-6 key, 8-11 channel,
+/// 12-18 velocity (0 to 127), bit 19 "a note is wanted", and a request
+/// count from bit 20 so asking for the same note again retriggers it.
+fn pack_preview(serial: u32, preview: Option<Preview>) -> u32 {
+    let note = preview.map_or(0, |p| {
+        let velocity = (p.velocity.clamp(0.0, 1.0) * 127.0).round() as u32;
+        u32::from(p.key & 0x7F) | u32::from(p.channel & 0x0F) << 8 | velocity << 12 | 1 << 19
+    });
+    serial << 20 | note
+}
+
+fn unpack_preview(word: u32) -> Option<Preview> {
+    (word & 1 << 19 != 0).then(|| Preview {
+        key: (word & 0x7F) as u8,
+        channel: (word >> 8 & 0x0F) as u8,
+        velocity: (word >> 12 & 0x7F) as f32 / 127.0,
+    })
+}
+
 #[derive(Debug, Default)]
 struct Shared {
     armed: AtomicBool,
@@ -95,6 +126,7 @@ struct Shared {
     input_open: AtomicBool,
     input_channel: AtomicU8,
     end_live: AtomicBool,
+    preview: AtomicU32,
 }
 
 /// Creates a player and the handle that controls it. `capture_capacity`
@@ -122,6 +154,8 @@ pub fn midi_player(capture_capacity: usize) -> (MidiPlayer, PlayerHandle) {
         live: [0; 16],
         pedal: 0,
         captured: [0; 16],
+        preview_seen: 0,
+        previewing: None,
         shared: shared.clone(),
     };
     let handle = PlayerHandle {
@@ -193,6 +227,17 @@ impl PlayerHandle {
         }
     }
 
+    /// Sounds `note` from the next block on, ending the note previewed
+    /// before (if any); `None` ends the preview. Asking for the note that
+    /// is already sounding starts it again. Only the newest request per
+    /// block is heard.
+    pub fn preview(&self, note: Option<Preview>) {
+        let serial = (self.shared.preview.load(Relaxed) >> 20).wrapping_add(1) & 0xFFF;
+        self.shared
+            .preview
+            .store(pack_preview(serial, note), Relaxed);
+    }
+
     /// Takes everything captured so far.
     pub fn drain_captured(&mut self) -> impl Iterator<Item = Captured> + '_ {
         self.capture_rx.drain()
@@ -237,6 +282,10 @@ pub struct MidiPlayer {
     pedal: u16,
     /// Live notes captured and not yet ended, like `live`.
     captured: [u128; 16],
+    /// The last preview request acted on.
+    preview_seen: u32,
+    /// The preview note sounding: channel, key and note id.
+    previewing: Option<(u8, u8, NoteId)>,
     shared: Arc<Shared>,
 }
 
@@ -355,6 +404,42 @@ impl MidiPlayer {
                 push(out, 0, EventKind::Midi([0xB0 | channel, 64, 0]));
                 self.pedal &= !bit;
             }
+        }
+    }
+
+    /// Follows a new preview request: ends the old note, starts the new.
+    fn update_preview(&mut self, out: &mut EventList) {
+        let word = self.shared.preview.load(Relaxed);
+        if word == self.preview_seen {
+            return;
+        }
+        self.preview_seen = word;
+        if let Some((channel, key, note_id)) = self.previewing.take() {
+            push(
+                out,
+                0,
+                EventKind::NoteOff {
+                    channel,
+                    key: Some(key),
+                    velocity: 0.0,
+                    note_id,
+                },
+            );
+        }
+        if let Some(p) = unpack_preview(word) {
+            let note_id = self.next_note_id;
+            self.next_note_id = self.next_note_id.wrapping_add(1) & NoteId::MAX;
+            push(
+                out,
+                0,
+                EventKind::NoteOn {
+                    channel: p.channel,
+                    key: p.key,
+                    velocity: p.velocity,
+                    note_id,
+                },
+            );
+            self.previewing = Some((p.channel, p.key, note_id));
         }
     }
 
@@ -512,6 +597,7 @@ impl Node for MidiPlayer {
                 let _ = out.push(*e);
             }
         }
+        self.update_preview(out);
 
         let t = ctx.transport;
         let armed = self.shared.armed.load(Relaxed);
@@ -610,6 +696,8 @@ impl Node for MidiPlayer {
 
     fn reset(&mut self) {
         self.active.clear();
+        // The instrument is reset too; a later request starts afresh.
+        self.previewing = None;
         if let Some(at) = self.expected.take()
             && self.capturing
         {

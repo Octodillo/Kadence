@@ -11,14 +11,20 @@
 //! velocity lane along the bottom (`velocity_height`) and the note grid in
 //! between. Keys run from 127 at the top to 0 at the bottom.
 //!
-//! Gestures:
-//! - click a note to select it (Shift toggles), drag it to move the
-//!   selection, drag an edge to resize; Alt disables snapping;
-//! - drag on empty space for a rubber band (Shift adds to the selection);
+//! Gestures, with the same modifiers as the arrange view:
+//! - click a note to select only it, Ctrl+click toggles it, Shift+click
+//!   adds it; drag it to move the selection, drag an edge to resize; Alt
+//!   disables snapping;
+//! - drag on empty space for a rubber band (Shift or Ctrl adds to the
+//!   selection);
 //! - double-click empty space to add a note, double-click a note to delete it;
-//! - click a key to select every note on it;
+//! - click a key to select every note on it (Shift adds, Ctrl toggles);
 //! - drag in the velocity lane to draw velocities;
 //! - click the ruler to move the playhead.
+//!
+//! Pressing a key or a note, and dragging a note up or down, auditions its
+//! pitch: [`PianoRoll::audition`] says which note should sound, and the
+//! front end plays it through the track's instrument.
 
 mod draw;
 
@@ -31,6 +37,7 @@ use daw_core::time::{PPQ, TickTime};
 use daw_midi::edit::{self, Quantize, Snap as ClipSnap};
 use daw_midi::grid::{Grid, Meter};
 use daw_midi::model::{self as glue, NoteEdit};
+use daw_midi::player::Preview;
 use daw_midi::view::{Drag, DragKind, NotePart, PianoRollView, VelocityLane};
 use daw_midi::{EditNote, NoteData};
 use daw_model::commands::EditNotes;
@@ -46,8 +53,9 @@ pub const DEFAULT_KEY_HEIGHT: f64 = 14.0;
 const DRAG_THRESHOLD: f64 = 3.0;
 /// Width of a note's resize zones.
 const EDGE_PX: f64 = 6.0;
-/// How close to a stem a velocity click must be.
-const STEM_TOLERANCE: f64 = 5.0;
+/// How close to a stem a velocity press must be: a target as wide as a
+/// fingertip, for touch screens too.
+const STEM_TOLERANCE: f64 = 10.0;
 /// Space above the tallest velocity stem.
 const VELOCITY_INSET: f64 = 4.0;
 
@@ -69,8 +77,14 @@ enum Gesture {
         area: Area,
         hit: Option<(NoteUid, NotePart)>,
     },
-    /// Moving or resizing the selection.
-    Notes { drag: Drag, ids: Vec<NoteUid> },
+    /// Moving or resizing the selection by `grabbed`.
+    Notes {
+        drag: Drag,
+        ids: Vec<NoteUid>,
+        grabbed: NoteUid,
+    },
+    /// Holding the pointer down on the keyboard strip.
+    Keys,
     /// Rubber-band selection.
     Band {
         x0: f64,
@@ -79,8 +93,14 @@ enum Gesture {
         y1: f64,
         base: BTreeSet<NoteUid>,
     },
-    /// Drawing velocities; `ids` are the notes it may change.
-    Velocity { last: (f64, f64), ids: Vec<NoteUid> },
+    /// Drawing velocities; `ids` are the notes it may change. `grabbed` is
+    /// the note whose stem was pressed: it follows the pointer up and down
+    /// until the pointer moves sideways away from it.
+    Velocity {
+        last: (f64, f64),
+        ids: Vec<NoteUid>,
+        grabbed: Option<NoteUid>,
+    },
 }
 
 /// The piano roll's state. See the crate docs.
@@ -108,6 +128,8 @@ pub struct PianoRoll {
     /// Length of drawn notes in ticks; `None` is one grid step.
     pub new_length: Option<i64>,
     gesture: Option<Gesture>,
+    /// The note the pointer is sounding, if any.
+    audition: Option<Preview>,
     menu_requested: bool,
     /// Fit the view to the clip's notes once the item has a size.
     fit_pending: bool,
@@ -165,6 +187,7 @@ impl PianoRoll {
             new_velocity: 0.8,
             new_length: None,
             gesture: None,
+            audition: None,
             fit_pending: false,
             sized: false,
             live: Vec::new(),
@@ -269,6 +292,7 @@ impl PianoRoll {
         self.clip = Some(clip);
         self.selection.clear();
         self.gesture = None;
+        self.audition = None;
         self.live.clear();
         self.fit_pending = true;
         self.fit(project);
@@ -319,6 +343,28 @@ impl PianoRoll {
         }
     }
 
+    /// The note the pointer wants to hear: the key or note pressed, at the
+    /// key a note has been dragged to. `None` once the pointer is up.
+    pub fn audition(&self) -> Option<Preview> {
+        self.audition
+    }
+
+    fn audition_key(&self, key: u8) -> Preview {
+        Preview {
+            key,
+            channel: 0,
+            velocity: self.new_velocity as f32,
+        }
+    }
+
+    fn audition_note(n: &Note) -> Preview {
+        Preview {
+            key: n.key,
+            channel: n.channel,
+            velocity: n.velocity as f32,
+        }
+    }
+
     /// Whether the last input asked for a context menu (cleared on read).
     pub fn take_menu_request(&mut self) -> bool {
         std::mem::take(&mut self.menu_requested)
@@ -351,6 +397,7 @@ impl PianoRoll {
     pub fn press(&mut self, doc: &mut Document, env: &Env, p: Pointer) -> Outcome {
         doc.seal();
         self.gesture = None;
+        self.audition = None;
         let project = doc.project();
         let area = self.area(p.x, p.y);
         if p.button == Button::Right {
@@ -384,27 +431,48 @@ impl PianoRoll {
                     return Outcome::default();
                 };
                 let key = self.grid_view(c.start).y_to_key(p.y - self.ruler_height);
-                if !p.shift {
-                    self.selection.clear();
+                let row: Vec<NoteUid> = m
+                    .notes
+                    .iter()
+                    .filter(|n| n.key == key)
+                    .map(|n| n.id)
+                    .collect();
+                if p.ctrl && !row.is_empty() && row.iter().all(|id| self.selection.contains(id)) {
+                    for id in &row {
+                        self.selection.remove(id);
+                    }
+                } else {
+                    if !p.shift && !p.ctrl {
+                        self.selection.clear();
+                    }
+                    self.selection.extend(row);
                 }
-                self.selection
-                    .extend(m.notes.iter().filter(|n| n.key == key).map(|n| n.id));
+                self.audition = Some(self.audition_key(key));
+                self.gesture = Some(Gesture::Keys);
                 outcome_view()
             }
             Area::Notes => {
                 let hit = self.hit(project, p.x, p.y);
                 match hit {
-                    Some((id, _)) if p.shift => {
+                    Some((id, _)) if p.ctrl => {
                         if !self.selection.remove(&id) {
                             self.selection.insert(id);
                         }
+                    }
+                    Some((id, _)) if p.shift => {
+                        self.selection.insert(id);
                     }
                     Some((id, _)) if !self.selection.contains(&id) => {
                         self.selection = BTreeSet::from([id]);
                     }
                     Some(_) => {}
-                    None if !p.shift => self.selection.clear(),
+                    None if !p.shift && !p.ctrl => self.selection.clear(),
                     None => {}
+                }
+                if let Some((id, _)) = hit
+                    && let Some(n) = self.notes(project).iter().find(|n| n.id == id)
+                {
+                    self.audition = Some(Self::audition_note(n));
                 }
                 self.gesture = Some(Gesture::Pending {
                     press: p,
@@ -436,7 +504,8 @@ impl PianoRoll {
                     .filter(|n| ids.contains(&n.id))
                     .cloned()
                     .collect();
-                let out = match lane.hit_test(&v, &targets, lx, STEM_TOLERANCE) {
+                let hit = lane.hit_test(&v, &targets, lx, STEM_TOLERANCE);
+                let out = match hit {
                     Some(i) => {
                         let mut all = targets.clone();
                         all[i].velocity = lane.y_to_velocity(ly);
@@ -447,6 +516,7 @@ impl PianoRoll {
                 self.gesture = Some(Gesture::Velocity {
                     last: (lx, ly),
                     ids,
+                    grabbed: hit.map(|i| targets[i].id),
                 });
                 let _ = env;
                 out
@@ -494,6 +564,7 @@ impl PianoRoll {
                         self.gesture = Some(Gesture::Notes {
                             drag,
                             ids: sel.iter().map(|n| n.id).collect(),
+                            grabbed: id,
                         });
                     }
                     None => {
@@ -508,7 +579,19 @@ impl PianoRoll {
                 }
                 self.motion(doc, p)
             }
-            Gesture::Notes { drag, ids } => {
+            Gesture::Keys => {
+                let Some((c, _)) = self.clip(doc.project()) else {
+                    return Outcome::default();
+                };
+                // Sliding along the keys plays each one, glissando.
+                let key = self.grid_view(c.start).y_to_key(p.y - self.ruler_height);
+                if self.audition.is_none_or(|a| a.key != key) {
+                    self.audition = Some(self.audition_key(key));
+                    return outcome_view();
+                }
+                Outcome::default()
+            }
+            Gesture::Notes { drag, ids, grabbed } => {
                 let project = doc.project();
                 let Some((c, m)) = self.clip(project) else {
                     return Outcome::default();
@@ -529,6 +612,13 @@ impl PianoRoll {
                         n.set_data(d);
                         notes.push(n);
                     }
+                }
+                // Follow the grabbed note to its new key; moving in time
+                // alone keeps the note sounding as it is.
+                if let Some(n) = notes.iter().find(|n| n.id == grabbed)
+                    && self.audition.is_some_and(|a| a.key != n.key)
+                {
+                    self.audition = Some(Self::audition_note(n));
                 }
                 self.execute_edit(doc, notes)
             }
@@ -556,7 +646,7 @@ impl PianoRoll {
                 );
                 outcome_view()
             }
-            Gesture::Velocity { last, ids } => {
+            Gesture::Velocity { last, ids, grabbed } => {
                 let project = doc.project();
                 let Some((c, m)) = self.clip(project) else {
                     return Outcome::default();
@@ -572,9 +662,21 @@ impl PianoRoll {
                     .cloned()
                     .collect();
                 lane.draw_line(&v, &mut targets, last, (lx, ly));
+                // The pressed stem follows the pointer even when it is not
+                // exactly over it, while it stays within reach.
+                let grabbed = grabbed.filter(|id| {
+                    targets.iter_mut().find(|n| n.id == *id).is_some_and(|n| {
+                        let near = (v.note_rect(&n.data()).x - lx).abs() <= STEM_TOLERANCE;
+                        if near {
+                            n.velocity = lane.y_to_velocity(ly);
+                        }
+                        near
+                    })
+                });
                 self.gesture = Some(Gesture::Velocity {
                     last: (lx, ly),
                     ids,
+                    grabbed,
                 });
                 self.execute_edit(doc, targets)
             }
@@ -582,8 +684,21 @@ impl PianoRoll {
     }
 
     pub fn release(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
+        self.audition = None;
         let out = match self.gesture.take() {
             Some(Gesture::Band { .. }) => outcome_view(),
+            // A click (no drag) on a note of a larger selection selects
+            // only it, as in the arrange view.
+            Some(Gesture::Pending {
+                press,
+                hit: Some((id, _)),
+                ..
+            }) if !press.shift && !press.ctrl && self.selection.len() > 1 => {
+                self.selection = BTreeSet::from([id]);
+                outcome_view()
+            }
+            // Redraw the key as released.
+            Some(Gesture::Keys) => outcome_view(),
             Some(Gesture::Pending { .. }) | None => Outcome::default(),
             Some(g @ (Gesture::Notes { .. } | Gesture::Velocity { .. })) => {
                 // Apply the final position, then close the undo step.
@@ -601,6 +716,7 @@ impl PianoRoll {
     /// step), like the arrange view.
     pub fn cancel(&mut self, doc: &mut Document) -> Outcome {
         self.gesture = None;
+        self.audition = None;
         doc.seal();
         outcome_view()
     }

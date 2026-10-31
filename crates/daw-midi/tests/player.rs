@@ -495,3 +495,80 @@ fn closing_the_gate_lifts_a_held_sustain_pedal() {
     // Only once.
     assert!(rig.block(128, 64, false, &[]).is_empty());
 }
+
+fn preview(key: u8) -> Option<daw_midi::player::Preview> {
+    Some(daw_midi::player::Preview {
+        key,
+        channel: 0,
+        velocity: 0.8,
+    })
+}
+
+#[test]
+fn preview_sounds_while_stopped_and_ends_on_request() {
+    let mut rig = Rig::new();
+    rig.handle.preview(preview(60));
+    let out = rig.block(0, 64, false, &[]);
+    assert_eq!(simple(&out), [(0, 60, true)]);
+    // Nothing new: nothing sent.
+    assert!(rig.block(0, 64, false, &[]).is_empty());
+    // A new key ends the old one first.
+    rig.handle.preview(preview(62));
+    let out = rig.block(0, 64, false, &[]);
+    assert_eq!(simple(&out), [(0, 60, false), (0, 62, true)]);
+    rig.handle.preview(None);
+    let out = rig.block(0, 64, false, &[]);
+    assert_eq!(simple(&out), [(0, 62, false)]);
+    assert!(rig.block(0, 64, false, &[]).is_empty());
+}
+
+#[test]
+fn preview_of_the_same_key_retriggers() {
+    let mut rig = Rig::new();
+    rig.handle.preview(preview(60));
+    rig.block(0, 64, false, &[]);
+    rig.handle.preview(preview(60));
+    let out = rig.block(0, 64, false, &[]);
+    assert_eq!(simple(&out), [(0, 60, false), (0, 60, true)]);
+}
+
+#[test]
+fn preview_bypasses_a_closed_gate_and_is_not_recorded() {
+    let mut rig = Rig::new();
+    rig.handle.set_input(InputGate {
+        open: false,
+        channel: None,
+    });
+    rig.handle.set_armed(true);
+    rig.handle.preview(Some(daw_midi::player::Preview {
+        key: 64,
+        channel: 3,
+        velocity: 0.5,
+    }));
+    let out = rig.block(0, 64, true, &[]);
+    match out.as_slice() {
+        [
+            (
+                0,
+                EventKind::NoteOn {
+                    channel: 3,
+                    key: 64,
+                    velocity,
+                    ..
+                },
+            ),
+        ] => assert!((velocity - 0.5).abs() < 0.01),
+        other => panic!("unexpected {other:?}"),
+    }
+    rig.handle.preview(None);
+    rig.block(64, 64, true, &[]);
+    rig.handle.set_armed(false);
+    rig.block(128, 64, true, &[]);
+    let captured: Vec<Captured> = rig.handle.drain_captured().collect();
+    assert!(
+        captured
+            .iter()
+            .all(|c| !matches!(c, Captured::Event { .. })),
+        "{captured:?}"
+    );
+}

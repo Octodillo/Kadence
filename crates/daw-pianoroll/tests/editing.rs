@@ -210,16 +210,36 @@ fn rubber_band_selects() {
 }
 
 #[test]
-fn shift_click_toggles_and_keys_select_rows() {
+fn ctrl_click_toggles_shift_click_adds_and_keys_select_rows() {
     let mut r = Rig::new(vec![n(0, Q, 60), n(Q, Q, 60), n(0, Q, 64)]);
     r.press(r.x(Q / 2), r.y(60));
     assert_eq!(r.pr.selection.len(), 1);
+    // Ctrl toggles, like the arrange view.
     let mut p = Pointer::left(r.x(Q / 2), r.y(64));
-    p.shift = true;
+    p.ctrl = true;
     r.press_with(p);
     assert_eq!(r.pr.selection.len(), 2);
     r.press_with(p);
     assert_eq!(r.pr.selection.len(), 1);
+    // Shift adds and never removes.
+    p.ctrl = false;
+    p.shift = true;
+    r.press_with(p);
+    assert_eq!(r.pr.selection.len(), 2);
+    r.press_with(p);
+    assert_eq!(r.pr.selection.len(), 2);
+    // A plain click (no drag) on one of several selected notes selects
+    // only it, once released.
+    let (x, y) = (r.x(Q / 2), r.y(64));
+    r.press(x, y);
+    assert_eq!(r.pr.selection.len(), 2, "kept for a drag");
+    r.pr.release(&mut r.doc, Pointer::left(x, y));
+    let keys: Vec<u8> =
+        r.pr.selected_data(r.doc.project())
+            .iter()
+            .map(|d| d.key)
+            .collect();
+    assert_eq!(keys, [64]);
     // Click the C4 key on the keyboard strip.
     r.press(10.0, r.y(60));
     let keys: Vec<u8> =
@@ -228,6 +248,93 @@ fn shift_click_toggles_and_keys_select_rows() {
             .map(|d| d.key)
             .collect();
     assert_eq!(keys, [60, 60]);
+    let q = Pointer::left(10.0, r.y(60));
+    r.pr.release(&mut r.doc, q);
+    // Shift+click a key adds its row; Ctrl+click toggles it.
+    let mut k = Pointer::left(10.0, r.y(64));
+    k.shift = true;
+    r.press_with(k);
+    assert_eq!(r.pr.selection.len(), 3);
+    k.shift = false;
+    k.ctrl = true;
+    r.press_with(k);
+    assert_eq!(r.pr.selection.len(), 2);
+    r.press_with(k);
+    assert_eq!(r.pr.selection.len(), 3);
+}
+
+#[test]
+fn ctrl_band_adds_to_the_selection() {
+    let mut r = Rig::new(vec![n(0, Q / 2, 60), n(3 * Q, Q / 2, 70)]);
+    r.press(r.x(Q / 4), r.y(60));
+    let q = Pointer::left(r.x(Q / 4), r.y(60));
+    r.pr.release(&mut r.doc, q);
+    assert_eq!(r.pr.selection.len(), 1);
+    let mut p = Pointer::left(r.x(3 * Q - 10), r.y(71));
+    p.ctrl = true;
+    r.press_with(p);
+    let mut m = Pointer::left(r.x(3 * Q + 50), r.y(69));
+    m.ctrl = true;
+    r.pr.motion(&mut r.doc, m);
+    r.pr.release(&mut r.doc, m);
+    assert_eq!(r.pr.selection.len(), 2);
+}
+
+#[test]
+fn pressing_a_key_auditions_it_and_sliding_plays_each_key() {
+    let mut r = Rig::new(vec![]);
+    assert_eq!(r.pr.audition(), None);
+    r.press(10.0, r.y(60));
+    let a = r.pr.audition().expect("sounding");
+    assert_eq!((a.key, a.channel), (60, 0));
+    assert!((f64::from(a.velocity) - r.pr.new_velocity).abs() < 1e-6);
+    // The pressed key is drawn in the highlight colour.
+    let scene = r.pr.scene(r.doc.project(), &r.env());
+    let pal = r.pr.palette;
+    assert!(scene.prims.iter().any(|p| matches!(p,
+        Prim::Rect { r: rect, fill, .. } if *fill == pal.highlight && rect.x == 0.0
+    )));
+    let q = Pointer::left(10.0, r.y(62));
+    let out = r.pr.motion(&mut r.doc, q);
+    assert!(out.view);
+    assert_eq!(r.pr.audition().map(|a| a.key), Some(62));
+    let q = Pointer::left(10.0, r.y(62));
+    r.pr.release(&mut r.doc, q);
+    assert_eq!(r.pr.audition(), None);
+}
+
+#[test]
+fn pressing_and_dragging_a_note_auditions_its_pitch() {
+    let mut note = n(0, Q, 60);
+    note.velocity = 0.5;
+    note.channel = 2;
+    let mut r = Rig::new(vec![note, n(0, Q, 64)]);
+    r.pr.select_all(r.doc.project());
+    let from = (r.x(Q / 2), r.y(60));
+    r.press(from.0, from.1);
+    let a = r.pr.audition().expect("sounding");
+    assert_eq!((a.key, a.channel), (60, 2));
+    assert!((a.velocity - 0.5).abs() < 1e-6);
+    // Moving in time keeps the same note; moving up follows the grabbed note.
+    r.pr.motion(&mut r.doc, Pointer::left(from.0 + 40.0, from.1));
+    assert_eq!(r.pr.audition(), Some(a));
+    let q = Pointer::left(from.0 + 40.0, r.y(63));
+    r.pr.motion(&mut r.doc, q);
+    assert_eq!(r.pr.audition().map(|a| a.key), Some(63));
+    let q = Pointer::left(from.0 + 40.0, r.y(63));
+    r.pr.release(&mut r.doc, q);
+    assert_eq!(r.pr.audition(), None);
+    // Empty space, the velocity lane and the ruler stay silent.
+    r.press(r.x(3 * Q), r.y(40));
+    assert_eq!(r.pr.audition(), None);
+    r.press(r.x(Q / 2), 590.0);
+    assert_eq!(r.pr.audition(), None);
+    r.press(r.x(Q / 2), 10.0);
+    assert_eq!(r.pr.audition(), None);
+    // Escape ends it too.
+    r.press(10.0, r.y(60));
+    r.pr.cancel(&mut r.doc);
+    assert_eq!(r.pr.audition(), None);
 }
 
 #[test]
@@ -243,6 +350,25 @@ fn velocity_lane_draws_velocities() {
     // One undo step restores all three.
     r.doc.undo().unwrap();
     assert!(r.notes().iter().all(|d| d.velocity == 0.8));
+}
+
+#[test]
+fn dragging_near_a_stem_sets_its_velocity() {
+    let mut r = Rig::new(vec![n(0, Q / 2, 60), n(Q, Q / 2, 62)]);
+    let vel = r.pr.velocity_rect();
+    let lane_top = vel.y + 4.0;
+    let lane_h = vel.h - 4.0;
+    // A few pixels to the side of the stem, straight down, as a finger
+    // or a not-quite-steady mouse would.
+    let x = r.x(0) + 7.0;
+    r.drag((x, lane_top), (x + 1.0, lane_top + lane_h * 0.75));
+    let v: Vec<f64> = r.notes().iter().map(|d| d.velocity).collect();
+    assert!((v[0] - 0.25).abs() < 0.02, "{v:?}");
+    assert_eq!(v[1], 0.8);
+    // Too far away to the side: nothing changes.
+    let x = r.x(0) + 30.0;
+    r.drag((x, lane_top), (x, lane_top + lane_h * 0.5));
+    assert!((r.notes()[0].velocity - 0.25).abs() < 0.02);
 }
 
 #[test]
