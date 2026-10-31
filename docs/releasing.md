@@ -19,7 +19,8 @@ fails the release if any of them disagrees with the tag:
 - `docs/releases/VERSION.md`, the release notes, used as the release's text
 
 The metainfo screenshots point at `data/screenshots/` at the release tag,
-so refresh them first if the UI changed. They are taken by the app itself:
+so refresh them first if the UI changed. They are taken by the app itself,
+installed or with the icon on `XDG_DATA_DIRS` so the sidebar shows it:
 
 ```sh
 for scheme in BreezeLight BreezeDark; do
@@ -50,10 +51,14 @@ git push origin :refs/tags/v0.1.0-test.1
    `git tag -a v0.1.0 -m 'Kadence 0.1.0' && git push origin v0.1.0`.
 3. The Release workflow builds the source tarball, the Arch package, the
    Fedora RPMs and the Flatpak bundle, installs and smoke-tests each, and
-   makes the draft with all of them and `SHA256SUMS`. If a job fails, fix
-   it and run the workflow again from the Actions tab with the same tag:
-   it updates the draft instead of making another one. It never touches a
-   release that is already published.
+   makes the draft with all of them and `SHA256SUMS`. It never touches a
+   release that is already published. If a job failed for a reason outside
+   the code (a mirror or runner outage), run the workflow again from the
+   Actions tab with the same tag: it replaces any draft for that tag with a
+   new one. If the
+   code needs a fix, merge it, delete the draft, move the tag to the new
+   commit (`git tag -fa v0.1.0 … && git push -f origin v0.1.0`; only while
+   nothing is published) and let the workflow run again.
 4. Check the draft: the notes, every file, and install at least the Flatpak.
 5. Publish the draft on GitHub.
 

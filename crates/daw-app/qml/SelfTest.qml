@@ -71,6 +71,8 @@ Item {
             check(window.visible, "window visible");
             check(window.pageStack.currentItem.title === i18nc("@title", "Arrange"), "starts on Arrange");
             check(!window.devicePanel.drawerOpen, "no device panel at start");
+            check(Array.from(window.pageStack.currentItem.actions).includes(window.recordAction),
+                  "Record button on the Arrange toolbar");
             shoot(window.title, "arrange");
         },
         () => {

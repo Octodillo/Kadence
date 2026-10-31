@@ -32,8 +32,9 @@ channel (see [Recording](#recording)).
 
 Kadence finds CLAP, VST3 and LV2 plugins in their usual folders
 (`~/.clap`, `/usr/lib/clap`, `~/.vst3`, `/usr/lib/vst3`, `~/.lv2`,
-`/usr/lib/lv2` and the like). The **Plugins** settings page shows what was
-found, lets you add other folders, and **Rescan** looks again. Each plugin
+`/usr/lib/lv2` and the like). The plugin section of the **Audio** settings
+page shows what was found, lets you add other folders with **Add Folder…**,
+and **Rescan** looks again. Each plugin
 runs in a process of its own, so a plugin that crashes is switched off and
 reported instead of closing Kadence.
 
@@ -61,15 +62,17 @@ Every edit can be undone with Ctrl+Z and redone with Ctrl+Shift+Z.
 
 ## The three pages
 
-Kadence has three pages, switched from the top of the window:
+Kadence has three pages, switched from the sidebar on the left:
 
 - **Arrange** (Ctrl+1): tracks and clips on a timeline.
 - **Mix** (Ctrl+2): a channel strip per track, with effects and sends.
 - **Edit** (Ctrl+3): the piano roll for the open MIDI clip.
 
-The transport bar along the bottom has **Play**/**Stop** (Space),
-**Record** (R), **Go to Start** (Home), **Loop** (Ctrl+L), the position in
-bars and beats, the tempo and time signature, and the metronome.
+**Play**/**Stop** (Space) and **Record** (R) are on the toolbar of the
+Arrange and Edit pages, and **Loop** (Ctrl+L) on the Arrange page's.
+**Go to Start** (Home) is in the sidebar. Under the Arrange page's toolbar,
+the transport bar shows the position in bars and beats, the tempo and time
+signature, and the metronome.
 
 ## Tracks
 
@@ -107,8 +110,8 @@ clip is made. A recorded take can be undone like any edit.
   clip.
 - Drag a clip to move it, drag its edges to trim it. Edits snap to the grid.
 - Right-click a clip for **Split at Playhead** (Ctrl+E), **Duplicate**
-  (Ctrl+D), **Glue**, **Reverse**, **Delete** and the fade and gain
-  options.
+  (Ctrl+D), **Delete**, the fade shape, **Remove Fades** and **Reset Clip
+  Gain**.
 - Drag the small handles at an audio clip's top corners to fade it in and
   out, and the one at the top centre up or down to change its gain.
 - Shift-drag in the ruler to set the loop range.
@@ -144,7 +147,7 @@ master.
 - **Add Effect** adds a built-in effect (EQ, compressor, delay, reverb,
   utility) or a plugin. Click an effect to open its device panel, where you
   set its parameters, bypass it or move it. Double-click a control to reset
-  it. Plugins with their own window can open it from there.
+  it.
 - **Add Send** sends the track to a bus. **Pre** sends before the fader
   instead of after it.
 - The output button at the bottom chooses where the track goes: the master
@@ -155,8 +158,9 @@ master.
 Right-click a track header and choose **Show Automation** to see its lanes,
 then add a lane for volume, pan or any device parameter. Click in a lane to
 add a point, drag points to move them, double-click one to delete it, and
-right-click a point to choose the shape of the curve that leaves it. To record moves instead, turn on
-**Write Automation** and move the controls while the song plays.
+right-click a point to choose the shape of the curve that leaves it. To
+record volume, pan and send moves instead, turn on **Write Automation** on
+the Mix page and move the controls while the song plays.
 
 ## Exporting
 

@@ -173,6 +173,7 @@ Kirigami.Page {
     // QML list literals can't spread lists, so name each entry.
     actions: [
         page.transportActions[0],
+        page.transportActions[1],
         page.loopAction,
         page.addTrackAction,
         page.importAction,

@@ -84,7 +84,7 @@
           <li>A piano roll with quantize, humanize and transpose</li>
           <li>Instrument tracks with the built-in synth, the sampler or a plugin instrument</li>
           <li>A mixer with effects, sends, buses and output routing</li>
-          <li>CLAP, VST3 and LV2 plugins, each in its own process, with their own windows</li>
+          <li>CLAP, VST3 and LV2 plugins, each in its own process</li>
           <li>Tempo, time signature and tap tempo</li>
           <li>Export to WAV or FLAC</li>
           <li>Backups, crash recovery and relinking of moved audio files</li>

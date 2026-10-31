@@ -275,35 +275,38 @@ jobs:
           (cd assets && sha256sum -- * > SHA256SUMS)
           ls -l assets
           cat assets/SHA256SUMS
-      - name: Create or update the draft
+      - name: Create the draft
         # Only ever a draft. If a published release already has this tag,
-        # stop rather than change what users may have downloaded.
+        # stop rather than change what users may have downloaded. Drafts
+        # from earlier runs of this tag are replaced, so the new one has
+        # exactly this run's files and points at this run's commit.
         run: |
           notes=docs/releases/"$VERSION".md
-          existing=$(gh api "repos/$GH_REPO/releases" --paginate \
+          releases=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | \"\(.id) \(.draft)\"")
+          if printf '%s\n' "$releases" | grep -q ' false$'; then
+            echo "::error::A published release for $TAG already exists; not touching it."
+            exit 1
+          fi
+          printf '%s\n' "$releases" | while read -r id _; do
+            if [ -n "$id" ]; then
+              echo "Replacing the earlier draft $id"
+              gh api -X DELETE "repos/$GH_REPO/releases/$id"
+            fi
+          done
+          flags=--draft
+          if [ "$PRERELEASE" = true ]; then flags="$flags --prerelease"; fi
+          if [ "$TAGGED" = true ]; then
+            flags="$flags --verify-tag"
+          else
+            # A trial of a commit: the tag is made only on publishing.
+            flags="$flags --target $REF"
+          fi
+          # shellcheck disable=SC2086
+          url=$(gh release create "$TAG" $flags \
+            --title "Kadence $VERSION" --notes-file "$notes" assets/*)
+          echo "Draft release: $url" >> "$GITHUB_STEP_SUMMARY"
+          # Exactly one release has this tag now, and it is a draft.
+          state=$(gh api "repos/$GH_REPO/releases" --paginate \
             --jq ".[] | select(.tag_name == \"$TAG\") | .draft")
-          case "$existing" in
-            "")
-              flags=--draft
-              if [ "$PRERELEASE" = true ]; then flags="$flags --prerelease"; fi
-              if [ "$TAGGED" = true ]; then
-                flags="$flags --verify-tag"
-              else
-                # A trial of a commit: the tag is made only on publishing.
-                flags="$flags --target $REF"
-              fi
-              # shellcheck disable=SC2086
-              gh release create "$TAG" $flags \
-                --title "Kadence $VERSION" --notes-file "$notes" assets/*
-              ;;
-            true)
-              gh release edit "$TAG" --notes-file "$notes"
-              gh release upload "$TAG" --clobber assets/*
-              ;;
-            *)
-              echo "::error::A published release for $TAG already exists; not touching it."
-              exit 1
-              ;;
-          esac
-          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
-          echo "Draft release: $(gh release view "$TAG" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"
+          test "$state" = true
