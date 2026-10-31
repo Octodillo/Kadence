@@ -12,6 +12,9 @@ import io.github.octodillo.daw
 ColumnLayout {
     id: settings
 
+    // The form, for twinning with the forms below it.
+    property alias form: form
+
     spacing: Kirigami.Units.largeSpacing
 
     function apply(): void {
@@ -67,6 +70,7 @@ ColumnLayout {
     }
 
     Kirigami.FormLayout {
+        id: form
         Layout.fillWidth: true
 
         QQC2.Label {
