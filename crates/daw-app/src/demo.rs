@@ -140,8 +140,9 @@ pub fn build() -> Result<Document, String> {
 }
 
 /// A large project for `--benchmark`: `tracks` audio tracks of `clips`
-/// one-beat clips each, all playing one short tone.
-pub fn stress(tracks: usize, clips: usize) -> Result<Document, String> {
+/// one-beat clips each, all playing one short tone. With `lanes`, each
+/// track also gets volume and pan lanes with a point on every clip.
+pub fn stress(tracks: usize, clips: usize, lanes: bool) -> Result<Document, String> {
     let dir = std::env::temp_dir()
         .join(format!("kadence-benchmark-{}", std::process::id()))
         .join("Stress");
@@ -164,12 +165,43 @@ pub fn stress(tracks: usize, clips: usize) -> Result<Document, String> {
                     ))
                 })
                 .collect();
+            if lanes {
+                track.automation = stress_lanes(clips);
+            }
             Arc::new(track)
         })
         .collect();
     let mut doc = Document::new(project);
     doc.save_as(&dir).map_err(|e| e.to_string())?;
     Ok(doc)
+}
+
+/// Volume and pan lanes for [`stress`]: one point per clip (every two
+/// beats), alternating up and down, with a mix of straight, curved and
+/// step segments so every way of drawing a segment is measured.
+fn stress_lanes(clips: usize) -> Vec<AutomationLane> {
+    let lane = |target, low: f64, high: f64| {
+        let mut lane = AutomationLane::new(target);
+        lane.points = (0..clips)
+            .map(|c| {
+                let mut p = AutomationPoint::new(
+                    TickTime(2 * c as i64 * PPQ),
+                    if c % 2 == 0 { low } else { high },
+                );
+                match c % 3 {
+                    1 => p.curve = 1.0,
+                    2 => p.step = true,
+                    _ => {}
+                }
+                p
+            })
+            .collect();
+        lane
+    };
+    vec![
+        lane(AutomationTarget::Volume, -24.0, 0.0),
+        lane(AutomationTarget::Pan, -0.5, 0.5),
+    ]
 }
 
 /// Removes what [`build`] and [`stress`] wrote.

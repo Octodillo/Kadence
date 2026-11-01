@@ -8,11 +8,14 @@ import io.github.octodillo.daw
 // Drives `--benchmark`: loads a 200 tracks x 50 clips project, scrolls and
 // zooms the arrange view from code (no input events), prints frame times
 // per phase, deletes the project and quits. Every frame moves the view, so
-// the time between swapped frames is what one redraw costs.
+// the time between swapped frames is what one redraw costs. With `lanes`
+// (`--benchmark-lanes`), every track shows volume and pan automation.
+// Results go to standard output, whatever Qt's logging is set to.
 Item {
     id: bench
 
     required property Kirigami.ApplicationWindow window
+    property bool lanes: false
 
     readonly property int tracks: 200
     readonly property int clips: 50
@@ -32,6 +35,10 @@ Item {
         return window.pageStack.currentItem.view;
     }
 
+    function say(...parts): void {
+        TestHelper.printLine(["benchmark:"].concat(parts).join(" "));
+    }
+
     function percentile(sorted: var, p: real): real {
         return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
     }
@@ -39,19 +46,21 @@ Item {
     function report(): void {
         const sorted = frames.slice().sort((a, b) => a - b);
         if (sorted.length === 0) {
-            console.error("benchmark:", phases[phase], "no frames");
+            say(phases[phase], "no frames");
             return;
         }
         const over = limit => sorted.filter(t => t > limit).length;
-        console.info("benchmark:", phases[phase],
-                     "frames", sorted.length,
-                     "median", percentile(sorted, 0.5).toFixed(2),
-                     "p95", percentile(sorted, 0.95).toFixed(2),
-                     "p99", percentile(sorted, 0.99).toFixed(2),
-                     "max", sorted[sorted.length - 1].toFixed(2),
-                     "over16.7", over(16.7),
-                     "over33", over(33.4),
-                     "ms");
+        const v = view();
+        say(phases[phase],
+            "timeline", Math.round(v.contentWidth) + "x" + Math.round(v.contentHeight), "px",
+            "frames", sorted.length,
+            "median", percentile(sorted, 0.5).toFixed(2),
+            "p95", percentile(sorted, 0.95).toFixed(2),
+            "p99", percentile(sorted, 0.99).toFixed(2),
+            "max", sorted[sorted.length - 1].toFixed(2),
+            "over16.7", over(16.7),
+            "over33", over(33.4),
+            "ms");
     }
 
     // One step of the current phase's motion.
@@ -113,14 +122,15 @@ Item {
         interval: 500
         running: true
         onTriggered: {
-            if (!TestHelper.loadStressProject(bench.tracks, bench.clips)) {
-                console.error("benchmark: could not build the stress project");
+            if (!TestHelper.loadStressProject(bench.tracks, bench.clips, bench.lanes)) {
+                bench.say("could not build the stress project");
                 TestHelper.removeTempFiles();
                 Qt.exit(1);
                 return;
             }
-            console.info("benchmark:", bench.tracks, "tracks x", bench.clips, "clips,",
-                         bench.window.width + "x" + bench.window.height, "px");
+            bench.say(bench.tracks, "tracks x", bench.clips, "clips,",
+                      bench.lanes ? "2 lanes each," : "no lanes,",
+                      "window", bench.window.width + "x" + bench.window.height, "px");
             bench.next();
             bench.move();
         }
@@ -131,7 +141,7 @@ Item {
         interval: 60000
         running: true
         onTriggered: {
-            console.error("benchmark: timed out");
+            bench.say("timed out");
             TestHelper.removeTempFiles();
             Qt.exit(1);
         }
