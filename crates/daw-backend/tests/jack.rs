@@ -698,6 +698,10 @@ fn other_clients_links_are_not_saved_over_a_stop() {
 }
 
 /// A patchbay that undoes our link right away has the last word.
+///
+/// Its many stops and starts are what tripped a pipewire-jack 1.0 crash
+/// ("invalid mem id", then SIGSEGV) when other tests ran in parallel, which
+/// is why `ci/pipewire-jack-tests.sh` runs one test at a time.
 #[test]
 #[ignore = "needs a running JACK server"]
 fn a_patchbay_change_after_ours_is_kept() {

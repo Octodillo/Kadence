@@ -16,7 +16,10 @@ cleanup() {
     [ -n "$pids" ] && kill $pids 2>/dev/null || true
     rm -rf "$runtime"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# Exit on a signal, so the EXIT trap cleans up once and nothing runs after.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 dbus-daemon --session --address="unix:path=$runtime/bus" --nofork --nopidfile &
 pids="$pids $!"
@@ -47,4 +50,10 @@ until pw-jack jack_lsp >/dev/null 2>&1; do
 done
 pw-jack jack_lsp
 
-pw-jack cargo nextest run -p daw-backend --run-ignored only "$@"
+# One test at a time: pipewire-jack 1.0 (Ubuntu 24.04) can crash a client
+# that stops and starts while other clients relink it in parallel test
+# processes ("invalid mem id", then SIGSEGV), a race in the library, not in
+# our code. The auto-connect test needs a dummy server's physical ports, so
+# it is left out here rather than reported as passed.
+pw-jack cargo nextest run -p daw-backend --run-ignored only --test-threads 1 \
+    -E 'not test(auto_connect_reaches_physical_ports)' "$@"

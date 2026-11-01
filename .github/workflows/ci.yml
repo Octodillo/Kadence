@@ -61,6 +61,9 @@ jobs:
         # build small C plugins and use the LV2 example plugins.
         run: cargo test --manifest-path third_party/livi/Cargo.toml
       - name: JACK integration tests (jackd)
+        # libjack can deadlock in jack_client_close; nextest's slow-timeout
+        # (.config/nextest.toml) names the test, this bounds the step.
+        timeout-minutes: 10
         # The dummy server's physical ports reach no hardware, so the
         # auto-connect test may link them here, and only here.
         run: |
@@ -72,6 +75,7 @@ jobs:
           KADENCE_TEST_PHYSICAL_PORTS: 1
       - name: JACK integration tests (PipeWire)
         # What a Plasma desktop runs: pipewire-jack on a headless PipeWire.
+        timeout-minutes: 10
         run: ci/pipewire-jack-tests.sh
       - name: doc tests
         run: cargo test --workspace --exclude daw-app --doc
