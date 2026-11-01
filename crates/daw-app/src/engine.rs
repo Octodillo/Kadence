@@ -11,6 +11,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use daw_backend::{DummyBackend, Pacing, PortDirection, PortKind};
 use daw_plugin_host::{HostLauncher, SandboxConfig};
@@ -222,6 +223,25 @@ pub(crate) fn plugin_cache_file() -> Option<PathBuf> {
         .map(|dir| dir.join("kadence").join("plugins.json"))
 }
 
+/// The client name of a quiet run, set by [`use_quiet_audio`].
+static QUIET: OnceLock<String> = OnceLock::new();
+
+/// Makes this a quiet run: the engine still uses the audio server, under a
+/// name of its own (`kadence-<purpose>-<pid>`), but connects nothing to the
+/// speakers or the microphone. For `--smoke-test`, `--screenshot-dir` and
+/// `--benchmark`; call it before the engine starts. Only the first call
+/// counts.
+pub fn use_quiet_audio(purpose: &str) {
+    let _ = QUIET.set(format!("kadence-{purpose}-{}", std::process::id()));
+}
+
+/// The configuration the engine starts with: see [`use_quiet_audio`].
+fn startup_config() -> HostConfig {
+    QUIET
+        .get()
+        .map_or_else(HostConfig::default, |name| HostConfig::quiet(name.as_str()))
+}
+
 /// Starts audio with plugins loading through [`plugin_loader`].
 fn start_host(config: HostConfig) -> AudioHost {
     let mut host = AudioHost::start(config);
@@ -250,7 +270,7 @@ impl SessionEngine {
     const SILENT: &'static str = "silent";
 
     pub fn new() -> Self {
-        let host = start_host(HostConfig::default());
+        let host = start_host(startup_config());
         let config = AudioConfig {
             device: None,
             sample_rate: host.sample_rate(),
@@ -323,6 +343,7 @@ impl EngineHandle for SessionEngine {
             sample_rate: config.sample_rate,
             buffer_size: config.buffer_size,
             use_server: true,
+            ..self.host.config().clone()
         };
         if wanted != *self.host.config() {
             self.host.restart(wanted);

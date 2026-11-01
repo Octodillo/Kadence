@@ -10,7 +10,10 @@ import io.github.octodillo.daw
 // per phase, deletes the project and quits. Every frame moves the view, so
 // the time between swapped frames is what one redraw costs. With `lanes`
 // (`--benchmark-lanes`), every track shows volume and pan automation.
-// Results go to standard output, whatever Qt's logging is set to.
+// Results go to standard output, whatever Qt's logging is set to. Each
+// phase also gives the arrange view's own refresh and paint time per frame
+// (median/p95/max; paint without the texture upload) and refreshes per
+// frame, to tell its cost from the rest of the frame.
 Item {
     id: bench
 
@@ -28,6 +31,11 @@ Item {
     property real phaseStart: 0
     property real last: 0
     property var frames: []
+    // The arrange view's own share of each frame: building its picture
+    // (refresh) and painting it, in ms, and how many refreshes there were.
+    property var refreshes: []
+    property var paints: []
+    property int refreshCount: 0
     // The timeline's size when measuring began.
     property string timeline: ""
     property int tick: 0
@@ -65,7 +73,16 @@ Item {
             "max", sorted[sorted.length - 1].toFixed(2),
             "over16.7", over(16.7),
             "over33", over(33.4),
-            "ms");
+            "ms;", "arrange refresh", spread(refreshes),
+            "paint", spread(paints), "ms,",
+            (refreshCount / sorted.length).toFixed(2), "refreshes per frame");
+    }
+
+    // "median/p95/max" of `values`.
+    function spread(values: var): string {
+        const sorted = values.slice().sort((a, b) => a - b);
+        return [percentile(sorted, 0.5), percentile(sorted, 0.95), sorted[sorted.length - 1]]
+            .map(v => v.toFixed(2)).join("/");
     }
 
     // One step of the current phase's motion.
@@ -92,6 +109,9 @@ Item {
         }
         phase += 1;
         frames = [];
+        refreshes = [];
+        paints = [];
+        refreshCount = 0;
         tick = 0;
         if (phase >= phases.length) {
             done = true;
@@ -109,12 +129,17 @@ Item {
         enabled: bench.phase >= 0 && !bench.done
         function onFrameSwapped(): void {
             const now = TestHelper.nowMs();
+            // Since the last swap: the move made then and this frame's paint.
+            const costs = bench.view().takeCosts();
             if (now - bench.phaseStart > bench.warmupMs && bench.last > 0) {
                 if (bench.frames.length === 0) {
                     const v = bench.view();
                     bench.timeline = Math.round(v.contentWidth) + "x" + Math.round(v.contentHeight);
                 }
                 bench.frames.push(now - bench.last);
+                bench.refreshes.push(costs[0]);
+                bench.refreshCount += costs[1];
+                bench.paints.push(costs[2]);
             }
             bench.last = now;
             if (now - bench.phaseStart > bench.warmupMs + bench.phaseMs) {

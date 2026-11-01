@@ -1,6 +1,7 @@
 //! C++ glue for the KDE Frameworks calls that have no Rust binding:
 //! application startup (KAboutData, KLocalizedString, KCrash, the QML
-//! engine) and KConfig. See `cpp/kadence.h`.
+//! engine) and KConfig. See `cpp/kadence.h`. Startup calls back into Rust
+//! once it has parsed the command line.
 
 #[cxx::bridge(namespace = "kadence")]
 mod bridge {
@@ -29,6 +30,17 @@ mod bridge {
         #[cxx_name = "configSync"]
         fn config_sync();
     }
+
+    extern "Rust" {
+        /// Called once the command line is parsed, before QML loads, for a
+        /// test or benchmark run. See [`crate::engine::use_quiet_audio`].
+        #[cxx_name = "useQuietAudio"]
+        fn use_quiet_audio(purpose: &str);
+    }
+}
+
+fn use_quiet_audio(purpose: &str) {
+    crate::engine::use_quiet_audio(purpose);
 }
 
 pub use bridge::*;
