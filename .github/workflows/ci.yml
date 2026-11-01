@@ -64,7 +64,7 @@ jobs:
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &
           sleep 2
-          cargo nextest run -p daw-backend --run-ignored only
+          cargo nextest run -p daw-backend -p daw-session --run-ignored only
           kill %1
       - name: doc tests
         run: cargo test --workspace --exclude daw-app --doc

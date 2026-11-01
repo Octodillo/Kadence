@@ -1,10 +1,12 @@
 //! Records audio through the dummy backend's loopback, which plays the
 //! outputs back into the inputs late by the latency it reports, and checks
-//! that the take lands where the played audio was.
+//! that the take lands where the played audio was. One test does the same
+//! through a running JACK (or PipeWire) server; see
+//! [`records_through_a_jack_server`].
 
 use std::time::{Duration, Instant};
 
-use daw_backend::{AudioBackend, BackendConfig, DummyBackend, Latency, Pacing};
+use daw_backend::{AudioBackend, BackendConfig, DummyBackend, JackBackend, Latency, Pacing};
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
 use daw_media::{AudioData, WavFormat, decode_file, write_wav};
@@ -21,22 +23,47 @@ const PERIOD: u32 = 256;
 /// Where the impulses are in the source file, and how loud.
 const IMPULSES: [(usize, f32); 3] = [(1_000, 0.9), (7_321, 0.6), (15_007, 0.3)];
 
-struct Rig {
+struct Rig<B = DummyBackend> {
     doc: Document,
     session: Session,
-    backend: DummyBackend,
+    backend: B,
     mic: TrackId,
     dir: tempfile::TempDir,
 }
 
+/// The backend's config: two audio channels each way, no MIDI.
+fn backend_config(client_name: &str, auto_connect: bool) -> BackendConfig {
+    BackendConfig {
+        client_name: client_name.into(),
+        audio_inputs: 2,
+        audio_outputs: 2,
+        midi_input: false,
+        midi_output: false,
+        sample_rate: Some(RATE),
+        buffer_size: Some(PERIOD),
+        auto_connect,
+        midi_capacity: 16,
+    }
+}
+
 fn rig(latency: Latency) -> Rig {
+    let mut backend = DummyBackend::new(Pacing::Freewheel).with_loopback(latency);
+    backend.open(backend_config("rec", true)).unwrap();
+    rig_on(backend, PERIOD)
+}
+
+/// A project with a "Source" track playing the impulses from beat one and an
+/// armed "Mic" track recording input 1, running on the open `backend`,
+/// whose periods are at most `max_frames`.
+fn rig_on<B: AudioBackend>(mut backend: B, max_frames: u32) -> Rig<B> {
+    let rate = backend.sample_rate() as u32;
     let dir = tempfile::tempdir().unwrap();
     let mut source = vec![0.0f32; 20_000];
     for (at, v) in IMPULSES {
         source[at] = v;
     }
     let data = AudioData {
-        sample_rate: RATE,
+        sample_rate: rate,
         channels: vec![source],
     };
     write_wav(dir.path().join("source.wav"), &data, WavFormat::Float32).unwrap();
@@ -69,24 +96,10 @@ fn rig(latency: Latency) -> Rig {
     .unwrap();
     doc.seal();
 
-    let mut backend = DummyBackend::new(Pacing::Freewheel).with_loopback(latency);
-    backend
-        .open(BackendConfig {
-            client_name: "rec".into(),
-            audio_inputs: 2,
-            audio_outputs: 2,
-            midi_input: false,
-            midi_output: false,
-            sample_rate: Some(RATE),
-            buffer_size: Some(PERIOD),
-            auto_connect: true,
-            midi_capacity: 16,
-        })
-        .unwrap();
     let (mut session, mut processor) = Session::new(SessionConfig {
         engine: EngineConfig {
-            sample_rate: f64::from(RATE),
-            max_frames: PERIOD,
+            sample_rate: f64::from(rate),
+            max_frames,
             ..Default::default()
         },
         inputs: 2,
@@ -119,7 +132,7 @@ fn wait_past(session: &Session, samples: i64) {
 
 /// The timeline positions (in samples) and values of the impulses in an
 /// audio clip on `track`.
-fn impulses_on(rig: &Rig, track: TrackId) -> Vec<(i64, f32)> {
+fn impulses_on<B>(rig: &Rig<B>, track: TrackId) -> Vec<(i64, f32)> {
     let project = rig.doc.project();
     let clip = &project.track(track).unwrap().clips[0];
     let ClipContent::Audio(a) = &clip.content else {
@@ -380,4 +393,76 @@ fn deleting_the_track_mid_take_is_reported_and_undo_keeps_the_take() {
     rig.backend.stop().unwrap();
     assert!(done.problems.is_empty(), "{:?}", done.problems);
     assert!(done.command.is_some());
+}
+
+/// Records through a running JACK server, or PipeWire's JACK interface.
+/// The session's first output is linked back to its first input inside the
+/// server, and nothing is linked to a sound card, so it is silent. The
+/// server picks the rate and period, and the link adds latency that the
+/// ports don't report, so the take must have the impulses with their
+/// spacing and levels, a period or two late at most. CI runs it against
+/// `jackd -d dummy`. Locally:
+///
+/// ```sh
+/// cargo nextest run -p daw-session --test record --run-ignored only
+/// ```
+#[test]
+#[ignore = "needs a running JACK server"]
+fn records_through_a_jack_server() {
+    const CLIENT: &str = "kadence-record-test";
+    let mut backend = JackBackend::new();
+    backend
+        .open(BackendConfig {
+            sample_rate: None,
+            buffer_size: None,
+            ..backend_config(CLIENT, false)
+        })
+        .unwrap();
+    backend
+        .connect(
+            &format!("{CLIENT}:audio_out_1"),
+            &format!("{CLIENT}:audio_in_1"),
+        )
+        .unwrap();
+    let rate = backend.sample_rate() as u32;
+    let period = i64::from(backend.buffer_size());
+    // PipeWire can change its period while running; leave room.
+    let mut rig = rig_on(backend, 8192);
+    let latency = rig.backend.latency().total();
+    let (mut takes, problems) = AudioTakes::start(
+        &mut rig.session,
+        rig.doc.project(),
+        &rig.dir.path().join("audio"),
+        latency,
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+    rig.session.play().unwrap();
+    let beat = i64::from(rate) / 2;
+    wait_past(&rig.session, beat + 20_000 + i64::from(latency) + 4 * 8192);
+    assert!(takes.poll().is_empty());
+    let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
+    rig.session.stop().unwrap();
+    let stats = rig.backend.stats();
+    rig.backend.close().unwrap();
+    assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+    rig.doc
+        .execute_boxed(finished.command.expect("a take"))
+        .unwrap();
+
+    let got = impulses_on(&rig, rig.mic);
+    assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
+    let late = got[0].0 - (beat + IMPULSES[0].0 as i64);
+    for ((t, v), (at, want)) in got.iter().zip(IMPULSES) {
+        assert_eq!(*t - late, beat + at as i64, "spacing: {got:?}");
+        let ratio = v / got[0].1;
+        assert!((ratio - want / IMPULSES[0].1).abs() < 1e-3, "{ratio}");
+    }
+    assert!(
+        (0..=2 * period).contains(&late),
+        "the take is {late} samples late; the period is {period}"
+    );
+    println!(
+        "recorded at {rate} Hz, period {period}: {late} samples late, reported latency {latency}, {} xruns",
+        stats.xruns
+    );
 }
