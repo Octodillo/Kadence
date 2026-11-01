@@ -141,7 +141,7 @@ pub fn build() -> Result<Document, String> {
 
 /// A large project for `--benchmark`: `tracks` audio tracks of `clips`
 /// one-beat clips each, all playing one short tone. With `lanes`, each
-/// track also gets volume and pan lanes with a point on every clip.
+/// track also gets volume and pan lanes with a point at each clip's start.
 pub fn stress(tracks: usize, clips: usize, lanes: bool) -> Result<Document, String> {
     let dir = std::env::temp_dir()
         .join(format!("kadence-benchmark-{}", std::process::id()))
@@ -154,19 +154,25 @@ pub fn stress(tracks: usize, clips: usize, lanes: bool) -> Result<Document, Stri
     let mut project = Project::new("Stress");
     project.tracks = (0..tracks)
         .map(|t| {
+            // Every other beat, odd tracks a beat later.
+            let starts: Vec<TickTime> = (0..clips)
+                .map(|c| TickTime((2 * c as i64 + (t % 2) as i64) * PPQ))
+                .collect();
             let mut track = Track::new(TrackKind::Audio, format!("Track {}", t + 1));
-            track.clips = (0..clips)
-                .map(|c| {
+            track.clips = starts
+                .iter()
+                .enumerate()
+                .map(|(c, &start)| {
                     Arc::new(Clip::new(
                         format!("Clip {}", c + 1),
-                        TickTime((2 * c as i64 + (t % 2) as i64) * PPQ),
+                        start,
                         TickTime(PPQ),
                         ClipContent::Audio(AudioClip::new("audio/tone.wav", SampleTime(0))),
                     ))
                 })
                 .collect();
             if lanes {
-                track.automation = stress_lanes(clips);
+                track.automation = stress_lanes(&starts);
             }
             Arc::new(track)
         })
@@ -176,18 +182,17 @@ pub fn stress(tracks: usize, clips: usize, lanes: bool) -> Result<Document, Stri
     Ok(doc)
 }
 
-/// Volume and pan lanes for [`stress`]: one point per clip (every two
-/// beats), alternating up and down, with a mix of straight, curved and
-/// step segments so every way of drawing a segment is measured.
-fn stress_lanes(clips: usize) -> Vec<AutomationLane> {
+/// Volume and pan lanes for [`stress`]: a point at the start of each clip
+/// (`starts`, ascending), alternating up and down, with a mix of straight,
+/// curved and step segments so every way of drawing a segment is measured.
+fn stress_lanes(starts: &[TickTime]) -> Vec<AutomationLane> {
     let lane = |target, low: f64, high: f64| {
         let mut lane = AutomationLane::new(target);
-        lane.points = (0..clips)
-            .map(|c| {
-                let mut p = AutomationPoint::new(
-                    TickTime(2 * c as i64 * PPQ),
-                    if c % 2 == 0 { low } else { high },
-                );
+        lane.points = starts
+            .iter()
+            .enumerate()
+            .map(|(c, &start)| {
+                let mut p = AutomationPoint::new(start, if c % 2 == 0 { low } else { high });
                 match c % 3 {
                     1 => p.curve = 1.0,
                     2 => p.step = true,

@@ -34,11 +34,12 @@ pub mod self_test {
         #[qinvokable]
         fn load_stress_project(self: &TestHelper, tracks: i32, clips: i32, lanes: bool) -> bool;
 
-        /// Writes `line` to standard output. Benchmark results go here
-        /// rather than through Qt's logging, which may send them to the
-        /// journal instead of the terminal.
+        /// Writes `line` to standard output, or to standard error when
+        /// `error`. Benchmark results go here rather than through Qt's
+        /// logging, which may send them to the journal instead of the
+        /// terminal.
         #[qinvokable]
-        fn print_line(self: &TestHelper, line: &QString);
+        fn print_line(self: &TestHelper, line: &QString, error: bool);
 
         /// A monotonic clock in milliseconds, for frame timing.
         #[qinvokable]
@@ -109,12 +110,13 @@ impl self_test::TestHelper {
         crate::state::with(|s| match crate::demo::stress(tracks, clips, lanes) {
             Ok(doc) => {
                 s.replace_document(doc);
-                if lanes {
-                    let project = s.doc.project().clone();
-                    for track in &project.tracks {
-                        let out = s.arrange.set_expanded(&project, track.id, true);
-                        s.apply(out);
-                    }
+                let project = s.doc.project().clone();
+                if lanes && let Some((last, rest)) = project.tracks.split_last() {
+                    // Expanding one track lays out all of them, so mark the
+                    // rest first and lay out once, with the last.
+                    s.arrange.expanded.extend(rest.iter().map(|t| t.id));
+                    let out = s.arrange.set_expanded(&project, last.id, true);
+                    s.apply(out);
                 }
                 true
             }
@@ -125,11 +127,15 @@ impl self_test::TestHelper {
         })
     }
 
-    fn print_line(&self, line: &QString) {
+    fn print_line(&self, line: &QString, error: bool) {
         use std::io::Write;
-        let mut out = std::io::stdout().lock();
-        // Nowhere to report a closed stdout to.
-        let _ = writeln!(out, "{line}").and_then(|()| out.flush());
+        // Nowhere to report a closed stream to.
+        let _ = if error {
+            writeln!(std::io::stderr().lock(), "{line}")
+        } else {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{line}").and_then(|()| out.flush())
+        };
     }
 
     fn now_ms(&self) -> f64 {

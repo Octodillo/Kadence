@@ -28,6 +28,8 @@ Item {
     property real phaseStart: 0
     property real last: 0
     property var frames: []
+    // The timeline's size when measuring began.
+    property string timeline: ""
     property int tick: 0
     property bool done: false
 
@@ -36,7 +38,11 @@ Item {
     }
 
     function say(...parts): void {
-        TestHelper.printLine(["benchmark:"].concat(parts).join(" "));
+        TestHelper.printLine(["benchmark:"].concat(parts).join(" "), false);
+    }
+
+    function fail(message: string): void {
+        TestHelper.printLine("benchmark: " + message, true);
     }
 
     function percentile(sorted: var, p: real): real {
@@ -50,9 +56,8 @@ Item {
             return;
         }
         const over = limit => sorted.filter(t => t > limit).length;
-        const v = view();
         say(phases[phase],
-            "timeline", Math.round(v.contentWidth) + "x" + Math.round(v.contentHeight), "px",
+            "timeline", timeline, "px",
             "frames", sorted.length,
             "median", percentile(sorted, 0.5).toFixed(2),
             "p95", percentile(sorted, 0.95).toFixed(2),
@@ -105,6 +110,10 @@ Item {
         function onFrameSwapped(): void {
             const now = TestHelper.nowMs();
             if (now - bench.phaseStart > bench.warmupMs && bench.last > 0) {
+                if (bench.frames.length === 0) {
+                    const v = bench.view();
+                    bench.timeline = Math.round(v.contentWidth) + "x" + Math.round(v.contentHeight);
+                }
                 bench.frames.push(now - bench.last);
             }
             bench.last = now;
@@ -123,7 +132,7 @@ Item {
         running: true
         onTriggered: {
             if (!TestHelper.loadStressProject(bench.tracks, bench.clips, bench.lanes)) {
-                bench.say("could not build the stress project");
+                bench.fail("could not build the stress project");
                 TestHelper.removeTempFiles();
                 Qt.exit(1);
                 return;
@@ -141,7 +150,7 @@ Item {
         interval: 60000
         running: true
         onTriggered: {
-            bench.say("timed out");
+            bench.fail("timed out");
             TestHelper.removeTempFiles();
             Qt.exit(1);
         }
