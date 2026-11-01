@@ -58,6 +58,30 @@ fn audio_is_connected_and_midi_only_where_chosen() {
 }
 
 #[test]
+fn a_quiet_host_has_its_own_name_and_no_hardware_links() {
+    let dummy = DummyBackend::new(Pacing::RealTime);
+    let system = dummy.system();
+    system.add_port("keys:out", PortKind::Midi, PortDirection::Output, true);
+    let config = HostConfig {
+        use_server: false,
+        ..HostConfig::quiet("kadence-test")
+    };
+    let mut host = AudioHost::with_backend(Box::new(dummy), &config).unwrap();
+    assert!(
+        system.connections().is_empty(),
+        "{:?}",
+        system.connections()
+    );
+    // A chosen MIDI source is still connected: MIDI in makes no sound.
+    assert!(host.set_midi_inputs(&["keys:out".into()]).is_empty());
+    assert_eq!(
+        system.connections(),
+        [("keys:out".to_string(), "kadence-test:out".to_string())]
+    );
+    assert_eq!(host.config(), &config);
+}
+
+#[test]
 fn a_chosen_source_gets_its_own_port_and_comes_back_after_unplugging() {
     let (mut host, system) = host();
     let failed = host.set_midi_inputs(&["keys:out".into(), "seq:out".into()]);
