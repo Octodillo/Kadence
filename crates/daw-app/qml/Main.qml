@@ -15,6 +15,7 @@ Kirigami.ApplicationWindow {
     required property var aboutData
     required property bool smokeTest
     required property bool benchmark
+    required property bool benchmarkLanes
     required property string screenshotDir
 
     // A project that was never named or saved has an empty name. This is %1
@@ -692,6 +693,7 @@ Kirigami.ApplicationWindow {
         active: root.benchmark
         sourceComponent: Benchmark {
             window: root
+            lanes: root.benchmarkLanes
         }
     }
 }

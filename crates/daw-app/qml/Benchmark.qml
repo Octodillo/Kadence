@@ -8,11 +8,14 @@ import io.github.octodillo.daw
 // Drives `--benchmark`: loads a 200 tracks x 50 clips project, scrolls and
 // zooms the arrange view from code (no input events), prints frame times
 // per phase, deletes the project and quits. Every frame moves the view, so
-// the time between swapped frames is what one redraw costs.
+// the time between swapped frames is what one redraw costs. With `lanes`
+// (`--benchmark-lanes`), every track shows volume and pan automation.
+// Results go to standard output, whatever Qt's logging is set to.
 Item {
     id: bench
 
     required property Kirigami.ApplicationWindow window
+    property bool lanes: false
 
     readonly property int tracks: 200
     readonly property int clips: 50
@@ -25,11 +28,21 @@ Item {
     property real phaseStart: 0
     property real last: 0
     property var frames: []
+    // The timeline's size when measuring began.
+    property string timeline: ""
     property int tick: 0
     property bool done: false
 
     function view(): Item {
         return window.pageStack.currentItem.view;
+    }
+
+    function say(...parts): void {
+        TestHelper.printLine(["benchmark:"].concat(parts).join(" "), false);
+    }
+
+    function fail(message: string): void {
+        TestHelper.printLine("benchmark: " + message, true);
     }
 
     function percentile(sorted: var, p: real): real {
@@ -39,19 +52,20 @@ Item {
     function report(): void {
         const sorted = frames.slice().sort((a, b) => a - b);
         if (sorted.length === 0) {
-            console.error("benchmark:", phases[phase], "no frames");
+            say(phases[phase], "no frames");
             return;
         }
         const over = limit => sorted.filter(t => t > limit).length;
-        console.info("benchmark:", phases[phase],
-                     "frames", sorted.length,
-                     "median", percentile(sorted, 0.5).toFixed(2),
-                     "p95", percentile(sorted, 0.95).toFixed(2),
-                     "p99", percentile(sorted, 0.99).toFixed(2),
-                     "max", sorted[sorted.length - 1].toFixed(2),
-                     "over16.7", over(16.7),
-                     "over33", over(33.4),
-                     "ms");
+        say(phases[phase],
+            "timeline", timeline, "px",
+            "frames", sorted.length,
+            "median", percentile(sorted, 0.5).toFixed(2),
+            "p95", percentile(sorted, 0.95).toFixed(2),
+            "p99", percentile(sorted, 0.99).toFixed(2),
+            "max", sorted[sorted.length - 1].toFixed(2),
+            "over16.7", over(16.7),
+            "over33", over(33.4),
+            "ms");
     }
 
     // One step of the current phase's motion.
@@ -96,6 +110,10 @@ Item {
         function onFrameSwapped(): void {
             const now = TestHelper.nowMs();
             if (now - bench.phaseStart > bench.warmupMs && bench.last > 0) {
+                if (bench.frames.length === 0) {
+                    const v = bench.view();
+                    bench.timeline = Math.round(v.contentWidth) + "x" + Math.round(v.contentHeight);
+                }
                 bench.frames.push(now - bench.last);
             }
             bench.last = now;
@@ -113,14 +131,15 @@ Item {
         interval: 500
         running: true
         onTriggered: {
-            if (!TestHelper.loadStressProject(bench.tracks, bench.clips)) {
-                console.error("benchmark: could not build the stress project");
+            if (!TestHelper.loadStressProject(bench.tracks, bench.clips, bench.lanes)) {
+                bench.fail("could not build the stress project");
                 TestHelper.removeTempFiles();
                 Qt.exit(1);
                 return;
             }
-            console.info("benchmark:", bench.tracks, "tracks x", bench.clips, "clips,",
-                         bench.window.width + "x" + bench.window.height, "px");
+            bench.say(bench.tracks, "tracks x", bench.clips, "clips,",
+                      bench.lanes ? "2 lanes each," : "no lanes,",
+                      "window", bench.window.width + "x" + bench.window.height, "px");
             bench.next();
             bench.move();
         }
@@ -131,7 +150,7 @@ Item {
         interval: 60000
         running: true
         onTriggered: {
-            console.error("benchmark: timed out");
+            bench.fail("timed out");
             TestHelper.removeTempFiles();
             Qt.exit(1);
         }
