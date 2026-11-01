@@ -1,0 +1,6 @@
+# The JACK integration tests talk to a real server, and libjack can hang
+# (seen in jack_client_close on jackd). End a hung test after a minute so
+# CI names it, instead of waiting for the job's time limit.
+[[profile.default.overrides]]
+filter = "package(daw-backend) & binary(jack)"
+slow-timeout = { period = "30s", terminate-after = 2 }

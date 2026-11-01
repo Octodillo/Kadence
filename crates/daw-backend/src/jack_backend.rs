@@ -857,9 +857,10 @@ mod tests {
     #[test]
     #[ignore = "needs a running JACK server"]
     fn failed_activation_closes_the_client_and_frees_its_name() {
+        // Unique: PipeWire doesn't rename a second client with a taken name.
+        let name = format!("kt-actfail-{}", std::process::id());
         let cfg = BackendConfig {
-            client_name: "wu2-actfail".into(),
-            auto_connect: false,
+            client_name: name.clone(),
             ..BackendConfig::default()
         };
         let mut b = JackBackend::new();
@@ -884,7 +885,7 @@ mod tests {
             .collect();
         assert!(!ours.is_empty());
         assert!(
-            ours.iter().all(|n| n.starts_with("wu2-actfail:")),
+            ours.iter().all(|n| n.starts_with(&format!("{name}:"))),
             "renamed: {ours:?}"
         );
         b.start(Box::new(|_| {})).unwrap();

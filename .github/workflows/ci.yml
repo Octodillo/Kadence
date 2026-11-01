@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb \
-            lv2-dev lv2-examples
+            lv2-dev lv2-examples pipewire pipewire-jack wireplumber dbus
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # The vendored livi is its own workspace with its own target dir.
@@ -60,12 +60,23 @@ jobs:
         # Its own workspace (see third_party/livi/KADENCE.md); its tests
         # build small C plugins and use the LV2 example plugins.
         run: cargo test --manifest-path third_party/livi/Cargo.toml
-      - name: JACK integration tests
+      - name: JACK integration tests (jackd)
+        # libjack can deadlock in jack_client_close; nextest's slow-timeout
+        # (.config/nextest.toml) names the test, this bounds the step.
+        timeout-minutes: 10
+        # The dummy server's physical ports reach no hardware, so the
+        # auto-connect test may link them here, and only here.
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &
           sleep 2
           cargo nextest run -p daw-backend --run-ignored only
           kill %1
+        env:
+          KADENCE_TEST_PHYSICAL_PORTS: 1
+      - name: JACK integration tests (PipeWire)
+        # What a Plasma desktop runs: pipewire-jack on a headless PipeWire.
+        timeout-minutes: 10
+        run: ci/pipewire-jack-tests.sh
       - name: doc tests
         run: cargo test --workspace --exclude daw-app --doc
 

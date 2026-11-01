@@ -1,4 +1,5 @@
 #include "daw-app/src/cpp/kadence.h"
+#include "daw-app/src/ffi.cxx.h"
 
 #include <QApplication>
 #include <QByteArray>
@@ -156,6 +157,16 @@ int runApplication(rust::Slice<const uint8_t> args, rust::Str version)
         applyColorScheme(parser.value(colorSchemeOption));
     }
 
+    // Test and benchmark runs use the real audio server, but are not heard.
+    const bool benchmark = parser.isSet(benchmarkOption) || parser.isSet(benchmarkLanesOption);
+    if (parser.isSet(smokeTestOption)) {
+        useQuietAudio("smoke-test");
+    } else if (parser.isSet(screenshotOption)) {
+        useQuietAudio("screenshots");
+    } else if (benchmark) {
+        useQuietAudio("benchmark");
+    }
+
     QQmlApplicationEngine engine;
     KLocalization::setupLocalizedContext(&engine);
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
@@ -168,7 +179,7 @@ int runApplication(rust::Slice<const uint8_t> args, rust::Str version)
     engine.setInitialProperties({
         {QStringLiteral("aboutData"), QVariant::fromValue(engine.toScriptValue(KAboutData::applicationData()))},
         {QStringLiteral("smokeTest"), parser.isSet(smokeTestOption)},
-        {QStringLiteral("benchmark"), parser.isSet(benchmarkOption) || parser.isSet(benchmarkLanesOption)},
+        {QStringLiteral("benchmark"), benchmark},
         {QStringLiteral("benchmarkLanes"), parser.isSet(benchmarkLanesOption)},
         {QStringLiteral("screenshotDir"), screenshotDir},
     });

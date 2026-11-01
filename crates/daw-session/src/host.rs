@@ -36,14 +36,22 @@ pub enum HostKind {
     Silent,
 }
 
-/// What the user asked for. JACK servers decide the rate and period
-/// themselves, so these are requests.
+/// How to run audio. JACK servers decide the rate and period themselves,
+/// so those two are requests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostConfig {
     pub sample_rate: u32,
     pub buffer_size: u32,
     /// Try an audio server before falling back to silence.
     pub use_server: bool,
+    /// Our client's name in patchbays, and the first part of our port
+    /// names. PipeWire does not rename a second client with a name already
+    /// taken, so runs that may meet the app (tests) need names of their own.
+    pub client_name: String,
+    /// Connect our audio ports to the system's physical inputs and outputs
+    /// on start: the speakers and the microphone. Off, nothing is heard
+    /// until someone patches us in.
+    pub auto_connect: bool,
 }
 
 impl Default for HostConfig {
@@ -52,6 +60,21 @@ impl Default for HostConfig {
             sample_rate: 48_000,
             buffer_size: 256,
             use_server: true,
+            client_name: "Kadence".into(),
+            auto_connect: true,
+        }
+    }
+}
+
+impl HostConfig {
+    /// The defaults under `client_name`, connected to no hardware: for
+    /// tests and benchmarks, which run on the real server but must not be
+    /// heard or pick up the microphone.
+    pub fn quiet(client_name: impl Into<String>) -> Self {
+        Self {
+            client_name: client_name.into(),
+            auto_connect: false,
+            ..Self::default()
         }
     }
 }
@@ -134,7 +157,7 @@ impl AudioHost {
         config: &HostConfig,
     ) -> Result<Self, BackendError> {
         backend.open(BackendConfig {
-            client_name: "Kadence".into(),
+            client_name: config.client_name.clone(),
             audio_inputs: 2,
             audio_outputs: 2,
             midi_input: true,
@@ -142,7 +165,7 @@ impl AudioHost {
             sample_rate: Some(config.sample_rate),
             buffer_size: Some(config.buffer_size),
             // MIDI sources are connected to ports of their own below, not
-            // all to `midi_in`, so connect audio here.
+            // all to `midi_in`, so audio is connected here if at all.
             auto_connect: false,
             midi_capacity: 1024,
         })?;
@@ -173,7 +196,9 @@ impl AudioHost {
                 &sources,
             );
         }))?;
-        connect_audio(backend.as_mut());
+        if config.auto_connect {
+            connect_audio(backend.as_mut());
+        }
         Ok(Self {
             backend,
             kind,

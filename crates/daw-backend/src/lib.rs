@@ -61,7 +61,9 @@ pub struct BackendConfig {
     /// server may refuse or change it later. Callbacks must read
     /// [`BackendCycle::frames`] every cycle, never assume a fixed size.
     pub buffer_size: Option<u32>,
-    /// Connect our ports to the system's physical ports after starting.
+    /// Connect our ports to the system's physical ports after starting:
+    /// the speakers, the microphone and every MIDI device. Off by default,
+    /// so nothing is heard unless asked for.
     pub auto_connect: bool,
     /// Capacity of the MIDI in and MIDI out event lists, per cycle. Events
     /// beyond it are dropped and counted in [`BackendStats::midi_dropped`].
@@ -78,7 +80,7 @@ impl Default for BackendConfig {
             midi_output: false,
             sample_rate: None,
             buffer_size: None,
-            auto_connect: true,
+            auto_connect: false,
             midi_capacity: 1024,
         }
     }
