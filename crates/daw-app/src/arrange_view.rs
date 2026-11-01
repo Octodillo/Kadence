@@ -7,9 +7,10 @@
 //! stored in this object.
 
 use std::pin::Pin;
+use std::time::Instant;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QString, QUrl};
+use cxx_qt_lib::{QColor, QList, QString, QUrl};
 use daw_arrange::{Button, Cursor, Hit, Pointer, Rgba, Scene};
 
 use crate::message::{Context, Message};
@@ -29,6 +30,8 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qurl.h");
         type QUrl = cxx_qt_lib::QUrl;
+        include!("cxx-qt-lib/qlist.h");
+        type QList_f64 = cxx_qt_lib::QList<f64>;
     }
 
     #[auto_cxx_name]
@@ -112,6 +115,13 @@ pub mod qobject {
         /// instead of editing (see `Arrange::touch_pans`).
         #[qinvokable]
         fn touch_pans(self: &ArrangeView, x: f64, y: f64) -> bool;
+        /// What building the picture (`refresh`) and painting it cost since
+        /// the last call, for `--benchmark`: [refresh milliseconds, refresh
+        /// count, paint milliseconds, paint count]. Starts counting again.
+        /// Paint is drawing into the item's image; uploading that to the
+        /// GPU is not in it.
+        #[qinvokable]
+        fn take_costs(self: Pin<&mut ArrangeView>) -> QList_f64;
         /// Adds a dropped audio file at view position (x, y). Returns false
         /// if it could not; `Project.status` says why.
         #[qinvokable]
@@ -175,6 +185,17 @@ pub struct ArrangeViewRust {
     waves: Vec<f32>,
     /// Where the last press was, for placing a context menu.
     last_press: (f64, f64),
+    /// What refreshes and paints cost since `take_costs`.
+    costs: Costs,
+}
+
+/// Time spent, and how many times, since it was last taken.
+#[derive(Default, Clone, Copy)]
+struct Costs {
+    refresh_ms: f64,
+    refreshes: u32,
+    paint_ms: f64,
+    paints: u32,
 }
 
 impl Default for ArrangeViewRust {
@@ -202,6 +223,7 @@ impl Default for ArrangeViewRust {
             texts: Vec::new(),
             waves: Vec::new(),
             last_press: (0.0, 0.0),
+            costs: Costs::default(),
         }
     }
 }
@@ -269,14 +291,32 @@ pub(crate) fn cursor_shape(c: Cursor) -> i32 {
 impl qobject::ArrangeView {
     /// # Safety
     /// Called by Qt with a valid painter for the duration of the call.
-    unsafe fn paint(self: Pin<&mut Self>, painter: *mut cxx_qt_lib::QPainter) {
+    unsafe fn paint(mut self: Pin<&mut Self>, painter: *mut cxx_qt_lib::QPainter) {
         // SAFETY: Qt passes a live, active painter.
         let Some(painter) = (unsafe { painter.as_mut() }) else {
             return;
         };
         // SAFETY: QPainter is not moved while we hold it.
         let painter = unsafe { Pin::new_unchecked(painter) };
+        let start = Instant::now();
         paint::paint_scene(painter, &self.ops, &self.texts, &self.waves);
+        let costs = &mut self.as_mut().rust_mut().costs;
+        costs.paint_ms += millis_since(start);
+        costs.paints += 1;
+    }
+
+    fn take_costs(self: Pin<&mut Self>) -> QList<f64> {
+        let c = std::mem::take(&mut self.rust_mut().costs);
+        let mut out = QList::default();
+        for v in [
+            c.refresh_ms,
+            f64::from(c.refreshes),
+            c.paint_ms,
+            f64::from(c.paints),
+        ] {
+            out.append(v);
+        }
+        out
     }
 
     fn palette(&self) -> daw_arrange::Palette {
@@ -292,6 +332,7 @@ impl qobject::ArrangeView {
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
+        let start = Instant::now();
         let (w, h) = (self.width(), self.height());
         let palette = self.palette();
         let ruler = self.ruler_height;
@@ -317,6 +358,11 @@ impl qobject::ArrangeView {
             (scene, geometry)
         });
         self.as_mut().store(scene);
+        // Not the setters below: they run QML bindings (the headers follow
+        // the scroll position).
+        let costs = &mut self.as_mut().rust_mut().costs;
+        costs.refresh_ms += millis_since(start);
+        costs.refreshes += 1;
         let (sx, sy, cw, ch, th) = geometry;
         self.as_mut().set_scroll_x(sx);
         self.as_mut().set_scroll_y(sy);
@@ -525,4 +571,8 @@ impl qobject::ArrangeView {
         self.as_mut().edited();
         ok
     }
+}
+
+fn millis_since(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
 }
