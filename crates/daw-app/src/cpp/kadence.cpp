@@ -145,7 +145,10 @@ int runApplication(rust::Slice<const uint8_t> args, rust::Str version)
     // prints frame times, and quits. No input is injected.
     QCommandLineOption benchmarkOption(QStringLiteral("benchmark"));
     benchmarkOption.setFlags(QCommandLineOption::HiddenFromHelp);
-    parser.addOptions({colorSchemeOption, smokeTestOption, screenshotOption, benchmarkOption});
+    // The same, with every track's volume and pan lanes shown.
+    QCommandLineOption benchmarkLanesOption(QStringLiteral("benchmark-lanes"));
+    benchmarkLanesOption.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOptions({colorSchemeOption, smokeTestOption, screenshotOption, benchmarkOption, benchmarkLanesOption});
     parser.process(app);
     about.processCommandLine(&parser);
 
@@ -165,7 +168,8 @@ int runApplication(rust::Slice<const uint8_t> args, rust::Str version)
     engine.setInitialProperties({
         {QStringLiteral("aboutData"), QVariant::fromValue(engine.toScriptValue(KAboutData::applicationData()))},
         {QStringLiteral("smokeTest"), parser.isSet(smokeTestOption)},
-        {QStringLiteral("benchmark"), parser.isSet(benchmarkOption)},
+        {QStringLiteral("benchmark"), parser.isSet(benchmarkOption) || parser.isSet(benchmarkLanesOption)},
+        {QStringLiteral("benchmarkLanes"), parser.isSet(benchmarkLanesOption)},
         {QStringLiteral("screenshotDir"), screenshotDir},
     });
     engine.loadFromModule("io.github.octodillo.daw", "Main");

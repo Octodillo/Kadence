@@ -29,9 +29,17 @@ pub mod self_test {
         fn load_demo_project(self: &TestHelper) -> bool;
 
         /// Replace the document with `tracks` audio tracks of `clips` clips
-        /// each, for `--benchmark`.
+        /// each, for `--benchmark`. With `lanes`, every track also has
+        /// volume and pan automation, shown in the arrange view.
         #[qinvokable]
-        fn load_stress_project(self: &TestHelper, tracks: i32, clips: i32) -> bool;
+        fn load_stress_project(self: &TestHelper, tracks: i32, clips: i32, lanes: bool) -> bool;
+
+        /// Writes `line` to standard output, or to standard error when
+        /// `error`. Benchmark results go here rather than through Qt's
+        /// logging, which may send them to the journal instead of the
+        /// terminal.
+        #[qinvokable]
+        fn print_line(self: &TestHelper, line: &QString, error: bool);
 
         /// A monotonic clock in milliseconds, for frame timing.
         #[qinvokable]
@@ -97,11 +105,19 @@ impl self_test::TestHelper {
         })
     }
 
-    fn load_stress_project(&self, tracks: i32, clips: i32) -> bool {
+    fn load_stress_project(&self, tracks: i32, clips: i32, lanes: bool) -> bool {
         let (tracks, clips) = (tracks.max(0) as usize, clips.max(0) as usize);
-        crate::state::with(|s| match crate::demo::stress(tracks, clips) {
+        crate::state::with(|s| match crate::demo::stress(tracks, clips, lanes) {
             Ok(doc) => {
                 s.replace_document(doc);
+                let project = s.doc.project().clone();
+                if lanes && let Some((last, rest)) = project.tracks.split_last() {
+                    // Expanding one track lays out all of them, so mark the
+                    // rest first and lay out once, with the last.
+                    s.arrange.expanded.extend(rest.iter().map(|t| t.id));
+                    let out = s.arrange.set_expanded(&project, last.id, true);
+                    s.apply(out);
+                }
                 true
             }
             Err(e) => {
@@ -109,6 +125,17 @@ impl self_test::TestHelper {
                 false
             }
         })
+    }
+
+    fn print_line(&self, line: &QString, error: bool) {
+        use std::io::Write;
+        // Nowhere to report a closed stream to.
+        let _ = if error {
+            writeln!(std::io::stderr().lock(), "{line}")
+        } else {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{line}").and_then(|()| out.flush())
+        };
     }
 
     fn now_ms(&self) -> f64 {
