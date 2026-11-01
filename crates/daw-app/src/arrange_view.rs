@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::time::Instant;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QString, QUrl};
+use cxx_qt_lib::{QColor, QList, QString, QUrl};
 use daw_arrange::{Button, Cursor, Hit, Pointer, Rgba, Scene};
 
 use crate::message::{Context, Message};
@@ -30,6 +30,8 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qurl.h");
         type QUrl = cxx_qt_lib::QUrl;
+        include!("cxx-qt-lib/qlist.h");
+        type QList_f64 = cxx_qt_lib::QList<f64>;
     }
 
     #[auto_cxx_name]
@@ -113,12 +115,13 @@ pub mod qobject {
         /// instead of editing (see `Arrange::touch_pans`).
         #[qinvokable]
         fn touch_pans(self: &ArrangeView, x: f64, y: f64) -> bool;
-        /// How long the last `refresh` (building the picture) and the last
-        /// paint took, in milliseconds, for `--benchmark`.
+        /// What building the picture (`refresh`) and painting it cost since
+        /// the last call, for `--benchmark`: [refresh milliseconds, refresh
+        /// count, paint milliseconds, paint count]. Starts counting again.
+        /// Paint is drawing into the item's image; uploading that to the
+        /// GPU is not in it.
         #[qinvokable]
-        fn last_refresh_ms(self: &ArrangeView) -> f64;
-        #[qinvokable]
-        fn last_paint_ms(self: &ArrangeView) -> f64;
+        fn take_costs(self: Pin<&mut ArrangeView>) -> QList_f64;
         /// Adds a dropped audio file at view position (x, y). Returns false
         /// if it could not; `Project.status` says why.
         #[qinvokable]
@@ -182,9 +185,17 @@ pub struct ArrangeViewRust {
     waves: Vec<f32>,
     /// Where the last press was, for placing a context menu.
     last_press: (f64, f64),
-    /// What the last refresh and paint cost, in milliseconds.
-    last_refresh_ms: f64,
-    last_paint_ms: f64,
+    /// What refreshes and paints cost since `take_costs`.
+    costs: Costs,
+}
+
+/// Time spent, and how many times, since it was last taken.
+#[derive(Default, Clone, Copy)]
+struct Costs {
+    refresh_ms: f64,
+    refreshes: u32,
+    paint_ms: f64,
+    paints: u32,
 }
 
 impl Default for ArrangeViewRust {
@@ -212,8 +223,7 @@ impl Default for ArrangeViewRust {
             texts: Vec::new(),
             waves: Vec::new(),
             last_press: (0.0, 0.0),
-            last_refresh_ms: 0.0,
-            last_paint_ms: 0.0,
+            costs: Costs::default(),
         }
     }
 }
@@ -290,15 +300,18 @@ impl qobject::ArrangeView {
         let painter = unsafe { Pin::new_unchecked(painter) };
         let start = Instant::now();
         paint::paint_scene(painter, &self.ops, &self.texts, &self.waves);
-        self.as_mut().rust_mut().last_paint_ms = millis_since(start);
+        let costs = &mut self.as_mut().rust_mut().costs;
+        costs.paint_ms += millis_since(start);
+        costs.paints += 1;
     }
 
-    fn last_refresh_ms(&self) -> f64 {
-        self.last_refresh_ms
-    }
-
-    fn last_paint_ms(&self) -> f64 {
-        self.last_paint_ms
+    fn take_costs(self: Pin<&mut Self>) -> QList<f64> {
+        let c = std::mem::take(&mut self.rust_mut().costs);
+        let mut out = QList::default();
+        for v in [c.refresh_ms, f64::from(c.refreshes), c.paint_ms, f64::from(c.paints)] {
+            out.append(v);
+        }
+        out
     }
 
     fn palette(&self) -> daw_arrange::Palette {
@@ -340,14 +353,18 @@ impl qobject::ArrangeView {
             (scene, geometry)
         });
         self.as_mut().store(scene);
+        // Not the setters below: they run QML bindings (the headers follow
+        // the scroll position).
+        let costs = &mut self.as_mut().rust_mut().costs;
+        costs.refresh_ms += millis_since(start);
+        costs.refreshes += 1;
         let (sx, sy, cw, ch, th) = geometry;
         self.as_mut().set_scroll_x(sx);
         self.as_mut().set_scroll_y(sy);
         self.as_mut().set_content_width(cw);
         self.as_mut().set_content_height(ch);
         self.as_mut().set_track_height(th);
-        self.as_mut().update();
-        self.as_mut().rust_mut().last_refresh_ms = millis_since(start);
+        self.update();
     }
 
     fn store(self: Pin<&mut Self>, scene: Scene) {
