@@ -3,7 +3,9 @@ use lv2_raw::LV2Feature;
 use lv2_sys::{LV2_BUF_SIZE__boundedBlockLength, LV2_STATE__loadDefaultState};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::Duration;
 use std::{collections::HashSet, ffi::CStr};
 
 pub mod options;
@@ -67,16 +69,7 @@ impl FeaturesBuilder {
             }
         })?;
         let worker_manager = Arc::new(WorkerManager::default());
-        let keep_worker_thread_alive = Arc::new(AtomicBool::new(true));
-
-        let keep_alive = keep_worker_thread_alive.clone();
-        let workers = worker_manager.clone();
-        let worker_thread = std::thread::spawn(move || {
-            while keep_alive.load(std::sync::atomic::Ordering::Relaxed) {
-                workers.run_workers();
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
+        let worker_thread = WorkerThread::spawn(worker_manager.clone());
         let mut features = Features {
             urid_map: urid_map::UridMap::new(),
             options: options::Options::new(),
@@ -92,7 +85,6 @@ impl FeaturesBuilder {
             },
             worker_manager,
             _worker_thread: worker_thread,
-            keep_worker_thread_alive,
         };
         features.options.set_int_option(
             &features.urid_map,
@@ -121,8 +113,7 @@ pub struct Features {
     min_block_length: usize,
     max_block_length: usize,
     worker_manager: Arc<WorkerManager>,
-    _worker_thread: std::thread::JoinHandle<()>,
-    keep_worker_thread_alive: Arc<AtomicBool>,
+    _worker_thread: WorkerThread,
 }
 
 unsafe impl Send for Features {}
@@ -197,15 +188,56 @@ impl std::fmt::Debug for Features {
             .field("max_block_length", &self.max_block_length)
             .field("worker_manager", &self.worker_manager)
             .field("_worker_thread", &self._worker_thread)
-            .field("keep_worker_thread_alive", &self.keep_worker_thread_alive)
             .finish()
     }
 }
 
-impl Drop for Features {
+/// How long the worker thread waits between runs of the plugins' workers.
+const WORKER_PERIOD: Duration = Duration::from_millis(100);
+
+/// The thread that runs plugin workers for a `Features`. Dropping it stops the
+/// thread and joins it.
+///
+/// It is joined, never detached: glibc's `pthread_detach` (2.39, as on Ubuntu
+/// 24.04) reads the thread's descriptor after marking it detached, and a thread
+/// that exits at that moment frees the descriptor with its stack, so the read
+/// can fault. A thread that is stopped and joined has finished exiting first.
+#[derive(Debug)]
+struct WorkerThread {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl WorkerThread {
+    fn spawn(workers: Arc<WorkerManager>) -> WorkerThread {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("livi-worker".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Acquire) {
+                    workers.run_workers();
+                    // Woken early by `drop`.
+                    std::thread::park_timeout(WORKER_PERIOD);
+                }
+            })
+            // PANIC OK: as `std::thread::spawn` does.
+            .expect("failed to spawn the LV2 worker thread");
+        WorkerThread {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for WorkerThread {
     fn drop(&mut self) {
-        self.keep_worker_thread_alive
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            // A panic on the worker thread was already reported by the panic hook.
+            let _ = handle.join();
+        }
     }
 }
 
@@ -245,6 +277,23 @@ mod tests {
             "accepted bounds {0}..={0}",
             i32::MAX as usize + 1
         );
+    }
+
+    // Kadence issue #152: dropping the features stops their worker thread and
+    // joins it, rather than detaching a thread that may be exiting.
+    #[test]
+    fn dropping_features_joins_the_worker_thread() {
+        let world = crate::World::with_plugin_predicate(|_| false);
+        for _ in 0..100 {
+            let features = FeaturesBuilder::default().try_build(&world).unwrap();
+            let workers = Arc::downgrade(features.worker_manager());
+            drop(features);
+            // The thread held the other reference; it has ended.
+            assert!(
+                workers.upgrade().is_none(),
+                "the worker thread outlived its features"
+            );
+        }
     }
 
     #[test]

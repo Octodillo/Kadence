@@ -17,6 +17,14 @@ Changes from upstream, each with a regression test in this crate:
   field and a `Port::scaled` method; `Plugin::ports` still reports the
   declared values. Test: `plugin::tests::sample_rate_ports_scale_with_the_rate`.
   Kadence issue #51.
+- Dropping a `Features` stops its worker thread and joins it; upstream
+  detached it and let it notice on its next 100 ms tick. Detaching a thread
+  while it exits is a use-after-free in glibc's `pthread_detach` (2.39, Ubuntu
+  24.04), which crashed these tests with SIGSEGV now and then, since many
+  short-lived `Features` are built. The thread now parks between runs, so the
+  join wakes it and returns at once. Test:
+  `features::tests::dropping_features_joins_the_worker_thread`. Kadence
+  issue #152.
 
 The tests need a C compiler, the LV2 headers and the LV2 example plugins
 (Ubuntu: `lv2-dev lv2-examples mda-lv2`):
