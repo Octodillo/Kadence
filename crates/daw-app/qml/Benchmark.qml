@@ -10,7 +10,9 @@ import io.github.octodillo.daw
 // per phase, deletes the project and quits. Every frame moves the view, so
 // the time between swapped frames is what one redraw costs. With `lanes`
 // (`--benchmark-lanes`), every track shows volume and pan automation.
-// Results go to standard output, whatever Qt's logging is set to.
+// Results go to standard output, whatever Qt's logging is set to. Each
+// phase also gives the arrange view's own refresh and paint times
+// (median/p95/max), to tell its cost from the rest of the frame.
 Item {
     id: bench
 
@@ -28,6 +30,10 @@ Item {
     property real phaseStart: 0
     property real last: 0
     property var frames: []
+    // The arrange view's own share of each frame: building its picture
+    // (refresh) and painting it.
+    property var refreshes: []
+    property var paints: []
     // The timeline's size when measuring began.
     property string timeline: ""
     property int tick: 0
@@ -65,7 +71,15 @@ Item {
             "max", sorted[sorted.length - 1].toFixed(2),
             "over16.7", over(16.7),
             "over33", over(33.4),
-            "ms");
+            "ms;", "arrange refresh", spread(refreshes),
+            "paint", spread(paints), "ms");
+    }
+
+    // "median/p95/max" of `values`.
+    function spread(values: var): string {
+        const sorted = values.slice().sort((a, b) => a - b);
+        return [percentile(sorted, 0.5), percentile(sorted, 0.95), sorted[sorted.length - 1]]
+            .map(v => v.toFixed(2)).join("/");
     }
 
     // One step of the current phase's motion.
@@ -92,6 +106,8 @@ Item {
         }
         phase += 1;
         frames = [];
+        refreshes = [];
+        paints = [];
         tick = 0;
         if (phase >= phases.length) {
             done = true;
@@ -115,6 +131,10 @@ Item {
                     bench.timeline = Math.round(v.contentWidth) + "x" + Math.round(v.contentHeight);
                 }
                 bench.frames.push(now - bench.last);
+                // The refresh the last move made, and the paint of the
+                // frame just shown.
+                bench.refreshes.push(bench.view().lastRefreshMs());
+                bench.paints.push(bench.view().lastPaintMs());
             }
             bench.last = now;
             if (now - bench.phaseStart > bench.warmupMs + bench.phaseMs) {
