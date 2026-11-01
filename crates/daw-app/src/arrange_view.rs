@@ -308,7 +308,12 @@ impl qobject::ArrangeView {
     fn take_costs(self: Pin<&mut Self>) -> QList<f64> {
         let c = std::mem::take(&mut self.rust_mut().costs);
         let mut out = QList::default();
-        for v in [c.refresh_ms, f64::from(c.refreshes), c.paint_ms, f64::from(c.paints)] {
+        for v in [
+            c.refresh_ms,
+            f64::from(c.refreshes),
+            c.paint_ms,
+            f64::from(c.paints),
+        ] {
             out.append(v);
         }
         out
