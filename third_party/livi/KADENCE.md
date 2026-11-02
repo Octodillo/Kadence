@@ -25,6 +25,18 @@ Changes from upstream, each with a regression test in this crate:
   join wakes it and returns at once. Test:
   `features::tests::dropping_features_joins_the_worker_thread`. Kadence
   issue #152.
+- lilv parses Turtle with a blank node prefix that `lilv_world_blank_node_prefix`
+  formats into one static buffer for every world (0.24.22, still so in 0.28).
+  Two worlds parsing at once on different threads can mix up their blank
+  nodes, and a plugin then loses its ports ("missing port N/M"). A
+  process-wide lock (`parse_lock` in `lib.rs`) is now held while a `World` is
+  built, which also reads every plugin's data files then (lilv otherwise
+  reads them on the first query), and by the new `World::load_resource`.
+  Callers must load data through livi, not through `World::raw`. The lock
+  cannot cover a plugin or UI in the process that parses with the same
+  system liblilv on a thread of its own. Test:
+  `tests::worlds_built_on_several_threads_read_every_port` (it failed about
+  one run in six without the lock). Kadence issue #156.
 
 The tests need a C compiler, the LV2 headers and the LV2 example plugins
 (Ubuntu: `lv2-dev lv2-examples mda-lv2`):

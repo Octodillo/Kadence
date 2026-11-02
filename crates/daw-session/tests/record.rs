@@ -1,10 +1,14 @@
 //! Records audio through the dummy backend's loopback, which plays the
 //! outputs back into the inputs late by the latency it reports, and checks
-//! that the take lands where the played audio was.
+//! that the take lands where the played audio was. One test does the same
+//! through a running JACK (or PipeWire) server; see
+//! [`records_through_a_jack_server`].
 
 use std::time::{Duration, Instant};
 
-use daw_backend::{AudioBackend, BackendConfig, DummyBackend, Latency, Pacing};
+use daw_backend::{
+    AudioBackend, BackendConfig, DummyBackend, JackBackend, Latency, Pacing, PortFilter,
+};
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
 use daw_media::{AudioData, WavFormat, decode_file, write_wav};
@@ -21,22 +25,47 @@ const PERIOD: u32 = 256;
 /// Where the impulses are in the source file, and how loud.
 const IMPULSES: [(usize, f32); 3] = [(1_000, 0.9), (7_321, 0.6), (15_007, 0.3)];
 
-struct Rig {
+struct Rig<B = DummyBackend> {
     doc: Document,
     session: Session,
-    backend: DummyBackend,
+    backend: B,
     mic: TrackId,
     dir: tempfile::TempDir,
 }
 
+/// The backend's config: two audio channels each way, no MIDI.
+fn backend_config(client_name: &str, auto_connect: bool) -> BackendConfig {
+    BackendConfig {
+        client_name: client_name.into(),
+        audio_inputs: 2,
+        audio_outputs: 2,
+        midi_input: false,
+        midi_output: false,
+        sample_rate: Some(RATE),
+        buffer_size: Some(PERIOD),
+        auto_connect,
+        midi_capacity: 16,
+    }
+}
+
 fn rig(latency: Latency) -> Rig {
+    let mut backend = DummyBackend::new(Pacing::Freewheel).with_loopback(latency);
+    backend.open(backend_config("rec", true)).unwrap();
+    rig_on(backend, PERIOD)
+}
+
+/// A project with a "Source" track playing the impulses from beat one and an
+/// armed "Mic" track recording input 1, running on the open `backend`,
+/// whose periods are at most `max_frames`.
+fn rig_on<B: AudioBackend>(mut backend: B, max_frames: u32) -> Rig<B> {
+    let rate = backend.sample_rate() as u32;
     let dir = tempfile::tempdir().unwrap();
     let mut source = vec![0.0f32; 20_000];
     for (at, v) in IMPULSES {
         source[at] = v;
     }
     let data = AudioData {
-        sample_rate: RATE,
+        sample_rate: rate,
         channels: vec![source],
     };
     write_wav(dir.path().join("source.wav"), &data, WavFormat::Float32).unwrap();
@@ -69,24 +98,10 @@ fn rig(latency: Latency) -> Rig {
     .unwrap();
     doc.seal();
 
-    let mut backend = DummyBackend::new(Pacing::Freewheel).with_loopback(latency);
-    backend
-        .open(BackendConfig {
-            client_name: "rec".into(),
-            audio_inputs: 2,
-            audio_outputs: 2,
-            midi_input: false,
-            midi_output: false,
-            sample_rate: Some(RATE),
-            buffer_size: Some(PERIOD),
-            auto_connect: true,
-            midi_capacity: 16,
-        })
-        .unwrap();
     let (mut session, mut processor) = Session::new(SessionConfig {
         engine: EngineConfig {
-            sample_rate: f64::from(RATE),
-            max_frames: PERIOD,
+            sample_rate: f64::from(rate),
+            max_frames,
             ..Default::default()
         },
         inputs: 2,
@@ -119,7 +134,7 @@ fn wait_past(session: &Session, samples: i64) {
 
 /// The timeline positions (in samples) and values of the impulses in an
 /// audio clip on `track`.
-fn impulses_on(rig: &Rig, track: TrackId) -> Vec<(i64, f32)> {
+fn impulses_on<B>(rig: &Rig<B>, track: TrackId) -> Vec<(i64, f32)> {
     let project = rig.doc.project();
     let clip = &project.track(track).unwrap().clips[0];
     let ClipContent::Audio(a) = &clip.content else {
@@ -147,6 +162,66 @@ fn impulses_on(rig: &Rig, track: TrackId) -> Vec<(i64, f32)> {
         .collect()
 }
 
+/// Where the source clip starts on the timeline: one beat in, at 120 bpm.
+fn source_start<B: AudioBackend>(rig: &Rig<B>) -> i64 {
+    i64::from(rig.backend.sample_rate() as u32) / 2
+}
+
+/// Plays the rig and records a take on its mic, reporting the input
+/// latency as `latency`. Calls `during` once the source's beat is reached,
+/// then records on 24000 samples further, and at least until the source
+/// has played back in with `latency` and `slack` to spare. Stops the
+/// transport and applies the take; returns the position it stopped at.
+fn record_take<B: AudioBackend>(
+    rig: &mut Rig<B>,
+    latency: u32,
+    slack: i64,
+    during: impl FnOnce(&mut Rig<B>),
+) -> i64 {
+    let (mut takes, problems) = AudioTakes::start(
+        &mut rig.session,
+        rig.doc.project(),
+        &rig.dir.path().join("audio"),
+        latency,
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(takes.tracks().collect::<Vec<_>>(), [rig.mic]);
+    rig.session.play().unwrap();
+    let beat = source_start(rig);
+    wait_past(&rig.session, beat);
+    during(rig);
+    let after = rig.session.controller().position().0 + 24_000;
+    wait_past(
+        &rig.session,
+        after.max(beat + 20_000 + i64::from(latency) + slack),
+    );
+    assert!(takes.poll().is_empty());
+    let stopped_at = rig.session.controller().position().0;
+    let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
+    rig.session.stop().unwrap();
+    assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+    let cmd = finished.command.expect("a take");
+    rig.doc.execute_boxed(cmd).unwrap();
+    stopped_at
+}
+
+/// Checks that the mic's take holds the source's impulses with their
+/// spacing and relative levels, and returns how many samples late the
+/// first one is against where it was played.
+fn impulses_late_by<B>(rig: &Rig<B>, beat: i64) -> i64 {
+    let got = impulses_on(rig, rig.mic);
+    assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
+    let late = got[0].0 - (beat + IMPULSES[0].0 as i64);
+    for ((t, v), (at, want)) in got.iter().zip(IMPULSES) {
+        assert_eq!(*t - late, beat + at as i64, "spacing: {got:?}");
+        // The centre-panned strip scales them, but the ratio between
+        // impulses survives.
+        let ratio = v / got[0].1;
+        assert!((ratio - want / IMPULSES[0].1).abs() < 1e-3, "{ratio}");
+    }
+    late
+}
+
 fn record_and_check(latency: Latency) {
     record_and_check_with(latency, |_| {});
 }
@@ -155,32 +230,8 @@ fn record_and_check(latency: Latency) {
 fn record_and_check_with(latency: Latency, during: impl FnOnce(&mut Rig)) {
     let mut rig = rig(latency);
     assert_eq!(rig.backend.latency().total(), latency.total());
-    let (mut takes, problems) = AudioTakes::start(
-        &mut rig.session,
-        rig.doc.project(),
-        &rig.dir.path().join("audio"),
-        rig.backend.latency().total(),
-    );
-    assert!(problems.is_empty(), "{problems:?}");
-    assert_eq!(takes.tracks().collect::<Vec<_>>(), [rig.mic]);
-    rig.session.play().unwrap();
-    let beat = i64::from(RATE) / 2;
-    wait_past(&rig.session, beat);
-    during(&mut rig);
-    // Record on well past whatever `during` did, and past the source.
-    let after = rig.session.controller().position().0 + 24_000;
-    wait_past(
-        &rig.session,
-        after.max(beat + 20_000 + i64::from(latency.total()) + 4096),
-    );
-    assert!(takes.poll().is_empty());
-    let stopped_at = rig.session.controller().position().0;
-    let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
-    rig.session.stop().unwrap();
+    let stopped_at = record_take(&mut rig, latency.total(), 4096, during);
     rig.backend.stop().unwrap();
-    assert!(finished.problems.is_empty(), "{:?}", finished.problems);
-    let cmd = finished.command.expect("a take");
-    rig.doc.execute_boxed(cmd).unwrap();
     rig.doc.seal();
     assert_eq!(
         rig.doc.history().undo_label().as_deref(),
@@ -205,19 +256,11 @@ fn record_and_check_with(latency: Latency, during: impl FnOnce(&mut Rig)) {
         file_end >= stopped_at - i64::from(latency.total()) - 4 * i64::from(PERIOD),
         "the take ends at {file_end}, stopped at {stopped_at}"
     );
-    let got = impulses_on(&rig, rig.mic);
-    assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
-    for ((t, v), (at, want)) in got.iter().zip(IMPULSES) {
-        let expected = beat + at as i64;
-        assert!(
-            *t == expected,
-            "impulse at {t}, played at {expected} (latency {latency:?})"
-        );
-        // The centre-panned strip scales it, but the ratio between
-        // impulses survives.
-        let ratio = v / got[0].1;
-        assert!((ratio - want / IMPULSES[0].1).abs() < 1e-3, "{ratio}");
-    }
+    assert_eq!(
+        impulses_late_by(&rig, source_start(&rig)),
+        0,
+        "the take is off (latency {latency:?})"
+    );
     assert_eq!(rig.backend.stats().rt_alloc_violations, 0);
 
     // Undo takes the take off the track.
@@ -380,4 +423,129 @@ fn deleting_the_track_mid_take_is_reported_and_undo_keeps_the_take() {
     rig.backend.stop().unwrap();
     assert!(done.problems.is_empty(), "{:?}", done.problems);
     assert!(done.command.is_some());
+}
+
+/// A JACK client that copies its input to its output: a loopback cable
+/// inside the server, standing in for a sound card's output wired to its
+/// input. PipeWire delivers nothing over a link from a client to itself,
+/// so the session records through this instead.
+struct Cable {
+    name: String,
+    client: jack::AsyncClient<(), jack::contrib::ClosureProcessHandler<(), CopyFn>>,
+}
+
+type CopyFn = Box<dyn FnMut(&jack::Client, &jack::ProcessScope) -> jack::Control + Send>;
+
+impl Cable {
+    fn new() -> Self {
+        // PipeWire doesn't rename a second client with a taken name, and
+        // nextest runs tests in parallel processes.
+        let name = format!("kadence-record-cable-{}", std::process::id());
+        let (client, _) = jack::Client::new(&name, jack::ClientOptions::NO_START_SERVER)
+            .expect("a JACK server is running");
+        let input = client
+            .register_port("in", jack::AudioIn::default())
+            .unwrap();
+        let mut output = client
+            .register_port("out", jack::AudioOut::default())
+            .unwrap();
+        let copy: CopyFn = Box::new(move |_, ps| {
+            output.as_mut_slice(ps).copy_from_slice(input.as_slice(ps));
+            jack::Control::Continue
+        });
+        let handler = jack::contrib::ClosureProcessHandler::new(copy);
+        Self {
+            name,
+            client: client.activate_async((), handler).unwrap(),
+        }
+    }
+
+    fn port(&self, port: &str) -> String {
+        format!("{}:{port}", self.name)
+    }
+
+    /// Waits until the server shows `from` linked to `to`.
+    fn wait_linked(&self, from: &str, to: &str) {
+        let client = self.client.as_client();
+        let end = Instant::now() + Duration::from_secs(10);
+        while !client
+            .port_by_name(from)
+            .is_some_and(|p| p.is_connected_to(to).unwrap_or(false))
+        {
+            assert!(Instant::now() < end, "{from} was never linked to {to}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Waits for `backend` to see another client's `port`: PipeWire shows a new
+/// client's ports a moment later.
+fn wait_visible(backend: &JackBackend, port: &str) {
+    let end = Instant::now() + Duration::from_secs(10);
+    while !backend
+        .list_ports(&PortFilter::default())
+        .unwrap()
+        .iter()
+        .any(|p| p.name == port)
+    {
+        assert!(Instant::now() < end, "{port} never showed up");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Records through a running JACK server, or PipeWire's JACK interface.
+/// The session's first output goes through a [`Cable`] back to its first
+/// input, and nothing is linked to a sound card, so it is silent. The
+/// server picks the rate and period, and the cable adds latency that the
+/// ports don't report, so the take must have the impulses with their
+/// spacing and levels, a period or two late at most. CI runs it against
+/// `jackd -d dummy` and a headless PipeWire. Locally:
+///
+/// ```sh
+/// cargo nextest run -p daw-session --test record --run-ignored only
+/// ```
+#[test]
+#[ignore = "needs a running JACK server"]
+fn records_through_a_jack_server() {
+    let client = format!("kadence-record-test-{}", std::process::id());
+    let cable = Cable::new();
+    let mut backend = JackBackend::new();
+    backend
+        .open(BackendConfig {
+            sample_rate: None,
+            buffer_size: None,
+            ..backend_config(&client, false)
+        })
+        .unwrap();
+    wait_visible(&backend, &cable.port("in"));
+    wait_visible(&backend, &cable.port("out"));
+    backend
+        .connect(&format!("{client}:audio_out_1"), &cable.port("in"))
+        .unwrap();
+    backend
+        .connect(&cable.port("out"), &format!("{client}:audio_in_1"))
+        .unwrap();
+    let rate = backend.sample_rate();
+    let period_at_open = backend.buffer_size();
+    // PipeWire can change its period while running; leave room.
+    let mut rig = rig_on(backend, 8192);
+    // The links were made when the client started; that only logs failures.
+    cable.wait_linked(&format!("{client}:audio_out_1"), &cable.port("in"));
+    cable.wait_linked(&cable.port("out"), &format!("{client}:audio_in_1"));
+    let latency = rig.backend.latency().total();
+    record_take(&mut rig, latency, 4 * 8192, |_| {});
+    let period = i64::from(period_at_open.max(rig.backend.buffer_size()));
+    let stats = rig.backend.stats();
+    rig.backend.close().unwrap();
+
+    let late = impulses_late_by(&rig, source_start(&rig));
+    assert!(
+        (0..=2 * period).contains(&late),
+        "the take is {late} samples late; the period is {period}"
+    );
+    assert_eq!(stats.rt_alloc_violations, 0);
+    println!(
+        "recorded at {rate} Hz, period {period}: {late} samples late, reported latency {latency}, {} xruns",
+        stats.xruns
+    );
 }

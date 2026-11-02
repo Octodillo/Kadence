@@ -546,7 +546,7 @@ impl EngineProcessor {
 // Lives here rather than in tests/no_alloc.rs because it pushes graphs onto
 // the command queue directly: send_graph collects garbage first, so from the
 // public API the garbage queue only fills when the two threads race.
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 mod tests {
     use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 

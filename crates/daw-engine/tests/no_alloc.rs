@@ -1,10 +1,8 @@
 //! The process path must never allocate or free. This binary installs
-//! `assert_no_alloc`'s allocator. The workspace enables its `warn_debug`
-//! feature, so instead of aborting it counts violations per thread, and each
-//! test asserts the count stays at zero on the thread that processed.
-//! `assert_no_alloc` checks nothing without debug assertions and leaves out
-//! the items used here, so the binary is empty in release builds.
-#![cfg(debug_assertions)]
+//! `assert_no_alloc`'s allocator. The workspace enables its `warn_debug` and
+//! `warn_release` features, so instead of aborting it counts violations per
+//! thread, and each test asserts the count stays at zero on the thread that
+//! processed.
 
 mod support;
 

@@ -1,7 +1,8 @@
 #!/bin/sh
-# Runs the daw-backend JACK integration tests on PipeWire's libjack
-# (pipewire-jack), the way a Plasma desktop runs them, on a private headless
-# PipeWire with a null sink and source standing in for a sound card.
+# Runs the JACK integration tests (daw-backend's, and daw-session's record
+# test) on PipeWire's libjack (pipewire-jack), the way a Plasma desktop runs
+# them, on a private headless PipeWire with a null sink and source standing
+# in for a sound card.
 #
 # Needs: pipewire, pipewire-jack (pw-jack), wireplumber, dbus, cargo-nextest.
 # Extra arguments go to `cargo nextest run`.
@@ -55,5 +56,5 @@ pw-jack jack_lsp
 # processes ("invalid mem id", then SIGSEGV), a race in the library, not in
 # our code. The auto-connect test needs a dummy server's physical ports, so
 # it is left out here rather than reported as passed.
-pw-jack cargo nextest run -p daw-backend --run-ignored only --test-threads 1 \
+pw-jack cargo nextest run -p daw-backend -p daw-session --run-ignored only --test-threads 1 \
     -E 'not test(auto_connect_reaches_physical_ports)' "$@"

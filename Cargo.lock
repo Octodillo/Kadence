@@ -723,6 +723,7 @@ dependencies = [
  "daw-model",
  "daw-plugin-host",
  "daw-plugins",
+ "jack",
  "libc",
  "log",
  "tempfile",

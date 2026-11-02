@@ -1,10 +1,9 @@
 //! Checks that the RT-side operations never touch the allocator.
 //!
-//! `warn_debug` makes violations count instead of abort, so everything runs inside one
-//! test: the violation counter is global and parallel tests would see each other's.
-//! `assert_no_alloc` checks nothing without debug assertions and leaves out the items
-//! used here, so the binary is empty in release builds.
-#![cfg(all(not(loom), debug_assertions))]
+//! The workspace's `warn_debug`/`warn_release` make violations count instead of abort,
+//! so everything runs inside one test: the violation counter is global and parallel
+//! tests would see each other's.
+#![cfg(not(loom))]
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::dispose::deferred_drop;
