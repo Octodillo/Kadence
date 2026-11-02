@@ -162,6 +162,66 @@ fn impulses_on<B>(rig: &Rig<B>, track: TrackId) -> Vec<(i64, f32)> {
         .collect()
 }
 
+/// Where the source clip starts on the timeline: one beat in, at 120 bpm.
+fn source_start<B: AudioBackend>(rig: &Rig<B>) -> i64 {
+    i64::from(rig.backend.sample_rate() as u32) / 2
+}
+
+/// Plays the rig and records a take on its mic, reporting the input
+/// latency as `latency`. Calls `during` once the source's beat is reached,
+/// then records on 24000 samples further, and at least until the source
+/// has played back in with `latency` and `slack` to spare. Stops the
+/// transport and applies the take; returns the position it stopped at.
+fn record_take<B: AudioBackend>(
+    rig: &mut Rig<B>,
+    latency: u32,
+    slack: i64,
+    during: impl FnOnce(&mut Rig<B>),
+) -> i64 {
+    let (mut takes, problems) = AudioTakes::start(
+        &mut rig.session,
+        rig.doc.project(),
+        &rig.dir.path().join("audio"),
+        latency,
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(takes.tracks().collect::<Vec<_>>(), [rig.mic]);
+    rig.session.play().unwrap();
+    let beat = source_start(rig);
+    wait_past(&rig.session, beat);
+    during(rig);
+    let after = rig.session.controller().position().0 + 24_000;
+    wait_past(
+        &rig.session,
+        after.max(beat + 20_000 + i64::from(latency) + slack),
+    );
+    assert!(takes.poll().is_empty());
+    let stopped_at = rig.session.controller().position().0;
+    let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
+    rig.session.stop().unwrap();
+    assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+    let cmd = finished.command.expect("a take");
+    rig.doc.execute_boxed(cmd).unwrap();
+    stopped_at
+}
+
+/// Checks that the mic's take holds the source's impulses with their
+/// spacing and relative levels, and returns how many samples late the
+/// first one is against where it was played.
+fn impulses_late_by<B>(rig: &Rig<B>, beat: i64) -> i64 {
+    let got = impulses_on(rig, rig.mic);
+    assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
+    let late = got[0].0 - (beat + IMPULSES[0].0 as i64);
+    for ((t, v), (at, want)) in got.iter().zip(IMPULSES) {
+        assert_eq!(*t - late, beat + at as i64, "spacing: {got:?}");
+        // The centre-panned strip scales them, but the ratio between
+        // impulses survives.
+        let ratio = v / got[0].1;
+        assert!((ratio - want / IMPULSES[0].1).abs() < 1e-3, "{ratio}");
+    }
+    late
+}
+
 fn record_and_check(latency: Latency) {
     record_and_check_with(latency, |_| {});
 }
@@ -170,32 +230,8 @@ fn record_and_check(latency: Latency) {
 fn record_and_check_with(latency: Latency, during: impl FnOnce(&mut Rig)) {
     let mut rig = rig(latency);
     assert_eq!(rig.backend.latency().total(), latency.total());
-    let (mut takes, problems) = AudioTakes::start(
-        &mut rig.session,
-        rig.doc.project(),
-        &rig.dir.path().join("audio"),
-        rig.backend.latency().total(),
-    );
-    assert!(problems.is_empty(), "{problems:?}");
-    assert_eq!(takes.tracks().collect::<Vec<_>>(), [rig.mic]);
-    rig.session.play().unwrap();
-    let beat = i64::from(RATE) / 2;
-    wait_past(&rig.session, beat);
-    during(&mut rig);
-    // Record on well past whatever `during` did, and past the source.
-    let after = rig.session.controller().position().0 + 24_000;
-    wait_past(
-        &rig.session,
-        after.max(beat + 20_000 + i64::from(latency.total()) + 4096),
-    );
-    assert!(takes.poll().is_empty());
-    let stopped_at = rig.session.controller().position().0;
-    let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
-    rig.session.stop().unwrap();
+    let stopped_at = record_take(&mut rig, latency.total(), 4096, during);
     rig.backend.stop().unwrap();
-    assert!(finished.problems.is_empty(), "{:?}", finished.problems);
-    let cmd = finished.command.expect("a take");
-    rig.doc.execute_boxed(cmd).unwrap();
     rig.doc.seal();
     assert_eq!(
         rig.doc.history().undo_label().as_deref(),
@@ -220,19 +256,11 @@ fn record_and_check_with(latency: Latency, during: impl FnOnce(&mut Rig)) {
         file_end >= stopped_at - i64::from(latency.total()) - 4 * i64::from(PERIOD),
         "the take ends at {file_end}, stopped at {stopped_at}"
     );
-    let got = impulses_on(&rig, rig.mic);
-    assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
-    for ((t, v), (at, want)) in got.iter().zip(IMPULSES) {
-        let expected = beat + at as i64;
-        assert!(
-            *t == expected,
-            "impulse at {t}, played at {expected} (latency {latency:?})"
-        );
-        // The centre-panned strip scales it, but the ratio between
-        // impulses survives.
-        let ratio = v / got[0].1;
-        assert!((ratio - want / IMPULSES[0].1).abs() < 1e-3, "{ratio}");
-    }
+    assert_eq!(
+        impulses_late_by(&rig, source_start(&rig)),
+        0,
+        "the take is off (latency {latency:?})"
+    );
     assert_eq!(rig.backend.stats().rt_alloc_violations, 0);
 
     // Undo takes the take off the track.
@@ -403,7 +431,7 @@ fn deleting_the_track_mid_take_is_reported_and_undo_keeps_the_take() {
 /// so the session records through this instead.
 struct Cable {
     name: String,
-    _client: jack::AsyncClient<(), jack::contrib::ClosureProcessHandler<(), CopyFn>>,
+    client: jack::AsyncClient<(), jack::contrib::ClosureProcessHandler<(), CopyFn>>,
 }
 
 type CopyFn = Box<dyn FnMut(&jack::Client, &jack::ProcessScope) -> jack::Control + Send>;
@@ -428,12 +456,25 @@ impl Cable {
         let handler = jack::contrib::ClosureProcessHandler::new(copy);
         Self {
             name,
-            _client: client.activate_async((), handler).unwrap(),
+            client: client.activate_async((), handler).unwrap(),
         }
     }
 
     fn port(&self, port: &str) -> String {
         format!("{}:{port}", self.name)
+    }
+
+    /// Waits until the server shows `from` linked to `to`.
+    fn wait_linked(&self, from: &str, to: &str) {
+        let client = self.client.as_client();
+        let end = Instant::now() + Duration::from_secs(10);
+        while !client
+            .port_by_name(from)
+            .is_some_and(|p| p.is_connected_to(to).unwrap_or(false))
+        {
+            assert!(Instant::now() < end, "{from} was never linked to {to}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -484,43 +525,25 @@ fn records_through_a_jack_server() {
     backend
         .connect(&cable.port("out"), &format!("{client}:audio_in_1"))
         .unwrap();
-    let rate = backend.sample_rate() as u32;
-    let period = i64::from(backend.buffer_size());
+    let rate = backend.sample_rate();
+    let period_at_open = backend.buffer_size();
     // PipeWire can change its period while running; leave room.
     let mut rig = rig_on(backend, 8192);
+    // The links were made when the client started; that only logs failures.
+    cable.wait_linked(&format!("{client}:audio_out_1"), &cable.port("in"));
+    cable.wait_linked(&cable.port("out"), &format!("{client}:audio_in_1"));
     let latency = rig.backend.latency().total();
-    let (mut takes, problems) = AudioTakes::start(
-        &mut rig.session,
-        rig.doc.project(),
-        &rig.dir.path().join("audio"),
-        latency,
-    );
-    assert!(problems.is_empty(), "{problems:?}");
-    rig.session.play().unwrap();
-    let beat = i64::from(rate) / 2;
-    wait_past(&rig.session, beat + 20_000 + i64::from(latency) + 4 * 8192);
-    assert!(takes.poll().is_empty());
-    let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
-    rig.session.stop().unwrap();
+    record_take(&mut rig, latency, 4 * 8192, |_| {});
+    let period = i64::from(period_at_open.max(rig.backend.buffer_size()));
     let stats = rig.backend.stats();
     rig.backend.close().unwrap();
-    assert!(finished.problems.is_empty(), "{:?}", finished.problems);
-    rig.doc
-        .execute_boxed(finished.command.expect("a take"))
-        .unwrap();
 
-    let got = impulses_on(&rig, rig.mic);
-    assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
-    let late = got[0].0 - (beat + IMPULSES[0].0 as i64);
-    for ((t, v), (at, want)) in got.iter().zip(IMPULSES) {
-        assert_eq!(*t - late, beat + at as i64, "spacing: {got:?}");
-        let ratio = v / got[0].1;
-        assert!((ratio - want / IMPULSES[0].1).abs() < 1e-3, "{ratio}");
-    }
+    let late = impulses_late_by(&rig, source_start(&rig));
     assert!(
         (0..=2 * period).contains(&late),
         "the take is {late} samples late; the period is {period}"
     );
+    assert_eq!(stats.rt_alloc_violations, 0);
     println!(
         "recorded at {rate} Hz, period {period}: {late} samples late, reported latency {latency}, {} xruns",
         stats.xruns

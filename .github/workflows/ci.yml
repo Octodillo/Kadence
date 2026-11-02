@@ -49,8 +49,8 @@ jobs:
         # cfg(debug_assertions) code can leave items unused in release builds,
         # which the CMake install checks (Arch and neon jobs) build with
         # RUSTFLAGS=-D warnings; this catches it in the fast job. All targets,
-        # so tests that only build in debug (as daw-app's song test once did)
-        # are caught too.
+        # so a test that only builds in debug is caught too (daw-app, left
+        # out here for Qt, once had one).
         run: cargo clippy --release --workspace --exclude daw-app --all-targets -- -D warnings
       - name: tests
         # -noreset: otherwise Xvfb resets when one test process disconnects
