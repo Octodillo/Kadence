@@ -10,6 +10,7 @@ use jack::{
 };
 
 use crate::cycle::{PortBuffers, push_or_count};
+use crate::link_log::{Link, LinkLog, OwnChange};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
     AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
@@ -17,10 +18,11 @@ use crate::{
 };
 use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
-/// JACK shows a graph change from its next cycle on: after this many of
-/// our cycles, `get_connections` has it.
-const RECENT_CYCLES: u64 = 2;
-/// How long `stop` waits for those cycles before trusting its own record.
+/// Cycles `stop` lets pass first, so link notifications already on their
+/// way (a patchbay's change just before) arrive.
+const SETTLE_CYCLES: u64 = 2;
+/// How long `stop` waits for the server to notify our own changes before
+/// it trusts its own record of them.
 const SETTLE: Duration = Duration::from_millis(250);
 
 const AUDIO_TYPE: &str = jack::jack_sys::FLOAT_MONO_AUDIO;
@@ -40,11 +42,12 @@ pub struct JackBackend {
     /// drops all of its connections, and JACK refuses to connect an inactive
     /// client's ports, so while stopped they are kept here: `stop` saves the
     /// live ones and `connect`/`disconnect` edit the list.
-    links: Vec<(String, String)>,
-    /// Links of ours made (true) or removed (false) while running, with the
-    /// cycle count then. JACK shows a graph change from its next cycle on,
-    /// so `stop` waits for that, or keeps these if the server has stalled.
-    recent: Vec<(bool, (String, String), u64)>,
+    links: Vec<Link>,
+    /// While running, the links of our ports as the server notifies them;
+    /// `stop` saves them from here. See [`crate::link_log`].
+    log: Arc<LinkLog>,
+    /// Links of ours made or removed while running and not yet in `log`.
+    recent: Vec<OwnChange>,
     /// Auto-connect has run since `open`. Later starts restore `links`
     /// instead, so ports the user unplugged stay unplugged.
     auto_connected: bool,
@@ -118,11 +121,13 @@ impl JackBackend {
         v
     }
 
-    /// Remembers a link made or removed while running, for `stop`.
-    fn note_change(&mut self, made: bool, link: (String, String)) {
-        let now = self.shared.cycles.load(Relaxed);
-        self.recent.retain(|(_, _, at)| now <= at + RECENT_CYCLES);
-        self.recent.push((made, link, now));
+    /// Remembers a link made or removed while running, for `stop`. `mark`
+    /// is the log's [`LinkLog::mark`] from before the call.
+    fn note_change(&mut self, made: bool, link: Link, mark: usize) {
+        let log = &self.log;
+        self.recent
+            .retain(|c| !log.has_all(std::slice::from_ref(c)));
+        self.recent.push(OwnChange { made, link, mark });
     }
 
     /// Every live connection of our ports, as (output, input) pairs.
@@ -209,9 +214,10 @@ impl JackBackend {
             );
         }
         for (from, to) in pairs {
+            let mark = self.log.mark();
             // Already-connected pairs (WirePlumber may link us first) are fine.
             match client.connect_ports_by_name(&from, &to) {
-                Ok(()) => self.note_change(true, (from, to)),
+                Ok(()) => self.note_change(true, (from, to), mark),
                 Err(e) => log::debug!("auto-connect {from} -> {to}: {e}"),
             }
         }
@@ -341,6 +347,7 @@ impl AudioBackend for JackBackend {
         self.shared.callback_panicked.store(false, Relaxed);
         let notifications = Notifications {
             shared: self.shared.clone(),
+            log: self.log.clone(),
         };
         let raw = client.raw();
         #[cfg(test)]
@@ -377,6 +384,9 @@ impl AudioBackend for JackBackend {
                 )));
             }
         };
+        // Notifications start now. Links already there (none on jackd, which
+        // won't link an inactive client) come from the server's graph.
+        self.log.reset(self.live_links(active.as_client(), &cfg));
         if cfg.auto_connect && !self.auto_connected {
             self.auto_connect(active.as_client(), &cfg);
             self.auto_connected = true;
@@ -390,8 +400,9 @@ impl AudioBackend for JackBackend {
             if made {
                 continue;
             }
+            let mark = self.log.mark();
             match client.connect_ports_by_name(&from, &to) {
-                Ok(()) => self.note_change(true, (from, to)),
+                Ok(()) => self.note_change(true, (from, to), mark),
                 Err(e) => log::warn!("could not restore connection {from} -> {to}: {e}"),
             }
         }
@@ -407,31 +418,28 @@ impl AudioBackend for JackBackend {
                     && !self.shared.server_gone.load(Relaxed)
                 {
                     let client = active.as_client();
-                    // Let JACK run past our newest change, so the snapshot
-                    // has it and anything a patchbay did after it.
-                    if let Some(&(_, _, last)) = self.recent.last() {
-                        let end = Instant::now() + SETTLE;
-                        while self.shared.cycles.load(Relaxed) <= last + RECENT_CYCLES
-                            && Instant::now() < end
-                            && !self.shared.server_gone.load(Relaxed)
-                        {
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
+                    // Let notifications on their way arrive, and wait for
+                    // those of our own changes. If the server stalls, our
+                    // record of them stands in.
+                    let cycles = self.shared.cycles.load(Relaxed) + SETTLE_CYCLES;
+                    let end = Instant::now() + SETTLE;
+                    while (self.shared.cycles.load(Relaxed) <= cycles
+                        || !self.log.has_all(&self.recent))
+                        && Instant::now() < end
+                        && !self.shared.server_gone.load(Relaxed)
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
                     }
-                    let mut links = self.live_links(client, cfg);
-                    let now = self.shared.cycles.load(Relaxed);
-                    // Only when the server stalled: keep our newest changes
-                    // rather than lose them. Older ones are in the snapshot.
-                    for (made, link, at) in self.recent.drain(..) {
-                        if now > at + RECENT_CYCLES {
-                            continue;
-                        }
-                        links.retain(|l| *l != link);
-                        if made {
-                            links.push(link);
-                        }
-                    }
-                    self.links = links;
+                    let ours = self.our_ports(client, cfg);
+                    let is_ours = |n: &String| ours.iter().any(|(o, _)| o == n);
+                    // Ports that went away took their links with them.
+                    let exists = |n: &String| client.port_by_name(n).is_some();
+                    self.links = self
+                        .log
+                        .links(&self.recent)
+                        .into_iter()
+                        .filter(|(a, b)| (is_ours(a) || is_ours(b)) && exists(a) && exists(b))
+                        .collect();
                 }
                 self.recent.clear();
                 let (client, _, processor) = active
@@ -531,12 +539,13 @@ impl AudioBackend for JackBackend {
             }
             State::Running(a) => {
                 let client = a.as_client();
+                let mark = self.log.mark();
                 client
                     .connect_ports_by_name(from, to)
                     .map_err(|e| err(e.to_string()))?;
                 if Self::involves_us(client, from, to) {
                     let link = (Self::full_name(client, from), Self::full_name(client, to));
-                    self.note_change(true, link);
+                    self.note_change(true, link, mark);
                 }
                 Ok(())
             }
@@ -566,12 +575,13 @@ impl AudioBackend for JackBackend {
             }
             State::Running(a) => {
                 let client = a.as_client();
+                let mark = self.log.mark();
                 client
                     .disconnect_ports_by_name(from, to)
                     .map_err(|e| err(e.to_string()))?;
                 if Self::involves_us(client, from, to) {
                     let link = (Self::full_name(client, from), Self::full_name(client, to));
-                    self.note_change(false, link);
+                    self.note_change(false, link, mark);
                 }
                 Ok(())
             }
@@ -623,8 +633,7 @@ impl AudioBackend for JackBackend {
         }
         // Links saved while stopped would fail to come back.
         self.links.retain(|(a, b)| *a != name && *b != name);
-        self.recent
-            .retain(|(_, (a, b), _)| *a != name && *b != name);
+        self.recent.retain(|c| c.link.0 != name && c.link.1 != name);
         self.apply_extra_now();
         Ok(())
     }
@@ -690,6 +699,7 @@ impl Drop for JackBackend {
 
 struct Notifications {
     shared: Arc<SharedStats>,
+    log: Arc<LinkLog>,
 }
 
 impl NotificationHandler for Notifications {
@@ -705,6 +715,25 @@ impl NotificationHandler for Notifications {
     fn xrun(&mut self, _: &Client) -> Control {
         self.shared.xruns.fetch_add(1, Relaxed);
         Control::Continue
+    }
+
+    fn ports_connected(&mut self, client: &Client, a: jack::PortId, b: jack::PortId, made: bool) {
+        // A port unregistered since is gone, and so are its links.
+        let (Some(a), Some(b)) = (client.port_by_id(a), client.port_by_id(b)) else {
+            return;
+        };
+        if !client.is_mine(&a) && !client.is_mine(&b) {
+            return;
+        }
+        let (Ok(a_name), Ok(b_name)) = (a.name(), b.name()) else {
+            return;
+        };
+        let link = if a.flags().contains(PortFlags::IS_OUTPUT) {
+            (a_name, b_name)
+        } else {
+            (b_name, a_name)
+        };
+        self.log.record(link, made);
     }
 }
 
