@@ -765,7 +765,16 @@ fn a_midi_input_added_again_does_not_get_the_old_links() {
         },
         || "the removed port is never unregistered".into(),
     );
-    let again = dst.add_midi_input("pads").unwrap();
+    // PipeWire frees the name a moment after the port is gone.
+    let mut again = None;
+    eventually(
+        || {
+            again = dst.add_midi_input("pads").ok();
+            again.is_some()
+        },
+        || "the name is never free again".into(),
+    );
+    let again = again.unwrap();
     assert_eq!(again.name, first.name);
     dst.stop().unwrap();
     dst.start(Box::new(|_| {})).unwrap();
