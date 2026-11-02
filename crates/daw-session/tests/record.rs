@@ -6,7 +6,9 @@
 
 use std::time::{Duration, Instant};
 
-use daw_backend::{AudioBackend, BackendConfig, DummyBackend, JackBackend, Latency, Pacing};
+use daw_backend::{
+    AudioBackend, BackendConfig, DummyBackend, JackBackend, Latency, Pacing, PortFilter,
+};
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
 use daw_media::{AudioData, WavFormat, decode_file, write_wav};
@@ -395,13 +397,68 @@ fn deleting_the_track_mid_take_is_reported_and_undo_keeps_the_take() {
     assert!(done.command.is_some());
 }
 
+/// A JACK client that copies its input to its output: a loopback cable
+/// inside the server, standing in for a sound card's output wired to its
+/// input. PipeWire delivers nothing over a link from a client to itself,
+/// so the session records through this instead.
+struct Cable {
+    name: String,
+    _client: jack::AsyncClient<(), jack::contrib::ClosureProcessHandler<(), CopyFn>>,
+}
+
+type CopyFn = Box<dyn FnMut(&jack::Client, &jack::ProcessScope) -> jack::Control + Send>;
+
+impl Cable {
+    fn new() -> Self {
+        // PipeWire doesn't rename a second client with a taken name, and
+        // nextest runs tests in parallel processes.
+        let name = format!("kadence-record-cable-{}", std::process::id());
+        let (client, _) = jack::Client::new(&name, jack::ClientOptions::NO_START_SERVER)
+            .expect("a JACK server is running");
+        let input = client
+            .register_port("in", jack::AudioIn::default())
+            .unwrap();
+        let mut output = client
+            .register_port("out", jack::AudioOut::default())
+            .unwrap();
+        let copy: CopyFn = Box::new(move |_, ps| {
+            output.as_mut_slice(ps).copy_from_slice(input.as_slice(ps));
+            jack::Control::Continue
+        });
+        let handler = jack::contrib::ClosureProcessHandler::new(copy);
+        Self {
+            name,
+            _client: client.activate_async((), handler).unwrap(),
+        }
+    }
+
+    fn port(&self, port: &str) -> String {
+        format!("{}:{port}", self.name)
+    }
+}
+
+/// Waits for `backend` to see another client's `port`: PipeWire shows a new
+/// client's ports a moment later.
+fn wait_visible(backend: &JackBackend, port: &str) {
+    let end = Instant::now() + Duration::from_secs(10);
+    while !backend
+        .list_ports(&PortFilter::default())
+        .unwrap()
+        .iter()
+        .any(|p| p.name == port)
+    {
+        assert!(Instant::now() < end, "{port} never showed up");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Records through a running JACK server, or PipeWire's JACK interface.
-/// The session's first output is linked back to its first input inside the
-/// server, and nothing is linked to a sound card, so it is silent. The
-/// server picks the rate and period, and the link adds latency that the
+/// The session's first output goes through a [`Cable`] back to its first
+/// input, and nothing is linked to a sound card, so it is silent. The
+/// server picks the rate and period, and the cable adds latency that the
 /// ports don't report, so the take must have the impulses with their
 /// spacing and levels, a period or two late at most. CI runs it against
-/// `jackd -d dummy`. Locally:
+/// `jackd -d dummy` and a headless PipeWire. Locally:
 ///
 /// ```sh
 /// cargo nextest run -p daw-session --test record --run-ignored only
@@ -409,20 +466,23 @@ fn deleting_the_track_mid_take_is_reported_and_undo_keeps_the_take() {
 #[test]
 #[ignore = "needs a running JACK server"]
 fn records_through_a_jack_server() {
-    const CLIENT: &str = "kadence-record-test";
+    let client = format!("kadence-record-test-{}", std::process::id());
+    let cable = Cable::new();
     let mut backend = JackBackend::new();
     backend
         .open(BackendConfig {
             sample_rate: None,
             buffer_size: None,
-            ..backend_config(CLIENT, false)
+            ..backend_config(&client, false)
         })
         .unwrap();
+    wait_visible(&backend, &cable.port("in"));
+    wait_visible(&backend, &cable.port("out"));
     backend
-        .connect(
-            &format!("{CLIENT}:audio_out_1"),
-            &format!("{CLIENT}:audio_in_1"),
-        )
+        .connect(&format!("{client}:audio_out_1"), &cable.port("in"))
+        .unwrap();
+    backend
+        .connect(&cable.port("out"), &format!("{client}:audio_in_1"))
         .unwrap();
     let rate = backend.sample_rate() as u32;
     let period = i64::from(backend.buffer_size());

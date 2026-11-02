@@ -19,6 +19,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
 hound = "3.5"
+jack = "0.13"
 # No default features: its default `disable_release` compiles the checker out
 # of optimized builds, so the RT-safety tests would not build with --release.
 # Warn (and count) instead of aborting in both profiles.
