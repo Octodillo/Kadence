@@ -81,9 +81,10 @@ impl UiInfo {
             };
             // UI data often lives in a file of its own: make sure it is
             // loaded. The features may be optional or required, so any
-            // predicate counts.
+            // predicate counts. livi's load_resource keeps it from parsing
+            // while another world does (#156).
             let node = ui.uri();
-            let _ = lilv.load_resource(&node);
+            let _ = world.load_resource(&node);
             let fixed_size = lilv.ask(Some(&node), None, Some(&no_user_resize))
                 || lilv.ask(Some(&node), None, Some(&fixed_size));
             let info = UiInfo {
