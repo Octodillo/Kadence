@@ -46,7 +46,7 @@ pub struct JackBackend {
     /// While running, the links of our ports as the server notifies them;
     /// `stop` saves them from here. See [`crate::link_log`].
     log: Arc<LinkLog>,
-    /// Links of ours made or removed while running and not yet in `log`.
+    /// Links of ours made or removed while running, until `log` has them.
     recent: Vec<OwnChange>,
     /// Auto-connect has run since `open`. Later starts restore `links`
     /// instead, so ports the user unplugged stay unplugged.
@@ -122,11 +122,8 @@ impl JackBackend {
     }
 
     /// Remembers a link made or removed while running, for `stop`. `mark`
-    /// is the log's [`LinkLog::mark`] from before the call.
+    /// is what [`LinkLog::begin_change`] returned before the call.
     fn note_change(&mut self, made: bool, link: Link, mark: usize) {
-        let log = &self.log;
-        self.recent
-            .retain(|c| !log.has_all(std::slice::from_ref(c)));
         self.recent.push(OwnChange { made, link, mark });
     }
 
@@ -214,7 +211,7 @@ impl JackBackend {
             );
         }
         for (from, to) in pairs {
-            let mark = self.log.mark();
+            let mark = self.log.begin_change(&mut self.recent);
             // Already-connected pairs (WirePlumber may link us first) are fine.
             match client.connect_ports_by_name(&from, &to) {
                 Ok(()) => self.note_change(true, (from, to), mark),
@@ -400,7 +397,7 @@ impl AudioBackend for JackBackend {
             if made {
                 continue;
             }
-            let mark = self.log.mark();
+            let mark = self.log.begin_change(&mut self.recent);
             match client.connect_ports_by_name(&from, &to) {
                 Ok(()) => self.note_change(true, (from, to), mark),
                 Err(e) => log::warn!("could not restore connection {from} -> {to}: {e}"),
@@ -539,7 +536,7 @@ impl AudioBackend for JackBackend {
             }
             State::Running(a) => {
                 let client = a.as_client();
-                let mark = self.log.mark();
+                let mark = self.log.begin_change(&mut self.recent);
                 client
                     .connect_ports_by_name(from, to)
                     .map_err(|e| err(e.to_string()))?;
@@ -575,7 +572,7 @@ impl AudioBackend for JackBackend {
             }
             State::Running(a) => {
                 let client = a.as_client();
-                let mark = self.log.mark();
+                let mark = self.log.begin_change(&mut self.recent);
                 client
                     .disconnect_ports_by_name(from, to)
                     .map_err(|e| err(e.to_string()))?;
@@ -633,6 +630,7 @@ impl AudioBackend for JackBackend {
         }
         // Links saved while stopped would fail to come back.
         self.links.retain(|(a, b)| *a != name && *b != name);
+        self.log.forget_port(&name);
         self.recent.retain(|c| c.link.0 != name && c.link.1 != name);
         self.apply_extra_now();
         Ok(())
@@ -718,10 +716,11 @@ impl NotificationHandler for Notifications {
     }
 
     fn ports_connected(&mut self, client: &Client, a: jack::PortId, b: jack::PortId, made: bool) {
-        // A port unregistered since is gone, and so are its links.
         let (Some(a), Some(b)) = (client.port_by_id(a), client.port_by_id(b)) else {
             return;
         };
+        // A MIDI input we removed is no longer ours by the time its links
+        // end; `remove_midi_input` records that itself (`forget_port`).
         if !client.is_mine(&a) && !client.is_mine(&b) {
             return;
         }

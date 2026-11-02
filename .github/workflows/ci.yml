@@ -69,7 +69,10 @@ jobs:
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &
           sleep 2
-          cargo nextest run -p daw-backend --run-ignored only
+          # One test at a time: with a dozen JACK test processes at once,
+          # jackd without real-time scheduling sometimes never runs a
+          # client's callback (#159).
+          cargo nextest run -p daw-backend --run-ignored only --test-threads 1
           kill %1
         env:
           KADENCE_TEST_PHYSICAL_PORTS: 1

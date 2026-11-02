@@ -45,42 +45,69 @@ impl LinkLog {
         events.extend(links.into_iter().map(|l| (l, true)));
     }
 
-    /// A point in the log, for [`OwnChange::mark`].
-    pub(crate) fn mark(&self) -> usize {
-        self.events().len()
+    /// Records the end of every link of `port`, which we are removing: the
+    /// server may not tell us, since the port is no longer ours by the time
+    /// it would.
+    pub(crate) fn forget_port(&self, port: &str) {
+        let mut events = self.events();
+        let gone: Vec<Link> = fold(&events, &[])
+            .into_iter()
+            .filter(|(a, b)| a == port || b == port)
+            .collect();
+        events.extend(gone.into_iter().map(|l| (l, false)));
     }
 
-    fn has(&self, change: &OwnChange) -> bool {
-        self.events().get(change.mark..).is_some_and(|after| {
-            after
-                .iter()
-                .any(|(l, m)| *l == change.link && *m == change.made)
-        })
+    /// Call before we make or remove a link while running, with our changes
+    /// so far; the result is the new change's [`OwnChange::mark`]. Drops the
+    /// changes the log has, and when that is all of them, compacts the log
+    /// so it doesn't grow for as long as we run.
+    pub(crate) fn begin_change(&self, recent: &mut Vec<OwnChange>) -> usize {
+        let mut events = self.events();
+        recent.retain(|c| !has_in(&events, c));
+        if recent.is_empty() {
+            let links = fold(&events, &[]);
+            *events = links.into_iter().map(|l| (l, true)).collect();
+        }
+        events.len()
     }
 
     /// Whether every change in `own` has been notified.
     pub(crate) fn has_all(&self, own: &[OwnChange]) -> bool {
-        own.iter().all(|c| self.has(c))
+        let events = self.events();
+        own.iter().all(|c| has_in(&events, c))
     }
 
     /// The links now: the log folded in order, then the changes in `own`
     /// it does not have yet (the server stalled before notifying them).
     pub(crate) fn links(&self, own: &[OwnChange]) -> Vec<Link> {
-        let mut links: Vec<Link> = Vec::new();
-        let mut apply = |link: &Link, made: bool| {
-            links.retain(|l| l != link);
-            if made {
-                links.push(link.clone());
-            }
-        };
-        for (link, made) in self.events().iter() {
-            apply(link, *made);
-        }
-        for change in own.iter().filter(|c| !self.has(c)) {
-            apply(&change.link, change.made);
-        }
-        links
+        fold(&self.events(), own)
     }
+}
+
+fn has_in(events: &[(Link, bool)], change: &OwnChange) -> bool {
+    events.get(change.mark..).is_some_and(|after| {
+        after
+            .iter()
+            .any(|(l, m)| *l == change.link && *m == change.made)
+    })
+}
+
+/// `events` folded in order, then the changes in `own` not in them.
+fn fold(events: &[(Link, bool)], own: &[OwnChange]) -> Vec<Link> {
+    let mut links: Vec<Link> = Vec::new();
+    let mut apply = |link: &Link, made: bool| {
+        links.retain(|l| l != link);
+        if made {
+            links.push(link.clone());
+        }
+    };
+    for (link, made) in events {
+        apply(link, *made);
+    }
+    for change in own.iter().filter(|c| !has_in(events, c)) {
+        apply(&change.link, change.made);
+    }
+    links
 }
 
 /// A link we made or removed while running.
@@ -88,7 +115,7 @@ impl LinkLog {
 pub(crate) struct OwnChange {
     pub(crate) made: bool,
     pub(crate) link: Link,
-    /// [`LinkLog::mark`] from just before the call: the server may notify a
+    /// [`LinkLog::begin_change`] from just before the call: the server may notify a
     /// change before the call returns.
     pub(crate) mark: usize,
 }
@@ -101,12 +128,14 @@ mod tests {
         (a.into(), b.into())
     }
 
-    fn own(log: &LinkLog, made: bool, l: &Link) -> OwnChange {
-        OwnChange {
+    /// Our change to `l`, made now, the way the backend records it.
+    fn ours(log: &LinkLog, recent: &mut Vec<OwnChange>, made: bool, l: &Link) {
+        let mark = log.begin_change(recent);
+        recent.push(OwnChange {
             made,
             link: l.clone(),
-            mark: log.mark(),
-        }
+            mark,
+        });
     }
 
     #[test]
@@ -123,40 +152,65 @@ mod tests {
 
     #[test]
     fn a_patchbay_change_after_ours_wins() {
-        let log = LinkLog::default();
+        let (log, mut recent) = (LinkLog::default(), Vec::new());
         let a = link("us:out", "hw:in");
-        let ours = own(&log, true, &a);
+        ours(&log, &mut recent, true, &a);
         log.record(a.clone(), true);
         log.record(a.clone(), false);
-        assert!(log.has_all(std::slice::from_ref(&ours)));
-        assert!(log.links(&[ours]).is_empty());
+        assert!(log.has_all(&recent));
+        assert!(log.links(&recent).is_empty());
     }
 
     #[test]
-    fn our_change_not_notified_yet_is_kept() {
-        let log = LinkLog::default();
+    fn our_changes_not_notified_yet_are_kept() {
+        let (log, mut recent) = (LinkLog::default(), Vec::new());
         let a = link("us:out", "hw:in");
-        let made = own(&log, true, &a);
-        assert!(!log.has_all(std::slice::from_ref(&made)));
-        assert_eq!(
-            log.links(std::slice::from_ref(&made)),
-            std::slice::from_ref(&a)
-        );
+        ours(&log, &mut recent, true, &a);
+        assert!(!log.has_all(&recent));
+        assert_eq!(log.links(&recent), std::slice::from_ref(&a));
         // A removal not notified yet undoes a notified link.
         log.record(a.clone(), true);
-        let removed = own(&log, false, &a);
-        assert!(log.links(&[made, removed]).is_empty());
+        ours(&log, &mut recent, false, &a);
+        assert_eq!(recent.len(), 1, "the notified change is dropped");
+        assert!(log.links(&recent).is_empty());
     }
 
     #[test]
     fn an_older_matching_notification_does_not_count() {
-        let log = LinkLog::default();
-        let a = link("us:out", "hw:in");
+        let (log, mut recent) = (LinkLog::default(), Vec::new());
+        let (a, b) = (link("us:out", "hw:in"), link("us:out", "hw:in2"));
+        // Pending, so the log is not compacted below.
+        ours(&log, &mut recent, true, &b);
         log.record(a.clone(), true);
         log.record(a.clone(), false);
         // Made again by us; the earlier "made" is from before the call.
-        let again = own(&log, true, &a);
-        assert!(!log.has_all(std::slice::from_ref(&again)));
-        assert_eq!(log.links(&[again]), [a]);
+        ours(&log, &mut recent, true, &a);
+        assert!(!log.has_all(&recent));
+        assert_eq!(log.links(&recent), [b, a]);
+    }
+
+    #[test]
+    fn the_log_is_compacted_once_nothing_is_pending() {
+        let (log, mut recent) = (LinkLog::default(), Vec::new());
+        let a = link("us:out", "hw:in");
+        for _ in 0..100 {
+            ours(&log, &mut recent, true, &a);
+            log.record(a.clone(), true);
+            ours(&log, &mut recent, false, &a);
+            log.record(a.clone(), false);
+        }
+        ours(&log, &mut recent, true, &a);
+        assert_eq!(recent.len(), 1);
+        assert!(log.events().is_empty(), "{:?}", log.events());
+    }
+
+    #[test]
+    fn a_forgotten_port_loses_its_links() {
+        let log = LinkLog::default();
+        let (a, b) = (link("src:out", "us:pads"), link("us:out", "hw:in"));
+        log.record(a, true);
+        log.record(b.clone(), true);
+        log.forget_port("us:pads");
+        assert_eq!(log.links(&[]), [b]);
     }
 }

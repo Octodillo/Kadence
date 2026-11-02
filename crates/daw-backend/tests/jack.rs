@@ -730,3 +730,46 @@ fn a_patchbay_change_after_ours_is_kept() {
     }
     b.close().unwrap();
 }
+
+/// A MIDI input removed while running, then added again under the same
+/// name, comes back without the old port's links: the server doesn't tell
+/// us they ended once the port is no longer ours.
+#[test]
+#[ignore = "needs a running JACK server"]
+fn a_midi_input_added_again_does_not_get_the_old_links() {
+    let _g = serial();
+    let (s, d) = (unique("rsrc"), unique("rdst"));
+    let mut src = JackBackend::new();
+    src.open(BackendConfig {
+        midi_output: true,
+        ..cfg(&s)
+    })
+    .unwrap();
+    src.start(Box::new(|_| {})).unwrap();
+    let source = format!("{s}:midi_out");
+    let mut dst = JackBackend::new();
+    dst.open(cfg(&d)).unwrap();
+    dst.start(Box::new(|_| {})).unwrap();
+    wait_visible(&dst, &source);
+    let first = dst.add_midi_input("pads").unwrap();
+    dst.connect(&source, &first.name).unwrap();
+    wait_connections(&first.name, &[&source]);
+    dst.remove_midi_input(first.slot).unwrap();
+    eventually(
+        || {
+            dst.collect_removed();
+            dst.list_ports(&PortFilter::default())
+                .unwrap()
+                .iter()
+                .all(|p| p.name != first.name)
+        },
+        || "the removed port is never unregistered".into(),
+    );
+    let again = dst.add_midi_input("pads").unwrap();
+    assert_eq!(again.name, first.name);
+    dst.stop().unwrap();
+    dst.start(Box::new(|_| {})).unwrap();
+    assert_stays_unlinked(&dst, &again.name);
+    src.close().unwrap();
+    dst.close().unwrap();
+}
