@@ -8,6 +8,8 @@
 //! - Audio, events and transport go through a shared-memory block. `process` hands each cycle
 //!   to the host with a futex and waits for it with a deadline, without allocating or locking;
 //!   the host processes on its own audio thread.
+//! - A plugin whose main thread waits on the user in its own editor (a modal file dialog, say)
+//!   is busy, not hung: calls give up on it with [`PluginError::Busy`] and leave it running.
 //! - A watchdog thread notices when the host exits or an audio cycle stalls. The instance then
 //!   outputs silence, its [`SandboxMonitor`] reports [`SandboxStatus::Crashed`], and the
 //!   [`SandboxConfig::on_crash`] hook is called, so the UI can offer a reload.
@@ -17,9 +19,12 @@
 //!
 //! [`SandboxFormat`] wraps a format so a [`daw_plugins::PluginRegistry`] hands out sandboxed
 //! instances; [`sandboxed_registry`] does that for every format in this build.
+//!
+//! [`PluginError::Busy`]: daw_core::plugin::PluginError::Busy
 
 mod child;
 mod client;
+mod control;
 mod format;
 mod protocol;
 mod shm;

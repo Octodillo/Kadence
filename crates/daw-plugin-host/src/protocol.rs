@@ -44,6 +44,15 @@ pub enum Request {
     Shutdown,
 }
 
+impl Request {
+    /// Whether the application may leave this request for the host to run once its main thread
+    /// is free again, rather than withdraw it, when that thread is busy in the plugin's editor:
+    /// nothing waits for its answer.
+    pub fn can_wait(&self) -> bool {
+        matches!(self, Self::CloseEditor | Self::SetEditorTitle(_))
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     /// The plugin's latency after the call, so changes reach the application.
@@ -62,6 +71,8 @@ pub enum Reply {
     /// The state is the frame's blob.
     State,
     Err(WireError),
+    /// The application withdrew the request before the host started it, so it did not run.
+    Withdrawn,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,6 +165,7 @@ pub enum WireError {
     State(String),
     Editor(String),
     NoDisplay(String),
+    Busy(String),
 }
 
 impl From<&PluginError> for WireError {
@@ -163,6 +175,7 @@ impl From<&PluginError> for WireError {
             PluginError::State(m) => Self::State(m.clone()),
             PluginError::Editor(m) => Self::Editor(m.clone()),
             PluginError::NoDisplay(m) => Self::NoDisplay(m.clone()),
+            PluginError::Busy(m) => Self::Busy(m.clone()),
         }
     }
 }
@@ -174,6 +187,7 @@ impl From<WireError> for PluginError {
             WireError::State(m) => Self::State(m),
             WireError::Editor(m) => Self::Editor(m),
             WireError::NoDisplay(m) => Self::NoDisplay(m),
+            WireError::Busy(m) => Self::Busy(m),
         }
     }
 }

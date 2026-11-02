@@ -20,7 +20,7 @@ use daw_core::time::{MusicalPosition, SampleTime};
 use memmap2::MmapMut;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"KDSB");
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 /// Bytes reserved for [`Header`] at the start of the block.
 const HEADER_BYTES: usize = 192;
 /// `u64` words per event record.
@@ -83,6 +83,10 @@ pub struct Header {
     /// Nonzero while the plugin's editor is open, as the host last saw it: before it answers
     /// a call, and after each main-thread pump.
     pub editor_open: AtomicU32,
+    /// Main-thread pumps the host has started plus those it has finished: odd while its main
+    /// thread is in one, that is in the plugin's own main-thread callbacks. A plugin whose
+    /// editor runs a modal dialog (a file chooser, say) stays in one until the user closes it.
+    pub pumps: AtomicU32,
     /// Time-signature numerator in the low byte, denominator in the next.
     time_sig: AtomicU32,
     /// Nonzero when a loop is set.
@@ -107,11 +111,42 @@ pub struct Header {
     loop_end_beats: AtomicU64,
     /// Cycles the host has finished, for the hang watchdog.
     pub completed: AtomicU64,
+    /// Which control requests the host has started, or the application has withdrawn; see
+    /// [`started`] and [`withdrawn`].
+    control: AtomicU64,
 }
 
 const _: () = assert!(size_of::<Header>() <= HEADER_BYTES);
 
 impl Header {
+    /// Whether the host's main thread is in a pump while the plugin's editor is open: busy
+    /// with whatever the user does in the plugin's own window, for as long as that takes.
+    pub fn pumping_editor(&self) -> Option<u32> {
+        let pumps = self.pumps.load(Ordering::SeqCst);
+        (pumps % 2 == 1 && self.editor_open.load(Ordering::Acquire) != 0).then_some(pumps)
+    }
+
+    /// Called by the host before it runs control request `n` (numbered from 1 in the order
+    /// sent). Returns false if the application withdrew the request first, so the host must
+    /// answer it without running it. Whichever of this and [`withdraw_request`] comes first
+    /// wins.
+    ///
+    /// [`withdraw_request`]: Self::withdraw_request
+    pub fn start_request(&self, n: u64) -> bool {
+        self.control.fetch_max(started(n), Ordering::SeqCst) != withdrawn(n)
+    }
+
+    /// Called by the application to give up on control request `n`, its latest. Returns
+    /// whether the host has not started it, and now never will; it still answers it.
+    pub fn withdraw_request(&self, n: u64) -> bool {
+        self.control.fetch_max(withdrawn(n), Ordering::SeqCst) < withdrawn(n)
+    }
+
+    /// Whether the host has started control request `n`, the application's latest.
+    pub fn request_started(&self, n: u64) -> bool {
+        self.control.load(Ordering::SeqCst) >= started(n)
+    }
+
     /// Stores the transport for the next cycle. Ordered by `state`.
     pub fn write_transport(&self, t: &TransportState) {
         let m = &t.music;
@@ -168,6 +203,17 @@ impl Header {
             count_in: None,
         }
     }
+}
+
+/// [`Header::control`] holds the highest of these marks set so far. Requests are handled in
+/// order and only the latest one is ever withdrawn, so the mark a start finds tells whether
+/// its request was withdrawn, and the mark a withdrawal finds whether its request started.
+fn started(n: u64) -> u64 {
+    2 * n + 1
+}
+
+fn withdrawn(n: u64) -> u64 {
+    2 * n
 }
 
 /// The sizes a block is made for.
@@ -522,6 +568,22 @@ pub fn record(words: &mut [u64], i: usize) -> &mut [u64] {
 }
 
 #[cfg(test)]
+impl Shm {
+    /// A small block without audio channels whose file is gone already, for tests.
+    pub(crate) fn scratch() -> std::sync::Arc<Self> {
+        let layout = Layout {
+            audio_in: 0,
+            audio_out: 0,
+            max_frames: 64,
+            event_capacity: 16,
+        };
+        let (shm, path) = Shm::create(&std::env::temp_dir(), layout).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::sync::Arc::new(shm)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -612,6 +674,24 @@ mod tests {
         }
         words[0] = 9 << 32;
         assert_eq!(decode_event(&words), None);
+    }
+
+    #[test]
+    fn a_control_request_runs_or_is_withdrawn_never_both() {
+        let shm = Shm::scratch();
+        let h = shm.header();
+        // Started first: too late to withdraw.
+        assert!(h.start_request(1));
+        assert!(!h.withdraw_request(1));
+        // Withdrawn first: the host answers without running it.
+        assert!(h.withdraw_request(2));
+        assert!(!h.start_request(2));
+        // One left to wait, then a later one withdrawn: the first still runs.
+        assert!(!h.request_started(3));
+        assert!(h.withdraw_request(4));
+        assert!(h.start_request(3));
+        assert!(!h.start_request(4));
+        assert!(h.start_request(5));
     }
 
     #[test]

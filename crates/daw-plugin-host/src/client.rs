@@ -7,7 +7,7 @@ use std::fmt;
 use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -22,12 +22,11 @@ use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance,
 use daw_plugins::Scanner;
 
 use crate::child::HOST_ARG;
-use crate::protocol::{
-    FrameReader, InstanceInfo, Reply, Request, Response, blob_fits, write_frame,
-};
+use crate::control::{CallError, Control};
+use crate::protocol::{InstanceInfo, Reply, Request, blob_fits};
 use crate::shm::{
-    self, DONE, EVENT_CAPACITY, FLAG_RESET, Layout, REQUEST, Shm, decode_event, encode_event,
-    futex_wait, futex_wake, shm_dir,
+    self, DONE, EVENT_CAPACITY, FLAG_RESET, Header, Layout, REQUEST, Shm, decode_event,
+    encode_event, futex_wait, futex_wake, shm_dir,
 };
 
 /// How to start a host process: `<program> <args>... --plugin-host <socket>`.
@@ -84,6 +83,12 @@ pub struct SandboxConfig {
     /// How long other main-thread calls (params, editor, prepare) may take before the host is
     /// treated as hung, and how long an audio cycle may wait while the host's main thread is in
     /// the plugin. Default 10 s.
+    ///
+    /// Neither these nor `load_timeout` apply while the host's main thread is in the plugin's
+    /// own callbacks with its editor open: a modal dialog there (a file chooser, say) keeps it
+    /// for as long as the user takes. Calls then fail with [`PluginError::Busy`] after a
+    /// moment, and a plugin that cannot play while that thread holds it outputs silence
+    /// meanwhile, which does not count as a hang.
     pub call_timeout: Duration,
     /// How long one audio cycle may stay unfinished before the host is treated as hung and
     /// killed. Default 2 s.
@@ -260,7 +265,7 @@ impl fmt::Debug for SandboxMonitor {
 struct Link {
     generation: u64,
     child: Arc<Mutex<Child>>,
-    control: UnixStream,
+    control: Control,
     /// The block the audio path uses.
     shm: Arc<Shm>,
     /// The same block, for the watchdog; swapped when `prepare` needs a bigger one.
@@ -399,19 +404,21 @@ impl Link {
             control
                 .set_nonblocking(false)
                 .map_err(|e| load(e.to_string()))?;
+            let control = Control::new(control);
 
-            let (response, _) = call(
-                &control,
-                &Request::Instantiate {
-                    descriptor: shared.descriptor.clone(),
-                    sample_rate,
-                    max_frames,
-                    rt_priority: config.rt_priority,
-                },
-                &[],
-                config.load_timeout,
-            )
-            .map_err(|e| load(format!("plugin host: {e}")))?;
+            let (response, _) = control
+                .call(
+                    &Request::Instantiate {
+                        descriptor: shared.descriptor.clone(),
+                        sample_rate,
+                        max_frames,
+                        rt_priority: config.rt_priority,
+                    },
+                    &[],
+                    config.load_timeout,
+                    None,
+                )
+                .map_err(|e| load(format!("plugin host: {e}")))?;
             let info = match response.reply {
                 Reply::Instantiated(info) => info,
                 Reply::Err(e) => return Err(e.into()),
@@ -425,8 +432,15 @@ impl Link {
                 event_capacity: EVENT_CAPACITY,
             };
             // Instantiating prepared the plugin with these settings already.
-            let (shm, latency, _) =
-                map_block(&control, layout, sample_rate, max_frames, false, config)?;
+            let (shm, latency, _) = map_block(
+                &control,
+                None,
+                layout,
+                sample_rate,
+                max_frames,
+                false,
+                config,
+            )?;
             Ok((control, info, shm, latency))
         })();
         let (control, info, shm, latency) = match started {
@@ -485,7 +499,7 @@ impl Link {
     fn close(mut self, graceful: bool, timeout: Duration) {
         self.stop.store(true, Ordering::Release);
         if graceful {
-            let _ = call(&self.control, &Request::Shutdown, &[], timeout);
+            let _ = self.control.call(&Request::Shutdown, &[], timeout, None);
             let deadline = Instant::now() + timeout;
             while Instant::now() < deadline {
                 if matches!(locked(&self.child).try_wait(), Ok(Some(_))) {
@@ -502,9 +516,11 @@ impl Link {
 }
 
 /// Creates a block for `layout`, has the host map it (and prepare the plugin, if `prepare`),
-/// then removes its file. Returns the block, the plugin's latency and its ports.
+/// then removes its file. Returns the block, the plugin's latency and its ports. `current` is
+/// the block the host uses now, if any, to watch for it being busy in the plugin's editor.
 fn map_block(
-    control: &UnixStream,
+    control: &Control,
+    current: Option<&Header>,
     layout: Layout,
     sample_rate: f64,
     max_frames: u32,
@@ -514,18 +530,19 @@ fn map_block(
     let (shm, path) = Shm::create(&shm_dir(), layout)
         .map_err(|e| PluginError::Load(format!("cannot create the audio block: {e}")))?;
     let path = RemoveOnDrop(path);
-    let (response, _) = call(
-        control,
-        &Request::Prepare {
-            sample_rate,
-            max_frames,
-            shm: Some(path.0.clone()),
-            prepare,
-        },
-        &[],
-        config.call_timeout,
-    )
-    .map_err(|e| PluginError::Load(format!("plugin host: {e}")))?;
+    let (response, _) = control
+        .call(
+            &Request::Prepare {
+                sample_rate,
+                max_frames,
+                shm: Some(path.0.clone()),
+                prepare,
+            },
+            &[],
+            config.call_timeout,
+            current,
+        )
+        .map_err(|e| call_error(&e))?;
     match response.reply {
         Reply::Prepared(ports) => Ok((shm, response.latency, (&ports).into())),
         Reply::Err(e) => Err(e.into()),
@@ -535,63 +552,32 @@ fn map_block(
     }
 }
 
-/// One request and its response, all within `timeout`, however the host paces its bytes.
-fn call(
-    control: &UnixStream,
-    request: &Request,
-    blob: &[u8],
-    timeout: Duration,
-) -> io::Result<(Response, Vec<u8>)> {
-    let mut stream = Deadline {
-        stream: control,
-        at: Instant::now() + timeout.max(Duration::from_millis(1)),
-    };
-    write_frame(&mut stream, request, blob)?;
-    // The reader grows its buffer as bytes arrive, rather than trusting the announced length.
-    let mut reader = FrameReader::default();
-    loop {
-        if let Some(frame) = reader.poll(&mut stream)? {
-            return Ok(frame);
-        }
-        stream.remaining()?;
+/// What a failed call means for the caller: a host busy in the plugin's editor is
+/// [`PluginError::Busy`]; anything else lost the host.
+fn call_error(e: &CallError) -> PluginError {
+    match e {
+        CallError::Busy => PluginError::Busy(e.to_string()),
+        CallError::Io(_) => PluginError::Load(format!("plugin host: {e}")),
     }
 }
 
-/// A stream whose reads and writes all end by one deadline: each syscall gets the time left.
-struct Deadline<'a> {
-    stream: &'a UnixStream,
-    at: Instant,
-}
-
-impl Deadline<'_> {
-    fn remaining(&self) -> io::Result<Duration> {
-        let left = self.at.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "the plugin host did not answer in time",
-            ));
-        }
-        Ok(left)
+/// How long an audio cycle may stall before the host counts as hung, or `None` while the
+/// stall is not a hang: the host's main thread is in a slow call (state, editor), or the cycle
+/// waits for a main thread that is busy in the plugin's open editor, which a modal dialog
+/// there keeps busy for as long as the user takes.
+fn stall_limit(h: &Header, hang_timeout: Duration, call_timeout: Duration) -> Option<Duration> {
+    if h.main_busy.load(Ordering::SeqCst) != 0 {
+        return None;
     }
-}
-
-impl io::Read for Deadline<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        (&mut &*self.stream).read(buf)
+    if h.main_in_plugin.load(Ordering::SeqCst) == 0 {
+        return Some(hang_timeout);
     }
-}
-
-impl io::Write for Deadline<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        (&mut &*self.stream).write(buf)
+    if h.pumping_editor().is_some() {
+        return None;
     }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    // The cycle may be waiting for the host's main thread, which is busy in the plugin (its
+    // main-thread pump, say): that is as slow as a main-thread call may be.
+    Some(call_timeout.max(hang_timeout))
 }
 
 fn watchdog(
@@ -636,18 +622,10 @@ fn watchdog(
         }
         let h = block.as_ref().expect("set above").header();
         let completed = h.completed.load(Ordering::Relaxed);
-        let stalled = h.state.load(Ordering::Acquire) == REQUEST
-            && completed == last_completed
-            && h.main_busy.load(Ordering::SeqCst) == 0;
-        if stalled {
+        let limit = stall_limit(h, hang_timeout, call_timeout);
+        let stalled = h.state.load(Ordering::Acquire) == REQUEST && completed == last_completed;
+        if let Some(limit) = limit.filter(|_| stalled) {
             let since = *stalled_since.get_or_insert_with(Instant::now);
-            // The cycle may be waiting for the host's main thread, which is busy in the plugin
-            // (its main-thread pump, say): that is as slow as a main-thread call may be.
-            let limit = if h.main_in_plugin.load(Ordering::SeqCst) != 0 {
-                call_timeout.max(hang_timeout)
-            } else {
-                hang_timeout
-            };
             if since.elapsed() >= limit && shared.crash(generation, CrashReason::Hung) {
                 let _ = locked(child).kill();
             }
@@ -725,6 +703,9 @@ pub struct SandboxedInstance {
     /// The settings the plugin in the host is prepared with, while nothing has asked for
     /// another prepare since. A prepare with them has nothing to do.
     prepared_with: Option<(f64, u32)>,
+    /// A prepare found the host busy in the plugin's editor. Once it is free, a layout change
+    /// has the engine prepare again.
+    prepare_pending: bool,
     sample_rate: f64,
     max_frames: u32,
     /// The last state saved from or loaded into the plugin.
@@ -831,6 +812,7 @@ impl SandboxedInstance {
             layout_changed: false,
             // Instantiating prepared it.
             prepared_with: Some((sample_rate, max_frames.max(1))),
+            prepare_pending: false,
             sample_rate,
             max_frames,
             state: None,
@@ -928,6 +910,7 @@ impl SandboxedInstance {
         // of other channel counts meanwhile.
         // The new host prepared its plugin with the current settings.
         self.prepared_with = Some((self.sample_rate, self.max_frames));
+        self.prepare_pending = false;
         if self.ports != old_ports || self.latency != old_latency {
             self.ports = old_ports;
             self.latency = old_latency;
@@ -975,6 +958,7 @@ impl SandboxedInstance {
             };
             let (shm, latency, ports) = map_block(
                 &link.control,
+                Some(link.shm.header()),
                 layout,
                 self.sample_rate,
                 self.max_frames,
@@ -1020,6 +1004,7 @@ impl SandboxedInstance {
             // The plugin is prepared already; this only swaps the block.
             let (shm, latency, ports) = map_block(
                 &link.control,
+                Some(link.shm.header()),
                 layout,
                 self.sample_rate,
                 self.max_frames,
@@ -1050,7 +1035,8 @@ impl SandboxedInstance {
     }
 
     /// Sends a main-thread request. A transport failure or timeout kills the host and marks it
-    /// lost; a plugin error is returned as is.
+    /// lost; a plugin error is returned as is, and so is [`PluginError::Busy`] from a host
+    /// busy in the plugin's editor.
     /// Returns the reply, its blob and the plugin's latency after the call.
     fn control(&self, request: Request, blob: &[u8]) -> Result<(Reply, Vec<u8>, u32), PluginError> {
         self.control_with(request, blob, self.config.call_timeout)
@@ -1066,11 +1052,16 @@ impl SandboxedInstance {
         let Some(link) = self.running() else {
             return Err(PluginError::Load(self.not_running()));
         };
-        match call(&link.control, &request, blob, timeout) {
+        match link
+            .control
+            .call(&request, blob, timeout, Some(link.shm.header()))
+        {
             Ok((response, blob)) => match response.reply {
                 Reply::Err(e) => Err(e.into()),
                 reply => Ok((reply, blob, response.latency)),
             },
+            // The host is fine, only busy with the user.
+            Err(e @ CallError::Busy) => Err(call_error(&e)),
             Err(e) => {
                 let reason = CrashReason::Lost(e.to_string());
                 self.shared.crash(link.generation, reason.clone());
@@ -1408,12 +1399,15 @@ impl Node for SandboxedInstance {
         match self.prepare_host() {
             Ok(()) => {
                 self.prepared_with = Some(settings);
+                self.prepare_pending = false;
                 // Some ranges scale with the rate (LV2's lv2:sampleRate), and
                 // LV2 plugins are re-instantiated for a new rate.
                 if new_rate {
                     self.refresh_params();
                 }
             }
+            // It plays on with the settings it has meanwhile.
+            Err(PluginError::Busy(_)) => self.prepare_pending = true,
             Err(e) => {
                 // `prepare` cannot fail; a host that cannot prepare is as good as crashed.
                 if self
@@ -1584,9 +1578,14 @@ impl PluginInstance for SandboxedInstance {
         // The user closed the window. (A host that is down keeps the editor "open", so a
         // reload opens it again.)
         let closed = header.editor_open.load(Ordering::Acquire) == 0;
+        let free = header.pumping_editor().is_none();
         if layout_changed {
             self.layout_changed = true;
             self.prepared_with = None;
+        }
+        if self.prepare_pending && free {
+            self.prepare_pending = false;
+            self.layout_changed = true;
         }
         self.state_changed |= state_changed;
         if closed && self.editor_open {
@@ -1640,8 +1639,6 @@ impl Drop for SandboxedInstance {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-
     use daw_core::plugin::PluginFormatKind;
 
     use super::*;
@@ -1672,15 +1669,7 @@ mod tests {
     #[test]
     fn a_stall_while_the_host_main_thread_is_in_the_plugin_gets_the_call_timeout() {
         let child = Arc::new(Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()));
-        let layout = Layout {
-            audio_in: 0,
-            audio_out: 0,
-            max_frames: 64,
-            event_capacity: 16,
-        };
-        let (shm, path) = Shm::create(&std::env::temp_dir(), layout).unwrap();
-        std::fs::remove_file(path).unwrap();
-        let shm = Arc::new(shm);
+        let shm = Shm::scratch();
         // A cycle is waiting on the plugin lock, which the host's main thread holds.
         shm.header().state.store(REQUEST, Ordering::Release);
         shm.header().main_in_plugin.store(1, Ordering::SeqCst);
@@ -1716,34 +1705,28 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_trickles_its_reply_cannot_outlast_the_call_timeout() {
-        let (app, mut host) = UnixStream::pair().unwrap();
-        let trickle = std::thread::spawn(move || {
-            let mut request = [0u8; 256];
-            let _ = host.read(&mut request);
-            // Announce a large reply, then send it a byte at a time, each well inside the
-            // timeout, for far longer than the timeout.
-            let mut head = Vec::new();
-            head.extend_from_slice(&4096u32.to_le_bytes());
-            head.extend_from_slice(&(64u32 << 20).to_le_bytes());
-            if host.write_all(&head).is_err() {
-                return;
-            }
-            for _ in 0..400 {
-                std::thread::sleep(Duration::from_millis(50));
-                if host.write_all(b" ").is_err() {
-                    return;
-                }
-            }
-        });
-        let start = Instant::now();
-        let result = call(&app, &Request::Params, &[], Duration::from_millis(200));
-        let elapsed = start.elapsed();
-        drop(app);
-        trickle.join().unwrap();
-        assert!(result.is_err());
-        // The trickle lasts 20 s; the call must give up long before.
-        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    fn a_stall_on_a_main_thread_busy_in_the_editor_is_not_a_hang() {
+        let shm = Shm::scratch();
+        let h = shm.header();
+        let (hang, call) = (Duration::from_secs(1), Duration::from_secs(10));
+        assert_eq!(stall_limit(h, hang, call), Some(hang));
+        // The cycle waits for the main thread, which is in a pump.
+        h.main_in_plugin.store(1, Ordering::SeqCst);
+        h.pumps.store(1, Ordering::SeqCst);
+        assert_eq!(stall_limit(h, hang, call), Some(call));
+        // With the editor open, the user may have a dialog of the plugin's up.
+        h.editor_open.store(1, Ordering::Release);
+        assert_eq!(stall_limit(h, hang, call), None);
+        // Out of the pump, it counts again.
+        h.pumps.store(2, Ordering::SeqCst);
+        assert_eq!(stall_limit(h, hang, call), Some(call));
+        // A split plugin's audio never waits for the main thread, so its stall is a hang
+        // whatever the main thread does.
+        h.pumps.store(3, Ordering::SeqCst);
+        h.main_in_plugin.store(0, Ordering::SeqCst);
+        assert_eq!(stall_limit(h, hang, call), Some(hang));
+        h.main_busy.store(1, Ordering::SeqCst);
+        assert_eq!(stall_limit(h, hang, call), None);
     }
 
     #[test]

@@ -674,10 +674,96 @@ fn names_taken_in_the_socket_directory_do_not_stop_plugins_loading() {
     assert!(l.iter().all(|&s| s == 1.0));
 }
 
-fn latency_state(magic: &[u8; 4], latency: u32) -> Vec<u8> {
+/// A state the test plugin takes as a command with one argument (see its docs).
+fn command_state(magic: &[u8; 4], arg: u32) -> Vec<u8> {
     let mut state = magic.to_vec();
-    state.extend_from_slice(&latency.to_le_bytes());
+    state.extend_from_slice(&arg.to_le_bytes());
     state
+}
+
+/// The test plugin's own state for `gain`.
+fn gain_state(gain: f64) -> Vec<u8> {
+    let mut state = b"DAWT".to_vec();
+    state.extend_from_slice(&gain.to_le_bytes());
+    state
+}
+
+/// Whether every sample of a block of input 1.0 came out at `gain`.
+fn plays_at(plugin: &mut SandboxedInstance, gain: f32) -> bool {
+    let ([l, r], _) = run(plugin, 64, 1.0, &[]);
+    l.iter().chain(&r).all(|&s| s == gain)
+}
+
+/// The user opens a file dialog in the plugin's editor, which keeps the host's main thread
+/// in the plugin until they close it, and takes longer over it than any call or cycle may
+/// take. The plugin is busy, not hung: calls give up on it at once, it keeps playing, and
+/// once the dialog closes it works as before.
+#[test]
+fn a_modal_dialog_in_the_editor_is_busy_not_a_crash() {
+    let mut config = config();
+    config.call_timeout = Duration::from_millis(500);
+    config.hang_timeout = Duration::from_millis(300);
+    let mut plugin = instance_with(config);
+    let monitor = plugin.monitor();
+    run(&mut plugin, 16, 0.0, &[param(GAIN, 0.5, 0)]);
+    plugin.open_editor().unwrap();
+
+    plugin.load_state(&command_state(b"DAWD", 4000)).unwrap();
+    let opened = Instant::now();
+    wait_for("the dialog to open", Duration::from_secs(5), || {
+        matches!(plugin.save_state(), Err(PluginError::Busy(_)))
+    });
+
+    // While it is open, calls fail at once rather than hold the application up.
+    let start = Instant::now();
+    assert_eq!(plugin.param_value(GAIN), 0.5, "the last value set");
+    assert!(matches!(
+        plugin.load_state(&gain_state(1.0)),
+        Err(PluginError::Busy(_))
+    ));
+    plugin.prepare(SR, MAX);
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        start.elapsed()
+    );
+
+    // The audio plays on, well past the hang and call timeouts.
+    while opened.elapsed() < Duration::from_millis(1500) {
+        assert!(plays_at(&mut plugin, 0.5));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(monitor.status(), SandboxStatus::Running);
+
+    wait_for("the dialog to close", Duration::from_secs(30), || {
+        plugin.save_state().is_ok()
+    });
+    assert_eq!(monitor.status(), SandboxStatus::Running);
+    assert!(plugin.is_editor_open());
+    // The state load given up on did not happen behind our back.
+    assert!(plays_at(&mut plugin, 0.5));
+    plugin.load_state(&gain_state(0.25)).unwrap();
+    assert!(plays_at(&mut plugin, 0.25));
+}
+
+/// Without its editor open, a plugin that keeps the host's main thread is hung: the next
+/// call times out and the host is killed, so a reload can bring it back.
+#[test]
+fn a_stuck_main_thread_without_the_editor_is_still_lost() {
+    let mut config = config();
+    config.call_timeout = Duration::from_millis(500);
+    let mut plugin = instance_with(config);
+    let monitor = plugin.monitor();
+    plugin.load_state(&command_state(b"DAWD", 20_000)).unwrap();
+    // Let the host get into the callback.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(plugin.open_editor().is_err());
+    assert!(matches!(
+        monitor.status(),
+        SandboxStatus::Crashed(CrashReason::Lost(_))
+    ));
+    plugin.reload().unwrap();
+    assert!(plays_at(&mut plugin, 1.0));
 }
 
 /// While the application's main thread waits on a slow call in the host, a split instance's
@@ -716,7 +802,7 @@ fn a_split_sandbox_plays_through_a_slow_main_thread_call() {
             blocks
         });
         plugin
-            .load_state(&latency_state(b"DAWS", 300))
+            .load_state(&command_state(b"DAWS", 300))
             .expect("the slow load");
         loading.store(false, Ordering::Release);
         audio.join().unwrap()
@@ -815,7 +901,7 @@ fn layout_changes_in_the_host_reach_the_application() {
         Duration::from_millis(200)
     ));
 
-    plugin.load_state(&latency_state(b"DAWR", 48)).unwrap();
+    plugin.load_state(&command_state(b"DAWR", 48)).unwrap();
     assert!(layout_changed_within(&mut plugin, Duration::from_secs(5)));
     assert_eq!(
         plugin.latency(),
@@ -840,7 +926,7 @@ fn layout_changes_in_the_host_reach_the_application() {
 #[test]
 fn a_prepare_answers_a_change_not_yet_picked_up() {
     let mut plugin = instance();
-    plugin.load_state(&latency_state(b"DAWL", 64)).unwrap();
+    plugin.load_state(&command_state(b"DAWL", 64)).unwrap();
     // The host publishes the flag after answering; give it a moment.
     std::thread::sleep(Duration::from_millis(100));
     plugin.prepare(SR, MAX);

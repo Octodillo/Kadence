@@ -70,6 +70,7 @@ pub fn run_host_child(
         state_changed: Cell::new(false),
         editor_open: Cell::new(false),
         rt_priority: None,
+        requests: 0,
     };
     let result = host.run();
     host.stop_audio();
@@ -122,6 +123,8 @@ struct Host<'a> {
     /// Whether the plugin's editor is open, as last seen.
     editor_open: Cell<bool>,
     rt_priority: Option<i32>,
+    /// Control requests read so far, which numbers them as the application does.
+    requests: u64,
 }
 
 impl Host<'_> {
@@ -132,9 +135,12 @@ impl Host<'_> {
         loop {
             match reader.poll::<Request>(&self.stream) {
                 Ok(Some((request, blob))) => {
+                    self.requests += 1;
                     let shutdown = matches!(request, Request::Shutdown);
                     let (mut reply, mut blob) = if shutdown {
                         (Reply::Ok, Vec::new())
+                    } else if !self.start_request() {
+                        (Reply::Withdrawn, Vec::new())
                     } else {
                         self.handle(request, &blob)
                     };
@@ -162,6 +168,7 @@ impl Host<'_> {
             }
             if last_pump.elapsed() >= PUMP_INTERVAL {
                 if let Some(p) = self.lock_inside().as_mut() {
+                    let _pumping = Pumping::start(self.audio.as_ref().map(|a| a.shm.clone()));
                     p.on_main_thread();
                     self.note(p.as_mut());
                 }
@@ -169,6 +176,14 @@ impl Host<'_> {
                 last_pump = Instant::now();
             }
         }
+    }
+
+    /// Claims the request just read, unless the application withdrew it first. Without a
+    /// block yet, nothing can withdraw it.
+    fn start_request(&self) -> bool {
+        self.audio
+            .as_ref()
+            .is_none_or(|a| a.shm.header().start_request(self.requests))
     }
 
     /// Picks up what the plugin reported since the last call.
@@ -346,6 +361,8 @@ impl Host<'_> {
                         fresh.state_changed.store(1, Ordering::Release);
                     }
                 }
+                // This request is under way, and the next one is claimed in this block.
+                new.header().start_request(self.requests);
                 Some(new)
             }
             None => old,
@@ -420,6 +437,29 @@ impl Drop for InsidePlugin<'_> {
     fn drop(&mut self) {
         if let Some(shm) = &self.shm {
             shm.header().main_in_plugin.store(0, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Counts the host's main thread into a pump and out again ([`Header::pumps`]), so the
+/// application can tell it is busy in the plugin's own callbacks.
+///
+/// [`Header::pumps`]: crate::shm::Header::pumps
+struct Pumping(Option<Arc<Shm>>);
+
+impl Pumping {
+    fn start(shm: Option<Arc<Shm>>) -> Self {
+        if let Some(shm) = &shm {
+            shm.header().pumps.fetch_add(1, Ordering::SeqCst);
+        }
+        Self(shm)
+    }
+}
+
+impl Drop for Pumping {
+    fn drop(&mut self) {
+        if let Some(shm) = &self.0 {
+            shm.header().pumps.fetch_add(1, Ordering::SeqCst);
         }
     }
 }
@@ -579,9 +619,11 @@ fn audio_loop(
                         true
                     }
                     None => {
-                        // While the main thread is in a slow call, skip the cycle instead of
-                        // waiting on it.
-                        let mut guard = if h.main_busy.load(Ordering::SeqCst) != 0 {
+                        // While the main thread is in a slow call, or waits on the user in
+                        // the plugin's editor, skip the cycle instead of waiting on it.
+                        let busy =
+                            h.main_busy.load(Ordering::SeqCst) != 0 || h.pumping_editor().is_some();
+                        let mut guard = if busy {
                             match plugin.try_lock() {
                                 Ok(guard) => Some(guard),
                                 Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
@@ -642,7 +684,6 @@ mod tests {
     use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginFormatKind};
 
     use super::*;
-    use crate::shm::Layout;
 
     /// Records what reaches it; `on_main_thread` notes whether the host flagged that its main
     /// thread is inside the plugin.
@@ -650,6 +691,8 @@ mod tests {
     struct Probe {
         shm: Option<Arc<Shm>>,
         in_plugin: Arc<AtomicU32>,
+        /// [`Header::pumps`](crate::shm::Header::pumps) as `on_main_thread` saw it.
+        pumps: Arc<AtomicU32>,
         resets: Arc<AtomicU32>,
         events: Arc<Mutex<Vec<Event>>>,
         value: f64,
@@ -738,20 +781,10 @@ mod tests {
             if let Some(shm) = &self.shm {
                 let flag = shm.header().main_in_plugin.load(Ordering::SeqCst);
                 self.in_plugin.fetch_max(flag + 1, Ordering::SeqCst);
+                let pumps = shm.header().pumps.load(Ordering::SeqCst);
+                self.pumps.store(pumps, Ordering::SeqCst);
             }
         }
-    }
-
-    fn block() -> Arc<Shm> {
-        let layout = Layout {
-            audio_in: 0,
-            audio_out: 0,
-            max_frames: 64,
-            event_capacity: 16,
-        };
-        let (shm, path) = Shm::create(&std::env::temp_dir(), layout).unwrap();
-        std::fs::remove_file(path).unwrap();
-        Arc::new(shm)
     }
 
     fn shared(probe: Probe) -> SharedPlugin {
@@ -787,11 +820,12 @@ mod tests {
 
     #[test]
     fn the_main_thread_pump_is_flagged_as_inside_the_plugin() {
-        let shm = block();
-        let in_plugin = Arc::new(AtomicU32::new(0));
+        let shm = Shm::scratch();
+        let (in_plugin, pumps) = (Arc::new(AtomicU32::new(0)), Arc::default());
         let plugin = shared(Probe {
             shm: Some(shm.clone()),
             in_plugin: in_plugin.clone(),
+            pumps: Arc::clone(&pumps),
             ..Probe::default()
         });
         let registry = PluginRegistry::new();
@@ -805,6 +839,7 @@ mod tests {
             state_changed: Cell::new(false),
             editor_open: Cell::new(false),
             rt_priority: None,
+            requests: 0,
         };
         // The host pumps between reads; close the socket once it has pumped at least once.
         let closer = {
@@ -822,11 +857,14 @@ mod tests {
         // 2 means the flag was set while the pump ran.
         assert_eq!(in_plugin.load(Ordering::SeqCst), 2);
         assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
+        // Counted into the pump, and out again.
+        assert_eq!(pumps.load(Ordering::SeqCst) % 2, 1);
+        assert_eq!(shm.header().pumps.load(Ordering::SeqCst) % 2, 0);
     }
 
     #[test]
     fn a_main_thread_waiting_on_a_stuck_audio_thread_is_not_flagged_as_inside_the_plugin() {
-        let shm = block();
+        let shm = Shm::scratch();
         let plugin = shared(Probe::default());
         let registry = PluginRegistry::new();
         let (stream, peer) = UnixStream::pair().unwrap();
@@ -843,6 +881,7 @@ mod tests {
                     state_changed: Cell::new(false),
                     editor_open: Cell::new(false),
                     rt_priority: None,
+                    requests: 0,
                 };
                 host.run().unwrap();
                 host.stop_audio();
@@ -862,7 +901,7 @@ mod tests {
 
     #[test]
     fn a_skipped_cycle_keeps_its_events_and_reset_for_the_next() {
-        let shm = block();
+        let shm = Shm::scratch();
         let (resets, events) = (Arc::new(AtomicU32::new(0)), Arc::default());
         let plugin = shared(Probe {
             resets: resets.clone(),
@@ -896,9 +935,44 @@ mod tests {
         assert_eq!(*events.lock().unwrap(), [Event { frame: 0, ..off }]);
     }
 
+    /// A plugin's editor shows a modal dialog, which keeps the main thread in the pump until
+    /// the user closes it: the cycles go on, silent, and what they carried comes after.
+    #[test]
+    fn a_cycle_is_skipped_while_the_main_thread_waits_on_the_user_in_the_editor() {
+        let shm = Shm::scratch();
+        let events = Arc::default();
+        let plugin = shared(Probe {
+            events: Arc::clone(&events),
+            ..Probe::default()
+        });
+        let audio = AudioThread::start(shm.clone(), plugin.clone(), None);
+        let on = Event {
+            frame: 3,
+            kind: EventKind::NoteOn {
+                channel: 0,
+                key: 60,
+                velocity: 1.0,
+                note_id: -1,
+            },
+        };
+
+        let h = shm.header();
+        let pump = lock(&plugin);
+        h.editor_open.store(1, Ordering::Release);
+        h.pumps.store(1, Ordering::SeqCst);
+        cycle(&shm, &[on], 0);
+        assert!(events.lock().unwrap().is_empty());
+        h.pumps.store(2, Ordering::SeqCst);
+        drop(pump);
+
+        cycle(&shm, &[], 0);
+        audio.stop();
+        assert_eq!(*events.lock().unwrap(), [Event { frame: 0, ..on }]);
+    }
+
     #[test]
     fn a_split_plugin_plays_while_the_main_thread_holds_it() {
-        let shm = block();
+        let shm = Shm::scratch();
         let (resets, events, joins) = (Arc::new(AtomicU32::new(0)), Arc::default(), Arc::default());
         let half = HalfProbe {
             resets: resets.clone(),
@@ -951,6 +1025,7 @@ mod tests {
             state_changed: Cell::new(false),
             editor_open: Cell::new(false),
             rt_priority: None,
+            requests: 0,
         };
         for (value, want) in [
             (f64::NAN, None),
