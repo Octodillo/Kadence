@@ -87,10 +87,7 @@ impl World {
         let world = Arc::new(lilv::World::new());
         let uri = world.new_uri(bundle_uri);
         world.load_bundle(&uri);
-        fn any_plugin_pred(_: &Plugin) -> bool {
-            true
-        }
-        Self::from_loaded_world(world, any_plugin_pred)
+        Self::from_loaded_world(world)
     }
 
     /// Get the underlying lilv world.
@@ -116,17 +113,24 @@ impl World {
     where
         P: Fn(&Plugin) -> bool,
     {
-        let _parsing = parse_lock();
-        let world = Arc::new(lilv::World::with_load_all());
-        Self::from_loaded_world(world, predicate)
+        let mut world = {
+            let _parsing = parse_lock();
+            Self::from_loaded_world(Arc::new(lilv::World::with_load_all()))
+        };
+        // Outside the lock, so the predicate may build worlds of its own.
+        world.livi_plugins.retain(|p| {
+            let keep = predicate(p);
+            if !keep {
+                debug!("Ignoring plugin {} due to predicate.", p.uri());
+            }
+            keep
+        });
+        world
     }
 
     // Apply the same validation before constructing a Plugin, regardless of
     // how the underlying world was populated. The caller holds `parse_lock`.
-    fn from_loaded_world<P>(world: Arc<lilv::World>, plugin_predicate: P) -> World
-    where
-        P: Fn(&Plugin) -> bool,
-    {
+    fn from_loaded_world(world: Arc<lilv::World>) -> World {
         // lilv reads a plugin's data files on the first query about it. Read
         // them all now, under the lock, so no later query parses.
         for plugin in world.plugins().iter() {
@@ -175,13 +179,6 @@ impl World {
             .map(|p| {
                 let classes = class_utils::class_with_parents(&p.class(), &class_to_parent);
                 Plugin::from_raw(p, world.clone(), common_uris.clone(), classes)
-            })
-            .filter(|p| {
-                let keep = plugin_predicate(p);
-                if !keep {
-                    debug!("Ignoring plugin {} due to predicate.", p.uri());
-                }
-                keep
             })
             .inspect(|p| info!("Found plugin {}: {}", p.name(), p.uri()))
             .collect();
@@ -487,7 +484,9 @@ mod tests {
             for _ in 0..4 {
                 threads.spawn(|| {
                     for _ in 0..WORLDS_PER_THREAD {
-                        for plugin in World::new().iter_plugins() {
+                        let world = World::new();
+                        assert_eq!(world.iter_plugins().len(), expected.len());
+                        for plugin in world.iter_plugins() {
                             assert_eq!(
                                 Some(plugin.port_counts()),
                                 expected.get(&plugin.uri()),
@@ -749,6 +748,16 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    // The predicate runs outside the parse lock, so it may build a world.
+    #[test]
+    fn a_predicate_may_build_a_world() {
+        let uri = "http://drobilla.net/plugins/mda/EPiano";
+        let world = World::with_plugin_predicate(|p| {
+            p.uri() == uri && World::with_plugin_predicate(|_| false).iter_plugins().len() == 0
+        });
+        assert_eq!(world.iter_plugins().len(), 1);
     }
 
     #[test]

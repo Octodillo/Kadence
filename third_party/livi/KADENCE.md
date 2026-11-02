@@ -32,7 +32,9 @@ Changes from upstream, each with a regression test in this crate:
   process-wide lock (`parse_lock` in `lib.rs`) is now held while a `World` is
   built, which also reads every plugin's data files then (lilv otherwise
   reads them on the first query), and by the new `World::load_resource`.
-  Callers must load data through livi, not through `World::raw`. Test:
+  Callers must load data through livi, not through `World::raw`. The lock
+  cannot cover a plugin or UI in the process that parses with the same
+  system liblilv on a thread of its own. Test:
   `tests::worlds_built_on_several_threads_read_every_port` (it failed about
   one run in six without the lock). Kadence issue #156.
 
