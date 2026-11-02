@@ -21,8 +21,8 @@ use crate::protocol::{
     blob_fits, write_frame,
 };
 use crate::shm::{
-    self, DONE, FLAG_RESET, MAX_CHANNELS, REQUEST, Shm, decode_event, encode_event, futex_wait,
-    futex_wake,
+    self, DONE, FLAG_RESET, Header, MAX_CHANNELS, REQUEST, Shm, decode_event, encode_event,
+    futex_wait, futex_wake,
 };
 
 /// The argument that selects host mode: `--plugin-host <socket>`.
@@ -441,16 +441,16 @@ impl Drop for InsidePlugin<'_> {
     }
 }
 
-/// Counts the host's main thread into a pump and out again ([`Header::pumps`]), so the
+/// Counts the host's main thread into a pump and out again ([`Header::enter_pump`]), so the
 /// application can tell it is busy in the plugin's own callbacks.
 ///
-/// [`Header::pumps`]: crate::shm::Header::pumps
+/// [`Header::enter_pump`]: crate::shm::Header::enter_pump
 struct Pumping(Option<Arc<Shm>>);
 
 impl Pumping {
     fn start(shm: Option<Arc<Shm>>) -> Self {
         if let Some(shm) = &shm {
-            shm.header().pumps.fetch_add(1, Ordering::SeqCst);
+            shm.header().enter_pump();
         }
         Self(shm)
     }
@@ -459,7 +459,7 @@ impl Pumping {
 impl Drop for Pumping {
     fn drop(&mut self) {
         if let Some(shm) = &self.0 {
-            shm.header().pumps.fetch_add(1, Ordering::SeqCst);
+            shm.header().leave_pump();
         }
     }
 }
@@ -522,6 +522,30 @@ impl AudioThread {
             p.join(half);
         }
         self.shm
+    }
+}
+
+/// How long the audio thread sleeps between tries for a plugin the main thread holds.
+const LOCK_RETRY: Duration = Duration::from_micros(50);
+
+/// Locks the plugin for one audio cycle. While the main thread holds it, waits for it, unless
+/// that thread is in a slow call or waits on the user in the plugin's editor: then returns
+/// `None`, so the cycle is skipped instead. Polls rather than blocks, since the main thread
+/// can start to wait on the user while it holds the plugin.
+fn lock_for_cycle<'a>(
+    plugin: &'a SharedPlugin,
+    h: &Header,
+) -> Option<MutexGuard<'a, Option<Box<dyn PluginInstance>>>> {
+    loop {
+        match plugin.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if h.main_busy.load(Ordering::SeqCst) != 0 || h.waiting_on_user().is_some() {
+            return None;
+        }
+        std::thread::sleep(LOCK_RETRY);
     }
 }
 
@@ -619,19 +643,7 @@ fn audio_loop(
                         true
                     }
                     None => {
-                        // While the main thread is in a slow call, or waits on the user in
-                        // the plugin's editor, skip the cycle instead of waiting on it.
-                        let busy =
-                            h.main_busy.load(Ordering::SeqCst) != 0 || h.pumping_editor().is_some();
-                        let mut guard = if busy {
-                            match plugin.try_lock() {
-                                Ok(guard) => Some(guard),
-                                Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-                                Err(std::sync::TryLockError::WouldBlock) => None,
-                            }
-                        } else {
-                            Some(lock(plugin))
-                        };
+                        let mut guard = lock_for_cycle(plugin, h);
                         match guard.as_mut().and_then(|g| g.as_mut()) {
                             Some(p) => {
                                 if flags & FLAG_RESET != 0 {
@@ -691,7 +703,7 @@ mod tests {
     struct Probe {
         shm: Option<Arc<Shm>>,
         in_plugin: Arc<AtomicU32>,
-        /// [`Header::pumps`](crate::shm::Header::pumps) as `on_main_thread` saw it.
+        /// Whether `on_main_thread` saw itself counted into a pump.
         pumps: Arc<AtomicU32>,
         resets: Arc<AtomicU32>,
         events: Arc<Mutex<Vec<Event>>>,
@@ -781,8 +793,8 @@ mod tests {
             if let Some(shm) = &self.shm {
                 let flag = shm.header().main_in_plugin.load(Ordering::SeqCst);
                 self.in_plugin.fetch_max(flag + 1, Ordering::SeqCst);
-                let pumps = shm.header().pumps.load(Ordering::SeqCst);
-                self.pumps.store(pumps, Ordering::SeqCst);
+                let pumping = shm.header().in_pump().is_some();
+                self.pumps.store(u32::from(pumping), Ordering::SeqCst);
             }
         }
     }
@@ -858,8 +870,8 @@ mod tests {
         assert_eq!(in_plugin.load(Ordering::SeqCst), 2);
         assert_eq!(shm.header().main_in_plugin.load(Ordering::SeqCst), 0);
         // Counted into the pump, and out again.
-        assert_eq!(pumps.load(Ordering::SeqCst) % 2, 1);
-        assert_eq!(shm.header().pumps.load(Ordering::SeqCst) % 2, 0);
+        assert_eq!(pumps.load(Ordering::SeqCst), 1);
+        assert_eq!(shm.header().in_pump(), None);
     }
 
     #[test]
@@ -959,15 +971,50 @@ mod tests {
         let h = shm.header();
         let pump = lock(&plugin);
         h.editor_open.store(1, Ordering::Release);
-        h.pumps.store(1, Ordering::SeqCst);
+        h.enter_pump_long_ago();
         cycle(&shm, &[on], 0);
         assert!(events.lock().unwrap().is_empty());
-        h.pumps.store(2, Ordering::SeqCst);
+        h.leave_pump();
         drop(pump);
 
         cycle(&shm, &[], 0);
         audio.stop();
         assert_eq!(*events.lock().unwrap(), [Event { frame: 0, ..on }]);
+    }
+
+    /// A short pump with the editor open (a redraw, say) holds the cycle up only for as long as
+    /// it takes; the cycle is not skipped for it.
+    #[test]
+    fn a_cycle_waits_out_a_short_pump_with_the_editor_open() {
+        let shm = Shm::scratch();
+        let events = Arc::default();
+        let plugin = shared(Probe {
+            events: Arc::clone(&events),
+            ..Probe::default()
+        });
+        let audio = AudioThread::start(shm.clone(), plugin.clone(), None);
+        let h = shm.header();
+        h.editor_open.store(1, Ordering::Release);
+        let on = Event {
+            frame: 3,
+            kind: EventKind::NoteOn {
+                channel: 0,
+                key: 60,
+                velocity: 1.0,
+                note_id: -1,
+            },
+        };
+        let pump = lock(&plugin);
+        h.enter_pump();
+        std::thread::scope(|s| {
+            let posted = s.spawn(|| cycle(&shm, &[on], 0));
+            std::thread::sleep(Duration::from_millis(20));
+            h.leave_pump();
+            drop(pump);
+            posted.join().unwrap();
+        });
+        audio.stop();
+        assert_eq!(*events.lock().unwrap(), [on]);
     }
 
     #[test]

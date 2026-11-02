@@ -1406,7 +1406,10 @@ impl Node for SandboxedInstance {
                     self.refresh_params();
                 }
             }
-            // It plays on with the settings it has meanwhile.
+            // The host waits on the user in the plugin's editor. Until it is free, the plugin
+            // plays on as it was prepared before, with the block it had (its channel counts
+            // too, if only the block swap found it busy; `process` copes with those). The
+            // engine counts these settings as done: `on_main_thread` asks it to prepare again.
             Err(PluginError::Busy(_)) => self.prepare_pending = true,
             Err(e) => {
                 // `prepare` cannot fail; a host that cannot prepare is as good as crashed.
@@ -1578,7 +1581,7 @@ impl PluginInstance for SandboxedInstance {
         // The user closed the window. (A host that is down keeps the editor "open", so a
         // reload opens it again.)
         let closed = header.editor_open.load(Ordering::Acquire) == 0;
-        let free = header.pumping_editor().is_none();
+        let free = header.waiting_on_user().is_none();
         if layout_changed {
             self.layout_changed = true;
             self.prepared_with = None;
@@ -1712,17 +1715,17 @@ mod tests {
         assert_eq!(stall_limit(h, hang, call), Some(hang));
         // The cycle waits for the main thread, which is in a pump.
         h.main_in_plugin.store(1, Ordering::SeqCst);
-        h.pumps.store(1, Ordering::SeqCst);
+        h.enter_pump();
         assert_eq!(stall_limit(h, hang, call), Some(call));
         // With the editor open, the user may have a dialog of the plugin's up.
         h.editor_open.store(1, Ordering::Release);
         assert_eq!(stall_limit(h, hang, call), None);
         // Out of the pump, it counts again.
-        h.pumps.store(2, Ordering::SeqCst);
+        h.leave_pump();
         assert_eq!(stall_limit(h, hang, call), Some(call));
         // A split plugin's audio never waits for the main thread, so its stall is a hang
         // whatever the main thread does.
-        h.pumps.store(3, Ordering::SeqCst);
+        h.enter_pump();
         h.main_in_plugin.store(0, Ordering::SeqCst);
         assert_eq!(stall_limit(h, hang, call), Some(hang));
         h.main_busy.store(1, Ordering::SeqCst);

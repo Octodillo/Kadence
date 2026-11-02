@@ -721,7 +721,9 @@ fn a_modal_dialog_in_the_editor_is_busy_not_a_crash() {
         plugin.load_state(&gain_state(1.0)),
         Err(PluginError::Busy(_))
     ));
-    plugin.prepare(SR, MAX);
+    // A prepare that needs a bigger block waits for the host to be free.
+    plugin.prepare(SR, MAX * 2);
+    assert!(!plugin.take_layout_changed());
     assert!(
         start.elapsed() < Duration::from_millis(200),
         "{:?}",
@@ -742,6 +744,12 @@ fn a_modal_dialog_in_the_editor_is_busy_not_a_crash() {
     assert!(plugin.is_editor_open());
     // The state load given up on did not happen behind our back.
     assert!(plays_at(&mut plugin, 0.5));
+    // Now the engine is asked to prepare again, and that prepare reaches the host.
+    plugin.on_main_thread();
+    assert!(plugin.take_layout_changed(), "no new prepare asked for");
+    plugin.prepare(SR, MAX * 2);
+    let ([l, _], _) = run(&mut plugin, (MAX * 2) as usize, 1.0, &[]);
+    assert!(l.iter().all(|&s| s == 0.5));
     plugin.load_state(&gain_state(0.25)).unwrap();
     assert!(plays_at(&mut plugin, 0.25));
 }
@@ -755,8 +763,8 @@ fn a_stuck_main_thread_without_the_editor_is_still_lost() {
     let mut plugin = instance_with(config);
     let monitor = plugin.monitor();
     plugin.load_state(&command_state(b"DAWD", 20_000)).unwrap();
-    // Let the host get into the callback.
-    std::thread::sleep(Duration::from_millis(200));
+    // Let the host get into the callback, which it does at its next pump (every 16 ms).
+    std::thread::sleep(Duration::from_millis(500));
     assert!(plugin.open_editor().is_err());
     assert!(matches!(
         monitor.status(),

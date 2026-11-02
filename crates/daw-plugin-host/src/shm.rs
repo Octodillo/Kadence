@@ -86,7 +86,8 @@ pub struct Header {
     /// Main-thread pumps the host has started plus those it has finished: odd while its main
     /// thread is in one, that is in the plugin's own main-thread callbacks. A plugin whose
     /// editor runs a modal dialog (a file chooser, say) stays in one until the user closes it.
-    pub pumps: AtomicU32,
+    /// See [`Header::enter_pump`].
+    pumps: AtomicU32,
     /// Time-signature numerator in the low byte, denominator in the next.
     time_sig: AtomicU32,
     /// Nonzero when a loop is set.
@@ -114,16 +115,65 @@ pub struct Header {
     /// Which control requests the host has started, or the application has withdrawn; see
     /// [`started`] and [`withdrawn`].
     control: AtomicU64,
+    /// When the current or last pump started, in [`monotonic_ns`].
+    pump_started: AtomicU64,
 }
 
 const _: () = assert!(size_of::<Header>() <= HEADER_BYTES);
 
 impl Header {
-    /// Whether the host's main thread is in a pump while the plugin's editor is open: busy
-    /// with whatever the user does in the plugin's own window, for as long as that takes.
-    pub fn pumping_editor(&self) -> Option<u32> {
-        let pumps = self.pumps.load(Ordering::SeqCst);
-        (pumps % 2 == 1 && self.editor_open.load(Ordering::Acquire) != 0).then_some(pumps)
+    /// Called by the host's main thread as it goes into the plugin's main-thread callbacks.
+    pub fn enter_pump(&self) {
+        self.enter_pump_at(monotonic_ns());
+    }
+
+    fn enter_pump_at(&self, started: u64) {
+        self.pump_started.store(started, Ordering::SeqCst);
+        self.pumps.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A pump that has gone on for long, for tests.
+    #[cfg(test)]
+    pub fn enter_pump_long_ago(&self) {
+        self.enter_pump_at(0);
+    }
+
+    /// Called by the host's main thread as it comes out of the plugin's callbacks.
+    pub fn leave_pump(&self) {
+        self.pumps.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The pump the host's main thread is in, if any.
+    pub fn in_pump(&self) -> Option<Pump> {
+        let id = self.pumps.load(Ordering::SeqCst);
+        if id.is_multiple_of(2) {
+            return None;
+        }
+        let started = self.pump_started.load(Ordering::SeqCst);
+        // Read across a new pump's start, `started` may be an older pump's: count it as new.
+        let age = if self.pumps.load(Ordering::SeqCst) == id {
+            Duration::from_nanos(monotonic_ns().saturating_sub(started))
+        } else {
+            Duration::ZERO
+        };
+        Some(Pump { id, age })
+    }
+
+    /// The pump the host's main thread is in while the plugin's editor is open: there, it may
+    /// be busy with whatever the user does in the plugin's own window, for as long as that
+    /// takes.
+    pub fn pumping_editor(&self) -> Option<Pump> {
+        self.in_pump()
+            .filter(|_| self.editor_open.load(Ordering::Acquire) != 0)
+    }
+
+    /// The pump, by id, the host's main thread has been in with the editor open for
+    /// [`EDITOR_BUSY_AFTER`]: it waits on the user (a modal dialog, say) rather than doing a
+    /// plugin's usual few milliseconds of work.
+    pub fn waiting_on_user(&self) -> Option<u32> {
+        self.pumping_editor()
+            .filter(|p| p.age >= EDITOR_BUSY_AFTER)
+            .map(|p| p.id)
     }
 
     /// Called by the host before it runs control request `n` (numbered from 1 in the order
@@ -205,9 +255,32 @@ impl Header {
     }
 }
 
-/// [`Header::control`] holds the highest of these marks set so far. Requests are handled in
-/// order and only the latest one is ever withdrawn, so the mark a start finds tells whether
-/// its request was withdrawn, and the mark a withdrawal finds whether its request started.
+/// How long the host's main thread can be in one pump with the plugin's editor open before it
+/// counts as waiting on the user. Pumps of a plugin that is not take a few milliseconds.
+pub const EDITOR_BUSY_AFTER: Duration = Duration::from_millis(250);
+
+/// One main-thread pump: which ([`Header::pumps`] while in it), and how long it has lasted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pump {
+    pub id: u32,
+    pub age: Duration,
+}
+
+/// `CLOCK_MONOTONIC` in nanoseconds, the same in both processes. Real-time safe.
+fn monotonic_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: writes the current time into `ts`.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+/// [`Header::control`] holds the highest of these marks set so far. The application sends a
+/// request only once it has the answer to the one before, withdrawn or not, so only request
+/// `n` can be marked while it is outstanding: the mark a start finds tells whether its request
+/// was withdrawn, and the mark a withdrawal finds whether its request started.
 fn started(n: u64) -> u64 {
     2 * n + 1
 }
