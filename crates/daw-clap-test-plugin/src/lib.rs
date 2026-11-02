@@ -7,8 +7,10 @@
 //! Loading the state `b"DAWL"` followed by a little-endian `u32` changes the reported latency;
 //! `b"DAWR"` does the same and asks the host to restart the plugin. `b"DAWS"` followed by a
 //! little-endian `u32` takes that many milliseconds to load and changes nothing, standing in
-//! for a slow main-thread call. `b"DAWC"` closes the editor, as the user closing its window
-//! would.
+//! for a slow main-thread call. `b"DAWD"` followed by a little-endian `u32` makes the next
+//! main-thread callback take that many milliseconds, as a modal file dialog in the editor
+//! keeps the main thread until the user closes it. `b"DAWC"` closes the editor, as the user
+//! closing its window would.
 //!
 //! It has a floating X11 editor that opens no window, so the host's editor handling can be
 //! tested without a display. Showing it stands in for the user loading a preset there: the
@@ -88,6 +90,7 @@ impl DefaultPluginFactory for TestPlugin {
             host,
             shared,
             gui_created: Cell::new(false),
+            dialog_ms: Cell::new(0),
         })
     }
 }
@@ -117,9 +120,18 @@ pub struct MainThread<'a> {
     host: HostMainThreadHandle<'a>,
     shared: &'a Shared,
     gui_created: Cell<bool>,
+    /// How long the next main-thread callback takes, from `b"DAWD"`.
+    dialog_ms: Cell<u32>,
 }
 
-impl<'a> PluginMainThread<'a, Shared> for MainThread<'a> {}
+impl<'a> PluginMainThread<'a, Shared> for MainThread<'a> {
+    fn on_main_thread(&self) {
+        let ms = self.dialog_ms.take();
+        if ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(ms)));
+        }
+    }
+}
 
 pub struct Processor<'a> {
     shared: &'a Shared,
@@ -367,6 +379,13 @@ impl PluginStateImpl for MainThread<'_> {
             if let Some(gui) = self.host.get_extension::<HostGui>() {
                 gui.closed(&self.host, false);
             }
+            return Ok(());
+        }
+        if &magic == b"DAWD" {
+            let mut ms = [0; 4];
+            input.read_exact(&mut ms)?;
+            self.dialog_ms.set(u32::from_le_bytes(ms));
+            self.host.request_callback();
             return Ok(());
         }
         if &magic == b"DAWS" {

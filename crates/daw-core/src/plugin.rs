@@ -53,6 +53,10 @@ pub enum PluginError {
     /// The editor needs an X11 display (XWayland under Wayland) and none could be reached.
     #[error("no X11 display: {0}")]
     NoDisplay(String),
+    /// The plugin could not take the call now, but has not failed: a sandboxed plugin whose
+    /// editor shows a modal dialog, say. The call can be made again later.
+    #[error("busy: {0}")]
+    Busy(String),
 }
 
 /// A loaded, activated plugin. It is a graph [`Node`]; the other methods run
