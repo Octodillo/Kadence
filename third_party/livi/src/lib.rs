@@ -39,7 +39,7 @@
 use error::StateError;
 use log::{debug, error, info, warn};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub use features::worker::{Worker, WorkerManager};
 pub use features::{Features, FeaturesBuilder};
@@ -83,6 +83,7 @@ impl World {
     /// bundle_uri must be a fully qualified URI to the bundle directory,
     /// with the trailing slash, eg file:///usr/lib/lv2/foo.lv2/.
     pub fn with_load_bundle(bundle_uri: &str) -> World {
+        let _parsing = parse_lock();
         let world = Arc::new(lilv::World::new());
         let uri = world.new_uri(bundle_uri);
         world.load_bundle(&uri);
@@ -93,8 +94,19 @@ impl World {
     }
 
     /// Get the underlying lilv world.
+    ///
+    /// Use [`World::load_resource`] rather than loading data through it:
+    /// lilv must not parse files in two worlds at once.
     pub fn raw(&self) -> &lilv::World {
         &self.world
+    }
+
+    /// Load the data files about `resource` (for example a plugin UI), as
+    /// `lilv::World::load_resource` does, but never while another world is
+    /// parsing. Returns the number of files loaded, or `None` on error.
+    pub fn load_resource(&self, resource: &lilv::node::Node) -> Option<usize> {
+        let _parsing = parse_lock();
+        self.world.load_resource(resource)
     }
 
     /// Creates a new world that includes all plugins that are found and return
@@ -104,16 +116,23 @@ impl World {
     where
         P: Fn(&Plugin) -> bool,
     {
+        let _parsing = parse_lock();
         let world = Arc::new(lilv::World::with_load_all());
         Self::from_loaded_world(world, predicate)
     }
 
     // Apply the same validation before constructing a Plugin, regardless of
-    // how the underlying world was populated.
+    // how the underlying world was populated. The caller holds `parse_lock`.
     fn from_loaded_world<P>(world: Arc<lilv::World>, plugin_predicate: P) -> World
     where
         P: Fn(&Plugin) -> bool,
     {
+        // lilv reads a plugin's data files on the first query about it. Read
+        // them all now, under the lock, so no later query parses.
+        for plugin in world.plugins().iter() {
+            // For the loading only: the filters below judge the plugin.
+            let _ = plugin.verify();
+        }
         let common_uris = Arc::new(CommonUris::new(&world));
         let supported_features = crate::Features::supported_features();
         info!(
@@ -260,6 +279,24 @@ impl World {
     }
 }
 
+/// Serializes lilv's parsing of Turtle across every world in the process.
+///
+/// lilv (0.24.22, still so in 0.28) prefixes the blank node names of each file
+/// it reads with a counter that `lilv_world_blank_node_prefix` formats into one
+/// static buffer shared by all worlds. When two worlds parse at once on
+/// different threads, one can take the other's prefix, so the blank nodes of
+/// two files in one world get the same names and merge. A plugin's ports are
+/// blank nodes (`lv2:port [ ... ]`), so lilv then reports "missing port" and
+/// drops them. Kadence issue #156.
+///
+/// Held while a world is built (which also reads every plugin's data, see
+/// `World::from_loaded_world`) and by `World::load_resource`.
+fn parse_lock() -> MutexGuard<'static, ()> {
+    static PARSING: Mutex<()> = Mutex::new(());
+    // The guarded data is (); a panic while parsing leaves nothing broken.
+    PARSING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn ports_supported(plugin: &lilv::plugin::Plugin, uris: &CommonUris) -> bool {
     let direction_classes = [&uris.input_port_uri, &uris.output_port_uri];
     let data_classes = [
@@ -364,7 +401,7 @@ impl CommonUris {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use crate::event::LV2AtomSequence;
 
@@ -373,6 +410,7 @@ mod tests {
     const MIN_BLOCK_SIZE: usize = 1;
     const MAX_BLOCK_SIZE: usize = 256;
     const SAMPLE_RATE: f64 = 44100.0;
+    const WORLDS_PER_THREAD: usize = 10;
 
     #[test]
     fn atom_ports_require_sequence_buffer_type() {
@@ -434,6 +472,33 @@ mod tests {
                 .plugin_by_uri("urn:livi:test")
                 .is_some()
         );
+    }
+
+    // Kadence issue #156: worlds built at once on several threads read every
+    // plugin's ports, as a world built alone does. Without the parse lock this
+    // failed about one run in six.
+    #[test]
+    fn worlds_built_on_several_threads_read_every_port() {
+        let expected: HashMap<String, PortCounts> = World::new()
+            .iter_plugins()
+            .map(|p| (p.uri(), *p.port_counts()))
+            .collect();
+        std::thread::scope(|threads| {
+            for _ in 0..4 {
+                threads.spawn(|| {
+                    for _ in 0..WORLDS_PER_THREAD {
+                        for plugin in World::new().iter_plugins() {
+                            assert_eq!(
+                                Some(plugin.port_counts()),
+                                expected.get(&plugin.uri()),
+                                "{}",
+                                plugin.uri()
+                            );
+                        }
+                    }
+                });
+            }
+        });
     }
 
     #[test]
