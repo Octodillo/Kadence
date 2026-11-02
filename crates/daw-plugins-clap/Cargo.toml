@@ -28,7 +28,7 @@ clack-extensions = { version = "0.2", features = [
 libc = "0.2"
 
 [dev-dependencies]
-assert_no_alloc = "1.1"
+assert_no_alloc.workspace = true
 
 [lints]
 workspace = true

@@ -1,5 +1,7 @@
 //! The backend's own per-cycle work must not allocate. With `RtAllocCounter`
-//! installed, the backend counts allocations made inside a cycle.
+//! installed, the backend counts allocations made inside a cycle. It counts
+//! only in debug builds, so these tests are compiled only there.
+#![cfg(debug_assertions)]
 
 use std::time::Duration;
 
@@ -10,7 +12,6 @@ use daw_core::event::{Event, EventKind};
 static ALLOC: RtAllocCounter = RtAllocCounter;
 
 #[test]
-#[cfg(debug_assertions)]
 fn dummy_cycles_do_not_allocate() {
     let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(2_000);
     b.open(BackendConfig {
@@ -59,7 +60,6 @@ const CHILD: &str = "DAW_BACKEND_ALLOC_CHILD";
 /// to stderr from the audio thread. The cycles run in a child process (this
 /// test binary again) so its stderr can be checked.
 #[test]
-#[cfg(debug_assertions)]
 fn allocating_cycles_are_counted_silently() {
     const CYCLES: u64 = 200;
     if std::env::var_os(CHILD).is_some() {

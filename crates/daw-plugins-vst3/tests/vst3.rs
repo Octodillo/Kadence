@@ -12,7 +12,6 @@ use daw_core::{
 };
 use daw_plugins_vst3::Vst3Format;
 
-#[cfg(debug_assertions)]
 #[global_allocator]
 static ALLOC: AllocDisabler = AllocDisabler;
 
@@ -88,7 +87,7 @@ fn run(
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        // The workspace enables `warn_debug`, so allocations are counted rather than aborting.
+        // The workspace enables `warn_debug`/`warn_release`, so allocations are counted rather than aborting.
         let before = assert_no_alloc::violation_count();
         assert_no_alloc(|| plugin.process(&mut ctx));
         assert_eq!(

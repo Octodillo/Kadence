@@ -127,12 +127,10 @@ pub fn render_prepared(
                 events_out: &mut events_out,
             };
             let start = Instant::now();
-            #[cfg(debug_assertions)]
             let violations = assert_no_alloc::violation_count();
             assert_no_alloc(|| dev.process(&mut ctx));
-            // The workspace enables `warn_debug`, so a violation is counted
-            // rather than aborting; turn it into a test failure.
-            #[cfg(debug_assertions)]
+            // The workspace enables `warn_debug`/`warn_release`, so a violation
+            // is counted rather than aborting; turn it into a test failure.
             assert_eq!(
                 assert_no_alloc::violation_count(),
                 violations,
