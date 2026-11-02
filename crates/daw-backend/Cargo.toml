@@ -13,7 +13,7 @@ daw-core.workspace = true
 thiserror.workspace = true
 # Loads libjack at run time, so the binary starts without JACK installed.
 # Building still needs jack.pc (libjack-jackd2-dev or pipewire-jack).
-jack = "0.13"
+jack.workspace = true
 libc = "0.2"
 log = "0.4"
 

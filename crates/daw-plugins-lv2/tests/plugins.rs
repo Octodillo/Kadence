@@ -10,7 +10,6 @@ use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{Node, ProcessContext, TransportState};
 use daw_core::plugin::{PluginDescriptor, PluginFormat, PluginInstance};
 
-#[cfg(debug_assertions)]
 #[global_allocator]
 static A: AllocDisabler = AllocDisabler;
 
@@ -87,7 +86,7 @@ fn run(
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        // The workspace's `warn_debug` makes violations count (per thread)
+        // The workspace's `warn_debug`/`warn_release` make violations count (per thread)
         // instead of aborting.
         reset_violation_count();
         assert_no_alloc(|| p.process(&mut ctx));

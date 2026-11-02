@@ -48,8 +48,10 @@ jobs:
       - name: clippy (release)
         # cfg(debug_assertions) code can leave items unused in release builds,
         # which the CMake install checks (Arch and neon jobs) build with
-        # RUSTFLAGS=-D warnings; this catches it in the fast job.
-        run: cargo clippy --release --workspace --exclude daw-app -- -D warnings
+        # RUSTFLAGS=-D warnings; this catches it in the fast job. All targets,
+        # so a test that only builds in debug is caught too (daw-app, left
+        # out here for Qt, once had one).
+        run: cargo clippy --release --workspace --exclude daw-app --all-targets -- -D warnings
       - name: tests
         # -noreset: otherwise Xvfb resets when one test process disconnects
         # and drops the connection of a test opening a plugin UI in parallel.
@@ -69,7 +71,7 @@ jobs:
         run: |
           jackd --no-realtime -d dummy -r 48000 -p 256 &
           sleep 2
-          cargo nextest run -p daw-backend --run-ignored only
+          cargo nextest run -p daw-backend -p daw-session --run-ignored only
           kill %1
         env:
           KADENCE_TEST_PHYSICAL_PORTS: 1
