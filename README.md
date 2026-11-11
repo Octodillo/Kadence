@@ -1,5 +1,7 @@
 # Kadence
 
+> **AI-generated project.** Kadence was written almost entirely by AI coding agents (Claude) working in parallel from a single short prompt: build a Plasma-native DAW. I started the run and mostly watched; I did not write or review most of this code. Treat it as an experiment in agent-built software, not as my own engineering work.
+
 Kadence is a digital audio workstation for KDE Plasma, written in Rust.
 Its app ID is `io.github.octodillo.daw`.
 
