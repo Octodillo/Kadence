@@ -16,6 +16,11 @@ mod module;
 mod runloop;
 mod util;
 
+/// The integration tests' helper that builds and bundles the example plugins.
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
 use std::path::{Path, PathBuf};
 
 use daw_core::plugin::{

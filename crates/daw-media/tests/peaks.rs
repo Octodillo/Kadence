@@ -21,8 +21,8 @@ fn levels_hold_exact_min_max() {
         let fpp = level.frames_per_peak as usize;
         assert_eq!(level.len(2), frames.div_ceil(fpp));
         for p in [0, level.len(2) / 2, level.len(2) - 1] {
-            for c in 0..2 {
-                let span = &data.channels[c][p * fpp..((p + 1) * fpp).min(frames)];
+            for (c, channel) in data.channels.iter().enumerate().take(2) {
+                let span = &channel[p * fpp..((p + 1) * fpp).min(frames)];
                 let lo = span.iter().copied().fold(f32::MAX, f32::min);
                 let hi = span.iter().copied().fold(f32::MIN, f32::max);
                 let i = (p * 2 + c) * 2;

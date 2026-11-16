@@ -21,7 +21,7 @@ log = "0.4"
 assert_no_alloc.workspace = true
 tempfile = "3"
 
-# A tiny VST3 plugin used by the tests. `cargo test` builds examples before running tests.
+# A tiny VST3 plugin used by the tests, which build it themselves (tests/support).
 [[example]]
 name = "testgain"
 crate-type = ["cdylib"]
