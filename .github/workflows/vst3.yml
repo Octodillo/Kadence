@@ -67,6 +67,6 @@ jobs:
         env:
           DAW_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
         run: |
-          bin=$(find target/debug/deps -maxdepth 1 -type f -executable -name 'vst3-*' | head -1)
+          bin=$(find target/debug -type f -executable -name 'vst3-*' | head -1)
           xvfb-run -a gdb -batch -ex run -ex 'thread apply all bt 30' --args "$bin" \
             sdk_again_editor_opens_in_a_floating_window --exact --nocapture --test-threads=1

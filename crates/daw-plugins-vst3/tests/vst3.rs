@@ -2,7 +2,6 @@
 //! sample when `DAW_VST3_AGAIN` points at a built `again.vst3` bundle (CI builds it).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
@@ -11,6 +10,8 @@ use daw_core::{
     TransportState,
 };
 use daw_plugins_vst3::Vst3Format;
+
+mod support;
 
 #[global_allocator]
 static ALLOC: AllocDisabler = AllocDisabler;
@@ -21,31 +22,7 @@ const SAMPLE_RATE: f64 = 48_000.0;
 /// Wraps the `testgain` example's shared object in a `.vst3` bundle.
 fn testgain_bundle() -> &'static Path {
     static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
-    BUNDLE.get_or_init(|| {
-        // target/<profile>/deps/<test binary>
-        let profile_dir = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .and_then(Path::parent)
-            .unwrap()
-            .to_path_buf();
-        let so = profile_dir.join("examples/libtestgain.so");
-        if !so.exists() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let status = Command::new(cargo)
-                .args(["build", "-p", "daw-plugins-vst3", "--example", "testgain"])
-                .status()
-                .expect("run cargo to build the test plugin");
-            assert!(status.success(), "building the testgain example failed");
-        }
-        let root = std::env::temp_dir().join(format!("daw-vst3-tests-{}", std::process::id()));
-        let bin = root
-            .join("TestGain.vst3/Contents")
-            .join(format!("{}-linux", std::env::consts::ARCH));
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::copy(&so, bin.join("TestGain.so")).unwrap();
-        root.join("TestGain.vst3")
-    })
+    BUNDLE.get_or_init(|| support::example_bundle("testgain", "TestGain", "tests").0)
 }
 
 fn testgain() -> PluginDescriptor {
