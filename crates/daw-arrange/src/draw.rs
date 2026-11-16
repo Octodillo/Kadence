@@ -40,9 +40,10 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
     let last = (a.row_at_content(a.scroll_y + lanes.h, rows) + 1).min(rows);
     let line = pal.background.mix(pal.text, 0.15);
     let lane_fill = pal.background.mix(pal.text, 0.04);
-    for row in first..last {
+    let visible = || project.tracks.iter().enumerate().take(last).skip(first);
+    for (row, track) in visible() {
         let y = a.row_y(row);
-        let fill = if a.selected_track == Some(project.tracks[row].id) {
+        let fill = if a.selected_track == Some(track.id) {
             pal.background.mix(pal.highlight, 0.12)
         } else if row % 2 == 1 {
             pal.alternate_background
@@ -51,7 +52,7 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
         };
         s.rect(Rect::new(0.0, y, w, a.track_height), fill);
         s.hline(y + a.track_height - 0.5, 0.0, w, line, 1.0);
-        for i in 0..a.lanes_shown(&project.tracks[row]) {
+        for i in 0..a.lanes_shown(track) {
             let r = a.lane_rect(row, i);
             s.rect(r, lane_fill);
             s.hline(r.bottom() - 0.5, 0.0, w, line.mix(pal.background, 0.4), 1.0);
@@ -72,8 +73,7 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
 
     s.push(Prim::PushClip(lanes));
     let range = a.view.visible(w);
-    for row in first..last {
-        let track = &project.tracks[row];
+    for (row, track) in visible() {
         let color = track_color(track, row);
         for clip in &track.clips {
             if clip.start >= range.end || clip.start.0 + clip.length.0 <= range.start.0 {
