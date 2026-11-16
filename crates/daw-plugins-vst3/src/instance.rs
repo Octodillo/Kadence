@@ -1630,36 +1630,8 @@ mod tests {
 
     fn testgain() -> PluginDescriptor {
         static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
-        let bundle = BUNDLE.get_or_init(|| {
-            let profile_dir = std::env::current_exe()
-                .unwrap()
-                .parent()
-                .and_then(Path::parent)
-                .unwrap()
-                .to_path_buf();
-            let so = profile_dir.join("examples/libtestgain.so");
-            // `cargo test --lib` does not build examples, so build it here, always (a stale
-            // copy would test an old plugin), and in this test binary's profile, or the
-            // library lands in another profile's directory.
-            let profile = match profile_dir.file_name().and_then(|n| n.to_str()) {
-                Some("debug") | None => "dev",
-                Some(name) => name,
-            };
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let status = std::process::Command::new(cargo)
-                .args(["build", "-p", "daw-plugins-vst3", "--example", "testgain"])
-                .args(["--profile", profile])
-                .status()
-                .expect("run cargo to build the test plugin");
-            assert!(status.success(), "building the testgain example failed");
-            let root = std::env::temp_dir().join(format!("daw-vst3-unit-{}", std::process::id()));
-            let bin = root
-                .join("TestGain.vst3/Contents")
-                .join(format!("{}-linux", std::env::consts::ARCH));
-            std::fs::create_dir_all(&bin).unwrap();
-            std::fs::copy(&so, bin.join("TestGain.so")).unwrap();
-            root.join("TestGain.vst3")
-        });
+        let bundle = BUNDLE
+            .get_or_init(|| crate::test_support::example_bundle("testgain", "TestGain", "unit").0);
         scan_module(bundle).unwrap().pop().unwrap()
     }
 

@@ -168,9 +168,9 @@ fn resample_preserves_pitch_and_length() {
         "{}",
         out.frames()
     );
-    for c in 0..2 {
+    for (c, channel) in out.channels.iter().enumerate().take(2) {
         let want = 220.0 * (c + 1) as f32 + 0.37;
-        let f = estimate_freq(&out.channels[c][1000..47_000], 48_000);
+        let f = estimate_freq(&channel[1000..47_000], 48_000);
         assert!((f - want).abs() < 2.0, "ch{c}: {f} vs {want}");
     }
     // The startup delay is trimmed: output lines up with the input to within one frame.

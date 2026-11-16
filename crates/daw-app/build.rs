@@ -7,7 +7,9 @@ use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 const KF6: &[(&[&str], &str)] = &[
     (&["KCoreAddons"], "KF6CoreAddons"),
     (&["KI18n"], "KF6I18n"),
-    (&["KI18n"], "KF6I18nQml"),
+    // KLocalizedQmlContext is in KI18n in older Frameworks and in KI18nQml
+    // in newer ones (seen with 6.32).
+    (&["KI18n", "KI18nQml"], "KF6I18nQml"),
     (&["KCrash"], "KF6Crash"),
     (&["KConfig", "KConfigCore"], "KF6ConfigCore"),
     (&["KColorScheme"], "KF6ColorScheme"),

@@ -74,7 +74,7 @@
   <url type="help">https://github.com/Octodillo/Kadence/blob/main/docs/user-guide.md</url>
   <url type="vcs-browser">https://github.com/Octodillo/Kadence</url>
   <releases>
-    <release version="0.1.0" date="2026-10-31" type="stable">
+    <release version="0.1.0" date="2026-11-16" type="stable">
       <url type="details">https://github.com/Octodillo/Kadence/releases/tag/v0.1.0</url>
       <description>
         <p>The first release. Kadence can record, arrange, edit, mix and export a song:</p>
