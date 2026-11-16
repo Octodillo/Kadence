@@ -67,6 +67,9 @@ jobs:
         env:
           DAW_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
         run: |
-          bin=$(find target/debug -type f -executable -name 'vst3-*' | head -1)
+          # Ask cargo where the test binary is: its place under target/ has
+          # changed between cargo versions.
+          bin=$(cargo test -p daw-plugins-vst3 --test vst3 --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "vst3") | .executable' | tail -1)
           xvfb-run -a gdb -batch -ex run -ex 'thread apply all bt 30' --args "$bin" \
             sdk_again_editor_opens_in_a_floating_window --exact --nocapture --test-threads=1
