@@ -41,11 +41,6 @@ impl TimelineView {
         TickTime(((x + self.scroll_x) / self.px_per_tick()).floor() as i64)
     }
 
-    /// A horizontal distance in pixels as ticks.
-    pub fn dx_to_ticks(&self, dx: f64) -> i64 {
-        (dx / self.px_per_tick()).round() as i64
-    }
-
     /// The ticks visible in a view `width` pixels wide.
     pub fn visible(&self, width: f64) -> std::ops::Range<TickTime> {
         self.x_to_tick(0.0)..TickTime(self.x_to_tick(width).0 + 1)
@@ -60,17 +55,6 @@ impl TimelineView {
 
     pub fn scroll_by(&mut self, dx: f64) {
         self.scroll_x = (self.scroll_x + dx).max(0.0);
-    }
-
-    /// Scrolls just enough to bring `t` into a view `width` wide, keeping a
-    /// `margin` of pixels on either side (for following the playhead).
-    pub fn reveal(&mut self, t: TickTime, width: f64, margin: f64) {
-        let x = self.tick_to_x(t);
-        if x < margin {
-            self.scroll_by(x - margin);
-        } else if x > width - margin {
-            self.scroll_by(x - (width - margin));
-        }
     }
 }
 
