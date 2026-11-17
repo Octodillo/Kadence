@@ -734,6 +734,17 @@ fn opening_a_clip_shows_all_its_notes() {
 }
 
 #[test]
+fn double_click_before_the_clip_is_refused() {
+    let mut r = Rig::new(vec![]);
+    // Half a beat before the clip start, in the dimmed part.
+    let p = Pointer::left(r.x(-Q / 2), r.y(64));
+    let out = r.pr.double_click(&mut r.doc, p);
+    assert!(out.error.is_some());
+    assert!(r.notes().is_empty());
+    assert!(r.pr.selection.is_empty());
+}
+
+#[test]
 fn a_velocity_edit_never_silences_a_note() {
     let mut r = Rig::new(vec![n(0, Q / 2, 60), n(Q, Q / 2, 62)]);
     let played = |r: &Rig| {

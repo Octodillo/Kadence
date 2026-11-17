@@ -879,16 +879,16 @@ impl PianoRoll {
             _ => None,
         };
         let (lx, ly) = self.local(p.x, p.y);
-        let note = glue::new_note(self.grid_view(c.start).new_note(
+        let note = self.grid_view(c.start).new_note(
             lx,
             ly,
             snap.as_ref(),
             self.new_length,
             self.new_velocity,
-        ));
-        if note.start >= c.length {
+        );
+        let Some(note) = note.map(glue::new_note).filter(|n| n.start < c.length) else {
             return outcome_error(Refusal::NoteOutsideClip);
-        }
+        };
         // A bare `AddNotes`, which takes in the resize that may follow, so
         // the note and its length are one undo step.
         let add = AddNotes {

@@ -171,7 +171,8 @@ impl PianoRollView {
 
     /// The note a click with the draw tool makes: on the clicked key,
     /// starting at the grid line at or before the pointer, `length` long
-    /// (one grid step when `None`).
+    /// (one grid step when `None`). `None` for a click before the clip
+    /// start, where a clip has no notes.
     pub fn new_note(
         &self,
         x: f64,
@@ -179,19 +180,23 @@ impl PianoRollView {
         snap: Option<&Snap>,
         length: Option<i64>,
         velocity: f64,
-    ) -> NoteData {
+    ) -> Option<NoteData> {
         let t = self.x_to_clip_tick(x);
+        if t.0 < 0 {
+            return None;
+        }
         let (start, step) = match snap {
-            Some(s) => (s.floor(t), s.step_at(t)),
+            // The grid line may lie before a clip that starts off the grid.
+            Some(s) => (s.floor(t).max(TickTime(0)), s.step_at(t)),
             None => (t, PPQ / 4),
         };
-        NoteData {
-            start: TickTime(start.0.max(0)),
+        Some(NoteData {
+            start,
             length: TickTime(length.unwrap_or(step).max(MIN_LENGTH)),
             key: self.y_to_key(y),
             channel: 0,
             velocity: edit::clamp_velocity(velocity),
-        }
+        })
     }
 }
 
@@ -530,12 +535,20 @@ mod tests {
         let meter = Meter::default();
         let snap = Snap::new(&grid, &meter, v.clip_start);
         let n = v.new_note(96.0 + 60.0, 675.0, Some(&snap), None, 0.7);
+        let n = n.unwrap();
         assert_eq!((n.start.0, n.length.0, n.key), (Q / 2, Q / 2, 60));
-        // Left of the clip start clamps to 0.
-        assert_eq!(
-            v.new_note(10.0, 675.0, Some(&snap), Some(10), 0.7).start.0,
-            0
-        );
+        // Left of the clip start there is no note to make.
+        assert_eq!(v.new_note(10.0, 675.0, Some(&snap), Some(10), 0.7), None);
+        assert_eq!(v.new_note(95.0, 675.0, None, None, 0.7), None);
+        // In a clip that starts off the grid, a click before its first
+        // grid line makes a note at the clip start.
+        let off_grid = PianoRollView {
+            clip_start: TickTime(Q + 100),
+            ..v
+        };
+        let snap = Snap::new(&grid, &meter, off_grid.clip_start);
+        let n = off_grid.new_note(96.0 + 15.0, 675.0, Some(&snap), None, 0.7);
+        assert_eq!(n.unwrap().start.0, 0);
     }
 
     #[test]
