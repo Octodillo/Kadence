@@ -170,6 +170,210 @@ fn saves_keep_rotating_backups() {
 }
 
 #[test]
+fn saving_what_is_saved_keeps_the_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(sample_project());
+    doc.save_as(dir.path().join("B")).unwrap();
+    let id = doc.project().tracks[0].id;
+    doc.execute(SetTrack::new(id, TrackField::Name("v1".into())))
+        .unwrap();
+    doc.save().unwrap();
+    let bundle = doc.bundle().unwrap().clone();
+    let before = bundle.backups().unwrap();
+    assert_eq!(before.len(), 1);
+    let saved = std::fs::metadata(bundle.project_file())
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    // A habit of pressing Save must not push the one earlier version out.
+    for _ in 0..BACKUPS_KEPT + 3 {
+        doc.save().unwrap();
+    }
+    assert_eq!(bundle.backups().unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(bundle.project_file())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        saved,
+        "nothing to write"
+    );
+
+    // It still clears an autosave, as any save does.
+    bundle.write_autosave(doc.project()).unwrap();
+    doc.save().unwrap();
+    assert!(!bundle.has_autosave());
+
+    // An edit undone to the same content is the same file again.
+    doc.execute(SetTrack::new(id, TrackField::Name("v2".into())))
+        .unwrap();
+    doc.execute(SetTrack::new(id, TrackField::Name("v1".into())))
+        .unwrap();
+    doc.save().unwrap();
+    assert!(!doc.is_modified());
+    assert_eq!(bundle.backups().unwrap(), before);
+}
+
+/// Whether this user can write into a folder made read-only, as root can.
+#[cfg(unix)]
+fn ignores_permissions(dir: &std::path::Path) -> bool {
+    let probe = dir.join("probe");
+    let wrote = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(probe);
+    wrote
+}
+
+#[cfg(unix)]
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_save_leaves_no_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("B");
+    let mut doc = Document::new(sample_project());
+    doc.save_as(&root).unwrap();
+    let id = doc.project().tracks[0].id;
+    doc.execute(SetTrack::new(id, TrackField::Name("v1".into())))
+        .unwrap();
+    // The project file cannot be replaced, but backups/ can be written.
+    set_mode(&root, 0o555);
+    if ignores_permissions(&root) {
+        set_mode(&root, 0o755);
+        return;
+    }
+    for _ in 0..3 {
+        assert!(doc.save().is_err());
+    }
+    set_mode(&root, 0o755);
+    assert!(doc.is_modified());
+    assert_eq!(
+        doc.bundle().unwrap().backups().unwrap(),
+        Vec::<std::path::PathBuf>::new()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_bundle_opens_at_its_saved_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("B");
+    let mut doc = Document::new(sample_project());
+    doc.save_as(&root).unwrap();
+    let saved = doc.project().clone();
+    let id = saved.tracks[0].id;
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    assert!(doc.autosave().unwrap());
+    set_mode(&root, 0o555);
+    if ignores_permissions(&root) {
+        set_mode(&root, 0o755);
+        return;
+    }
+    let opened = Document::open_discarding_autosave(&root);
+    set_mode(&root, 0o755);
+    assert_eq!(opened.unwrap().project(), &saved);
+    // The autosave could not be removed, so it is offered again.
+    assert!(matches!(
+        Document::open(&root),
+        Err(FormatError::AutosavePending(_))
+    ));
+}
+
+#[test]
+fn saving_never_brings_back_a_bundle_that_moved() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Song");
+    let moved = dir.path().join("Song final");
+    let mut doc = Document::new(sample_project());
+    doc.save_as(&root).unwrap();
+    let id = doc.project().tracks[0].id;
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    std::fs::rename(&root, &moved).unwrap();
+
+    let not_found = |r: Result<(), FormatError>| match r {
+        Err(FormatError::Io { path, source }) => {
+            assert_eq!(path, root);
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("{other:?}"),
+    };
+    not_found(doc.save());
+    not_found(doc.autosave().map(drop));
+    let bundle = doc.bundle().unwrap().clone();
+    not_found(bundle.import_audio(moved.join("Song.kadence")).map(drop));
+    assert!(!root.exists(), "a second, empty bundle at the old place");
+    assert!(doc.is_modified());
+
+    // Saving as a new bundle is the way out, and works.
+    doc.save_as(dir.path().join("Song 2")).unwrap();
+    assert!(!doc.is_modified());
+}
+
+#[test]
+fn save_as_a_project_file_means_its_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Song");
+    let mut doc = Document::new(sample_project());
+    // A name that is not there yet stands for the folder around it.
+    doc.save_as(dir.path().join("Song.KADENCE")).unwrap();
+    assert_eq!(doc.bundle().unwrap().root(), root);
+    let own = root.join("Song.kadence");
+    assert!(own.is_file());
+
+    // The document's own file: a plain save, where the user chose.
+    let id = doc.project().tracks[0].id;
+    doc.execute(SetTrack::new(id, TrackField::Name("Edited".into())))
+        .unwrap();
+    doc.save_as(&own).unwrap();
+    assert!(!doc.is_modified());
+    assert_eq!(doc.bundle().unwrap().root(), root);
+    assert!(!root.join("Song").exists(), "a bundle inside the bundle");
+    assert_eq!(
+        Document::open(&own).unwrap().project().tracks[0].name,
+        "Edited"
+    );
+
+    // Another project's file is not replaced and nothing is put beside it.
+    let mut other = Document::new(Project::new("Other"));
+    match other.save_as(&own) {
+        Err(FormatError::Io { path, source }) => {
+            assert_eq!(path, own);
+            assert_eq!(source.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+        r => panic!("{r:?}"),
+    }
+    assert!(other.bundle().is_none());
+    assert!(!root.join("Song").exists());
+    assert_eq!(
+        Document::open(&own).unwrap().project().tracks[0].name,
+        "Edited"
+    );
+
+    // A folder called Name.kadence is a bundle folder as it stands.
+    let folder = dir.path().join("Live.kadence");
+    std::fs::create_dir(&folder).unwrap();
+    other.save_as(&folder).unwrap();
+    assert!(folder.join("Live.kadence").is_file());
+}
+
+#[test]
+fn a_failed_import_leaves_nothing_in_the_audio_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = Bundle::create(dir.path().join("B")).unwrap();
+    // A folder opens but cannot be read as a file.
+    let src = dir.path().join("take.wav");
+    std::fs::create_dir(&src).unwrap();
+    assert!(bundle.import_audio(&src).is_err());
+    assert_eq!(std::fs::read_dir(bundle.audio_dir()).unwrap().count(), 0);
+}
+
+#[test]
 fn autosave_and_recover() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("A");
@@ -184,7 +388,7 @@ fn autosave_and_recover() {
     assert!(doc.autosave().unwrap());
     assert!(!doc.autosave().unwrap(), "already autosaved this revision");
     let bundle = doc.bundle().unwrap().clone();
-    assert!(bundle.has_newer_autosave());
+    assert!(bundle.has_autosave());
 
     let recovered = Document::recover(&path).unwrap();
     assert!(recovered.is_modified());
@@ -487,4 +691,82 @@ fn arming_and_midi_input_are_undoable_track_edits() {
     let track = doc.project().track(id).unwrap();
     assert!(!track.armed);
     assert_eq!(track.midi_input, MidiInput::default());
+}
+
+/// Every key a project file can hold, as `path.key` lines: `[]` for the
+/// items of a list, `<kind>` for the variant a `type` key names, `{}` for
+/// the entries of a map.
+fn key_paths(value: &Value, path: &str, out: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            let path = match map.get("type").and_then(Value::as_str) {
+                Some(kind) => format!("{path}<{kind}>"),
+                None => path.to_owned(),
+            };
+            // Keyed by what the user made (parameter numbers), not by the schema.
+            let free_keys = path.ends_with(".params");
+            for (key, v) in map {
+                let key = if free_keys { "{}" } else { key };
+                let child = format!("{path}.{key}");
+                out.insert(child.clone());
+                key_paths(v, &child, out);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                key_paths(v, &format!("{path}[]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Guards the rule in docs/project-format.md that every added field bumps
+/// `SCHEMA_VERSION`: an older build drops a field it does not know when it
+/// saves, so it has to refuse the file instead.
+#[test]
+fn the_keys_of_a_project_file_are_those_of_its_schema_version() {
+    let mut p = sample_project();
+    // Fill in what the sample leaves empty, so every key shows.
+    let mut tracks = p.tracks.clone();
+    let bus = tracks[2].id;
+    let inst = std::sync::Arc::make_mut(&mut tracks[1]);
+    inst.color = Some(Color(1, 2, 3));
+    inst.audio_input.channels = InputChannels::Stereo(2);
+    inst.output = TrackOutput::Bus(bus);
+    inst.midi_input = MidiInput {
+        device: Some("Keys".into()),
+        channel: Some(0),
+    };
+    inst.devices.push(Device::new(
+        "Gain",
+        DeviceSource::Builtin {
+            kind: "gain".into(),
+        },
+    ));
+    inst.automation
+        .push(AutomationLane::new(AutomationTarget::Volume));
+    inst.automation
+        .push(AutomationLane::new(AutomationTarget::Pan));
+    p.tracks = tracks;
+
+    let json: Value = serde_json::from_str(&bundle::to_json(&p).unwrap()).unwrap();
+    let mut keys = std::collections::BTreeSet::new();
+    key_paths(&json["project"], "project", &mut keys);
+    let found: String = keys.iter().map(|k| format!("{k}\n")).collect();
+
+    let version = bundle::SCHEMA_VERSION;
+    let file = format!(
+        "{}/tests/schema/v{version}.keys",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let expected = std::fs::read_to_string(&file).unwrap_or_default();
+    assert!(
+        found == expected,
+        "the keys a project file holds differ from {file}.\n\
+         A field was added, removed or renamed. Do not edit that list: raise \
+         SCHEMA_VERSION, append a migration, add a row to the History table in \
+         docs/project-format.md, and save the list below as the new version's \
+         file.\n\n{found}"
+    );
 }

@@ -11,7 +11,7 @@ My Song/                      bundle directory
   My Song.kadence             project file (JSON), MIME application/x-kadence-project
   My Song.kadence.autosave    autosave, present only if there are unsaved changes
   audio/                      recorded and imported audio, plus peak caches
-  backups/                    the previous 10 saves
+  backups/                    the 10 versions before the current one
     My Song-0001761766000123.kadence
 ```
 
@@ -22,16 +22,31 @@ My Song/                      bundle directory
   Opening the autosave path, or a bundle whose project file is missing but
   whose autosave remains, resolves to the bundle so `Document::recover` works.
 - A bundle directory holds exactly one `.kadence` file; creating a bundle in a
-  directory that already has one, or has a `.kadence.autosave`, fails. Save As
-  also fails rather than overwrite a file already in the target's `audio/`.
+  directory that already has one, or has a `.kadence.autosave`, fails.
+- Save As takes the bundle directory or, as a file dialog gives it, the
+  project file `Name.kadence` for the directory `Name` around it. Choosing
+  the open project's own file is a plain save; choosing another project's
+  file fails rather than write into its bundle. It copies the old bundle's
+  `audio/` folder with its sub-folders, and any other file in the old bundle
+  that a clip plays, each to the same place in the new bundle, and fails
+  rather than overwrite a file already there. A failed Save As removes what
+  it copied.
 - Saving copies the current project file into `backups/` as
   `<name>-<timestamp>.kadence`, where the timestamp is a zero-padded
-  millisecond Unix time, always later than the newest backup's. It keeps that
-  project's newest 10 (backups under another name, from before the project
-  file was renamed, are left alone), then writes the new file atomically:
-  write a new `<name>.kadence.<pid>-<n>.tmp`, fsync, rename, fsync the
-  directory. A crash never leaves a half-written project. The new file keeps
-  the old one's permissions.
+  millisecond Unix time, always later than the newest backup's, then writes
+  the new file atomically: write a new `<name>.kadence.<pid>-<n>.tmp`, fsync,
+  rename, fsync the directory. A crash never leaves a half-written project.
+  The new file keeps the old one's permissions. Once it is written, that
+  project's backups beyond the newest 10 are removed (backups under another
+  name, from before the project file was renamed, are left alone). If the
+  write fails, the backup just made is removed again.
+- Saving a project whose file already holds exactly what would be written
+  changes nothing, so repeated saves do not push earlier versions out of
+  `backups/`.
+- Only creating a bundle makes its directory. If the directory of an open
+  bundle was moved, renamed or deleted, saving, autosaving and importing
+  fail with a not-found error naming it instead of starting a second bundle
+  at the old place.
 - A symlinked project file is written through, and stays a link, only when
   the open project was read from it. After recovering an autosave or Save As
   the project file was not read, so a link there is replaced by the new file
@@ -41,16 +56,19 @@ My Song/                      bundle directory
   cannot direct a write to another file.
 - Autosave writes `<name>.kadence.autosave` the same atomic way and never
   touches the project file. A link at that name is replaced, not followed.
-  Symlinked `audio/` and `backups/` folders are still followed. Saving deletes it, and so does undoing back to the
-  saved state. If one exists when a bundle is opened, `Document::open` fails
+  Symlinked `audio/` and `backups/` folders are still followed. Saving
+  deletes it, and so does undoing back to the saved state; a save still
+  succeeds if the autosave cannot be deleted. If one exists when a bundle is opened, `Document::open` fails
   with `FormatError::AutosavePending` instead of loading the older file: the
   app asks the user, then calls `Document::recover` (load the autosave) or
   `Document::open_discarding_autosave`. The open document therefore always owns
-  its bundle's autosave.
+  its bundle's autosave. In a bundle that cannot be written, discarding
+  still opens the saved version and the autosave stays to be offered again.
 - `AudioClip.source` paths are relative to the bundle root (for example
-  `audio/take1.wav`), always with `/` separators. Absolute paths are allowed for files left outside the
-  bundle. `Bundle::import_audio` copies a file into `audio/` under a name that
-  doesn't clash.
+  `audio/take1.wav`), always with `/` separators. Absolute paths are allowed
+  for files left outside the bundle. `Bundle::import_audio` copies a file
+  into `audio/` under a name that doesn't clash, and leaves nothing there if
+  the copy fails.
 
 ## Project file
 
@@ -185,6 +203,10 @@ fails is rejected rather than half-loaded.
   deserializes. Files at the current version skip the migration path.
 - A file with a newer version than the build supports is rejected with
   `FormatError::TooNew`, never silently downgraded.
+- `crates/daw-model/tests/schema/v<N>.keys` lists every key a version `N`
+  file can hold, and a test compares it with what the build writes. When it
+  fails, a field was added or renamed: raise the version and add the new
+  list instead of editing the old one.
 
 ### History
 
@@ -192,5 +214,5 @@ fails is rejected rather than half-loaded.
 |---------|--------|
 | 1       | First schema. |
 | 2       | Default names are no longer saved in English: a project name of `"Untitled"` and a master named `"Master"` become `""`, and the UI words them in the user's language. |
-| 3       | Audio clips get `fade_in` and `fade_out`. Missing fades mean no fade, so version 2 files load unchanged. |
+| 3       | Audio clips get `fade_in` and `fade_out`. Missing fades mean no fade, so version 2 files load unchanged. Tracks later gained `armed` and `audio_input` without a version of their own, so a version 3 file may or may not hold them; missing means not armed and the first input, mono, monitoring off. |
 | 4       | Instrument tracks gain `midi_input` (`device`: a source port name or `null` for every input; `channel`: 0–15 or `null` for every channel). Missing means every input, so version 3 files load unchanged. |

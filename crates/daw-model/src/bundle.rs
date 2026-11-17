@@ -9,7 +9,7 @@
 //! ```
 
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -86,6 +86,13 @@ struct EnvelopeIn<'a> {
 /// Serializes a project to the current schema.
 pub fn to_json(project: &Project) -> Result<String, FormatError> {
     Ok(serde_json::to_string_pretty(&envelope(project))?)
+}
+
+/// A project file's content: [`to_json`] and the newline that ends it.
+fn file_content(project: &Project) -> Result<Vec<u8>, FormatError> {
+    let mut bytes = serde_json::to_vec_pretty(&envelope(project))?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 fn envelope(project: &Project) -> EnvelopeOut<'_> {
@@ -175,7 +182,7 @@ impl Bundle {
         // open, and saving would delete an autosave left to recover from.
         let existing = project_files(&bundle.root)?
             .into_iter()
-            .chain(files_with_suffix(&bundle.root, AUTOSAVE_SUFFIX)?)
+            .chain(autosaves(&bundle.root)?)
             .next();
         if let Some(existing) = existing {
             return Err(FormatError::Io {
@@ -183,8 +190,30 @@ impl Bundle {
                 source: std::io::ErrorKind::AlreadyExists.into(),
             });
         }
-        bundle.make_dirs()?;
+        for d in [&bundle.root, &bundle.audio_dir(), &bundle.backups_dir()] {
+            fs::create_dir_all(d).map_err(FormatError::io(d))?;
+        }
         Ok(bundle)
+    }
+
+    /// What saving as `path` means. A file dialog hands back the project
+    /// file `Name.kadence`, which stands for the bundle directory `Name`
+    /// around it; if that file is already there, it is the bundle it
+    /// belongs to that was chosen.
+    pub fn target(path: impl AsRef<Path>) -> Result<Target, FormatError> {
+        let path = path.as_ref();
+        if path.is_file() {
+            return Self::open(path).map(Target::Existing);
+        }
+        let around = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| strip_suffix_ci(n, PROJECT_SUFFIX))
+            .filter(|stem| !matches!(*stem, "" | "." | ".."))
+            // A folder called `Name.kadence` is a bundle directory itself.
+            .filter(|_| path.symlink_metadata().is_err())
+            .map(|stem| path.with_file_name(stem));
+        Ok(Target::New(around.unwrap_or_else(|| path.to_path_buf())))
     }
 
     /// Opens an existing bundle, given either its directory or its project
@@ -217,7 +246,7 @@ impl Bundle {
             if files.is_empty() {
                 // The project file is gone but an autosave may be left to
                 // recover from.
-                files = files_with_suffix(path, AUTOSAVE_SUFFIX)?;
+                files = autosaves(path)?;
             }
             return match files.len() {
                 0 => Err(FormatError::io(path)(std::io::ErrorKind::NotFound.into())),
@@ -230,9 +259,7 @@ impl Bundle {
             .and_then(|s| s.to_str())
             .ok_or_else(|| invalid("project file name is not valid UTF-8"))?;
         // An autosave path stands for the project file next to it.
-        let file_name = strip_suffix_ci(name, ".autosave")
-            .filter(|n| has_suffix_ci(n, PROJECT_SUFFIX))
-            .unwrap_or(name);
+        let file_name = autosave_of(name).unwrap_or(name);
         let stem = strip_suffix_ci(file_name, PROJECT_SUFFIX)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| invalid("not a .kadence project file"))?;
@@ -263,7 +290,7 @@ impl Bundle {
     }
 
     pub fn autosave_file(&self) -> PathBuf {
-        self.root.join(format!("{}.autosave", self.file_name))
+        self.root.join(format!("{}{AUTOSAVE_EXT}", self.file_name))
     }
 
     pub fn audio_dir(&self) -> PathBuf {
@@ -274,11 +301,18 @@ impl Bundle {
         self.root.join(BACKUPS_DIR)
     }
 
-    fn make_dirs(&self) -> Result<(), FormatError> {
-        for d in [self.root.clone(), self.audio_dir(), self.backups_dir()] {
-            fs::create_dir_all(&d).map_err(FormatError::io(d))?;
+    /// Makes sure `dir`, a folder of this bundle, is there. The bundle's
+    /// own folder is only ever made by [`Bundle::create`]: if it was moved,
+    /// renamed or deleted since, writing into a new one at the old place
+    /// would split the project from its audio, so that is an error naming
+    /// the folder.
+    fn ensure_dir(&self, dir: &Path) -> Result<(), FormatError> {
+        if !self.root.is_dir() {
+            return Err(FormatError::io(&self.root)(
+                std::io::ErrorKind::NotFound.into(),
+            ));
         }
-        Ok(())
+        fs::create_dir_all(dir).map_err(FormatError::io(dir))
     }
 
     /// Reads the project file.
@@ -286,28 +320,54 @@ impl Bundle {
         read_project(&self.project_file())
     }
 
-    /// Writes the project file atomically, first copying the previous version
-    /// into `backups/`. Removes any autosave, since it is now older.
+    /// Writes the project file atomically, keeping the version it replaces
+    /// in `backups/`. Saving what the file already holds changes nothing, so
+    /// the backups stay distinct earlier versions. Removes any autosave,
+    /// since it is now older.
     ///
     /// `link` says what happens if the project file is a symlink. Pass
     /// [`Link::Follow`] only when `project` was loaded through it with
     /// [`Bundle::load`].
     pub fn save(&self, project: &Project, link: Link) -> Result<(), FormatError> {
-        self.make_dirs()?;
+        self.ensure_dir(&self.root)?;
         let file = self.project_file();
+        let content = file_content(project)?;
         let previous = match link {
             Link::Follow => fs::metadata(&file),
             // What a link points to is not a previous version of this project.
             Link::Replace => fs::symlink_metadata(&file),
         };
-        if previous.is_ok_and(|m| m.is_file()) {
-            self.backup(&file)?;
+        if !previous.is_ok_and(|m| m.is_file()) {
+            write_atomic(&file, &file, link, &content)?;
+        } else if fs::read(&file).is_ok_and(|saved| saved == content) {
+            // Already saved.
+        } else {
+            let backups = self.backup(&file)?;
+            if let Err(e) = write_atomic(&file, &file, link, &content) {
+                // Nothing was replaced, so there is no earlier version to keep.
+                if let Some((_, unused)) = backups.last() {
+                    let _ = fs::remove_file(unused);
+                }
+                return Err(e);
+            }
+            // Only this project's backups rotate; ones left by a project
+            // file of another name (before a rename) are kept. One that
+            // cannot be removed is left: the project is saved.
+            let excess = backups.len().saturating_sub(BACKUPS_KEPT);
+            for (_, old) in &backups[..excess] {
+                let _ = fs::remove_file(old);
+            }
         }
-        write_atomic(&file, &file, link, project)?;
-        self.discard_autosave()
+        // The project is saved even if the autosave cannot be removed, which
+        // only means an offer to recover it later.
+        let _ = self.discard_autosave();
+        Ok(())
     }
 
-    fn backup(&self, file: &Path) -> Result<(), FormatError> {
+    /// Copies `file` into `backups/` under the next name. Returns this
+    /// project's backups, oldest first, the new one last.
+    fn backup(&self, file: &Path) -> Result<Vec<(u64, PathBuf)>, FormatError> {
+        self.ensure_dir(&self.backups_dir())?;
         let mut backups = self.own_backups()?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -339,18 +399,12 @@ impl Bundle {
             }
         };
         backups.push((stamp, dest));
-        // Only this project's backups rotate; ones left by a project file of
-        // another name (before a rename) are kept.
-        let excess = backups.len().saturating_sub(BACKUPS_KEPT);
-        for (_, old) in &backups[..excess] {
-            fs::remove_file(old).map_err(FormatError::io(old))?;
-        }
-        Ok(())
+        Ok(backups)
     }
 
     /// This project's `<stem>-<timestamp>` backups, oldest first.
     fn own_backups(&self) -> Result<Vec<(u64, PathBuf)>, FormatError> {
-        let mut v: Vec<(u64, PathBuf)> = files_with_suffix(&self.backups_dir(), PROJECT_SUFFIX)?
+        let mut v: Vec<(u64, PathBuf)> = project_files(&self.backups_dir())?
             .into_iter()
             .filter_map(|p| Some((self.backup_stamp(&p)?, p)))
             .collect();
@@ -372,7 +426,7 @@ impl Bundle {
     /// Lists backups, oldest first. Backups left by a project file of another
     /// name (before a rename) come before this project's own.
     pub fn backups(&self) -> Result<Vec<PathBuf>, FormatError> {
-        let mut others: Vec<PathBuf> = files_with_suffix(&self.backups_dir(), PROJECT_SUFFIX)?
+        let mut others: Vec<PathBuf> = project_files(&self.backups_dir())?
             .into_iter()
             .filter(|p| self.backup_stamp(p).is_none())
             .collect();
@@ -383,34 +437,20 @@ impl Bundle {
 
     /// Writes the autosave file atomically. The project file is untouched.
     pub fn write_autosave(&self, project: &Project) -> Result<(), FormatError> {
-        self.make_dirs()?;
+        self.ensure_dir(&self.root)?;
         // The autosave holds the same data, so it gets the same permissions.
         write_atomic(
             &self.autosave_file(),
             &self.project_file(),
             Link::Replace,
-            project,
+            &file_content(project)?,
         )
     }
 
-    /// Whether an autosave exists that is newer than the project file, which
-    /// means the app quit without saving. Offer to recover it.
     /// Whether an autosave exists. Saving deletes it, so this means unsaved
-    /// changes from a session that ended without saving.
+    /// changes from a session that ended without saving. Offer to recover it.
     pub fn has_autosave(&self) -> bool {
         self.autosave_file().is_file()
-    }
-
-    pub fn has_newer_autosave(&self) -> bool {
-        let modified = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
-        match (
-            modified(self.autosave_file()),
-            modified(self.project_file()),
-        ) {
-            (Some(a), Some(p)) => a >= p,
-            (Some(_), None) => true,
-            _ => false,
-        }
     }
 
     pub fn load_autosave(&self) -> Result<Project, FormatError> {
@@ -429,31 +469,31 @@ impl Bundle {
 
     /// Copies an audio file into `audio/` under a name that doesn't clash, and
     /// returns its path relative to the bundle root, for
-    /// [`crate::AudioClip::source`].
+    /// [`crate::AudioClip::source`]. A failed copy leaves nothing behind.
     pub fn import_audio(&self, src: impl AsRef<Path>) -> Result<PathBuf, FormatError> {
         let src = src.as_ref();
         let dir = self.audio_dir();
-        fs::create_dir_all(&dir).map_err(FormatError::io(&dir))?;
+        self.ensure_dir(&dir)?;
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
         let ext = src.extension().and_then(|s| s.to_str());
-        let name = |n: usize| {
+        for n in 0usize.. {
             let base = if n == 0 {
                 stem.to_owned()
             } else {
                 format!("{stem}-{n}")
             };
-            match ext {
+            let file = match ext {
                 Some(e) => format!("{base}.{e}"),
                 None => base,
+            };
+            match copy_new(src, &dir.join(&file)) {
+                Err(FormatError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // Always `/`, so bundles open the same on every platform.
+                result => return result.map(|()| PathBuf::from(format!("{AUDIO_DIR}/{file}"))),
             }
-        };
-        let file = (0..)
-            .map(name)
-            .find(|n| !dir.join(n).exists())
-            .expect("some name is free");
-        fs::copy(src, dir.join(&file)).map_err(FormatError::io(src))?;
-        // Always `/`, so bundles open the same on every platform.
-        Ok(PathBuf::from(format!("{AUDIO_DIR}/{file}")))
+        }
+        unreachable!("some name is free")
     }
 
     /// Resolves an [`crate::AudioClip::source`] against this bundle.
@@ -462,8 +502,23 @@ impl Bundle {
     }
 }
 
+/// What [`Bundle::target`] makes of the path chosen to save as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A bundle to create in this directory.
+    New(PathBuf),
+    /// The bundle the chosen project file belongs to.
+    Existing(Bundle),
+}
+
 const PROJECT_SUFFIX: &str = ".kadence";
-const AUTOSAVE_SUFFIX: &str = ".kadence.autosave";
+/// What an autosave's name adds to its project file's.
+const AUTOSAVE_EXT: &str = ".autosave";
+
+/// The project file name that the autosave called `name` belongs to.
+fn autosave_of(name: &str) -> Option<&str> {
+    strip_suffix_ci(name, AUTOSAVE_EXT).filter(|n| has_suffix_ci(n, PROJECT_SUFFIX))
+}
 
 fn has_suffix_ci(name: &str, suffix: &str) -> bool {
     strip_suffix_ci(name, suffix).is_some()
@@ -478,20 +533,23 @@ fn strip_suffix_ci<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
 
 /// The project files directly inside `dir`.
 fn project_files(dir: &Path) -> Result<Vec<PathBuf>, FormatError> {
-    files_with_suffix(dir, PROJECT_SUFFIX)
+    files_named(dir, |n| has_suffix_ci(n, PROJECT_SUFFIX))
 }
 
-fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>, FormatError> {
+/// The autosaves directly inside `dir`.
+fn autosaves(dir: &Path) -> Result<Vec<PathBuf>, FormatError> {
+    files_named(dir, |n| autosave_of(n).is_some())
+}
+
+/// The files directly inside `dir` whose name `wanted` accepts.
+fn files_named(dir: &Path, wanted: impl Fn(&str) -> bool) -> Result<Vec<PathBuf>, FormatError> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
     let mut files = Vec::new();
     for entry in fs::read_dir(dir).map_err(FormatError::io(dir))? {
         let p = entry.map_err(FormatError::io(dir))?.path();
-        let matches = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| has_suffix_ci(n, suffix));
+        let matches = p.file_name().and_then(|n| n.to_str()).is_some_and(&wanted);
         if matches && p.is_file() {
             files.push(p);
         }
@@ -527,7 +585,7 @@ pub fn read_project(path: &Path) -> Result<Project, FormatError> {
 /// Writes a project file on its own, atomically, such as the autosave of a
 /// project that has no bundle yet. Read it back with [`read_project`].
 pub fn write_project(path: &Path, project: &Project) -> Result<(), FormatError> {
-    write_atomic(path, path, Link::Replace, project)
+    write_atomic(path, path, Link::Replace, &file_content(project)?)
 }
 
 /// The largest time stamp a backup's 16-digit name holds.
@@ -536,7 +594,7 @@ const MAX_STAMP: u64 = 9_999_999_999_999_999;
 /// Copies the file `src` to `dest`, which must not exist yet: a link put at
 /// `dest` beforehand is refused, not written through. A failed copy leaves
 /// nothing at `dest`.
-fn copy_new(src: &Path, dest: &Path) -> Result<(), FormatError> {
+pub(crate) fn copy_new(src: &Path, dest: &Path) -> Result<(), FormatError> {
     let mut from = File::open(src).map_err(FormatError::io(src))?;
     let meta = from.metadata().map_err(FormatError::io(src))?;
     let mut to = File::create_new(dest).map_err(FormatError::io(dest))?;
@@ -570,12 +628,7 @@ pub enum Link {
 /// Writes to a temporary file next to `path`, syncs it, then renames it over
 /// `path`, so a crash never leaves a half-written project. The new file keeps
 /// the permissions of `path`, or of `like` if `path` doesn't exist yet.
-fn write_atomic(
-    path: &Path,
-    like: &Path,
-    link: Link,
-    project: &Project,
-) -> Result<(), FormatError> {
+fn write_atomic(path: &Path, like: &Path, link: Link, content: &[u8]) -> Result<(), FormatError> {
     let path = match fs::symlink_metadata(path) {
         // A dangling link is replaced either way.
         Ok(m) if link == Link::Follow && m.file_type().is_symlink() => {
@@ -590,7 +643,7 @@ fn write_atomic(
         .or_else(|| fs::metadata(like).ok())
         .map(|m| m.permissions());
     let (file, tmp) = create_temp(path)?;
-    let result = write_synced(file, &tmp, perms, project)
+    let result = write_synced(file, &tmp, perms, content)
         .and_then(|()| fs::rename(&tmp, path).map_err(FormatError::io(path)));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -626,10 +679,10 @@ fn create_temp(path: &Path) -> Result<(File, PathBuf), FormatError> {
 }
 
 fn write_synced(
-    file: File,
+    mut file: File,
     path: &Path,
     perms: Option<fs::Permissions>,
-    project: &Project,
+    content: &[u8],
 ) -> Result<(), FormatError> {
     // Narrowed before any data goes in. Elsewhere permissions are only a
     // read-only flag, which would stop the write.
@@ -639,18 +692,6 @@ fn write_synced(
     }
     #[cfg(not(unix))]
     let _ = perms;
-    let mut w = BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut w, &envelope(project)).map_err(|e| {
-        // A full disk is an I/O error, not a malformed file.
-        if e.is_io() {
-            FormatError::io(path)(e.into())
-        } else {
-            e.into()
-        }
-    })?;
-    w.write_all(b"\n").map_err(FormatError::io(path))?;
-    let file = w
-        .into_inner()
-        .map_err(|e| FormatError::io(path)(e.into_error()))?;
+    file.write_all(content).map_err(FormatError::io(path))?;
     file.sync_all().map_err(FormatError::io(path))
 }

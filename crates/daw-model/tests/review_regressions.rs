@@ -43,7 +43,7 @@ fn autosave_is_removed_after_undoing_to_saved_state() {
     doc.undo().unwrap();
     assert!(!doc.autosave().unwrap());
     assert!(!bundle.autosave_file().exists());
-    assert!(!bundle.has_newer_autosave());
+    assert!(!bundle.has_autosave());
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn recover_works_when_only_the_autosave_is_left() {
         .unwrap();
     doc.autosave().unwrap();
     std::fs::remove_file(root.join("Lost.kadence")).unwrap();
-    assert!(Bundle::open(&root).unwrap().has_newer_autosave());
+    assert!(Bundle::open(&root).unwrap().has_autosave());
     assert_eq!(Document::recover(&root).unwrap().project(), doc.project());
     assert_eq!(
         Document::recover(root.join("Lost.kadence.autosave"))

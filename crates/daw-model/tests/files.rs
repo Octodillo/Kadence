@@ -400,10 +400,89 @@ fn save_as_copies_only_what_is_really_in_the_audio_folder() {
 fn save_as_copies_nothing_through_a_linked_audio_folder() {
     let fx = fixture();
     write(&fx.outside.join("id_ed25519"), b"secret");
+    write(&fx.outside.join("unused.wav"), b"unused");
     let mut doc = saved(&fx, project_with(&["audio/id_ed25519".into()]));
     fs::remove_dir(fx.root.join("audio")).unwrap();
     std::os::unix::fs::symlink(&fx.outside, fx.root.join("audio")).unwrap();
     let new = fx._tmp.path().join("Copy");
     doc.save_as(&new).unwrap();
-    assert!(!new.join("audio/id_ed25519").exists());
+    // The folder is not walked, and the file a clip plays through it comes
+    // across as a link to it, as a linked file would.
+    assert!(new.join("audio/unused.wav").symlink_metadata().is_err());
+    let played = new.join("audio/id_ed25519");
+    assert!(played.symlink_metadata().unwrap().is_symlink());
+    assert_eq!(fs::read(played).unwrap(), b"secret");
+}
+
+#[test]
+fn save_as_brings_every_file_of_the_bundle_that_plays() {
+    let fx = fixture();
+    let sources: Vec<PathBuf> = [
+        "audio/take.wav",
+        "audio/drums/kick.wav",
+        "samples/one/snare.wav",
+        "samples/../audio/drums/kick.wav",
+    ]
+    .map(PathBuf::from)
+    .into();
+    let outside = fx.outside.join("far.wav");
+    write(&outside, b"far");
+    let mut all = sources.clone();
+    all.push(outside.clone());
+    all.push("../Samples/far.wav".into());
+    let mut doc = saved(&fx, project_with(&all));
+    let content = |s: &Path| s.file_name().unwrap().as_encoded_bytes().to_vec();
+    for s in &sources {
+        write(&fx.root.join(s), &content(s));
+    }
+    // In audio/ but played by nothing, and elsewhere and played by nothing.
+    write(&fx.root.join("audio/old/unused.wav"), b"unused");
+    write(&fx.root.join("notes/lyrics.txt"), b"la");
+
+    let new = fx._tmp.path().join("Song v2");
+    doc.save_as(&new).unwrap();
+    assert_eq!(doc.bundle().unwrap().root(), new);
+    assert!(files::missing_audio(doc.project(), doc.bundle()).is_empty());
+    for s in &sources[..3] {
+        let copy = new.join(s);
+        assert!(copy.symlink_metadata().unwrap().is_file(), "{s:?}");
+        assert_eq!(fs::read(copy).unwrap(), content(s));
+    }
+    assert_eq!(
+        fs::read(new.join("audio/old/unused.wav")).unwrap(),
+        b"unused"
+    );
+    assert!(!new.join("notes").exists());
+    assert!(!new.join("far.wav").exists());
+}
+
+#[test]
+fn failed_save_as_takes_back_the_folders_it_made() {
+    let fx = fixture();
+    let mut doc = saved(
+        &fx,
+        project_with(&["audio/drums/kick.wav".into(), "samples/snare.wav".into()]),
+    );
+    write(&fx.root.join("audio/drums/kick.wav"), b"kick");
+    write(&fx.root.join("samples/snare.wav"), b"snare");
+
+    // A file of that name is already where one would go: refused before
+    // anything is copied.
+    let taken = fx._tmp.path().join("Taken");
+    write(&taken.join("samples/snare.wav"), b"theirs");
+    assert!(doc.save_as(&taken).is_err());
+    assert_eq!(
+        fs::read(taken.join("samples/snare.wav")).unwrap(),
+        b"theirs"
+    );
+    assert!(!taken.join("audio/drums").exists());
+
+    // The copy fails part-way: a folder cannot be made where a file is.
+    let blocked = fx._tmp.path().join("Blocked");
+    write(&blocked.join("samples"), b"a file");
+    assert!(doc.save_as(&blocked).is_err());
+    assert!(!blocked.join("audio/drums").exists(), "left half a copy");
+    assert_eq!(fs::read(blocked.join("samples")).unwrap(), b"a file");
+    assert_eq!(doc.bundle().unwrap().root(), fx.root);
+    assert!(!blocked.join("Blocked.kadence").exists());
 }

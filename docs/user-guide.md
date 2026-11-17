@@ -69,8 +69,11 @@ audio it uses, so it can be copied or backed up as one. **New Project**
 (Ctrl+S) and **Save As…** (Ctrl+Shift+S) are in the main menu, with
 **Open Recent**.
 
-- Every save keeps the previous ten versions in the project's `backups`
-  folder.
+- Saving keeps the ten versions before it in the project's `backups`
+  folder. Saving again without a change adds nothing to it.
+- **Save As…** makes a new project folder and copies the project's audio
+  into it. Choosing the open project's own file there just saves it. If you
+  move or rename an open project's folder, save it with **Save As…**.
 - While a project has unsaved changes, Kadence keeps a recovery copy (you
   can turn this off in **General** settings). After a crash, Kadence offers
   to **Recover** it the next time you open the project.

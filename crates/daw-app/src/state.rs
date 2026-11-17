@@ -968,14 +968,14 @@ impl AppState {
         self.doc.save()
     }
 
-    /// Saves into a new bundle at `dir`. A take in progress ends first and
-    /// is saved with the rest: its files belong with the project it was
-    /// started in.
-    pub fn save_as(&mut self, dir: &Path) -> Result<(), FormatError> {
+    /// Saves into a new bundle at `path` (see [`Document::save_as`]). A take
+    /// in progress ends first and is saved with the rest: its files belong
+    /// with the project it was started in.
+    pub fn save_as(&mut self, path: &Path) -> Result<(), FormatError> {
         self.stop_recording();
         self.store_plugin_states();
         let was_untitled = self.doc.bundle().is_none();
-        self.doc.save_as(dir)?;
+        self.doc.save_as(path)?;
         if was_untitled && let Some(s) = &self.scratch {
             let _ = s.discard();
         }
