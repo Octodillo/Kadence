@@ -117,8 +117,7 @@ impl Editor {
         self.window.set_title(title);
     }
 
-    /// Handles window events and the plugin's run-loop callbacks. Returns false once the user
-    /// has closed the window.
+    /// Handles window events. Returns false once the user has closed the window.
     pub fn pump(&mut self) -> bool {
         let mut open = true;
         let mut resized = None;
@@ -158,7 +157,6 @@ impl Editor {
                 }
             }
         }
-        host().run_loop.pump();
         open
     }
 }

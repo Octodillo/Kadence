@@ -131,10 +131,13 @@ impl PluginFormat for Lv2Format {
     }
 }
 
-/// `file:///path/to/bundle.lv2/`, the form lilv wants for bundle URIs.
+/// `file:///path/to/bundle.lv2/`, the form lilv wants for bundle URIs. The
+/// path's bytes are encoded as they are, so a name that is not UTF-8 still
+/// names its directory; [`uri_to_path`] is the inverse.
 pub(crate) fn bundle_uri(bundle: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
     let mut uri = String::from("file://");
-    for b in bundle.to_string_lossy().bytes() {
+    for &b in bundle.as_os_str().as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
                 uri.push(b as char)
@@ -188,5 +191,15 @@ mod tests {
             uri_to_path("file://localhost/usr/lib/lv2/a.so").unwrap(),
             Path::new("/usr/lib/lv2/a.so")
         );
+    }
+
+    #[test]
+    fn a_bundle_path_that_is_not_utf8_round_trips() {
+        use std::os::unix::ffi::OsStrExt;
+        // "Pléug" in Latin-1.
+        let p = Path::new(std::ffi::OsStr::from_bytes(b"/home/me/.lv2/Pl\xE9ug.lv2/"));
+        let uri = bundle_uri(p);
+        assert_eq!(uri, "file:///home/me/.lv2/Pl%E9ug.lv2/");
+        assert_eq!(uri_to_path(&uri).unwrap(), p);
     }
 }
