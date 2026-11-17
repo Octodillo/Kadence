@@ -75,19 +75,25 @@ pub(crate) fn push_clap(out: &mut EventBuffer, e: &Event, frame: u32, notes_as_m
 /// Events the list cannot hold, and kinds `daw_core` has no form for, are dropped.
 pub(crate) struct Sink<'a> {
     pub(crate) out: &'a mut EventList,
+    /// Where in the host's block the chunk being processed starts, and its length.
     pub(crate) frame_offset: u32,
+    pub(crate) frames: u32,
 }
 
 impl OutputEventBuffer for Sink<'_> {
     fn try_push(&mut self, event: &UnknownEvent) -> Result<(), TryPushError> {
-        push_daw(self.out, event, self.frame_offset).map_err(|()| TryPushError::new())
+        // The time is the plugin's word: one outside the chunk (an uninitialised header, a
+        // "now" of `u32::MAX`) is moved to its last frame instead of overflowing or leaving
+        // the block.
+        let time = event.header().time().min(self.frames.saturating_sub(1));
+        push_daw(self.out, event, self.frame_offset.saturating_add(time))
+            .map_err(|()| TryPushError::new())
     }
 }
 
-/// Pushes the `daw_core` form of a CLAP event the plugin sent into `out`. Fails when `out` is
-/// full. Kinds `daw_core` has no form for are skipped.
-pub(crate) fn push_daw(out: &mut EventList, e: &UnknownEvent, frame_offset: u32) -> Result<(), ()> {
-    let frame = e.header().time() + frame_offset;
+/// Pushes the `daw_core` form of a CLAP event the plugin sent into `out`, at `frame` of the
+/// host's block. Fails when `out` is full. Kinds `daw_core` has no form for are skipped.
+pub(crate) fn push_daw(out: &mut EventList, e: &UnknownEvent, frame: u32) -> Result<(), ()> {
     let mut push = |kind| out.push(Event { frame, kind }).map_err(|_| ());
     match e.as_core_event() {
         Some(CoreEventSpace::NoteOn(n)) => {
@@ -293,6 +299,25 @@ mod tests {
             panic!("expected a MIDI event");
         };
         assert_eq!(m.data(), [0x92, 60, 1]);
+    }
+
+    #[test]
+    fn an_output_event_timed_outside_its_chunk_lands_on_the_chunks_last_frame() {
+        let mut buf = EventBuffer::with_capacity(2);
+        buf.push(&MidiEvent::new(u32::MAX, 0, [0x90, 60, 100]));
+        buf.push(&MidiEvent::new(5, 0, [0x80, 60, 0]));
+        let mut out = EventList::with_capacity(4);
+        let mut sink = Sink {
+            out: &mut out,
+            frame_offset: 96,
+            frames: 32,
+        };
+        for e in &buf {
+            sink.try_push(e).unwrap();
+        }
+        let mut frames: Vec<u32> = out.iter().map(|e| e.frame).collect();
+        frames.sort_unstable();
+        assert_eq!(frames, [101, 127]);
     }
 
     fn converted(e: &UnknownEvent) -> Vec<EventKind> {

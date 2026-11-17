@@ -26,7 +26,7 @@ use crate::runloop::{RunLoop, forward_run_loop};
 use crate::util::copy_wstr;
 
 /// Name reported to plugins through `IHostApplication::getName`.
-pub const HOST_NAME: &str = "DAW";
+pub use daw_core::plugin::HOST_NAME;
 
 fn same_iid<I: Interface>(tuid: *const TUID) -> bool {
     !tuid.is_null() && unsafe { *(tuid as *const [u8; 16]) } == I::IID
@@ -549,6 +549,11 @@ impl ComponentHandler {
     /// Returns and clears the flags passed to `restartComponent` since the last call.
     pub fn take_restart_flags(&self) -> i32 {
         self.restart_flags.swap(0, Ordering::AcqRel)
+    }
+
+    /// Forgets the flags in `mask`, which the caller has just answered.
+    pub fn discard_restart_flags(&self, mask: i32) {
+        self.restart_flags.fetch_and(!mask, Ordering::AcqRel);
     }
 
     /// Notes a change to the plugin's state that it made on its own.
