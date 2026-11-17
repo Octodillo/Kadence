@@ -50,7 +50,7 @@ use daw_midi::grid::{Grid, Meter};
 use daw_midi::model::{self as glue, NoteEdit};
 use daw_midi::player::Preview;
 use daw_midi::{EditNote, NoteData};
-use daw_model::commands::{AddNotes, EditNotes};
+use daw_model::commands::AddNotes;
 use daw_model::{
     Clip, ClipContent, ClipId, Command, Document, MidiClip, Note, NoteUid, Project, TrackId,
 };
@@ -640,7 +640,7 @@ impl PianoRoll {
                 // the pointer.
                 let end = TickTime(c.start.0 + note.data().end().0);
                 let view = self.grid_view(c.start);
-                if view.x_to_tick(self.local(p.x, p.y).0) <= end {
+                if view.time.x_to_tick(self.local(p.x, p.y).0) <= end {
                     return Outcome::default();
                 }
                 let begun = self.begin_note_drag(project, id, |_, grabbed, sel| {
