@@ -444,20 +444,12 @@ impl ClapInstance {
     }
 }
 
-fn silence(ctx: &mut ProcessContext) {
-    let frames = ctx.frames as usize;
-    for out in ctx.audio_out.iter_mut() {
-        let n = frames.min(out.len());
-        out[..n].fill(0.0);
-    }
-}
-
 impl AudioHalf {
     fn process(&mut self, ctx: &mut ProcessContext) {
         let _scope = AudioThreadScope::enter();
         let bufs = &mut self.buffers;
         let Ok(processor) = self.processor.ensure_processing_started() else {
-            silence(ctx);
+            ctx.silence_outputs();
             return;
         };
 
@@ -580,7 +572,7 @@ impl Node for ClapInstance {
     fn process(&mut self, ctx: &mut ProcessContext) {
         match self.audio.as_mut() {
             Some(audio) => audio.process(ctx),
-            None => silence(ctx),
+            None => ctx.silence_outputs(),
         }
     }
 
