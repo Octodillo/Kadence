@@ -1,17 +1,17 @@
 //! Tests against real LV2 plugins: mda-lv2 and x42-plugins.
 //!
 //! When the plugins are not installed the tests skip, unless
-//! `DAW_REQUIRE_LV2_PLUGINS` is set (CI sets it), in which case they fail.
+//! `KADENCE_REQUIRE_LV2_PLUGINS` is set (CI sets it), in which case they fail.
 
 use std::path::{Path, PathBuf};
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{Node, ProcessContext, TransportState};
 use daw_core::plugin::{PluginDescriptor, PluginFormat, PluginInstance};
+use daw_test_support::lv2;
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static A: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const SR: f64 = 48_000.0;
 const BLOCK: u32 = 256;
@@ -23,23 +23,14 @@ static EDITORS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lv2_dir() -> Option<PathBuf> {
     let dirs = daw_plugins_lv2::format().default_search_paths();
-    let found = dirs
-        .into_iter()
-        .find(|d| d.join("mda.lv2").is_dir() && d.join("midimap.lv2").is_dir());
-    if found.is_none() && std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_some() {
-        panic!("mda-lv2 and x42-plugins must be installed");
-    }
-    found
+    lv2::find_bundles(dirs, &["mda.lv2", "midimap.lv2"])
 }
 
 macro_rules! need_plugins {
     () => {
         match lv2_dir() {
             Some(d) => d,
-            None => {
-                eprintln!("skipped: mda-lv2 / x42-plugins not installed");
-                return;
-            }
+            None => return,
         }
     };
 }
@@ -86,11 +77,7 @@ fn run(
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        // The workspace's `warn_debug`/`warn_release` make violations count (per thread)
-        // instead of aborting.
-        reset_violation_count();
-        assert_no_alloc(|| p.process(&mut ctx));
-        assert_eq!(violation_count(), 0, "process allocated");
+        assert_no_alloc("process", || p.process(&mut ctx));
     }
     (outs, events_out.iter().copied().collect())
 }

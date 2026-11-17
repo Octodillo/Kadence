@@ -50,11 +50,15 @@ fn dummy_cycles_do_not_allocate() {
     assert!(b.wait_for_cycles(2_000, Duration::from_secs(30)));
     b.stop().unwrap();
     assert!(tap.try_recv().is_some());
-    assert_eq!(b.stats().rt_alloc_violations, 0, "a cycle allocated");
+    assert_eq!(
+        b.stats().rt_alloc_violations,
+        RtAllocCounter::CLEAN,
+        "a cycle allocated"
+    );
 }
 
 /// Set in the child process `allocating_cycles_are_counted_silently` runs.
-const CHILD: &str = "DAW_BACKEND_ALLOC_CHILD";
+const CHILD: &str = "KADENCE_BACKEND_ALLOC_CHILD";
 
 /// A callback that allocates every cycle is counted, and nothing is written
 /// to stderr from the audio thread. The cycles run in a child process (this
@@ -76,7 +80,7 @@ fn allocating_cycles_are_counted_silently() {
         assert!(b.wait_for_cycles(CYCLES, Duration::from_secs(30)));
         b.stop().unwrap();
         // One allocation and one deallocation per cycle.
-        assert_eq!(b.stats().rt_alloc_violations, 2 * CYCLES);
+        assert_eq!(b.stats().rt_alloc_violations, Some(2 * CYCLES));
         return;
     }
     let out = std::process::Command::new(std::env::current_exe().unwrap())

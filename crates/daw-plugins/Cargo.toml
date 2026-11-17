@@ -26,6 +26,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+daw-test-support.workspace = true
 tempfile = "3"
 daw-plugins-clap = { path = "../daw-plugins-clap" }
 daw-plugins-lv2 = { path = "../daw-plugins-lv2" }

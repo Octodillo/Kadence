@@ -489,7 +489,6 @@ dependencies = [
 name = "daw-app"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",
@@ -506,6 +505,7 @@ dependencies = [
  "daw-plugin-host",
  "daw-plugins",
  "daw-session",
+ "daw-test-support",
  "libc",
  "tempfile",
  "uuid",
@@ -547,7 +547,7 @@ dependencies = [
 name = "daw-core"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
+ "daw-test-support",
  "loom",
  "proptest",
  "serde",
@@ -558,9 +558,9 @@ dependencies = [
 name = "daw-devices"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-core",
  "daw-media",
+ "daw-test-support",
  "serde",
  "serde_json",
  "tempfile",
@@ -571,8 +571,8 @@ dependencies = [
 name = "daw-engine"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-core",
+ "daw-test-support",
  "hound",
  "thiserror 2.0.21",
 ]
@@ -581,8 +581,8 @@ dependencies = [
 name = "daw-media"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-core",
+ "daw-test-support",
  "flacenc",
  "hound",
  "rtrb 0.4.1",
@@ -596,11 +596,11 @@ dependencies = [
 name = "daw-midi"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-core",
  "daw-devices",
  "daw-engine",
  "daw-model",
+ "daw-test-support",
  "proptest",
 ]
 
@@ -632,9 +632,9 @@ dependencies = [
 name = "daw-plugin-host"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-core",
  "daw-plugins",
+ "daw-test-support",
  "libc",
  "log",
  "memmap2",
@@ -659,6 +659,7 @@ dependencies = [
  "daw-plugins-clap",
  "daw-plugins-lv2",
  "daw-plugins-vst3",
+ "daw-test-support",
  "libc",
  "serde",
  "serde_json",
@@ -670,11 +671,11 @@ dependencies = [
 name = "daw-plugins-clap"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "clack-extensions",
  "clack-host",
  "daw-core",
  "daw-plugin-window",
+ "daw-test-support",
  "libc",
 ]
 
@@ -682,9 +683,9 @@ dependencies = [
 name = "daw-plugins-lv2"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-core",
  "daw-plugin-window",
+ "daw-test-support",
  "libloading 0.8.9",
  "livi",
  "log",
@@ -698,9 +699,9 @@ dependencies = [
 name = "daw-plugins-vst3"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-core",
  "daw-plugin-window",
+ "daw-test-support",
  "libc",
  "libloading 0.8.9",
  "log",
@@ -713,7 +714,6 @@ dependencies = [
 name = "daw-session"
 version = "0.1.0"
 dependencies = [
- "assert_no_alloc",
  "daw-backend",
  "daw-core",
  "daw-devices",
@@ -723,11 +723,20 @@ dependencies = [
  "daw-model",
  "daw-plugin-host",
  "daw-plugins",
+ "daw-test-support",
  "jack",
  "libc",
  "log",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "daw-test-support"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+ "tempfile",
 ]
 
 [[package]]

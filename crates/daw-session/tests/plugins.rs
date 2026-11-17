@@ -6,7 +6,6 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_core::event::EventList;
 use daw_core::plugin::PluginFormatKind;
 use daw_core::time::{PPQ, SampleTime, TickTime};
@@ -22,9 +21,9 @@ use daw_model::{
 use daw_plugin_host::{HostLauncher, SandboxConfig};
 use daw_session::catalog::{Filter, PluginCatalog, PluginKind};
 use daw_session::{PluginStatus, SandboxLoader, Session, SessionConfig, Warning};
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const RATE: f64 = 48_000.0;
 const BLOCK: usize = 256;
@@ -230,9 +229,7 @@ impl Rig {
         while out.len() < frames {
             let n = BLOCK.min(frames - out.len());
             let mut outs: [&mut [f32]; 2] = [&mut l[..n], &mut r[..n]];
-            let before = violation_count();
-            assert_no_alloc(|| self.proc.process(n, &[], &mut outs, &events));
-            assert_eq!(violation_count(), before, "process allocated");
+            assert_no_alloc("process", || self.proc.process(n, &[], &mut outs, &events));
             out.extend_from_slice(&l[..n]);
             let report = self.session.tick();
             assert!(report.error.is_none(), "{:?}", report.error);

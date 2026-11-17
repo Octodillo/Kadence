@@ -8,6 +8,11 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set by the first allocator call that goes through [`RtAllocCounter`]: any
+/// process that installed it has allocated long before it opens a backend.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     /// Nesting depth of [`forbid`] on this thread.
@@ -29,8 +34,31 @@ thread_local! {
 pub struct RtAllocCounter;
 
 impl RtAllocCounter {
+    /// What [`BackendStats::rt_alloc_violations`](crate::BackendStats::rt_alloc_violations)
+    /// reads after cycles that never allocated, in a binary that installed
+    /// this allocator: a count of zero in debug builds, and no count in
+    /// release builds, where cycles are not guarded. A test comparing with
+    /// this fails in a debug build when the allocator is missing, instead of
+    /// passing because nothing counted.
+    pub const CLEAN: Option<u64> = if cfg!(debug_assertions) {
+        Some(0)
+    } else {
+        None
+    };
+
+    /// Whether allocations in cycles are being counted: this is a debug
+    /// build and this allocator is the global one.
+    pub(crate) fn counting() -> bool {
+        cfg!(debug_assertions) && INSTALLED.load(Ordering::Relaxed)
+    }
+
     #[inline]
     fn check() {
+        // Read before writing: after the first call this never dirties the
+        // cache line every thread's allocations read.
+        if !INSTALLED.load(Ordering::Relaxed) {
+            INSTALLED.store(true, Ordering::Relaxed);
+        }
         // `try_with`: the allocator also runs while thread locals are torn down.
         let forbidden = FORBID.try_with(|f| f.get() > 0).unwrap_or(false);
         if forbidden {
@@ -40,7 +68,7 @@ impl RtAllocCounter {
 }
 
 // SAFETY: every call forwards to `System` unchanged; the check only touches
-// const-initialised thread locals, which never allocate.
+// an atomic and const-initialised thread locals, which never allocate.
 unsafe impl GlobalAlloc for RtAllocCounter {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         Self::check();

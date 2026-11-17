@@ -1,0 +1,20 @@
+[package]
+name = "daw-test-support"
+description = "Shared helpers for the workspace's tests: checked no-alloc sections, golden audio files, LV2 test plugin lookup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A dev-dependency of the other crates only. It depends on none of them, so
+# every crate (daw-core included) can use it without a dependency cycle.
+[dependencies]
+assert_no_alloc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

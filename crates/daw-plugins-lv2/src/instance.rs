@@ -897,18 +897,7 @@ mod tests {
 
     fn mda_delay() -> Option<Lv2Instance> {
         let format = crate::Lv2Format::new();
-        let Some(dir) = format
-            .default_search_paths()
-            .into_iter()
-            .find(|d| d.join("mda.lv2").is_dir())
-        else {
-            assert!(
-                std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
-                "mda-lv2 must be installed"
-            );
-            eprintln!("skipped: mda-lv2 not installed");
-            return None;
-        };
+        let dir = daw_test_support::lv2::find_bundles(format.default_search_paths(), &["mda.lv2"])?;
         let id = "http://drobilla.net/plugins/mda/Delay";
         let d = format
             .scan(&dir.join("mda.lv2"))

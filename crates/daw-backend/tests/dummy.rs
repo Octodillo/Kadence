@@ -566,3 +566,18 @@ fn loopback_returns_the_outputs_after_the_reported_latency() {
     b.open(cfg(64)).unwrap();
     assert_eq!(b.latency().total(), 64);
 }
+
+/// This binary does not install `RtAllocCounter`, so nothing counts
+/// allocations in cycles, and the stats say so rather than reporting zero.
+#[test]
+fn allocation_count_is_absent_without_the_counter() {
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(4);
+    b.open(cfg(64)).unwrap();
+    b.start(Box::new(|_| {
+        std::hint::black_box(vec![0u8; 64]);
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(4, WAIT));
+    b.stop().unwrap();
+    assert_eq!(b.stats().rt_alloc_violations, None);
+}

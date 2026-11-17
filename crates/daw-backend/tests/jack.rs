@@ -31,11 +31,12 @@ use std::time::{Duration, Instant};
 
 use daw_backend::{
     AudioBackend, BackendConfig, BackendStats, JackBackend, PortDirection, PortFilter, PortKind,
+    RtAllocCounter,
 };
 use daw_core::event::{Event, EventKind};
 
 #[global_allocator]
-static ALLOC: daw_backend::RtAllocCounter = daw_backend::RtAllocCounter;
+static ALLOC: RtAllocCounter = RtAllocCounter;
 
 // JACK clients in one process share the server connection; keep tests apart
 // when they run in one process (`cargo test`).
@@ -263,7 +264,7 @@ fn runs_cycles_and_lists_ports() {
     let before = b.stats().cycles;
     b.start(Box::new(|_| {})).unwrap();
     wait(&b, |s| s.cycles >= before + 5);
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, RtAllocCounter::CLEAN);
     b.close().unwrap();
 }
 
@@ -332,8 +333,8 @@ fn audio_and_midi_flow_between_two_clients() {
     src.disconnect(&midi_out, &midi_in).unwrap();
     // Input to output is refused.
     assert!(src.connect(&audio_in, &audio_out).is_err());
-    assert_eq!(src.stats().rt_alloc_violations, 0);
-    assert_eq!(dst.stats().rt_alloc_violations, 0);
+    assert_eq!(src.stats().rt_alloc_violations, RtAllocCounter::CLEAN);
+    assert_eq!(dst.stats().rt_alloc_violations, RtAllocCounter::CLEAN);
     src.close().unwrap();
     dst.close().unwrap();
 }
@@ -371,7 +372,7 @@ fn auto_connect_reaches_physical_ports() {
     // Connecting again is refused: the link is there.
     assert!(b.connect(&out, &first.name).is_err());
     wait(&b, |s| s.cycles >= 5);
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, RtAllocCounter::CLEAN);
     b.close().unwrap();
 }
 
@@ -422,7 +423,7 @@ fn connections_survive_stop_and_start() {
     b.disconnect(&out2, &hw.playback(1)).unwrap();
     b.start(Box::new(|_| {})).unwrap();
     assert_stays_unlinked(&b, &out2);
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, RtAllocCounter::CLEAN);
     b.close().unwrap();
 }
 
@@ -460,7 +461,7 @@ fn links_made_just_before_stop_are_kept() {
         assert_stays_unlinked(&b, &out);
         b.stop().unwrap();
     }
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, RtAllocCounter::CLEAN);
     b.close().unwrap();
 }
 
@@ -659,7 +660,7 @@ fn added_midi_inputs_keep_their_sources_apart() {
             .all(|p| p.name != during.name),
         "the removed port is unregistered"
     );
-    assert_eq!(dst.stats().rt_alloc_violations, 0);
+    assert_eq!(dst.stats().rt_alloc_violations, RtAllocCounter::CLEAN);
     src.close().unwrap();
     dst.close().unwrap();
 }

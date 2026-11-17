@@ -35,7 +35,7 @@ libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-assert_no_alloc.workspace = true
+daw-test-support.workspace = true
 tempfile = "3"
 
 [build-dependencies]

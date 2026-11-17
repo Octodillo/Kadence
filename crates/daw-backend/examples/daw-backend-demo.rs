@@ -241,11 +241,8 @@ fn main() {
                 backend.buffer_size()
             );
         }
-        if s.rt_alloc_violations > 0 {
-            eprintln!(
-                "bug: {} allocations on the audio thread",
-                s.rt_alloc_violations
-            );
+        if let Some(n) = s.rt_alloc_violations.filter(|&n| n > 0) {
+            eprintln!("bug: {n} allocations on the audio thread");
         }
         if s.server_gone {
             eprintln!("The audio server went away.");

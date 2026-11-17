@@ -28,10 +28,10 @@ pub struct BackendStats {
     /// [`start`](crate::AudioBackend::start). (JACK only; the dummy backend's
     /// `stop` returns an error instead.)
     pub callback_panicked: bool,
-    /// Allocator calls caught inside cycles (debug builds with
-    /// [`RtAllocCounter`](crate::RtAllocCounter) installed; always 0
-    /// otherwise).
-    pub rt_alloc_violations: u64,
+    /// Allocator calls caught inside cycles. `None` when nothing counts
+    /// them: in release builds, and when the binary has not installed
+    /// [`RtAllocCounter`](crate::RtAllocCounter).
+    pub rt_alloc_violations: Option<u64>,
 }
 
 /// Counters written by the real-time thread and read by everyone else.
@@ -81,7 +81,8 @@ impl SharedStats {
             dsp_load: (!load.is_nan()).then_some(load),
             server_gone: self.server_gone.load(Relaxed),
             callback_panicked: self.callback_panicked.load(Relaxed),
-            rt_alloc_violations: self.rt_alloc_violations.load(Relaxed),
+            rt_alloc_violations: crate::RtAllocCounter::counting()
+                .then(|| self.rt_alloc_violations.load(Relaxed)),
         }
     }
 }

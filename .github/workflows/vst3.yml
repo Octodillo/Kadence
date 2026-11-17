@@ -59,13 +59,13 @@ jobs:
           tool: cargo-nextest
       - name: Tests against again.vst3
         env:
-          DAW_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
-          DAW_VST3_REQUIRE_SDK_PLUGINS: "1"
+          KADENCE_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
+          KADENCE_VST3_REQUIRE_SDK_PLUGINS: "1"
         run: xvfb-run -a cargo nextest run -p daw-plugins-vst3 --no-fail-fast
       - name: Backtrace for a crashing editor test
         if: failure()
         env:
-          DAW_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
+          KADENCE_VST3_AGAIN: ${{ github.workspace }}/vst3-again/again.vst3
         run: |
           # Ask cargo where the test binary is: its place under target/ has
           # changed between cargo versions.

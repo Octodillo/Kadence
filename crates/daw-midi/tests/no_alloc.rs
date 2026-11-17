@@ -3,24 +3,12 @@
 
 mod support;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::event::{Event, EventKind};
 use daw_midi::sequence::Sequence;
+use daw_test_support::no_alloc::allocations_in as violations;
 use support::{Rig, note};
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
-
-fn violations(f: impl FnOnce()) -> u32 {
-    reset_violation_count();
-    assert_no_alloc(f);
-    violation_count()
-}
-
-#[test]
-fn detector_catches_allocations() {
-    assert!(violations(|| drop(std::hint::black_box(vec![1u8; 16]))) > 0);
-}
+daw_test_support::install_checker!();
 
 #[test]
 fn process_never_allocates() {

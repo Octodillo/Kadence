@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use daw_backend::{
     AudioBackend, BackendConfig, DummyBackend, JackBackend, Latency, Pacing, PortFilter,
+    RtAllocCounter,
 };
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
@@ -19,6 +20,11 @@ use daw_model::{
 };
 use daw_session::record::AudioTakes;
 use daw_session::{Session, SessionConfig};
+
+/// Counts allocations made inside the backend's cycles, so the takes can
+/// check that capturing never allocates on the audio thread.
+#[global_allocator]
+static ALLOC: RtAllocCounter = RtAllocCounter;
 
 const RATE: u32 = 48_000;
 const PERIOD: u32 = 256;
@@ -261,7 +267,10 @@ fn record_and_check_with(latency: Latency, during: impl FnOnce(&mut Rig)) {
         0,
         "the take is off (latency {latency:?})"
     );
-    assert_eq!(rig.backend.stats().rt_alloc_violations, 0);
+    assert_eq!(
+        rig.backend.stats().rt_alloc_violations,
+        RtAllocCounter::CLEAN
+    );
 
     // Undo takes the take off the track.
     rig.doc.undo().unwrap();
@@ -543,7 +552,7 @@ fn records_through_a_jack_server() {
         (0..=2 * period).contains(&late),
         "the take is {late} samples late; the period is {period}"
     );
-    assert_eq!(stats.rt_alloc_violations, 0);
+    assert_eq!(stats.rt_alloc_violations, RtAllocCounter::CLEAN);
     println!(
         "recorded at {rate} Hz, period {period}: {late} samples late, reported latency {latency}, {} xruns",
         stats.xruns

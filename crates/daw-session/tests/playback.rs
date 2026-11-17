@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_core::event::EventList;
 use daw_core::time::{PPQ, SampleTime, TempoMap, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
@@ -16,9 +15,9 @@ use daw_model::{
     TrackKind,
 };
 use daw_session::{Session, SessionConfig, Warning, effective_mutes};
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const RATE: f64 = 48_000.0;
 const BLOCK: usize = 256;
@@ -109,9 +108,7 @@ impl Rig {
         while done < frames {
             let n = BLOCK.min(frames - done);
             let mut outs: [&mut [f32]; 2] = [&mut l[..n], &mut r[..n]];
-            let before = violation_count();
-            assert_no_alloc(|| self.proc.process(n, &[], &mut outs, &events));
-            assert_eq!(violation_count(), before, "process allocated");
+            assert_no_alloc("process", || self.proc.process(n, &[], &mut outs, &events));
             out.extend_from_slice(&l[..n]);
             done += n;
         }

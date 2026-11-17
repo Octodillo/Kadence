@@ -548,13 +548,12 @@ impl EngineProcessor {
 // public API the garbage queue only fills when the two threads race.
 #[cfg(test)]
 mod tests {
-    use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
+    use daw_test_support::no_alloc::allocations_in;
 
     use super::*;
     use crate::nodes::Strip;
 
-    #[global_allocator]
-    static ALLOC: AllocDisabler = AllocDisabler;
+    daw_test_support::install_checker!();
 
     /// Queues a graph without collecting garbage first, as a controller
     /// whose sends race the audio thread's retirements would.
@@ -566,9 +565,7 @@ mod tests {
     fn process(proc: &mut EngineProcessor, out: &mut [f32]) -> u32 {
         let input = [1.0f32; 32];
         let events = EventList::with_capacity(0);
-        reset_violation_count();
-        assert_no_alloc(|| proc.process(32, &[&input], &mut [out], &events));
-        violation_count()
+        allocations_in(|| proc.process(32, &[&input], &mut [out], &events))
     }
 
     #[test]
