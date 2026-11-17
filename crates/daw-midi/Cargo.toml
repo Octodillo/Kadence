@@ -1,6 +1,6 @@
 [package]
 name = "daw-midi"
-description = "MIDI editing: grid and quantize, note operations, piano-roll geometry, clip playback and recording"
+description = "MIDI editing: grid and quantize, note operations, clip playback and recording"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

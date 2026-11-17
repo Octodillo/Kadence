@@ -766,3 +766,24 @@ fn a_velocity_edit_never_silences_a_note() {
         assert_eq!(played(&r), 2, "seed {seed}");
     }
 }
+
+#[test]
+fn notes_sit_on_the_grid_at_any_scroll_and_zoom() {
+    // Fully zoomed in, a tick is about two pixels wide: scrolled by a
+    // fraction of a tick, notes must still start on their grid line.
+    let mut r = Rig::new(vec![n(Q, Q, 60)]);
+    r.pr.view.px_per_beat = 2000.0;
+    r.pr.view.scroll_x = 3700.9;
+    let scene = r.pr.scene(r.doc.project(), &r.env());
+    let x = r.x(Q);
+    let drawn = scene.prims.iter().any(|p| match p {
+        Prim::RoundRect { r, .. } => (r.x - x).abs() < 1e-9 && (r.w - 2000.0).abs() < 1e-9,
+        _ => false,
+    });
+    assert!(drawn, "no note drawn at {x}");
+    // The pointer hits the note from its first pixel on, and not before.
+    r.press(x + 0.1, r.y(60));
+    assert_eq!(r.pr.selection.len(), 1);
+    r.press(x - 0.1, r.y(60));
+    assert!(r.pr.selection.is_empty());
+}
