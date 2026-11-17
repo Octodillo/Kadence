@@ -56,6 +56,8 @@ pub mod qobject {
         #[qproperty(i32, max_autosave_minutes)]
         /// The piano roll plays the keys and notes pressed in it.
         #[qproperty(bool, preview_notes)]
+        /// The piano roll names the black keys as flats, not sharps.
+        #[qproperty(bool, flat_note_names)]
         /// The Edit page shows the clip's track strip.
         #[qproperty(bool, edit_strip_shown)]
         /// The Edit page shows the clip's track's automation lanes.
@@ -81,6 +83,8 @@ pub mod qobject {
         fn choose_autosave_minutes(self: Pin<&mut AppSettings>, minutes: i32);
         #[qinvokable]
         fn choose_preview_notes(self: Pin<&mut AppSettings>, on: bool);
+        #[qinvokable]
+        fn choose_flat_note_names(self: Pin<&mut AppSettings>, on: bool);
         #[qinvokable]
         fn choose_edit_strip_shown(self: Pin<&mut AppSettings>, on: bool);
         #[qinvokable]
@@ -112,6 +116,7 @@ pub struct AppSettingsRust {
     autosave_minutes: i32,
     max_autosave_minutes: i32,
     preview_notes: bool,
+    flat_note_names: bool,
     edit_strip_shown: bool,
     edit_lanes_shown: bool,
     general: GeneralSettings,
@@ -283,6 +288,14 @@ impl qobject::AppSettings {
         self.choose_general(general);
     }
 
+    fn choose_flat_note_names(self: Pin<&mut Self>, on: bool) {
+        let general = GeneralSettings {
+            flat_note_names: on,
+            ..self.general.clone()
+        };
+        self.choose_general(general);
+    }
+
     fn choose_edit_strip_shown(self: Pin<&mut Self>, on: bool) {
         let general = GeneralSettings {
             edit_strip_shown: on,
@@ -313,6 +326,7 @@ impl qobject::AppSettings {
             s.sync_audition();
         });
         self.as_mut().set_preview_notes(general.preview_notes);
+        self.as_mut().set_flat_note_names(general.flat_note_names);
         self.as_mut().set_edit_strip_shown(general.edit_strip_shown);
         self.as_mut().set_edit_lanes_shown(general.edit_lanes_shown);
         let folder = general.project_folder.clone().unwrap_or_default();

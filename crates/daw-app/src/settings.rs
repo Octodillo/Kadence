@@ -204,6 +204,9 @@ pub struct GeneralSettings {
     pub autosave_minutes: u32,
     /// Whether the piano roll plays the keys and notes pressed in it.
     pub preview_notes: bool,
+    /// Whether the piano roll names the black keys as flats (B♭) rather
+    /// than sharps (A♯).
+    pub flat_note_names: bool,
     /// Whether the Edit page shows the clip's track strip beside the notes.
     pub edit_strip_shown: bool,
     /// Whether the Edit page shows the clip's track's automation lanes
@@ -217,6 +220,7 @@ impl Default for GeneralSettings {
             project_folder: None,
             autosave_minutes: 1,
             preview_notes: true,
+            flat_note_names: false,
             edit_strip_shown: true,
             edit_lanes_shown: true,
         }
@@ -272,6 +276,7 @@ pub fn load_general_settings(store: &dyn SettingsStore) -> GeneralSettings {
             .filter(|&m| m <= MAX_AUTOSAVE_MINUTES)
             .unwrap_or(defaults.autosave_minutes),
         preview_notes: read_bool(store, GENERAL, "PreviewNotes", defaults.preview_notes),
+        flat_note_names: read_bool(store, GENERAL, "FlatNoteNames", defaults.flat_note_names),
         edit_strip_shown: read_bool(store, GENERAL, "EditStripShown", defaults.edit_strip_shown),
         edit_lanes_shown: read_bool(store, GENERAL, "EditLanesShown", defaults.edit_lanes_shown),
     }
@@ -289,6 +294,11 @@ pub fn save_general_settings(store: &mut dyn SettingsStore, settings: &GeneralSe
         &settings.autosave_minutes.to_string(),
     );
     store.write(GENERAL, "PreviewNotes", &settings.preview_notes.to_string());
+    store.write(
+        GENERAL,
+        "FlatNoteNames",
+        &settings.flat_note_names.to_string(),
+    );
     store.write(
         GENERAL,
         "EditStripShown",
@@ -541,6 +551,7 @@ mod tests {
             project_folder: Some("/home/me/Music/Projects".into()),
             autosave_minutes: 0,
             preview_notes: false,
+            flat_note_names: true,
             edit_strip_shown: false,
             edit_lanes_shown: false,
         };
