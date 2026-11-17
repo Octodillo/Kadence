@@ -57,6 +57,8 @@ const DAMP_SCALE: f32 = 0.4;
 const ALLPASS_FEEDBACK: f32 = 0.5;
 const WET_SCALE: f32 = 3.0;
 const MAX_PRE_DELAY_MS: f64 = 200.0;
+/// Glide time of the pre-delay tap, as for the Delay device's time.
+const PRE_DELAY_GLIDE_MS: f64 = 50.0;
 
 #[derive(Clone, Debug, Default)]
 struct Comb {
@@ -157,6 +159,9 @@ pub struct Reverb {
     sample_rate: f64,
     channels: [Channel; 2],
     pre_delay: [DelayLine; 2],
+    /// Pre-delay in samples. The read tap glides to a new time, since a jump
+    /// would cut the signal feeding the tank.
+    pre_time: Smoother,
     mix: Smoother,
     width: Smoother,
 }
@@ -174,6 +179,7 @@ impl Reverb {
             sample_rate: 0.0,
             channels: [Channel::default(), Channel::default()],
             pre_delay: [DelayLine::default(), DelayLine::default()],
+            pre_time: Smoother::new(0.0),
             mix: Smoother::new(0.3),
             width: Smoother::new(1.0),
         };
@@ -181,10 +187,15 @@ impl Reverb {
         r
     }
 
+    fn pre_delay_samples(&self) -> f32 {
+        (self.params.get(PRE_DELAY) / 1000.0 * self.sample_rate) as f32
+    }
+
     fn apply_param(&mut self, id: ParamId) {
         match id {
             MIX => self.mix.set_target(self.params.get_f32(MIX)),
             WIDTH => self.width.set_target(self.params.get_f32(WIDTH)),
+            PRE_DELAY => self.pre_time.set_target(self.pre_delay_samples()),
             _ => {}
         }
     }
@@ -194,6 +205,7 @@ impl_device!(Reverb, INFO, PARAMS, {
     fn snap_smoothing(&mut self) {
         self.mix.reset(self.mix.target());
         self.width.reset(self.width.target());
+        self.pre_time.reset(self.pre_time.target());
     }
 });
 
@@ -205,11 +217,11 @@ impl Segmented for Reverb {
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         let feedback = self.params.get_f32(SIZE) * ROOM_SCALE + ROOM_OFFSET;
         let damp = self.params.get_f32(DAMPING) * DAMP_SCALE;
-        let pre = (self.params.get(PRE_DELAY) / 1000.0 * self.sample_rate) as f32;
         for i in start..end {
             let (l, r) = (input(ctx, 0, i), input(ctx, 1, i));
             self.pre_delay[0].push(l);
             self.pre_delay[1].push(r);
+            let pre = self.pre_time.tick();
             let x = (self.pre_delay[0].read(pre) + self.pre_delay[1].read(pre)) * INPUT_GAIN;
             let out_l = self.channels[0].process(x, feedback, damp);
             let out_r = self.channels[1].process(x, feedback, damp);
@@ -248,6 +260,8 @@ impl Node for Reverb {
         self.sample_rate = sample_rate;
         self.mix.set_time(10.0, sample_rate);
         self.width.set_time(10.0, sample_rate);
+        self.pre_time.set_time(PRE_DELAY_GLIDE_MS, sample_rate);
+        self.pre_time.reset(self.pre_delay_samples());
         self.mix.reset(self.params.get_f32(MIX));
         self.width.reset(self.params.get_f32(WIDTH));
         self.reset();
