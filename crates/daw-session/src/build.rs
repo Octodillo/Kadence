@@ -737,6 +737,7 @@ impl<'a> Builder<'a> {
                 dev.as_mut(),
                 &state.0,
                 self.session.media.root(),
+                &mut self.session.samples,
                 &mut self.session.warnings,
             )
         {
@@ -1230,12 +1231,14 @@ fn join_contiguous(
 }
 
 /// Restores a built-in device's saved state. A sampler's relative sample
-/// paths are relative to `root`; a sample that will not load leaves its zone
-/// silent and a warning in `warnings`.
+/// paths are relative to `root` and its samples come from `samples`; a
+/// sample that will not load leaves its zone silent and a warning in
+/// `warnings`.
 fn load_device_state(
     dev: &mut dyn daw_devices::Device,
     data: &[u8],
     root: Option<&Path>,
+    samples: &mut crate::samples::SamplePool,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), daw_devices::StateError> {
     let Some(sampler) = dev.as_any_mut().downcast_mut::<daw_devices::Sampler>() else {
@@ -1246,8 +1249,8 @@ fn load_device_state(
             Some(root) if path.is_relative() => root.join(path),
             _ => path.to_path_buf(),
         };
-        match daw_devices::SampleBuffer::load(&path) {
-            Ok(sample) => Some(Arc::new(sample)),
+        match samples.load(&path) {
+            Ok(sample) => Some(sample),
             Err(_) => {
                 warnings.push(Warning::CannotRead { path });
                 None

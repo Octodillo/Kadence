@@ -124,7 +124,11 @@ signature, and the metronome.
   the instrument button and click **Load Sample…** in its device panel.
   It plays the file (WAV, FLAC, Ogg Vorbis, MP3 or AIFF) over every key,
   at its recorded pitch on middle C. The file is copied into the project
-  like imported audio, and **Undo** brings back the sample before.
+  like imported audio, and **Undo** brings back the sample before. Files
+  up to ten minutes long can be loaded. In a project that has not been
+  saved yet the file stays where it is, and **Collect Audio Files** and
+  **Find Missing Audio Files…** do not look after a sampler's file: if it
+  goes missing, the device panel says so, and loading it again mends it.
 - **Bus**, to group tracks or share an effect such as reverb.
 
 Right-click a track header to rename, move, delete or show its automation.

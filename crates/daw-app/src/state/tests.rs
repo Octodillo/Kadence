@@ -397,3 +397,77 @@ fn a_file_that_is_not_audio_is_refused_and_not_copied() {
     let audio = s.doc.bundle().unwrap().root().join("audio");
     assert!(!audio.exists() || std::fs::read_dir(audio).unwrap().next().is_none());
 }
+
+fn write_tone(file: &Path) {
+    let data = daw_media::AudioData {
+        sample_rate: 48_000,
+        channels: vec![vec![0.5; 480]],
+    };
+    daw_media::write_wav(file, &data, daw_media::WavFormat::Float32).unwrap();
+}
+
+fn audio_copies(s: &AppState) -> usize {
+    let audio = s.doc.bundle().unwrap().root().join("audio");
+    std::fs::read_dir(audio).map_or(0, |d| d.count())
+}
+
+#[test]
+fn a_sample_for_a_panel_with_no_sampler_open_is_not_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kick.wav");
+    write_tone(&file);
+    let mut s = state();
+    let mut panel = add_sampler(&mut s);
+    s.save_as(&dir.path().join("Song")).unwrap();
+    panel.close();
+    let revision = s.doc.revision();
+
+    s.load_sample(&panel, &file).unwrap();
+    assert_eq!(s.doc.revision(), revision, "nothing changed");
+    assert_eq!(audio_copies(&s), 0);
+}
+
+/// Saved state names a sample as text. A project with a folder of its own
+/// copies the file under a name that is; one without would have to save
+/// the path as it is.
+#[cfg(unix)]
+#[test]
+fn a_sample_whose_path_is_not_text_is_refused_until_the_project_is_saved() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.wav"));
+    write_tone(&file);
+    let mut s = state();
+    let panel = add_sampler(&mut s);
+
+    let e = s.load_sample(&panel, &file).unwrap_err();
+    assert_eq!(e.fields().reason, crate::message::Reason::NameNotText);
+    assert_eq!(loaded_sample(&s, &panel), None);
+
+    s.save_as(&dir.path().join("Song")).unwrap();
+    s.load_sample(&panel, &file).unwrap();
+    assert_eq!(
+        loaded_sample(&s, &panel),
+        Some(PathBuf::from("audio/audio.wav"))
+    );
+}
+
+#[test]
+fn a_sample_that_has_gone_shows_as_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kick.wav");
+    write_tone(&file);
+    let mut s = state();
+    let panel = add_sampler(&mut s);
+    s.load_sample(&panel, &file).unwrap();
+    let sampler = |s: &AppState| {
+        let mut v = panel.view(s.doc.project()).unwrap().sampler.unwrap();
+        v.look_for_sample(s.doc.bundle());
+        v
+    };
+    assert!(!sampler(&s).missing);
+    assert_eq!(s.status, None, "the sampler read it: {:?}", s.status);
+
+    std::fs::remove_file(&file).unwrap();
+    assert!(sampler(&s).missing);
+}

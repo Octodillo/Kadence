@@ -2,7 +2,6 @@
 
 import QtQuick
 import QtQuick.Controls as QQC2
-import QtQuick.Dialogs
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
@@ -34,13 +33,9 @@ Kirigami.Dialog {
         }
     }
 
-    FileDialog {
+    AudioFileDialog {
         id: locateDialog
         title: i18nc("@title:window", "Locate Audio File")
-        nameFilters: [
-            i18nc("@item:inlistbox", "Audio files (*.wav *.flac *.ogg *.mp3 *.aif *.aiff)"),
-            i18nc("@item:inlistbox", "All files (*)")
-        ]
         onAccepted: {
             const n = Project.relink(dialog.locating, selectedFile);
             dialog.locating = -1;

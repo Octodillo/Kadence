@@ -13,7 +13,7 @@ use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QUrl, QV
 use daw_session::PluginStatus;
 
 use crate::device_panel::{AppDevicePanel, DeviceView, ParamView};
-use crate::message::{Context, Message};
+use crate::message::Context;
 use crate::model_roles;
 use crate::qt_lists::{ModelRole, string_list};
 
@@ -82,6 +82,9 @@ pub mod qobject {
         /// The file name of the sample a sampler plays; empty while it has
         /// none.
         #[qproperty(QString, sample_name, READ, NOTIFY)]
+        /// The sampler's sample is not where the project says it is, so
+        /// the sampler is silent.
+        #[qproperty(bool, sample_missing, READ, NOTIFY)]
         type DevicePanel = super::DevicePanelRust;
 
         fn silent_db(self: &DevicePanel) -> f64;
@@ -212,6 +215,7 @@ pub struct DevicePanelRust {
     plugin_error: QString,
     sampler: bool,
     sample_name: QString,
+    sample_missing: bool,
     /// The panel's revision when `view` was read.
     revision: u64,
     view: Option<DeviceView>,
@@ -312,12 +316,9 @@ impl qobject::DevicePanel {
     }
 
     fn load_sample(mut self: Pin<&mut Self>, url: &QUrl) {
-        match url.to_local_file() {
-            Some(path) => {
-                let path = std::path::PathBuf::from(path.to_string());
-                self.as_mut().rust_mut().panel.load_sample(&path);
-            }
-            None => crate::state::with(|s| s.report(Message::NotLocalFile(Context::Import))),
+        match crate::project::local_file(url, Context::Import) {
+            Ok(path) => self.as_mut().rust_mut().panel.load_sample(&path),
+            Err(e) => crate::state::with(|s| s.report(e)),
         }
         self.reload();
     }
@@ -446,6 +447,11 @@ impl qobject::DevicePanel {
             sample_name,
             sample_name_changed,
             QString::from(sample_name.as_str())
+        );
+        update!(
+            sample_missing,
+            sample_missing_changed,
+            sampler.is_some_and(|s| s.missing)
         );
         update!(active, active_changed, v.is_some());
     }

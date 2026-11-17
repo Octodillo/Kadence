@@ -60,6 +60,7 @@ pub mod qobject {
         AutosavePending,
         CannotDecode,
         UnknownLength,
+        NameNotText,
         EditRefused,
         NoteOutsideClip,
         EngineRefused,
@@ -397,6 +398,14 @@ fn track_at(s: &AppState, index: i32) -> Option<&std::sync::Arc<Track>> {
 /// A message as QML sees it: `context` and `reason` (the qenums above),
 /// `fileName` (of `Fields::file`), `path`, `name`, `detail`, `number` and
 /// `number2`.
+/// The file on this machine a file dialog's `url` names, for the edit
+/// `context` names.
+pub fn local_file(url: &QUrl, context: Context) -> Result<std::path::PathBuf, Message> {
+    url.to_local_file()
+        .map(|p| std::path::PathBuf::from(p.to_string()))
+        .ok_or(Message::NotLocalFile(context))
+}
+
 pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
     use qobject::{MessageContext as QC, MessageReason as QR};
     let context = match f.context {
@@ -424,6 +433,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::AutosavePending => QR::AutosavePending,
         Reason::CannotDecode => QR::CannotDecode,
         Reason::UnknownLength => QR::UnknownLength,
+        Reason::NameNotText => QR::NameNotText,
         Reason::EditRefused => QR::EditRefused,
         Reason::NoteOutsideClip => QR::NoteOutsideClip,
         Reason::EngineRefused => QR::EngineRefused,
@@ -746,9 +756,7 @@ impl qobject::Project {
     }
 
     fn local_path(url: &QUrl, context: Context) -> Result<std::path::PathBuf, Fields> {
-        url.to_local_file()
-            .map(|p| std::path::PathBuf::from(p.to_string()))
-            .ok_or_else(|| Message::NotLocalFile(context).fields())
+        local_file(url, context).map_err(|e| e.fields())
     }
 
     fn recover_project(self: Pin<&mut Self>, url: &QUrl) -> QMap<QMapPair_QString_QVariant> {

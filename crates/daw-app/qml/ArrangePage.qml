@@ -107,14 +107,10 @@ Kirigami.Page {
         onTriggered: importDialog.open()
     }
 
-    FileDialog {
+    AudioFileDialog {
         id: importDialog
         title: i18nc("@title:window", "Import Audio")
         fileMode: FileDialog.OpenFiles
-        nameFilters: [
-            i18nc("@item:inlistbox", "Audio files (*.wav *.flac *.ogg *.oga *.mp3 *.aif *.aiff)"),
-            i18nc("@item:inlistbox", "All files (*)")
-        ]
         onAccepted: {
             for (let i = 0; i < selectedFiles.length; ++i) {
                 Project.importAudio(selectedFiles[i], i);

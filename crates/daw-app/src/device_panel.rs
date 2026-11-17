@@ -25,7 +25,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use daw_model::{AutomationTarget, Device, DeviceId, DeviceSource, Document, Project, TrackKind};
+use daw_model::{
+    AutomationTarget, Bundle, Device, DeviceId, DeviceSource, Document, Project, TrackKind,
+};
 use daw_session::PluginStatus;
 
 use crate::double_click::Clicks;
@@ -337,6 +339,10 @@ pub struct SamplerView {
     /// none (or its saved state can't be read). A zone map with several
     /// files names its first.
     pub sample: Option<PathBuf>,
+    /// The file is not where the project says it is, so the sampler is
+    /// silent. Only whoever knows where the project is can tell
+    /// ([`SamplerView::look_for_sample`]); `false` until then.
+    pub missing: bool,
 }
 
 impl SamplerView {
@@ -350,7 +356,22 @@ impl SamplerView {
             .as_ref()
             .and_then(|s| Sampler::saved_samples(&s.0).ok())
             .and_then(|samples| samples.into_iter().next());
-        Some(Self { sample })
+        Some(Self {
+            sample,
+            missing: false,
+        })
+    }
+
+    /// Sets [`missing`](Self::missing) by looking for the file, relative
+    /// to `bundle` as the project stores it.
+    pub fn look_for_sample(&mut self, bundle: Option<&Bundle>) {
+        self.missing = self.sample.as_deref().is_some_and(|source| {
+            let path = match bundle {
+                Some(b) => b.resolve(source),
+                None => source.to_path_buf(),
+            };
+            !path.is_file()
+        });
     }
 }
 
@@ -578,6 +599,12 @@ impl DevicePanel {
         r.map(|_| ()).map_err(Message::from)
     }
 
+    /// Whether the open device is a sampler, which
+    /// [`load_sample`](Self::load_sample) gives its sample.
+    pub fn plays_samples(&self, project: &Project) -> bool {
+        self.view(project).is_some_and(|v| v.sampler.is_some())
+    }
+
     /// Gives the open device, when it is a sampler, one sample to play over
     /// every key, replacing what it played, as an undo step of its own.
     /// `source` is the file as the project stores it (see
@@ -790,6 +817,9 @@ impl AppDevicePanel {
     pub fn view(&self) -> Option<DeviceView> {
         crate::state::with(|s| {
             let mut view = self.inner.view(s.doc.project())?;
+            if let Some(sampler) = &mut view.sampler {
+                sampler.look_for_sample(s.doc.bundle());
+            }
             let project = s.doc.project();
             let track = project
                 .device_location(view.id)

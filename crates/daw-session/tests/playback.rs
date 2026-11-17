@@ -866,12 +866,116 @@ fn a_sampler_given_a_sample_plays_it_and_undo_takes_it_back() {
         .unwrap();
     rig.sync();
     assert_eq!(rig.session.controller().graphs_swapped(), swaps);
+    let quieter = play(&mut rig);
+    let half = 0.4 * 10f32.powf(-6.0 / 20.0);
+    assert!(
+        quieter[30_000..70_000]
+            .iter()
+            .all(|v| (v - half).abs() < 1e-3),
+        "the same node still plays the sample, 6 dB down"
+    );
     rig.doc.undo().unwrap();
 
     rig.doc.undo().unwrap();
     rig.sync();
     let undone = play(&mut rig);
     assert!(peak(&undone) < 1e-6, "undo empties the sampler again");
+}
+
+/// A sampler's new node is the only new one: a synth on another track
+/// keeps its node, and so the note it holds, through the swap.
+#[test]
+fn giving_a_sampler_a_sample_leaves_other_devices_playing() {
+    use daw_model::commands::{AddDevice, DeviceField, SetDevice};
+    let (mut rig, _, _) = synth_rig();
+    dc_file(rig.dir(), "hit.wav", BEAT as usize, 0.5);
+    let drums = Track::new(TrackKind::Instrument, "Drums");
+    let drums_id = drums.id;
+    rig.doc.execute(AddTrack::new(2, drums)).unwrap();
+    let sampler = daw_model::Device::new(
+        "Sampler",
+        daw_model::DeviceSource::Builtin {
+            kind: "daw.sampler".into(),
+        },
+    );
+    let device = sampler.id;
+    rig.doc
+        .execute(AddDevice {
+            track: drums_id,
+            index: 0,
+            device: sampler,
+        })
+        .unwrap();
+    rig.sync();
+    rig.session.play().unwrap();
+    rig.run(2 * BEAT as usize); // Inside the synth's held note.
+
+    let swaps = rig.session.controller().graphs_swapped();
+    let state = daw_devices::Sampler::state_with_sample("hit.wav");
+    rig.doc
+        .execute(SetDevice {
+            id: device,
+            field: DeviceField::State(Some(state.into())),
+        })
+        .unwrap();
+    rig.sync();
+    let out = rig.run(BEAT as usize / 2);
+    assert_eq!(
+        rig.session.controller().graphs_swapped(),
+        swaps + 1,
+        "the sampler's new node came in one swap"
+    );
+    assert!(
+        peak(&out[BEAT as usize / 4..]) > 1e-3,
+        "the synth still holds its note"
+    );
+}
+
+/// A file something already decoded (the app, checking it before it is
+/// loaded) is not read a second time for the sampler's node.
+#[test]
+fn a_sampler_takes_a_sample_already_decoded() {
+    use daw_model::commands::{DeviceField, SetDevice};
+    let (mut rig, track, _) = instrument_rig("daw.sampler");
+    let file = dc_file(rig.dir(), "hit.wav", 2 * BEAT as usize, 0.5);
+    let device = rig.doc.project().track(track).unwrap().devices[0].id;
+    // Not what the file holds, to tell the two apart.
+    let decoded = std::sync::Arc::new(daw_devices::SampleBuffer::mono(
+        vec![0.25; 2 * BEAT as usize],
+        RATE,
+    ));
+    rig.session.hold_sample(file.clone(), &decoded);
+    let load = |rig: &mut Rig| {
+        let state = daw_devices::Sampler::state_with_sample("hit.wav");
+        rig.doc
+            .execute(SetDevice {
+                id: device,
+                field: DeviceField::State(Some(state.into())),
+            })
+            .unwrap();
+        rig.sync();
+        rig.session.locate(TickTime(0)).unwrap();
+        rig.session.play().unwrap();
+        let out = rig.run(4 * BEAT as usize);
+        rig.session.stop().unwrap();
+        out
+    };
+    let held = load(&mut rig);
+    assert!(
+        held[30_000..70_000].iter().all(|v| (v - 0.2).abs() < 1e-3),
+        "the buffer handed over plays"
+    );
+
+    // A file written again since is read again.
+    rig.doc.undo().unwrap();
+    rig.sync();
+    dc_file(rig.dir(), "hit.wav", 3 * BEAT as usize, 0.5);
+    let read = load(&mut rig);
+    assert!(
+        read[30_000..70_000].iter().all(|v| (v - 0.4).abs() < 1e-3),
+        "the changed file is decoded"
+    );
+    drop(decoded);
 }
 
 #[test]

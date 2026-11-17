@@ -41,6 +41,8 @@ QtObject {
                          "It could not be read as audio (%1).", m.detail);
         case Project.UnknownLength:
             return i18nc("@info", "The file does not say how long it is.");
+        case Project.NameNotText:
+            return i18nc("@info", "Its name or folder has characters that cannot be saved. Save the project first, or rename the file.");
         case Project.EditRefused:
             return i18nc("@info %1 is a technical message which may be in English",
                          "This is a bug in Kadence; please report it (%1).", m.detail);

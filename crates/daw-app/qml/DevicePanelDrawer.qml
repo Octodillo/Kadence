@@ -2,7 +2,6 @@
 
 import QtQuick
 import QtQuick.Controls as QQC2
-import QtQuick.Dialogs
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
@@ -62,14 +61,9 @@ Kirigami.OverlayDrawer {
         onTriggered: sampleDialog.open()
     }
 
-    FileDialog {
+    AudioFileDialog {
         id: sampleDialog
         title: i18nc("@title:window", "Load Sample")
-        // The formats the decoder reads, as Import Audio offers them.
-        nameFilters: [
-            i18nc("@item:inlistbox", "Audio files (*.wav *.flac *.ogg *.oga *.mp3 *.aif *.aiff)"),
-            i18nc("@item:inlistbox", "All files (*)")
-        ]
         onAccepted: DevicePanel.loadSample(selectedFile)
     }
 
@@ -241,14 +235,17 @@ Kirigami.OverlayDrawer {
             ]
         }
 
-        // A sampler plays nothing until it is given a sample.
+        // A sampler plays nothing until it is given a sample, or while
+        // the file it was given is gone.
         Kirigami.InlineMessage {
             objectName: "noSampleMessage"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
-            visible: DevicePanel.sampler && DevicePanel.sampleName === ""
-            type: Kirigami.MessageType.Information
-            text: i18nc("@info", "No sample loaded. The sampler is silent until you load one.")
+            visible: DevicePanel.sampler && (DevicePanel.sampleName === "" || DevicePanel.sampleMissing)
+            type: DevicePanel.sampleMissing ? Kirigami.MessageType.Warning : Kirigami.MessageType.Information
+            text: DevicePanel.sampleMissing
+                ? i18nc("@info %1 is a file name", "The sample %1 cannot be found. The sampler is silent until you load it again.", DevicePanel.sampleName)
+                : i18nc("@info", "No sample loaded. The sampler is silent until you load one.")
             actions: [loadSampleAction]
         }
 
@@ -275,7 +272,7 @@ Kirigami.OverlayDrawer {
                     Kirigami.Icon {
                         Layout.preferredWidth: Kirigami.Units.iconSizes.small
                         Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                        source: "audio-x-generic"
+                        source: DevicePanel.sampleMissing ? "dialog-warning" : "audio-x-generic"
                     }
                     QQC2.Label {
                         Layout.fillWidth: true
