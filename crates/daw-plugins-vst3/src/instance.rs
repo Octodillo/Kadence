@@ -14,7 +14,7 @@ use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
     BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
-    PluginProcessor,
+    PluginProcessor, ScanBuilder,
 };
 use vst3::Steinberg::Vst::{
     AudioBusBuffers, AudioBusBuffers__type0, BusDirections_, BusInfo, ControllerNumbers_,
@@ -710,37 +710,26 @@ fn channel_total(channels: &[i32]) -> u16 {
 }
 
 /// Lists the processor classes of one module as descriptors. Classes whose component cannot be
-/// created are left out; when that is every class, the scan fails, naming the first.
+/// created are reported as skipped; when that is every class, the scan fails, naming the first.
 pub fn scan_module(path: &Path) -> Result<BundleScan, PluginError> {
     let module = Module::load(path).map_err(PluginError::Load)?;
     let factory_vendor = module.factory_vendor();
-    let mut scan = BundleScan::default();
-    let mut first_error = None;
+    let mut scan = ScanBuilder::default();
     for class in module
         .classes()
         .into_iter()
         .filter(|c| c.category == AUDIO_EFFECT_CLASS)
     {
         match probe_ports(&module, &class) {
-            Some(ports) => {
-                scan.plugins
-                    .push(descriptor_for(path, &class, &factory_vendor, ports));
-            }
-            None => {
-                let e = format!(
-                    "{}: {} could not be created and initialized",
-                    path.display(),
-                    class.name
-                );
-                scan.skipped.push(e.clone());
-                first_error.get_or_insert(e);
-            }
+            Some(ports) => scan.found(descriptor_for(path, &class, &factory_vendor, ports)),
+            None => scan.skip(PluginError::Load(format!(
+                "{}: {} could not be created and initialized",
+                path.display(),
+                class.name
+            ))),
         }
     }
-    match first_error {
-        Some(e) if scan.plugins.is_empty() => Err(PluginError::Load(e)),
-        _ => Ok(scan),
-    }
+    scan.finish()
 }
 
 fn descriptor_for(

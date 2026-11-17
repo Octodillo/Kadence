@@ -27,6 +27,6 @@ pub use event::{Event, EventKind, EventList, NoteId, ParamId};
 pub use node::{Node, PortLayout, ProcessContext, TransportLoop, TransportState};
 pub use plugin::{
     BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind,
-    PluginInstance, PluginProcessor,
+    PluginInstance, PluginProcessor, ScanBuilder,
 };
 pub use time::{MusicalPosition, PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline};

@@ -9,7 +9,7 @@ use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use daw_core::plugin::{BundleScan, PluginError, PluginFormatKind};
+use daw_core::plugin::{BundleScan, PluginFormatKind};
 use serde::{Deserialize, Serialize};
 
 use crate::registry::PluginRegistry;
@@ -249,11 +249,9 @@ pub fn run_scan_child(
             ExitCode::SUCCESS,
         ),
         Err(e) => {
-            let load_failed = match e {
-                PluginError::Load(why) => why,
-                other => other.to_string(),
+            let failure = LoadFailure {
+                load_failed: e.reason(),
             };
-            let failure = LoadFailure { load_failed };
             (
                 serde_json::to_vec(&failure).expect("a string serializes"),
                 ExitCode::from(EXIT_LOAD_FAILED),

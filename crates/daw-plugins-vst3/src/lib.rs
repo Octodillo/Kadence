@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use daw_core::plugin::{
     BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    ScanBuilder,
 };
 
 pub use instance::{Vst3Instance, Vst3Processor};
@@ -54,23 +55,13 @@ impl PluginFormat for Vst3Format {
         if is_module(path) {
             return instance::scan_module(path);
         }
-        let mut scan = BundleScan::default();
-        let mut first_error = None;
+        let mut scan = ScanBuilder::default();
         if path.is_dir() {
             for module in find_modules(path) {
-                match instance::scan_module(&module) {
-                    Ok(found) => scan.merge(found),
-                    Err(e) => {
-                        scan.skipped.push(load_reason(&e));
-                        first_error.get_or_insert(e);
-                    }
-                }
+                scan.bundle(instance::scan_module(&module));
             }
         }
-        match first_error {
-            Some(e) if scan.plugins.is_empty() => Err(e),
-            _ => Ok(scan),
-        }
+        scan.finish()
     }
 
     /// Runs ModuleExit for the modules no instance uses any more; see [`shutdown`].
@@ -93,14 +84,6 @@ impl PluginFormat for Vst3Format {
         let mut instance = Vst3Instance::new(d)?;
         daw_core::node::Node::prepare(&mut instance, sample_rate, max_frames);
         Ok(Box::new(instance))
-    }
-}
-
-/// Why a module did not load, without the error's own prefix: the text already names the module.
-fn load_reason(e: &PluginError) -> String {
-    match e {
-        PluginError::Load(why) => why.clone(),
-        other => other.to_string(),
     }
 }
 

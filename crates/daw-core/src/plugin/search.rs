@@ -11,16 +11,21 @@ use std::path::{Path, PathBuf};
 
 use super::PluginFormatKind;
 
-/// The system library directories plugins are installed under, most local first: `/usr/local`
-/// before `/usr`, then the lib64 (Fedora, openSUSE) and multiarch (Debian, Ubuntu) layouts.
-const LIBRARY_DIRS: [&str; 6] = [
+/// The system library directories plugins are installed under: `lib` and `lib64` (Fedora,
+/// openSUSE), in `/usr/local` first so that a plugin the administrator installed wins over the
+/// distribution's copy, as it does for programs and libraries.
+const LIBRARY_DIRS: [&str; 4] = [
     "/usr/local/lib",
     "/usr/local/lib64",
     "/usr/lib",
     "/usr/lib64",
-    "/usr/lib/x86_64-linux-gnu",
-    "/usr/lib/aarch64-linux-gnu",
 ];
+
+/// The multiarch library directory (Debian, Ubuntu) of the architecture this build runs on.
+/// Other architectures' directories hold plugins this process cannot load.
+fn multiarch_dir() -> PathBuf {
+    PathBuf::from(format!("/usr/lib/{}-linux-gnu", std::env::consts::ARCH))
+}
 
 /// Inside Flatpak: the plugin extension point (`org.freedesktop.LinuxAudio.Plugins`) and the
 /// plugins bundled with the application.
@@ -33,7 +38,8 @@ struct Layout {
     /// The environment variable that lists more directories, in `PATH` syntax.
     env: &'static str,
     /// Whether the variable replaces the home and system directories (LV2, as lilv does) or is
-    /// searched before them (CLAP and VST3, as their specifications say).
+    /// searched before them (CLAP, as its specification says, and VST3 by the same convention;
+    /// the VST 3 specification names no variable).
     env_replaces: bool,
 }
 
@@ -76,13 +82,14 @@ impl Environment {
     }
 }
 
-/// The directories to search for `kind`'s bundles, in order of precedence: the format's
+/// The paths to search for `kind`'s bundles, in order of precedence: the format's
 /// environment variable (`CLAP_PATH`, `LV2_PATH`, `VST3_PATH`), the user's home, the system
 /// library directories and, inside Flatpak, the plugin extension and the application's own
 /// plugins. `LV2_PATH` replaces the home and system directories; the other two add to them.
 ///
 /// Only paths that exist are returned, each once: the same directory is often listed twice or
-/// reached through a symlink (`/usr/lib64` is a link to `/usr/lib` on Arch).
+/// reached through a symlink (`/usr/lib64` is a link to `/usr/lib` on Arch). A path from the
+/// variable may also be a single bundle.
 pub fn default_search_paths(kind: &PluginFormatKind) -> Vec<PathBuf> {
     let layout = layout(kind);
     existing(listed(&layout, &Environment::current(&layout)))
@@ -103,10 +110,11 @@ fn listed(layout: &Layout, environment: &Environment) -> Vec<PathBuf> {
         if let Some(home) = &environment.home {
             paths.push(Path::new(home).join(format!(".{}", layout.dir)));
         }
+        let libraries = LIBRARY_DIRS.iter().map(PathBuf::from);
         paths.extend(
-            LIBRARY_DIRS
-                .iter()
-                .map(|lib| Path::new(lib).join(layout.dir)),
+            libraries
+                .chain([multiarch_dir()])
+                .map(|lib| lib.join(layout.dir)),
         );
     }
     if environment.flatpak {
@@ -148,7 +156,8 @@ mod tests {
     }
 
     #[test]
-    fn every_format_covers_lib64_and_multiarch() {
+    fn every_format_covers_lib64_and_this_builds_multiarch() {
+        let arch = std::env::consts::ARCH;
         for (kind, dir) in [
             (PluginFormatKind::Clap, "clap"),
             (PluginFormatKind::Lv2, "lv2"),
@@ -162,8 +171,7 @@ mod tests {
                     format!("/usr/local/lib64/{dir}"),
                     format!("/usr/lib/{dir}"),
                     format!("/usr/lib64/{dir}"),
-                    format!("/usr/lib/x86_64-linux-gnu/{dir}"),
-                    format!("/usr/lib/aarch64-linux-gnu/{dir}"),
+                    format!("/usr/lib/{arch}-linux-gnu/{dir}"),
                 ]
             );
         }
@@ -209,12 +217,16 @@ mod tests {
         let link = dir.path().join("lib64");
         std::fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
+        // A path may be one bundle rather than a directory of them.
+        let bundle = dir.path().join("one.clap");
+        std::fs::write(&bundle, "").unwrap();
         let found = existing(vec![
             real.clone(),
             dir.path().join("missing"),
             link,
+            bundle.clone(),
             real.clone(),
         ]);
-        assert_eq!(found, [real]);
+        assert_eq!(found, [real, bundle]);
     }
 }

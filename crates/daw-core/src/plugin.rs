@@ -40,9 +40,9 @@ pub struct PluginDescriptor {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BundleScan {
     pub plugins: Vec<PluginDescriptor>,
-    /// Plugins the bundle holds that could not be described, each with its name and the reason
-    /// (in English, often the plugin's own words). The host lists them as failures and scans
-    /// the bundle again when asked to retry.
+    /// Why each plugin the bundle holds but could not describe was skipped: a sentence that
+    /// names the plugin (in English, often with the plugin's own words). The host lists them
+    /// as failures and scans the bundle again when asked to retry.
     #[serde(default)]
     pub skipped: Vec<String>,
 }
@@ -55,11 +55,45 @@ impl BundleScan {
             skipped: Vec::new(),
         }
     }
+}
 
-    /// Adds another scan's findings, for a path that holds several bundles.
-    pub fn merge(&mut self, other: BundleScan) {
-        self.plugins.extend(other.plugins);
-        self.skipped.extend(other.skipped);
+/// Builds a [`BundleScan`] one plugin at a time, for a format that has to load each plugin to
+/// describe it. Plugins that fail are skipped; a scan in which every plugin failed is itself a
+/// failure, with the first plugin's error.
+#[derive(Debug, Default)]
+pub struct ScanBuilder {
+    scan: BundleScan,
+    first_error: Option<PluginError>,
+}
+
+impl ScanBuilder {
+    pub fn found(&mut self, plugin: PluginDescriptor) {
+        self.scan.plugins.push(plugin);
+    }
+
+    /// Records a plugin that could not be described. `error` should name the plugin.
+    pub fn skip(&mut self, error: PluginError) {
+        self.scan.skipped.push(error.reason());
+        self.first_error.get_or_insert(error);
+    }
+
+    /// Adds the outcome of scanning one bundle of several under the scanned path; a bundle
+    /// that failed counts as skipped.
+    pub fn bundle(&mut self, scanned: Result<BundleScan, PluginError>) {
+        match scanned {
+            Ok(scan) => {
+                self.scan.plugins.extend(scan.plugins);
+                self.scan.skipped.extend(scan.skipped);
+            }
+            Err(e) => self.skip(e),
+        }
+    }
+
+    pub fn finish(self) -> Result<BundleScan, PluginError> {
+        match self.first_error {
+            Some(e) if self.scan.plugins.is_empty() => Err(e),
+            _ => Ok(self.scan),
+        }
     }
 }
 
@@ -88,6 +122,17 @@ pub enum PluginError {
     /// editor shows a modal dialog, say. The call can be made again later.
     #[error("busy: {0}")]
     Busy(String),
+}
+
+impl PluginError {
+    /// What went wrong, for a list that already says which step failed: a load failure's own
+    /// text, without the `load:` in front.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Load(why) => why.clone(),
+            other => other.to_string(),
+        }
+    }
 }
 
 /// A loaded, activated plugin. It is a graph [`Node`]; the other methods run
@@ -188,4 +233,66 @@ pub trait PluginFormat: Send + Sync {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<Box<dyn PluginInstance>, PluginError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plugin(id: &str) -> PluginDescriptor {
+        PluginDescriptor {
+            format: PluginFormatKind::Clap,
+            id: id.into(),
+            name: id.into(),
+            vendor: String::new(),
+            path: PathBuf::from("/x.clap"),
+            is_instrument: false,
+            ports: (2, 2),
+        }
+    }
+
+    fn load_error(why: &str) -> PluginError {
+        PluginError::Load(why.into())
+    }
+
+    #[test]
+    fn a_scan_skips_plugins_that_fail_and_fails_when_all_do() {
+        let mut some = ScanBuilder::default();
+        some.skip(load_error("b: no licence"));
+        some.found(plugin("a"));
+        some.skip(PluginError::State("c: bad state".into()));
+        let scan = some.finish().expect("one plugin was described");
+        assert_eq!(scan.plugins.len(), 1);
+        assert_eq!(scan.skipped, ["b: no licence", "state: c: bad state"]);
+
+        let mut none = ScanBuilder::default();
+        none.skip(load_error("b: no licence"));
+        none.skip(load_error("c: no display"));
+        match none.finish() {
+            Err(PluginError::Load(why)) => assert_eq!(why, "b: no licence"),
+            other => panic!("expected the first error, got {other:?}"),
+        }
+
+        let empty = ScanBuilder::default()
+            .finish()
+            .expect("no plugins is no failure");
+        assert!(empty.plugins.is_empty() && empty.skipped.is_empty());
+    }
+
+    #[test]
+    fn bundles_under_one_path_add_up() {
+        let mut all = ScanBuilder::default();
+        all.bundle(Ok(BundleScan {
+            plugins: vec![plugin("a")],
+            skipped: vec!["b: no licence".into()],
+        }));
+        all.bundle(Err(load_error("/Broken.vst3: not a library")));
+        all.bundle(Ok(BundleScan::complete(vec![plugin("c")])));
+        let scan = all.finish().unwrap();
+        assert_eq!(scan.plugins.len(), 2);
+        assert_eq!(
+            scan.skipped,
+            ["b: no licence", "/Broken.vst3: not a library"]
+        );
+    }
 }

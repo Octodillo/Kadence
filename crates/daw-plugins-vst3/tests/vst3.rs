@@ -108,6 +108,20 @@ fn scans_the_test_plugin() {
     assert_eq!(Vst3Format.scan(dir).unwrap().plugins.len(), 1);
 }
 
+/// Under a directory, a module that does not load is skipped and named; the others still count.
+#[test]
+fn a_directory_scan_reports_the_modules_it_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(testgain_bundle(), dir.path().join("TestGain.vst3")).unwrap();
+    std::fs::write(dir.path().join("Broken.vst3"), b"not an elf").unwrap();
+    let scan = Vst3Format.scan(dir.path()).unwrap();
+    assert_eq!(scan.plugins.len(), 1, "{scan:?}");
+    assert_eq!(scan.plugins[0].name, "Test Gain");
+    assert_eq!(scan.skipped.len(), 1, "{scan:?}");
+    assert!(scan.skipped[0].contains("Broken.vst3"), "{scan:?}");
+    assert!(!scan.skipped[0].starts_with("load:"), "{scan:?}");
+}
+
 #[test]
 fn processes_audio_params_and_events() {
     let d = testgain();

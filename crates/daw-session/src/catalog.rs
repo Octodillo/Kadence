@@ -81,7 +81,8 @@ pub struct ScanProgress {
     pub total: usize,
 }
 
-/// A bundle that did not scan, and why (in English, often the plugin's own words).
+/// A bundle that did not scan, or a plugin in it that was skipped, and why (in English, often
+/// the plugin's own words). A bundle that skipped several plugins has a row for each.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanFailure {
     pub bundle: PathBuf,
@@ -261,7 +262,8 @@ impl PluginCatalog {
             .find(|d| d.format == *format && d.id == id)
     }
 
-    /// Bundles the last scan could not load.
+    /// What the last scan could not load: whole bundles, and plugins skipped in bundles that
+    /// otherwise loaded.
     pub fn failed(&self) -> &[ScanFailure] {
         &self.failed
     }

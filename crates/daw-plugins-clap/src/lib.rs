@@ -29,6 +29,7 @@ use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer, PluginA
 use clack_host::prelude::{HostInfo, PluginEntry};
 use daw_core::plugin::{
     BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    ScanBuilder,
 };
 
 pub use instance::{ClapInstance, ClapProcessor};
@@ -93,8 +94,7 @@ fn scan_file(path: &Path) -> Result<BundleScan, PluginError> {
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| PluginError::Load(format!("{}: no plugin factory", path.display())))?;
-    let mut scan = BundleScan::default();
-    let mut first_error = None;
+    let mut scan = ScanBuilder::default();
     for desc in factory.plugin_descriptors() {
         let Some(id) = desc.id().and_then(|id| id.to_str().ok()) else {
             continue;
@@ -114,18 +114,12 @@ fn scan_file(path: &Path) -> Result<BundleScan, PluginError> {
         match main_ports(&entry, id, is_instrument) {
             Ok(ports) => {
                 d.ports = ports;
-                scan.plugins.push(d);
+                scan.found(d);
             }
-            Err(e) => {
-                scan.skipped.push(format!("{}: {e}", d.name));
-                first_error.get_or_insert(e);
-            }
+            Err(e) => scan.skip(e),
         }
     }
-    match first_error {
-        Some(e) if scan.plugins.is_empty() => Err(e),
-        _ => Ok(scan),
-    }
+    scan.finish()
 }
 
 /// Which port the graph connects to: the one flagged main, else the first. Many effects leave
