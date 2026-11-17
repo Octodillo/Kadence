@@ -14,6 +14,11 @@ use crate::note::{EditNote, NoteData};
 /// Shortest note an edit produces, in ticks.
 pub const MIN_LENGTH: i64 = 1;
 
+/// Lowest velocity an edit produces: MIDI velocity 1. A note at velocity 0
+/// would stay in the clip but never play (see
+/// [`Sequence::new`](crate::sequence::Sequence::new)).
+pub const MIN_VELOCITY: f64 = 1.0 / 127.0;
+
 /// A grid seen from inside a clip: note times are clip-relative, grid lines
 /// are on the timeline, and `origin` is where the clip starts.
 #[derive(Copy, Clone, Debug)]
@@ -385,12 +390,18 @@ pub fn invert<N: EditNote>(notes: &mut [N], axis: u8) {
 // Velocity
 
 /// Clamps to 0..1, with NaN and infinities going to 0.
-pub(crate) fn clamp_velocity(v: f64) -> f64 {
+pub(crate) fn clamp_unit(v: f64) -> f64 {
     if v.is_finite() {
         v.clamp(0.0, 1.0)
     } else {
         0.0
     }
+}
+
+/// The velocity an edit stores for `v`: within [`MIN_VELOCITY`]..1, so the
+/// note still plays. NaN and infinities go to the minimum.
+pub fn clamp_velocity(v: f64) -> f64 {
+    clamp_unit(v).max(MIN_VELOCITY)
 }
 
 pub fn set_velocity<N: EditNote>(notes: &mut [N], velocity: f64) {
@@ -455,7 +466,7 @@ impl Rng {
 pub fn humanize<N: EditNote>(notes: &mut [N], timing: i64, velocity: f64, seed: u64) {
     let mut rng = Rng(seed);
     let timing = timing.max(0) as f64;
-    let velocity = clamp_velocity(velocity);
+    let velocity = clamp_unit(velocity);
     update(notes, |d| {
         let dt = (rng.signed() * timing).round() as i64;
         let dv = rng.signed() * velocity;
@@ -654,7 +665,26 @@ mod tests {
         let v: Vec<f64> = notes.iter().map(|x| x.velocity).collect();
         assert!((v[0] - 0.2).abs() < 1e-9 && (v[1] - 0.6).abs() < 1e-9 && v[2] == 1.0);
         set_velocity(&mut notes, f64::NAN);
-        assert!(notes.iter().all(|x| x.velocity == 0.0));
+        assert!(notes.iter().all(|x| x.velocity == MIN_VELOCITY));
+    }
+
+    #[test]
+    fn velocity_edits_keep_notes_audible() {
+        let mut notes = [n(0, 10, 60), n(100, 10, 60)];
+        scale_velocity(&mut notes, 0.0);
+        assert!(notes.iter().all(|x| x.velocity == MIN_VELOCITY));
+        set_velocity(&mut notes, -1.0);
+        assert!(notes.iter().all(|x| x.velocity == MIN_VELOCITY));
+        // A ghost note quieter than the humanize amount.
+        for seed in 0..100 {
+            let mut ghost = [NoteData::new(0, 10, 60, 0.05)];
+            humanize(&mut ghost, 0, 0.08, seed);
+            assert!(ghost[0].velocity >= MIN_VELOCITY, "seed {seed}");
+        }
+        // No amount, no change.
+        let mut ghost = [NoteData::new(0, 10, 60, 0.05)];
+        humanize(&mut ghost, 0, 0.0, 1);
+        assert_eq!(ghost[0].velocity, 0.05);
     }
 
     #[test]

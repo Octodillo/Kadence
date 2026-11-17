@@ -10,7 +10,7 @@
 
 use daw_core::time::{PPQ, TickTime};
 
-use crate::edit::{self, MIN_LENGTH, Snap};
+use crate::edit::{self, MIN_LENGTH, MIN_VELOCITY, Snap};
 use crate::note::{EditNote, NoteData};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -318,7 +318,8 @@ impl Drag {
 }
 
 /// The velocity lane under the piano roll: velocity 1 at the top, 0 at
-/// the bottom, one stem per note at its start.
+/// the bottom, one stem per note at its start. The lowest velocity it
+/// sets is [`MIN_VELOCITY`], at the bottom and below.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct VelocityLane {
     pub height: f64,
@@ -331,9 +332,9 @@ impl VelocityLane {
 
     pub fn y_to_velocity(&self, y: f64) -> f64 {
         if self.height <= 0.0 {
-            return 0.0;
+            return MIN_VELOCITY;
         }
-        (1.0 - y / self.height).clamp(0.0, 1.0)
+        (1.0 - y / self.height).clamp(MIN_VELOCITY, 1.0)
     }
 
     /// The stem nearest to `x`, within `tolerance_px`. Among stems at the
@@ -553,7 +554,12 @@ mod tests {
         let changed = lane.draw_line(&v, &mut notes, (96.0, 100.0), (288.0, 0.0));
         assert_eq!(changed, [0, 1, 2]);
         let vel: Vec<f64> = notes.iter().map(|n| n.velocity).collect();
-        assert_eq!(vel, [0.0, 0.5, 1.0]);
+        assert_eq!(vel, [MIN_VELOCITY, 0.5, 1.0]);
+        assert_eq!(lane.y_to_velocity(1e9), MIN_VELOCITY);
+        assert_eq!(
+            VelocityLane { height: 0.0 }.y_to_velocity(0.0),
+            MIN_VELOCITY
+        );
     }
 
     #[test]

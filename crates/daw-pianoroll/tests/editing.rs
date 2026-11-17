@@ -4,7 +4,7 @@ use daw_arrange::{Button, Env, Pointer, Prim, Snap};
 use daw_core::time::{PPQ, SegmentTempoMap, TickTime};
 use daw_midi::edit::Quantize;
 use daw_midi::grid::Grid;
-use daw_midi::model::new_note;
+use daw_midi::model::{compile_track, new_note};
 use daw_midi::{EditNote, NoteData};
 use daw_model::commands::{AddClip, AddTrack};
 use daw_model::{Clip, ClipContent, ClipId, Document, MidiClip, Note, Project, Track, TrackKind};
@@ -730,5 +730,28 @@ fn opening_a_clip_shows_all_its_notes() {
     let visible = pr.visible_keys();
     for key in [48, 60, 84] {
         assert!(visible.contains(&key), "{key} not in {visible:?}");
+    }
+}
+
+#[test]
+fn a_velocity_edit_never_silences_a_note() {
+    let mut r = Rig::new(vec![n(0, Q / 2, 60), n(Q, Q / 2, 62)]);
+    let played = |r: &Rig| {
+        let track = &r.doc.project().tracks[0];
+        compile_track(track, &r.tempo, 48_000.0).len()
+    };
+    // A stem dragged to the very bottom of the lane, and past it.
+    let vel = r.pr.velocity_rect();
+    r.drag((r.x(0), vel.y + 10.0), (r.x(0), vel.bottom() + 20.0));
+    assert!(r.notes()[0].velocity < 0.01);
+    assert_eq!(played(&r), 2);
+    r.pr.select_all(r.doc.project());
+    r.pr.set_velocity(&mut r.doc, 0.0);
+    assert_eq!(played(&r), 2);
+    r.pr.scale_velocity(&mut r.doc, 0.0);
+    assert_eq!(played(&r), 2);
+    for seed in 0..50 {
+        r.pr.humanize(&mut r.doc, seed);
+        assert_eq!(played(&r), 2, "seed {seed}");
     }
 }

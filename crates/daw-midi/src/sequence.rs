@@ -6,7 +6,7 @@
 
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 
-use crate::edit::clamp_velocity;
+use crate::edit::clamp_unit;
 use crate::note::NoteData;
 
 /// One note on the timeline, in samples.
@@ -142,7 +142,7 @@ where
                 end: tempo.ticks_to_samples(TickTime(end), sample_rate),
                 key: n.key,
                 channel: n.channel,
-                velocity: clamp_velocity(n.velocity) as f32,
+                velocity: clamp_unit(n.velocity) as f32,
                 uid,
             });
         }
