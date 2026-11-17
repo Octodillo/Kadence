@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{Node, ProcessContext, TransportState};
 use daw_core::plugin::{
@@ -17,9 +16,9 @@ use daw_core::plugin::{
 use daw_plugin_host::{
     CrashReason, HostLauncher, SandboxConfig, SandboxFormat, SandboxStatus, SandboxedInstance,
 };
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const ID: &str = "org.daw.test.gain";
 const GAIN: u32 = 1;
@@ -359,11 +358,11 @@ fn process_does_not_allocate() {
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        assert_no_alloc(|| plugin.process(&mut ctx));
+        assert_no_alloc("process", || plugin.process(&mut ctx));
     }
     assert_eq!(left[0], 0.25);
     assert_eq!(left[599], 0.25);
-    assert_no_alloc(|| plugin.reset());
+    assert_no_alloc("reset", || plugin.reset());
     // The reset reaches the host on the next cycle.
     let ([l, _], _) = run(&mut plugin, 8, 1.0, &[]);
     assert!(l.iter().all(|&s| s == 0.5));
@@ -979,17 +978,10 @@ fn a_prepare_answers_a_change_not_yet_picked_up() {
 /// declared under lv2:sampleRate, so its range is a fraction of the rate.
 /// None when mda-lv2 is not installed (CI requires it).
 fn sample_rate_lv2_bundle() -> Option<tempfile::TempDir> {
-    let binary = ["/usr/lib/lv2", "/usr/lib64/lv2", "/usr/local/lib/lv2"]
-        .iter()
-        .map(|d| Path::new(d).join("mda.lv2/Delay.so"))
-        .find(|p| p.is_file());
-    let Some(binary) = binary else {
-        assert!(
-            std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
-            "mda-lv2 must be installed"
-        );
-        return None;
-    };
+    let dirs = daw_plugins::default_registry().search_paths(&PluginFormatKind::Lv2);
+    assert!(!dirs.is_empty(), "daw-plugins was built without LV2");
+    let binary = daw_test_support::lv2::find_bundles(dirs, &["mda.lv2"])?.join("mda.lv2/Delay.so");
+    assert!(binary.is_file(), "{} is missing", binary.display());
     let control = |i: u32, symbol: &str, range: &str| {
         format!(
             "[ a lv2:InputPort , lv2:ControlPort ; lv2:index {i} ; lv2:symbol \"{symbol}\" ; \
@@ -1037,7 +1029,6 @@ fn sample_rate_lv2_bundle() -> Option<tempfile::TempDir> {
 #[test]
 fn a_new_rate_refreshes_parameter_ranges() {
     let Some(bundle) = sample_rate_lv2_bundle() else {
-        eprintln!("skipped: mda-lv2 not installed");
         return;
     };
     let format = SandboxFormat::new(PluginFormatKind::Lv2, vec![], config());

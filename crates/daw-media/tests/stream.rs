@@ -5,14 +5,13 @@ use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::time::SampleTime;
 use daw_media::{
     AudioData, ClipReader, DiskStreamer, ReadStatus, StreamerConfig, WavFormat, write_wav,
 };
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 256;
@@ -80,10 +79,9 @@ fn sixty_four_streams_in_real_time_without_underruns() {
     let start = Instant::now();
     let mut worst_err = 0.0f32;
     let mut bad_status = 0;
-    reset_violation_count();
     for cycle in 0..cycles {
         let pos = (cycle * BLOCK) as i64;
-        assert_no_alloc(|| {
+        assert_no_alloc("the RT reader", || {
             for (i, r) in readers.iter_mut().enumerate() {
                 let status = r.read(SampleTime(pos), &mut [&mut left[..], &mut right[..]]);
                 if status != ReadStatus::Ok {
@@ -102,7 +100,6 @@ fn sixty_four_streams_in_real_time_without_underruns() {
             std::thread::sleep(d);
         }
     }
-    assert_eq!(violation_count(), 0, "RT reader allocated");
     let underruns: u64 = readers.iter().map(|r| r.underruns()).sum();
     assert_eq!(underruns, 0);
     assert_eq!(bad_status, 0);

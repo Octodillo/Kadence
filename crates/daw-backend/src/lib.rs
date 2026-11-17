@@ -11,7 +11,7 @@
 //!   real-time pace or as fast as possible. Tests use it.
 //!
 //! The callback runs on the real-time thread. It must not allocate, lock, log
-//! or do I/O. In debug builds, when the binary installs [`RtAllocCounter`] as
+//! or do I/O. When the binary installs [`RtAllocCounter`] as
 //! its global allocator, allocations in a cycle show up in
 //! [`BackendStats::rt_alloc_violations`].
 
@@ -263,29 +263,22 @@ pub fn port_short_name(name: &str) -> String {
     }
 }
 
-/// Runs one cycle body under the debug-build allocation guard, and counts any
-/// allocation it catches in [`BackendStats::rt_alloc_violations`]. It only
-/// counts: printing from the real-time thread would cost more than the
-/// allocation it reports.
+/// Runs one cycle body under the allocation guard, and counts any allocation
+/// it catches in [`BackendStats::rt_alloc_violations`]. It only counts:
+/// printing from the real-time thread would cost more than the allocation it
+/// reports. Without [`RtAllocCounter`] installed nothing is ever caught, and
+/// the guard costs two thread-local reads a cycle.
 #[inline]
 pub(crate) fn rt_guard<R>(shared: &stats::SharedStats, f: impl FnOnce() -> R) -> R {
-    #[cfg(debug_assertions)]
-    {
-        let before = alloc::violations();
-        let r = alloc::forbid(f);
-        let caught = alloc::violations().wrapping_sub(before);
-        if caught > 0 {
-            shared
-                .rt_alloc_violations
-                .fetch_add(caught, std::sync::atomic::Ordering::Relaxed);
-        }
-        r
+    let before = alloc::violations();
+    let r = alloc::forbid(f);
+    let caught = alloc::violations().wrapping_sub(before);
+    if caught > 0 {
+        shared
+            .rt_alloc_violations
+            .fetch_add(caught, std::sync::atomic::Ordering::Relaxed);
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = shared;
-        f()
-    }
+    r
 }
 
 #[cfg(test)]

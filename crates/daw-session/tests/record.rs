@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use daw_backend::{
     AudioBackend, BackendConfig, DummyBackend, JackBackend, Latency, Pacing, PortFilter,
+    RtAllocCounter,
 };
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
@@ -20,17 +21,37 @@ use daw_model::{
 use daw_session::record::AudioTakes;
 use daw_session::{Session, SessionConfig};
 
+/// Counts allocations made inside the backend's cycles, so the takes can
+/// check that capturing never allocates on the audio thread.
+#[global_allocator]
+static ALLOC: RtAllocCounter = RtAllocCounter;
+
 const RATE: u32 = 48_000;
 const PERIOD: u32 = 256;
 /// Where the impulses are in the source file, and how loud.
 const IMPULSES: [(usize, f32); 3] = [(1_000, 0.9), (7_321, 0.6), (15_007, 0.3)];
 
-struct Rig<B = DummyBackend> {
+struct Rig<B: AudioBackend = DummyBackend> {
     doc: Document,
     session: Session,
     backend: B,
     mic: TrackId,
     dir: tempfile::TempDir,
+}
+
+/// Every test ends here: whatever it recorded, monitored or threw away, no
+/// cycle may have allocated.
+impl<B: AudioBackend> Drop for Rig<B> {
+    fn drop(&mut self) {
+        // A second panic while a failed test unwinds would abort the run.
+        if !std::thread::panicking() {
+            assert_eq!(
+                self.backend.stats().rt_alloc_violations,
+                Some(0),
+                "a cycle allocated"
+            );
+        }
+    }
 }
 
 /// The backend's config: two audio channels each way, no MIDI.
@@ -134,7 +155,7 @@ fn wait_past(session: &Session, samples: i64) {
 
 /// The timeline positions (in samples) and values of the impulses in an
 /// audio clip on `track`.
-fn impulses_on<B>(rig: &Rig<B>, track: TrackId) -> Vec<(i64, f32)> {
+fn impulses_on<B: AudioBackend>(rig: &Rig<B>, track: TrackId) -> Vec<(i64, f32)> {
     let project = rig.doc.project();
     let clip = &project.track(track).unwrap().clips[0];
     let ClipContent::Audio(a) = &clip.content else {
@@ -208,7 +229,7 @@ fn record_take<B: AudioBackend>(
 /// Checks that the mic's take holds the source's impulses with their
 /// spacing and relative levels, and returns how many samples late the
 /// first one is against where it was played.
-fn impulses_late_by<B>(rig: &Rig<B>, beat: i64) -> i64 {
+fn impulses_late_by<B: AudioBackend>(rig: &Rig<B>, beat: i64) -> i64 {
     let got = impulses_on(rig, rig.mic);
     assert_eq!(got.len(), IMPULSES.len(), "{got:?}");
     let late = got[0].0 - (beat + IMPULSES[0].0 as i64);
@@ -261,7 +282,6 @@ fn record_and_check_with(latency: Latency, during: impl FnOnce(&mut Rig)) {
         0,
         "the take is off (latency {latency:?})"
     );
-    assert_eq!(rig.backend.stats().rt_alloc_violations, 0);
 
     // Undo takes the take off the track.
     rig.doc.undo().unwrap();
@@ -543,7 +563,6 @@ fn records_through_a_jack_server() {
         (0..=2 * period).contains(&late),
         "the take is {late} samples late; the period is {period}"
     );
-    assert_eq!(stats.rt_alloc_violations, 0);
     println!(
         "recorded at {rate} Hz, period {period}: {late} samples late, reported latency {latency}, {} xruns",
         stats.xruns

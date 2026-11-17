@@ -19,7 +19,7 @@ lv2_raw = "0.3"
 rtrb = "0.3"
 
 [dev-dependencies]
-assert_no_alloc.workspace = true
+daw-test-support.workspace = true
 tempfile = "3"
 
 [lints]

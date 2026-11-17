@@ -2,12 +2,11 @@ mod common;
 
 use std::time::Duration;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use common::{max_abs_diff, test_signal};
 use daw_media::{PeakCache, Recorder, WavFormat, decode_file};
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 #[test]
 fn records_rt_blocks_to_wav_with_peaks() {
@@ -15,17 +14,15 @@ fn records_rt_blocks_to_wav_with_peaks() {
     let path = dir.path().join("take.wav");
     let src = test_signal(48_000, 48_000, 2);
     let (rec, mut input) = Recorder::start(&path, 2, 48_000, WavFormat::Float32, 1.0).unwrap();
-    reset_violation_count();
     for start in (0..48_000).step_by(256) {
         let end = (start + 256).min(48_000);
-        let queued = assert_no_alloc(|| {
+        let queued = assert_no_alloc("RecordInput::write", || {
             input.write(&[&src.channels[0][start..end], &src.channels[1][start..end]])
         });
         assert_eq!(queued, end - start);
         // Faster than real time, but slow enough for the writer to keep up.
         std::thread::sleep(Duration::from_micros(200));
     }
-    assert_eq!(violation_count(), 0, "RecordInput::write allocated");
     drop(input);
     let stats = rec.finish().unwrap();
     assert_eq!(stats.frames, 48_000);

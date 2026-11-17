@@ -21,7 +21,7 @@ thiserror.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
-assert_no_alloc.workspace = true
+daw-test-support.workspace = true
 tempfile = "3"
 
 [lints]

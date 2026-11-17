@@ -1,15 +1,12 @@
-//! The process path must never allocate or free. This binary installs
-//! `assert_no_alloc`'s allocator. The workspace enables its `warn_debug` and
-//! `warn_release` features, so instead of aborting it counts violations per
-//! thread, and each test asserts the count stays at zero on the thread that
-//! processed.
+//! The process path must never allocate or free. Each test counts the
+//! allocator calls made on the thread that processed, and asserts there
+//! were none.
 
 mod support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::time::SampleTime;
 use daw_engine::nodes::Strip;
@@ -17,25 +14,12 @@ use daw_engine::{
     AutomationLane, AutomationPoint, Curve, EngineConfig, EngineController, GraphDesc, LoopRange,
     NodeId, NodeKey, NodeMeter, PluginHandle,
 };
+use daw_test_support::no_alloc::allocations_in;
 use support::{Delay, EventProbe, FakePlugin, NoteSource, Sine};
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const SWAPS: u64 = 1000;
-
-/// Runs `f` under `assert_no_alloc` and returns how many allocations or
-/// frees it made on this thread.
-fn violations(f: impl FnOnce()) -> u32 {
-    reset_violation_count();
-    assert_no_alloc(f);
-    violation_count()
-}
-
-#[test]
-fn detector_catches_allocations() {
-    assert!(violations(|| drop(std::hint::black_box(vec![1u8; 16]))) > 0);
-}
 
 const SINE: NodeKey = NodeKey(1);
 const TRACK: NodeKey = NodeKey(2);
@@ -109,7 +93,7 @@ fn swapping_graphs_while_processing_never_allocates() {
         };
         events.push(Event { frame: 70, kind }).unwrap();
         let mut cycles = 0u64;
-        let bad = violations(|| {
+        let bad = allocations_in(|| {
             // 100 frames with max_frames 64 also exercises block splitting.
             while !rt_done.load(Ordering::Acquire) {
                 proc.process(100, &[&input], &mut [&mut out], &events);
@@ -163,7 +147,7 @@ fn steady_state_processing_never_allocates() {
         ctl.set_param(track, Strip::PAN, 0.0).unwrap();
         ctl.locate(SampleTime(0)).unwrap();
     }
-    let bad = violations(|| {
+    let bad = allocations_in(|| {
         for _ in 0..100 {
             proc.process(512, &[&input], &mut [&mut out], &events);
         }
@@ -207,7 +191,7 @@ fn stress_plugin(fake: FakePlugin) {
     let rt = std::thread::spawn(move || {
         let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
         let events = EventList::with_capacity(0);
-        violations(|| {
+        allocations_in(|| {
             while !rt_done.load(Ordering::Acquire) {
                 proc.process(64, &[], &mut [&mut l, &mut r], &events);
             }

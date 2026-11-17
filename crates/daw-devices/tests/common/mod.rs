@@ -2,17 +2,16 @@
 //! test binary, and nextest runs every test in its own process.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{ProcessContext, TransportState};
 use daw_core::time::{SampleTime, Timeline};
 use daw_devices::Device;
+use daw_test_support::no_alloc::assert_no_alloc;
+use daw_test_support::{golden, golden_dir};
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 pub const GOLDEN_RATE: f64 = 22050.0;
 
@@ -127,15 +126,9 @@ pub fn render_prepared(
                 events_out: &mut events_out,
             };
             let start = Instant::now();
-            let violations = assert_no_alloc::violation_count();
-            assert_no_alloc(|| dev.process(&mut ctx));
-            // The workspace enables `warn_debug`/`warn_release`, so a violation
-            // is counted rather than aborting; turn it into a test failure.
-            assert_eq!(
-                assert_no_alloc::violation_count(),
-                violations,
-                "process allocated at frame {pos}"
-            );
+            assert_no_alloc(format_args!("process at frame {pos}"), || {
+                dev.process(&mut ctx)
+            });
             block_times.push(start.elapsed());
         }
         for (o, b) in out.iter_mut().zip(&out_blocks) {
@@ -204,60 +197,12 @@ pub fn rms(x: &[f32]) -> f32 {
     (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt()
 }
 
-fn golden_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(format!("{name}.f32"))
-}
-
-/// Compare against `tests/golden/<name>.f32`. Set `DAW_UPDATE_GOLDEN=1` to
-/// (re)write the file. A small tolerance absorbs libm differences between
-/// platforms; real DSP changes are far larger.
+/// Compare against `tests/golden/<name>.f32`; see [`golden`] for rewriting
+/// the files. A small tolerance absorbs libm differences between platforms;
+/// real DSP changes are far larger.
+#[track_caller]
 pub fn check_golden(name: &str, channels: &[Vec<f32>]) {
-    for c in channels {
-        assert!(c.iter().all(|s| s.is_finite()), "{name}: non-finite output");
-    }
-    let path = golden_path(name);
-    if std::env::var_os("DAW_UPDATE_GOLDEN").is_some() {
-        let mut bytes = Vec::new();
-        bytes.extend((channels.len() as u32).to_le_bytes());
-        bytes.extend((channels[0].len() as u32).to_le_bytes());
-        for c in channels {
-            for s in c {
-                bytes.extend(s.to_le_bytes());
-            }
-        }
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, bytes).unwrap();
-        return;
-    }
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-        panic!(
-            "{}: {e}; run with DAW_UPDATE_GOLDEN=1 to create it",
-            path.display()
-        )
-    });
-    let word = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
-    let (nch, frames) = (word(0) as usize, word(1) as usize);
-    assert_eq!(nch, channels.len(), "{name}: channel count");
-    assert_eq!(frames, channels[0].len(), "{name}: length");
-    let mut worst = (0.0f32, 0, 0);
-    for (c, ch) in channels.iter().enumerate() {
-        for (i, &s) in ch.iter().enumerate() {
-            let g = f32::from_bits(word(2 + c * frames + i));
-            let d = (g - s).abs();
-            if d > worst.0 {
-                worst = (d, c, i);
-            }
-        }
-    }
-    assert!(
-        worst.0 <= 1e-4,
-        "{name}: differs from golden by {} at channel {} frame {}",
-        worst.0,
-        worst.1,
-        worst.2
-    );
+    golden::check(golden_dir!(), name, channels, golden::Match::Within(1e-4));
 }
 
 /// A device that is excited and then fed silence must decay to exact zeros,
