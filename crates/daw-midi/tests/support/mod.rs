@@ -69,6 +69,12 @@ impl Rig {
         });
     }
 
+    /// Shrinks the output event list to `capacity` events, to test what a
+    /// full list does.
+    pub fn limit_output(&mut self, capacity: usize) {
+        self.events_out = EventList::with_capacity(capacity);
+    }
+
     pub fn out_len(&self) -> usize {
         self.events_out.len()
     }

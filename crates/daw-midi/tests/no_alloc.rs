@@ -26,7 +26,17 @@ fn process_never_allocates() {
                 .collect(),
         )
     };
+    let mut total = 0;
+    // A roomy output list, and one that overflows and owes note-offs.
+    for capacity in [1024, 8] {
+        total += violations_playing(capacity, &seq);
+    }
+    assert_eq!(total, 0);
+}
+
+fn violations_playing(capacity: usize, seq: &impl Fn(i64) -> Sequence) -> u32 {
     let mut rig = Rig::new();
+    rig.limit_output(capacity);
     rig.handle.set_sequence(seq(0)).unwrap();
     rig.handle.set_armed(true);
     let input = [Event {
@@ -63,5 +73,5 @@ fn process_never_allocates() {
         total += allocations_in(|| rig.block_into(pos, 128, playing, &input));
         pos += 128;
     }
-    assert_eq!(total, 0);
+    total
 }
