@@ -9,9 +9,7 @@
 //! ```
 
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -625,9 +623,11 @@ pub enum Link {
     Replace,
 }
 
-/// Writes to a temporary file next to `path`, syncs it, then renames it over
-/// `path`, so a crash never leaves a half-written project. The new file keeps
-/// the permissions of `path`, or of `like` if `path` doesn't exist yet.
+/// Replaces the file at `path` with `content` through
+/// [`daw_core::atomic_file`], so a crash never leaves a half-written project
+/// and nothing put at a temporary name beforehand receives the write. The
+/// new file keeps the permissions of `path`, or of `like` if `path` doesn't
+/// exist yet.
 fn write_atomic(path: &Path, like: &Path, link: Link, content: &[u8]) -> Result<(), FormatError> {
     let path = match fs::symlink_metadata(path) {
         // A dangling link is replaced either way.
@@ -636,62 +636,10 @@ fn write_atomic(path: &Path, like: &Path, link: Link, content: &[u8]) -> Result<
         }
         _ => path.to_path_buf(),
     };
-    let path = path.as_path();
-    let perms = fs::symlink_metadata(path)
+    let perms = fs::symlink_metadata(&path)
         .ok()
         .filter(|m| m.is_file())
         .or_else(|| fs::metadata(like).ok())
         .map(|m| m.permissions());
-    let (file, tmp) = create_temp(path)?;
-    let result = write_synced(file, &tmp, perms, content)
-        .and_then(|()| fs::rename(&tmp, path).map_err(FormatError::io(path)));
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-        return result;
-    }
-    if let Some(dir) = path.parent() {
-        // Persist the rename itself. Not every filesystem allows this.
-        let _ = File::open(dir).and_then(|d| d.sync_all());
-    }
-    Ok(())
-}
-
-/// Creates a new, empty temporary file next to `path`. Never opens a file
-/// that already exists, so nothing put at a guessable name beforehand (a
-/// symlink in a bundle from somewhere else, say) can receive the write.
-fn create_temp(path: &Path) -> Result<(File, PathBuf), FormatError> {
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-    loop {
-        let mut name = path.as_os_str().to_owned();
-        name.push(format!(
-            ".{}-{}.tmp",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let tmp = PathBuf::from(name);
-        match File::create_new(&tmp) {
-            Ok(file) => return Ok((file, tmp)),
-            // Left by an earlier process with this id, or planted: try the next.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(FormatError::io(tmp)(e)),
-        }
-    }
-}
-
-fn write_synced(
-    mut file: File,
-    path: &Path,
-    perms: Option<fs::Permissions>,
-    content: &[u8],
-) -> Result<(), FormatError> {
-    // Narrowed before any data goes in. Elsewhere permissions are only a
-    // read-only flag, which would stop the write.
-    #[cfg(unix)]
-    if let Some(perms) = perms {
-        file.set_permissions(perms).map_err(FormatError::io(path))?;
-    }
-    #[cfg(not(unix))]
-    let _ = perms;
-    file.write_all(content).map_err(FormatError::io(path))?;
-    file.sync_all().map_err(FormatError::io(path))
+    daw_core::atomic_file::write(&path, perms, content).map_err(FormatError::io(path))
 }

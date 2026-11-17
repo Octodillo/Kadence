@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use daw_model::commands::AddClip;
 use daw_model::{Clip, ClipContent, ClipId, Command, MidiClip, Project, TrackId, TrackKind};
-use daw_session::record::{AudioTakes, armed_audio_tracks};
+use daw_session::record::{AudioTakes, TakeProblem, armed_audio_tracks};
 
 use crate::message::{Message, RecordProblem};
 use crate::state::AppState;
@@ -51,15 +51,19 @@ pub struct AudioRecording {
     xruns_reported: bool,
 }
 
-/// Where takes of an unsaved project go: `kadence/recordings` in the
-/// user's data directory.
-fn unsaved_recordings_dir() -> PathBuf {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    data.join("kadence").join("recordings")
+/// Where takes of an unsaved project go: `recordings` in Kadence's data
+/// folder, if the user has one (see [`crate::user_dirs::data`]).
+fn unsaved_recordings_dir() -> Result<PathBuf, Message> {
+    const FOLDER: &str = "recordings";
+    match crate::user_dirs::data() {
+        Some(data) => Ok(data.join(FOLDER)),
+        None => Err(Message::Record(RecordProblem::Take(
+            TakeProblem::CannotCreate {
+                path: FOLDER.into(),
+                detail: "no home folder to keep it in; save the project first".into(),
+            },
+        ))),
+    }
 }
 
 /// The instrument track that hears live MIDI while none is armed: the one
@@ -181,10 +185,10 @@ impl AppState {
         if armed_audio_tracks(project).next().is_none() {
             return Ok(false);
         }
-        let dir = self
-            .doc
-            .bundle()
-            .map_or_else(unsaved_recordings_dir, |b| b.audio_dir());
+        let dir = match self.doc.bundle() {
+            Some(bundle) => bundle.audio_dir(),
+            None => unsaved_recordings_dir()?,
+        };
         let latency = self.engine.round_trip_latency();
         let xruns = self.engine.xruns();
         let Some(session) = self.engine.session_mut() else {

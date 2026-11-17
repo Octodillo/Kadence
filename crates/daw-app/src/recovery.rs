@@ -22,15 +22,10 @@ use daw_model::{Bundle, FormatError, Project, bundle};
 /// File name of a never-saved project's autosave in its scratch folder.
 const SCRATCH_FILE: &str = "Untitled.kadence.autosave";
 
-/// The folder scratch folders go in: `$XDG_DATA_HOME/kadence/recovery`, else
-/// `~/.local/share/kadence/recovery`. Flatpak points `XDG_DATA_HOME` at the
-/// app's own folder.
+/// The folder scratch folders go in: `recovery` in Kadence's data folder
+/// (see [`crate::user_dirs::data`]).
 pub fn default_base() -> Option<PathBuf> {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    Some(data.join("kadence/recovery"))
+    Some(crate::user_dirs::data()?.join("recovery"))
 }
 
 /// An exclusive advisory lock on a folder, held until dropped.

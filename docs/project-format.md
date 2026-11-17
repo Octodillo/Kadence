@@ -34,8 +34,10 @@ My Song/                      bundle directory
 - Saving copies the current project file into `backups/` as
   `<name>-<timestamp>.kadence`, where the timestamp is a zero-padded
   millisecond Unix time, always later than the newest backup's, then writes
-  the new file atomically: write a new `<name>.kadence.<pid>-<n>.tmp`, fsync,
-  rename, fsync the directory. A crash never leaves a half-written project.
+  the new file atomically: write a new `.kadence-<pid>-<n>.tmp` beside it,
+  fsync, rename, fsync the directory (`daw_core::atomic_file`, which exports
+  and caches use too). A temporary file a killed Kadence left behind is
+  removed by a later write into the same folder once it is an hour old. A crash never leaves a half-written project.
   The new file keeps the old one's permissions. Once it is written, that
   project's backups beyond the newest 10 are removed (backups under another
   name, from before the project file was renamed, are left alone). If the

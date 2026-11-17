@@ -640,21 +640,15 @@ fn received_bundle() -> (tempfile::TempDir, Document, TrackId, std::path::PathBu
 }
 
 #[cfg(unix)]
-fn append(path: std::path::PathBuf, suffix: &str) -> std::path::PathBuf {
-    let mut name = path.into_os_string();
-    name.push(suffix);
-    name.into()
-}
-
-#[cfg(unix)]
 #[test]
 fn links_at_temporary_names_are_not_written_through() {
     let (_dir, mut doc, id, victim) = received_bundle();
     let b = doc.bundle().unwrap().clone();
-    for planted in [
-        append(b.project_file(), ".tmp"),
-        append(b.autosave_file(), ".tmp"),
-    ] {
+    // The names the next few hundred writes of this process would use.
+    for n in 0..2000 {
+        let planted = b
+            .root()
+            .join(format!(".kadence-{}-{n}.tmp", std::process::id()));
         std::os::unix::fs::symlink(&victim, planted).unwrap();
     }
     doc.execute(SetTrack::new(id, TrackField::Mute(true)))
