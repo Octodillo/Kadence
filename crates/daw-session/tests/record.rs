@@ -383,7 +383,7 @@ fn auto_monitoring_follows_arm_and_transport() {
 
 #[test]
 fn saving_to_a_new_place_mid_take_keeps_the_take() {
-    // Save As moves the project root, which rebuilds the graph.
+    // Save As moves the project root: every player gets its clips again.
     record_and_check_with(
         Latency {
             input: 300,

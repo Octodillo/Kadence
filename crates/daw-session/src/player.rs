@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
 use daw_core::node::{Node, PortLayout, ProcessContext};
@@ -42,26 +42,43 @@ const NOWHERE: i64 = i64::MIN;
 
 /// The loop range, shared between the session and every player so the
 /// players can prepare for the wrap. `end <= start` means no loop.
+///
+/// The two ends are read as the pair they were set as: each
+/// [`set`](Self::set) writes the slot readers are not pointed at and then
+/// points them to it. One writer (the session's thread), any number of
+/// readers.
 #[derive(Debug, Default)]
 pub struct LoopPoints {
-    start: AtomicI64,
-    end: AtomicI64,
+    /// `(start, end)`, twice. The low bit of `version` says which is current.
+    slots: [[AtomicI64; 2]; 2],
+    version: AtomicU32,
 }
 
 impl LoopPoints {
     pub fn set(&self, range: Option<(SampleTime, SampleTime)>) {
         let (s, e) = range.map_or((0, 0), |(s, e)| (s.0, e.0));
-        // Clear the end first so a reader never sees a new start with an old end
-        // that makes a bogus range for one block.
-        self.end.store(0, Ordering::Relaxed);
-        self.start.store(s, Ordering::Relaxed);
-        self.end.store(e, Ordering::Release);
+        let next = self.version.load(Ordering::Relaxed).wrapping_add(1);
+        let slot = &self.slots[(next & 1) as usize];
+        slot[0].store(s, Ordering::Relaxed);
+        slot[1].store(e, Ordering::Relaxed);
+        self.version.store(next, Ordering::Release);
     }
 
     pub fn get(&self) -> Option<(i64, i64)> {
-        let e = self.end.load(Ordering::Acquire);
-        let s = self.start.load(Ordering::Relaxed);
-        (e > s).then_some((s, e))
+        loop {
+            let version = self.version.load(Ordering::Acquire);
+            let slot = &self.slots[(version & 1) as usize];
+            let (s, e) = (
+                slot[0].load(Ordering::Relaxed),
+                slot[1].load(Ordering::Relaxed),
+            );
+            // The slot read is written again only by the second `set` after
+            // `version`, and the first one moves the version on: unchanged,
+            // the pair is whole. Otherwise read the newer one.
+            if self.version.load(Ordering::Acquire) == version {
+                return (e > s).then_some((s, e));
+            }
+        }
     }
 }
 
@@ -202,6 +219,12 @@ impl ClipSet {
 
     pub fn is_empty(&self) -> bool {
         self.clips.is_empty()
+    }
+
+    /// Whether a clip's file could not be read.
+    pub fn has_unread(&self) -> bool {
+        let mut sources = self.clips.iter().map(|c| &c.source);
+        sources.any(|s| matches!(s, ClipSource::Missing))
     }
 }
 
@@ -522,5 +545,37 @@ impl Node for AudioClipPlayer {
     fn reset(&mut self) {
         self.expected = None;
         self.parked_at = NOWHERE;
+    }
+}
+
+#[cfg(test)]
+mod loop_points_tests {
+    use super::*;
+
+    #[test]
+    fn a_reader_sees_the_ends_of_one_set() {
+        let points = LoopPoints::default();
+        assert_eq!(points.get(), None);
+        points.set(Some((SampleTime(10), SampleTime(20))));
+        assert_eq!(points.get(), Some((10, 20)));
+        points.set(None);
+        assert_eq!(points.get(), None);
+
+        // Every range set is 10 long; a mix of two would not be.
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    if let Some((s, e)) = points.get() {
+                        assert_eq!(e - s, 10, "torn: {s}..{e}");
+                    }
+                }
+            });
+            for i in 0..200_000 {
+                points.set(Some((SampleTime(i * 7), SampleTime(i * 7 + 10))));
+            }
+            done.store(true, Ordering::Relaxed);
+            reader.join().unwrap();
+        });
     }
 }

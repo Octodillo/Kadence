@@ -18,6 +18,15 @@ pub const MEMORY_LIMIT_SECONDS: f64 = 60.0;
 /// at 192 kHz.
 const NOMINAL_SAMPLES_PER_SECOND: u64 = 192_000 * 8;
 
+/// What tells a file from an earlier version of itself: its modification
+/// time and length.
+type Stamp = (std::time::SystemTime, u64);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
 /// How a file is played.
 #[derive(Clone)]
 pub(crate) enum Loaded {
@@ -32,7 +41,10 @@ pub(crate) enum Loaded {
 pub struct MediaPool {
     sample_rate: u32,
     root: Option<PathBuf>,
-    loaded: HashMap<PathBuf, Loaded>,
+    /// Files read so far, each with its [`stamp`] at the time: a file that
+    /// changed since is read again. Files that could not be read are not
+    /// kept, so each look tries them again.
+    loaded: HashMap<PathBuf, (Loaded, Stamp)>,
     streamer: DiskStreamer,
     memory_limit: f64,
 }
@@ -54,10 +66,13 @@ impl MediaPool {
     /// The project bundle directory that relative clip paths are resolved
     /// against.
     pub fn set_root(&mut self, root: Option<PathBuf>) {
-        if self.root != root {
-            self.root = root;
-            self.loaded.clear();
-        }
+        // The cache is by resolved path, so it holds for any root.
+        self.root = root;
+    }
+
+    /// Forgets every file read so far.
+    pub(crate) fn clear(&mut self) {
+        self.loaded.clear();
     }
 
     /// Files longer than this many seconds are streamed instead of decoded
@@ -84,12 +99,26 @@ impl MediaPool {
     }
 
     pub(crate) fn get(&mut self, path: &Path) -> Loaded {
-        if let Some(l) = self.loaded.get(path) {
-            return l.clone();
+        let Some(now) = stamp(path) else {
+            self.loaded.remove(path);
+            return Loaded::Missing;
+        };
+        if let Some((loaded, then)) = self.loaded.get(path)
+            && *then == now
+        {
+            return loaded.clone();
         }
-        let l = self.load(path).unwrap_or(Loaded::Missing);
-        self.loaded.insert(path.to_path_buf(), l.clone());
-        l
+        match self.load(path) {
+            Ok(loaded) => {
+                self.loaded
+                    .insert(path.to_path_buf(), (loaded.clone(), now));
+                loaded
+            }
+            Err(_) => {
+                self.loaded.remove(path);
+                Loaded::Missing
+            }
+        }
     }
 
     pub(crate) fn open_streams(&self, path: &Path) -> Result<Streams, MediaError> {

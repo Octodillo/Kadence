@@ -213,6 +213,9 @@ pub(crate) struct Built {
     pub midi_clips: HashMap<TrackId, Vec<Arc<daw_model::Clip>>>,
     /// Input taps of audio tracks.
     pub taps: HashMap<TrackId, capture::TapHandle>,
+    /// Audio tracks with a clip whose file could not be read: every sync
+    /// looks again, in case the file is there now.
+    pub unread: HashSet<TrackId>,
 }
 
 /// The engine as the model sees it. See the crate docs.
@@ -262,12 +265,92 @@ pub struct Session {
     /// Rebuild the graph on the next sync even if the project's shape is
     /// unchanged.
     force_rebuild: bool,
+    /// The tempo changed and what is kept in samples has not all followed
+    /// yet: clips, notes and automation.
+    retime: bool,
+    /// The loop has not followed the tempo (or the engine refused it).
+    loop_stale: bool,
+    /// Where the playhead still has to go to stay put over a tempo change.
+    relocate: Option<TickTime>,
+    /// The project bundle moved and samplers have not loaded from the new
+    /// place yet.
+    pub(crate) root_moved: bool,
+    pub(crate) sent: SentParams,
     /// After the engine refused a graph: how long [`tick`](Self::tick)
     /// waits before it tries again, and when.
     retry: Option<(std::time::Duration, std::time::Instant)>,
     /// Audio tracks that monitor automatically (armed, monitoring on
     /// auto), as of the last sync.
     auto_monitor: HashSet<TrackId>,
+}
+
+/// What the session has sent the running graph's nodes lately, to notice
+/// values that did not arrive.
+///
+/// The engine keeps [`PER_NODE`](Self::PER_NODE) parameter changes per
+/// node between two audio cycles and drops the rest, counting them. So a
+/// sync sends a node no more than that and leaves the rest for the next
+/// one, and when the count moved, the nodes sent to since are sent their
+/// values again.
+#[derive(Default)]
+pub(crate) struct SentParams {
+    /// The engine's count of dropped changes when last looked at.
+    dropped: u64,
+    /// Changes sent per node since then.
+    counts: HashMap<NodeKey, usize>,
+    /// A node had no room for a change: there is more to send.
+    deferred: bool,
+    /// How many graphs the audio thread had swapped in when `since_swap`
+    /// was started.
+    swaps: u64,
+    /// Nodes sent a change since that swap, which the running graph may
+    /// not have played yet.
+    since_swap: HashSet<NodeKey>,
+}
+
+impl SentParams {
+    /// Changes the engine keeps per node between two cycles
+    /// (`PARAM_QUEUE` in `daw_engine::compile`).
+    const PER_NODE: usize = 64;
+
+    /// Starts a round of sends. Returns the nodes sent to since the last
+    /// round if the engine dropped a change meanwhile.
+    fn begin(&mut self, controller: &EngineController) -> HashSet<NodeKey> {
+        self.deferred = false;
+        let dropped = controller.dropped_params();
+        let sent = std::mem::take(&mut self.counts);
+        if std::mem::replace(&mut self.dropped, dropped) == dropped {
+            return HashSet::new();
+        }
+        sent.into_keys().collect()
+    }
+
+    fn room(&mut self, key: NodeKey) -> bool {
+        let room = self.counts.get(&key).is_none_or(|&n| n < Self::PER_NODE);
+        self.deferred |= !room;
+        room
+    }
+
+    fn record(&mut self, controller: &EngineController, key: NodeKey) {
+        *self.counts.entry(key).or_default() += 1;
+        self.since_last_swap(controller).insert(key);
+    }
+
+    /// The nodes sent a change since the last graph swap this side saw.
+    fn since_last_swap(&mut self, controller: &EngineController) -> &mut HashSet<NodeKey> {
+        let swaps = controller.graphs_swapped();
+        if std::mem::replace(&mut self.swaps, swaps) != swaps {
+            self.since_swap.clear();
+        }
+        &mut self.since_swap
+    }
+
+    /// Whether `key` was sent a change that the audio thread may not have
+    /// played before it swaps the next graph in: one sent since the last
+    /// swap this side saw.
+    pub(crate) fn maybe_unplayed(&mut self, controller: &EngineController, key: NodeKey) -> bool {
+        self.since_last_swap(controller).contains(&key)
+    }
 }
 
 /// How long [`Session::tick`] waits before resending a refused graph, at
@@ -320,6 +403,11 @@ impl Session {
             plugins: Plugins::default(),
             last: None,
             force_rebuild: false,
+            retime: false,
+            loop_stale: false,
+            relocate: None,
+            root_moved: false,
+            sent: SentParams::default(),
             retry: None,
             auto_monitor: HashSet::new(),
         };
@@ -342,6 +430,8 @@ impl Session {
     /// full) and should run again even if the document hasn't changed.
     pub fn wants_sync(&self) -> bool {
         self.midi_sources_changed
+            || self.retime
+            || self.sent.deferred
             || self.built.as_ref().is_some_and(|b| {
                 b.midi.keys().any(|t| !b.midi_clips.contains_key(t))
                     || b.players.keys().any(|t| !b.clips.contains_key(t))
@@ -412,18 +502,24 @@ impl Session {
             return;
         }
         self.media.set_root(root);
-        // Paths may resolve differently now; rebuild everything but the
-        // input taps, whose nodes hold takes being recorded (saving a new
-        // project while recording moves its root).
-        let old = self.built.take().unwrap_or_default();
-        // So a lane removed later still puts its parameter back.
-        self.built = Some(Built {
-            taps: old.taps,
-            automated: old.automated,
-            rest: old.rest,
-            restore: old.restore,
-            ..Default::default()
-        });
+        // Only what depends on the root starts over, so saving a new
+        // project while it plays or records is not heard: every player
+        // gets its clips again (and keeps the streams of files that did
+        // not move), and samplers load their samples again.
+        if let Some(b) = &mut self.built {
+            b.clips.clear();
+        }
+        self.root_moved = true;
+    }
+
+    /// Reads every audio file again on the next [`sync`](Self::sync), for
+    /// a new document: files that could not be read before, or that
+    /// changed on disk, are looked at afresh.
+    pub fn reload_media(&mut self) {
+        self.media.clear();
+        if let Some(b) = &mut self.built {
+            b.clips.clear();
+        }
     }
 
     /// Problems found by the last sync, such as audio files that could not
@@ -452,22 +548,31 @@ impl Session {
             // Tempo and time signatures, so the metronome and plugins see
             // the project's bars and beats.
             let timeline = daw_midi::model::timeline(&snapshot.tempo);
-            self.tempo = timeline.tempo.clone();
             // Marked as sent only once it is, so a full queue retries next sync.
-            self.controller.set_timeline(timeline)?;
+            self.controller.set_timeline(timeline.clone())?;
+            self.tempo = timeline.tempo;
             self.tempo_data = Some(snapshot.tempo.clone());
+            // Everything kept in samples follows, in the steps below. Each
+            // stays owed until it is done, should the engine refuse one.
+            self.retime = true;
+            self.loop_stale = true;
+            self.relocate = keep;
+        }
+        if self.loop_stale {
             self.apply_loop()?;
-            if let Some(at) = keep {
-                self.locate(at)?;
-            }
+        }
+        if let Some(at) = self.relocate {
+            self.locate(at)?;
+            self.relocate = None;
         }
         self.last = Some(snapshot.clone());
         let structure = build::Structure::of(snapshot, &self.suspended, &self.midi_sources);
         let sources_changed = std::mem::take(&mut self.midi_sources_changed);
         // Automation is in samples, so a tempo change re-times it.
-        let rebuild = std::mem::take(&mut self.force_rebuild)
+        let rebuild = self.force_rebuild
+            || (self.root_moved && structure.has_sampler())
             || self.built.as_ref().is_none_or(|b| {
-                b.structure != structure || (tempo_changed && structure.has_automation())
+                b.structure != structure || (self.retime && structure.has_automation())
             });
         if rebuild {
             let old = self.built.take().unwrap_or_default();
@@ -476,27 +581,22 @@ impl Session {
                 .keys()
                 .map(|&t| (t, old.structure.live_input(t)))
                 .collect();
-            let running = old.automated.clone();
-            let (desc, built) = build::graph(self, snapshot, structure, old);
-            // Kept only once the engine has the graph: a refused graph's players never
-            // ran, so the next build must not take their handles for the running ones.
+            let (desc, build) = build::graph(self, snapshot, structure, old);
             if let Err(e) = self.controller.set_graph(desc) {
                 let backoff = self
                     .retry
                     .map_or(RETRY_MIN, |(b, _)| (b * 2).min(RETRY_MAX));
                 self.retry = Some((backoff, std::time::Instant::now() + backoff));
-                // The old graph plays on with its lanes: the next build starts
-                // from them, knowing what each goes back to.
-                self.built = Some(Built {
-                    automated: running,
-                    rest: built.rest,
-                    restore: built.restore,
-                    ..Default::default()
-                });
+                // The old graph plays on: its bookkeeping is kept, with the
+                // handles of its players, for the next try to build on.
+                self.built = Some(build.revert(&mut self.plugins));
+                self.midi_sources_changed = sources_changed;
                 self.force_rebuild = true;
                 return Err(e.into());
             }
+            let built = build.built;
             self.retry = None;
+            self.force_rebuild = false;
             // A track whose live MIDI now comes from elsewhere would never
             // get the note-offs of what it holds.
             for (track, was) in old_live {
@@ -519,6 +619,8 @@ impl Session {
             // block at most), the old graph plays them as silence.
             self.plugins.retain(|id| ids.contains(&id));
         }
+        // Samplers, if there are any, went into that graph.
+        self.root_moved = false;
         self.sync_plugin_states(snapshot);
         self.gates = snapshot
             .tracks
@@ -527,9 +629,13 @@ impl Session {
             .map(|t| (t.id, t.armed, t.midi_input.channel))
             .collect();
         self.apply_gates();
-        self.send_params(snapshot)?;
-        self.send_clips(snapshot, tempo_changed);
+        // A parameter the engine would not take must not keep the clips
+        // from being sent.
+        let params = self.send_params(snapshot);
+        self.send_clips(snapshot, self.retime);
+        self.retime = false;
         self.apply_inputs(snapshot);
+        params?;
         // Plugin state that was lost, first: said once, and only by a sync
         // whose warnings are shown.
         let mut warnings = std::mem::take(&mut self.plugins.unsaved);
@@ -550,10 +656,10 @@ impl Session {
     pub fn tick(&mut self) -> TickReport {
         self.collect_garbage();
         let mut news = Vec::new();
-        let mut rebuild = self.built.is_none()
-            && self
-                .retry
-                .is_none_or(|(_, at)| std::time::Instant::now() >= at);
+        // A graph the engine refused is sent again.
+        let mut rebuild = self
+            .retry
+            .is_some_and(|(_, at)| std::time::Instant::now() >= at);
         let mut state_changed = Vec::new();
         for (&device, slot) in &mut self.plugins.slots {
             let plugins::Slot::Live(l) = slot else {
@@ -973,11 +1079,24 @@ impl Session {
             self.pre_live.entry((key, param)).or_insert(before);
         }
         self.live.insert((key, param), value);
+        // Without room for it now, the next sync sends it.
+        self.send_param(key, param, value)?;
+        Ok(())
+    }
+
+    /// Sends one parameter value to the running graph and records it as
+    /// sent. Returns false, leaving it for the next sync, when the node has
+    /// had as many changes as the engine keeps for it between two cycles.
+    fn send_param(&mut self, key: NodeKey, param: u32, value: f64) -> Result<bool, EngineError> {
+        if !self.sent.room(key) {
+            return Ok(false);
+        }
         self.controller.set_param_by_key(key, param, value)?;
+        self.sent.record(&self.controller, key);
         if let Some(b) = &mut self.built {
             b.params.insert((key, param), value);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// What a plugin device's parameter is now, by node key: what the
@@ -1070,11 +1189,10 @@ impl Session {
     /// [`metronome`](Self::metronome) keeps the old settings, so calling
     /// again retries.
     pub fn set_metronome(&mut self, settings: MetronomeSettings) -> Result<(), SessionError> {
-        if let Some(built) = self.built.as_mut() {
+        if self.built.is_some() {
             for ((key, param), value) in build::metronome_params(&settings) {
-                if built.params.get(&(key, param)) != Some(&value) {
-                    self.controller.set_param_by_key(key, param, value)?;
-                    built.params.insert((key, param), value);
+                if self.last_sent(key, param) != Some(value) {
+                    self.send_param(key, param, value)?;
                 }
             }
         }
@@ -1086,14 +1204,35 @@ impl Session {
         self.metronome
     }
 
+    /// The value a node's parameter was last sent.
+    fn last_sent(&self, key: NodeKey, param: u32) -> Option<f64> {
+        self.built.as_ref()?.params.get(&(key, param)).copied()
+    }
+
     fn send_params(&mut self, snapshot: &ProjectSnapshot) -> Result<(), SessionError> {
-        let built = self.built.as_mut().expect("built before params");
+        // Values the engine dropped since the last look were recorded as
+        // sent: forget that, for the nodes they may have been for.
+        let suspect = self.sent.begin(&self.controller);
+        if let Some(b) = self.built.as_mut().filter(|_| !suspect.is_empty()) {
+            b.params.retain(|(key, _), _| !suspect.contains(key));
+        }
         let metronome = build::metronome_params(&self.metronome);
         for ((key, param), value) in build::params(snapshot).into_iter().chain(metronome) {
             let value = self.live.get(&(key, param)).copied().unwrap_or(value);
-            if built.params.get(&(key, param)) != Some(&value) {
-                self.controller.set_param_by_key(key, param, value)?;
-                built.params.insert((key, param), value);
+            if self.last_sent(key, param) != Some(value) {
+                self.send_param(key, param, value)?;
+            }
+        }
+        // Held values the document has no parameter for (a plugin's, during
+        // touch write), should a rebuild have sent their node's again.
+        let held: Vec<_> = self.live.iter().map(|(&k, &v)| (k, v)).collect();
+        for ((key, param), value) in held {
+            if self.last_sent(key, param) != Some(value) {
+                match self.send_param(key, param, value) {
+                    // Its device is gone.
+                    Ok(_) | Err(EngineError::UnknownKey(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
         // Only parameters that were sent another value: one the document
@@ -1101,28 +1240,30 @@ impl Session {
         // saved state.
         for ((key, param), value) in build::param_defaults(snapshot) {
             let value = self.live.get(&(key, param)).copied().unwrap_or(value);
-            if built.params.get(&(key, param)).is_some_and(|&v| v != value) {
-                self.controller.set_param_by_key(key, param, value)?;
-                built.params.insert((key, param), value);
+            if self.last_sent(key, param).is_some_and(|v| v != value) {
+                self.send_param(key, param, value)?;
             }
         }
         // A lane that stopped driving a parameter the document doesn't set
         // left its last value in the device: put back what it had before.
         // Kept until sent, so a full queue retries on the next sync.
+        let built = self.built.as_ref().expect("built before params");
         let restore: Vec<_> = built.restore.iter().map(|(&k, &v)| (k, v)).collect();
         for ((key, param), value) in restore {
-            if let std::collections::hash_map::Entry::Vacant(e) = built.params.entry((key, param)) {
+            if self.last_sent(key, param).is_none() {
                 let value = self.live.get(&(key, param)).copied().unwrap_or(value);
-                match self.controller.set_param_by_key(key, param, value) {
-                    Ok(()) => {
-                        e.insert(value);
-                    }
+                match self.send_param(key, param, value) {
+                    Ok(true) => {}
+                    // No room this time: still owed.
+                    Ok(false) => continue,
                     // The device is gone; nothing to put back.
-                    Err(daw_engine::EngineError::UnknownKey(_)) => {}
+                    Err(EngineError::UnknownKey(_)) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
-            built.restore.remove(&(key, param));
+            if let Some(b) = &mut self.built {
+                b.restore.remove(&(key, param));
+            }
         }
         Ok(())
     }
@@ -1151,10 +1292,14 @@ impl Session {
             let Some(handle) = built.players.get_mut(&track.id) else {
                 continue;
             };
-            if !all && same_clips(built.clips.get(&track.id), &track.clips) {
+            let unread = built.unread.remove(&track.id);
+            if !all && !unread && same_clips(built.clips.get(&track.id), &track.clips) {
                 continue;
             }
             let set = build::clip_set(self, track, handle);
+            if set.has_unread() {
+                built.unread.insert(track.id);
+            }
             if handle.send(set).is_err() {
                 self.warnings.push(Warning::ClipsDropped {
                     track: track.name.clone(),
@@ -1305,8 +1450,11 @@ impl Session {
                 end: self.ticks_to_samples(e),
             })
             .filter(|r| r.is_playable(self.sample_rate()));
-        self.loop_points.set(range.map(|r| (r.start, r.end)));
+        self.loop_stale = true;
+        // The players follow only once the transport does.
         self.controller.set_loop(range)?;
+        self.loop_points.set(range.map(|r| (r.start, r.end)));
+        self.loop_stale = false;
         Ok(())
     }
 

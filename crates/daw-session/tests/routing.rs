@@ -1,8 +1,10 @@
 //! Track outputs, sends and buses, played through a session.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-use daw_core::event::EventList;
+use daw_core::event::{EventKind, EventList};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
@@ -15,8 +17,8 @@ use daw_model::commands::{
 };
 use daw_model::{
     AudioClip, AudioInput, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent,
-    Device, DeviceSource, Document, InputChannels, MidiClip, Monitoring, Note, Project, Send,
-    SendId, Track, TrackId, TrackKind, TrackOutput,
+    Device, DeviceId, DeviceSource, Document, InputChannels, MidiClip, Monitoring, Note, Project,
+    Send, SendId, Track, TrackId, TrackKind, TrackOutput,
 };
 use daw_session::{LoadError, LoadedPlugin, PluginLoader, Session, SessionConfig, Warning};
 
@@ -30,6 +32,8 @@ struct Rig {
     session: Session,
     proc: EngineProcessor,
     track: TrackId,
+    /// The parameter values the plugin "2x2p" was sent.
+    sent: Arc<Mutex<BTreeMap<u32, f64>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -64,13 +68,16 @@ impl Rig {
             inputs,
             outputs: 2,
         });
-        session.set_plugin_loader(Some(Box::new(FakeLoader)));
+        let loader = FakeLoader::default();
+        let sent = loader.0.clone();
+        session.set_plugin_loader(Some(Box::new(loader)));
         session.set_root(Some(dir.path().to_path_buf()));
         let mut rig = Self {
             doc,
             session,
             proc,
             track: id,
+            sent,
             _dir: dir,
         };
         rig.sync();
@@ -102,11 +109,24 @@ impl Rig {
     }
 
     fn plugin(&mut self, track: TrackId, index: usize, id: &str) {
+        self.plugin_with(track, index, id, BTreeMap::new());
+    }
+
+    /// Adds a [`Fake`] plugin device with these parameter values in the document.
+    fn plugin_with(
+        &mut self,
+        track: TrackId,
+        index: usize,
+        id: &str,
+        params: BTreeMap<u32, f64>,
+    ) -> DeviceId {
         let source = DeviceSource::Plugin {
             format: PluginFormatKind::Clap,
             id: id.into(),
         };
-        let device = Device::new(id, source);
+        let mut device = Device::new(id, source);
+        device.params = params;
+        let device_id = device.id;
         self.doc
             .execute(AddDevice {
                 track,
@@ -114,6 +134,7 @@ impl Rig {
                 device,
             })
             .unwrap();
+        device_id
     }
 
     fn pre_fader_send(&mut self, from: TrackId, to: TrackId) -> SendId {
@@ -167,6 +188,9 @@ const FAKE_LEVEL: f32 = 0.25;
 /// the outputs beyond), or with no inputs plays [`FAKE_LEVEL`].
 struct Fake {
     descriptor: PluginDescriptor,
+    /// For an id that ends in "p": the parameter values it was sent. Such a fake takes
+    /// events.
+    params: Option<Arc<Mutex<BTreeMap<u32, f64>>>>,
 }
 
 impl Node for Fake {
@@ -174,11 +198,20 @@ impl Node for Fake {
         PortLayout {
             audio_in: self.descriptor.ports.0,
             audio_out: self.descriptor.ports.1,
+            event_in: self.params.is_some(),
             ..Default::default()
         }
     }
     fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
     fn process(&mut self, ctx: &mut ProcessContext) {
+        if let Some(params) = &self.params {
+            let mut params = params.lock().unwrap();
+            for e in ctx.events_in.iter() {
+                if let EventKind::ParamValue { param, value } = e.kind {
+                    params.insert(param, value);
+                }
+            }
+        }
         for (i, out) in ctx.audio_out.iter_mut().enumerate() {
             match ctx.audio_in.get(i).or(ctx.audio_in.last()) {
                 Some(input) => out.copy_from_slice(input),
@@ -213,7 +246,9 @@ impl PluginInstance for Fake {
     fn close_editor(&mut self) {}
 }
 
-struct FakeLoader;
+/// Loads [`Fake`]s, and keeps what the last one that takes parameters was sent.
+#[derive(Default)]
+struct FakeLoader(Arc<Mutex<BTreeMap<u32, f64>>>);
 
 impl PluginLoader for FakeLoader {
     fn load(
@@ -223,6 +258,10 @@ impl PluginLoader for FakeLoader {
         _sample_rate: f64,
         _max_frames: u32,
     ) -> Result<LoadedPlugin, LoadError> {
+        let (id, takes_params) = match id.strip_suffix('p') {
+            Some(id) => (id, true),
+            None => (id, false),
+        };
         let ports = id.split_once('x').ok_or(LoadError::NotFound)?;
         let count = |s: &str| s.parse::<u16>().map_err(|_| LoadError::NotFound);
         let descriptor = PluginDescriptor {
@@ -235,7 +274,10 @@ impl PluginLoader for FakeLoader {
             ports: (count(ports.0)?, count(ports.1)?),
         };
         Ok(LoadedPlugin {
-            instance: Box::new(Fake { descriptor }),
+            instance: Box::new(Fake {
+                descriptor,
+                params: takes_params.then(|| self.0.clone()),
+            }),
             monitor: None,
         })
     }
@@ -627,4 +669,41 @@ fn a_pre_fader_send_carries_the_monitored_input() {
     let [left, right] = rig.process(8 * BLOCK, 0.2);
     let (l, r) = (left[left.len() - 1], right[right.len() - 1]);
     assert!(close(l, 0.2) && close(r, 0.2), "{l} {r}");
+}
+
+/// The engine keeps 64 parameter changes per node between two cycles. A plugin with more
+/// values than that in the document still gets them all, over a few syncs.
+#[test]
+fn a_plugin_with_many_parameters_gets_them_all() {
+    let mut rig = Rig::new();
+    let params: BTreeMap<u32, f64> = (0..150).map(|p| (p, f64::from(p) / 150.0)).collect();
+    rig.plugin_with(rig.track, 0, "2x2p", params.clone());
+    rig.sync();
+    rig.process(BLOCK, 0.0);
+    let mut rounds = 0;
+    while rig.session.wants_sync() {
+        rounds += 1;
+        assert!(rounds < 10, "never done");
+        rig.sync();
+        rig.process(BLOCK, 0.0);
+    }
+    assert_eq!(*rig.sent.lock().unwrap(), params);
+}
+
+/// A value sent right before a graph is rebuilt, with no audio cycle in between, went to the
+/// old graph's node of the plugin and was dropped with it. It is sent again.
+#[test]
+fn a_parameter_sent_just_before_a_rebuild_reaches_the_plugin() {
+    let mut rig = Rig::new();
+    let device = rig.plugin_with(rig.track, 0, "2x2p", BTreeMap::from([(1, 0.1)]));
+    rig.sync();
+    rig.process(BLOCK, 0.0);
+    // A touch-write take starts: the control is held, and the graph rebuilt at once.
+    let key = Session::device_key(device);
+    rig.session.set_live_param(key, 7, Some(0.5)).unwrap();
+    rig.bus("Another");
+    rig.sync();
+    rig.process(BLOCK, 0.0);
+    let sent = rig.sent.lock().unwrap().clone();
+    assert_eq!(sent.get(&7), Some(&0.5), "{sent:?}");
 }
