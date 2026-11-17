@@ -437,7 +437,13 @@ impl Shm {
         let size = layout.size();
         // SAFETY: the file is ours and only ever mapped by the two processes of one sandbox,
         // which access it as the module docs describe.
-        let mut map = unsafe { memmap2::MmapOptions::new().len(size).map_mut(file)? };
+        // Populated, so the audio thread's first touch of a page is not a fault.
+        let mut map = unsafe {
+            memmap2::MmapOptions::new()
+                .len(size)
+                .populate()
+                .map_mut(file)?
+        };
         let ptr = map.as_mut_ptr();
         Ok(Self {
             _map: map,

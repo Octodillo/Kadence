@@ -2,8 +2,15 @@
 //!
 //! A decaying filter, reverb or delay ends up computing with denormal (subnormal) floats,
 //! which many CPUs handle one or two orders of magnitude slower than normal ones: enough to
-//! miss the deadline on a tail that should cost nothing. Every thread that runs audio code,
-//! ours or a plugin's, calls [`flush_to_zero`] once before it starts.
+//! miss the deadline on a tail that should cost nothing. The threads that run audio code,
+//! ours or a plugin's, call [`flush_to_zero`] before they start: the audio backends', the
+//! offline export's, and in a plugin host process the main thread too, so threads a plugin
+//! starts from it inherit the mode.
+//!
+//! Rust assumes the default floating-point environment, so this is a deliberate step outside
+//! what the language promises, taken by every audio program: with the mode on, a float
+//! operation the compiler evaluated at build time can differ from the same one at run time
+//! by a denormal that became zero. Audio code must not depend on denormals either way.
 
 /// Makes the calling thread round denormal results to zero and read denormal inputs as zero
 /// (FTZ and DAZ on x86-64, FZ on AArch64), for as long as it lives. Does nothing on other
@@ -15,7 +22,8 @@ pub fn flush_to_zero() {
         const FTZ_DAZ: u32 = 0x8040;
         let mut csr = 0u32;
         // SAFETY: reads and writes the calling thread's SSE control register through a valid
-        // pointer. Only the two denormal bits change; rounding and exception masks stay.
+        // pointer. Only the two denormal bits change; rounding and exception masks stay. See
+        // the module docs for what the changed mode means for Rust code.
         unsafe {
             std::arch::asm!("stmxcsr [{}]", in(reg) &raw mut csr, options(nostack, preserves_flags));
             csr |= FTZ_DAZ;

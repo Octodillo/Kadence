@@ -31,6 +31,11 @@ mod protocol;
 mod shm;
 mod supervisor;
 
+/// Locks a mutex whose data stays usable after a panic elsewhere.
+fn locked<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub use child::{HOST_ARG, run_host_child};
 pub use client::{
     CrashHook, CrashReason, HostLauncher, SandboxConfig, SandboxMonitor, SandboxStatus,

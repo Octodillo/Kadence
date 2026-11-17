@@ -430,8 +430,8 @@ impl AudioBackend for DummyBackend {
         let thread = std::thread::Builder::new()
             .name(format!("{}-dummy-audio", cfg.client_name))
             .spawn(move || {
-                // Catch a panic so `stop` gets the worker, and its queues, back.
                 daw_core::denormals::flush_to_zero();
+                // Catch a panic so `stop` gets the worker, and its queues, back.
                 let panicked = catch_unwind(AssertUnwindSafe(|| worker.run(&stop2))).is_err();
                 (worker, panicked)
             })

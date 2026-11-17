@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,8 @@ pub fn run_host_child(
         std::process::abort();
     }));
     exit_with_parent();
+    // Before the plugin is loaded: the threads it starts from this one inherit the mode.
+    daw_core::denormals::flush_to_zero();
     let stream = match UnixStream::connect(Path::new(socket)) {
         Ok(s) => s,
         Err(e) => {
@@ -109,7 +111,7 @@ fn exit_with_parent() {
 }
 
 fn lock(plugin: &SharedPlugin) -> MutexGuard<'_, Option<Box<dyn PluginInstance>>> {
-    plugin.lock().unwrap_or_else(PoisonError::into_inner)
+    crate::locked(plugin)
 }
 
 struct Host<'a> {

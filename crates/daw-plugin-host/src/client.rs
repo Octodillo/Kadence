@@ -10,7 +10,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use daw_core::event::{Event, EventKind, EventList, ParamId};
@@ -69,8 +69,9 @@ impl HostLauncher {
     }
 }
 
-/// Called when a sandboxed plugin crashes or hangs, on the thread that supervises every
-/// host: keep it short, and never wait in it for a plugin instance.
+/// Called when a sandboxed plugin crashes or hangs, on a thread of its own
+/// (`plugin-crash-report`) that all instances share: hooks run one at a time, and one that
+/// waits for a plugin instance holds up the reports after it, though no host's supervision.
 pub type CrashHook = Arc<dyn Fn(SandboxMonitor) + Send + Sync>;
 
 /// Settings for sandboxed instances.
@@ -177,7 +178,7 @@ struct Shared {
 
 impl Shared {
     fn reason(&self) -> MutexGuard<'_, Option<CrashReason>> {
-        self.reason.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::locked(&self.reason)
     }
 
     /// Marks host `generation` as crashed, unless a newer host has replaced it or it already
@@ -193,8 +194,41 @@ impl Shared {
         true
     }
 
-    /// Calls the crash hook once for `generation`, if it crashed and is still current. Only
-    /// the supervisor calls this, so the hook never runs on a thread that holds the instance.
+    /// Has the crash hook called for `generation` on the crash-report thread: never on a
+    /// thread that holds the instance, nor on the supervisor's, where a slow hook would keep
+    /// every other host from being watched.
+    fn notify_later(self: &Arc<Self>, generation: u64) {
+        /// An instance's shared state and the generation of it that crashed.
+        type Report = (Arc<Shared>, u64);
+        static REPORTS: OnceLock<Option<mpsc::Sender<Report>>> = OnceLock::new();
+        if self.on_crash.is_none() {
+            return;
+        }
+        let reports = REPORTS.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<Report>();
+            std::thread::Builder::new()
+                .name("plugin-crash-report".into())
+                .spawn(move || {
+                    for (shared, generation) in rx {
+                        // The hook is the application's: its panic must not end the reports.
+                        let hook = std::panic::AssertUnwindSafe(|| shared.notify(generation));
+                        if std::panic::catch_unwind(hook).is_err() {
+                            log::error!("a plugin crash hook panicked");
+                        }
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        });
+        match reports {
+            Some(reports) => {
+                let _ = reports.send((self.clone(), generation));
+            }
+            None => log::error!("no thread to report a plugin crash on"),
+        }
+    }
+
+    /// Calls the crash hook once for `generation`, if it crashed and is still current.
     fn notify(self: &Arc<Self>, generation: u64) {
         let current = self.generation.load(Ordering::Acquire) == generation;
         if current
@@ -281,7 +315,7 @@ impl Reports for Reporter {
             Err(e) => CrashReason::Lost(e.to_string()),
         };
         self.shared.crash(self.generation, reason);
-        self.shared.notify(self.generation);
+        self.shared.notify_later(self.generation);
     }
 
     fn hung(&self) -> bool {
@@ -459,8 +493,14 @@ impl Link {
             )?;
             Ok((control, info, shm, latency))
         })();
-        // On an error, dropping the host kills it.
-        let (control, info, shm, latency) = started?;
+        let (control, info, shm, latency) = match started {
+            Ok(v) => v,
+            Err(e) => {
+                // Gone before the error is returned, so a retry never overlaps with it.
+                host.kill_and_wait();
+                return Err(e);
+            }
+        };
 
         let shm = Arc::new(shm);
         shared.pid.store(host.pid(), Ordering::Relaxed);
@@ -647,8 +687,11 @@ pub struct SandboxedInstance {
     audio: SharedAudio<Audio>,
 }
 
-/// What `close_editor` and `set_editor_title` could not tell a host that was busy in the
-/// plugin's editor. Neither call can fail, so each is made again once the host is free.
+/// What `close_editor` and `set_editor_title` could not get an answer for from a host that
+/// was busy in the plugin's editor. Neither call can fail, so each is made again once the host
+/// is free. The first request to find the host busy may already be queued there and then
+/// arrives twice, which is harmless: closing a closed editor and setting the same title again
+/// do nothing.
 #[derive(Default)]
 struct EditorOwed {
     close: bool,
@@ -769,12 +812,8 @@ impl SandboxedInstance {
             Err(e) => {
                 *self.shared.reason() = Some(CrashReason::Lost(e.to_string()));
                 self.shared.crashed.store(true, Ordering::Release);
-                // No host is supervised for this generation, so tell the hook from a thread of
-                // our own: never this one, which holds the instance.
-                let shared = self.shared.clone();
-                let _ = std::thread::Builder::new()
-                    .name("plugin-crash-report".into())
-                    .spawn(move || shared.notify(generation));
+                // No host is supervised for this generation, so nothing else tells the hook.
+                self.shared.notify_later(generation);
                 return Err(e);
             }
         };
@@ -810,6 +849,9 @@ impl SandboxedInstance {
             a.rt.late_pending = false;
             a.shm = Some(shm);
         });
+        // What the old host was owed went with it: the new one gets the title here, and
+        // its editor only if one should be open.
+        self.editor_owed = EditorOwed::default();
         if let Some(title) = self.editor_title.clone() {
             let _ = self.control(Request::SetEditorTitle(title), &[]);
         }
@@ -1570,7 +1612,6 @@ impl Drop for SandboxedInstance {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     #[test]

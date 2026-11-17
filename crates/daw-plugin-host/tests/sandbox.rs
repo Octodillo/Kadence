@@ -378,7 +378,7 @@ fn killing_the_host_mid_playback_keeps_us_running_and_reload_restores_it() {
         config.on_crash = Some(Arc::new(move |m| {
             assert!(m.is_crashed());
             // Never on the thread that drives the instance.
-            assert_eq!(std::thread::current().name(), Some("plugin-supervisor"));
+            assert_eq!(std::thread::current().name(), Some("plugin-crash-report"));
             crashes.fetch_add(1, Ordering::SeqCst);
         }));
     }

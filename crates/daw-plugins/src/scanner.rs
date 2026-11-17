@@ -132,7 +132,7 @@ impl Scanner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        // A timeout also kills any helpers the plugin started.
+        // Any helpers the plugin starts are killed with the scanner, however it ends.
         crate::process::in_own_group(&mut command);
         // Out of the terminal's process group the scanner no longer sees Ctrl-C, so tie its
         // life to this thread instead, which always outlives it.
@@ -164,17 +164,21 @@ impl Scanner {
         }
 
         let start = Instant::now();
-        let status = loop {
-            match child.try_wait().map_err(ScanError::Spawn)? {
-                Some(status) => break status,
-                None if start.elapsed() >= self.timeout => {
-                    crate::process::kill_group(&child);
-                    let _ = child.wait();
-                    return Err(ScanError::TimedOut(self.timeout));
-                }
-                None => std::thread::sleep(Duration::from_millis(5)),
+        let timed_out = loop {
+            if crate::process::has_exited(&child).map_err(ScanError::Spawn)? {
+                break false;
             }
+            if start.elapsed() >= self.timeout {
+                break true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         };
+        // Before the wait, while the group's id cannot have been reused.
+        crate::process::kill_group(&child);
+        let status = child.wait().map_err(ScanError::Spawn)?;
+        if timed_out {
+            return Err(ScanError::TimedOut(self.timeout));
+        }
         if status.code() == Some(i32::from(EXIT_UNSUPPORTED)) {
             return Err(ScanError::Unsupported);
         }

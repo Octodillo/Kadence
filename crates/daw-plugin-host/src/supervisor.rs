@@ -1,29 +1,34 @@
 //! One thread that watches every host process of the application.
 //!
 //! It sleeps in `poll` on a pidfd per host, so a host that exits is noticed at once and costs
-//! nothing while it runs. Only while a host has an audio block to watch does the thread wake
-//! on a coarse timer, to look for a cycle the host never finished: a hung plugin.
+//! nothing while it runs. Only while a host is up (armed with an audio block to watch) does
+//! the thread wake on a coarse timer, to look for a cycle the host never finished: a hung
+//! plugin.
 //!
 //! A host runs in its own process group. Whoever ends it kills the whole group, so helper
-//! processes the plugin started go with it, and the supervisor does the same when a host
-//! exits by itself.
+//! processes the plugin started go with it unless they left the group, and the supervisor
+//! does the same when a host exits by itself.
+//!
+//! Needs pidfds (Linux 5.3). Where they are refused, hosts fail to start and say why.
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use daw_plugins::process::{in_own_group, kill_group};
 
+use crate::locked;
 use crate::shm::{Header, REQUEST, Shm};
 
 /// How often stalled cycles are looked for. Hang limits are hundreds of milliseconds or more.
 const TICK: Duration = Duration::from_millis(50);
 
-/// How a host's end is reported, on the supervisor thread: keep both short, since every other
-/// host waits meanwhile.
+/// How a host's end is reported, on the supervisor thread. Every other host waits meanwhile,
+/// so an implementation only records what happened and hands anything slow, such as calling
+/// into the application, to another thread.
 pub(crate) trait Reports: Send + Sync {
     /// The host exited though nobody asked it to.
     fn exited(&self, status: io::Result<ExitStatus>);
@@ -58,13 +63,18 @@ struct Watched {
     block: Mutex<Option<Arc<Shm>>>,
     reports: Box<dyn Reports>,
     limits: Limits,
-}
-
-fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Whom to wake when this host's state changes; set right after it is handed over.
+    supervisor: std::sync::OnceLock<Arc<Supervisor>>,
 }
 
 impl Watched {
+    /// Has the supervisor look at this host again now.
+    fn wake_supervisor(&self) {
+        if let Some(supervisor) = self.supervisor.get() {
+            supervisor.wake();
+        }
+    }
+
     /// Kills the host and everything it started, unless it was already waited for.
     fn kill(&self) {
         // Under the lock the child is unreaped, so its process group id cannot be reused.
@@ -121,9 +131,11 @@ impl HostProcess {
             block: Mutex::new(None),
             reports,
             limits,
+            supervisor: std::sync::OnceLock::new(),
         });
         locked(&supervisor.new).push(watched.clone());
         supervisor.wake();
+        watched.supervisor.set(supervisor).ok();
         Ok(Self(watched))
     }
 
@@ -141,7 +153,7 @@ impl HostProcess {
     pub(crate) fn arm(&self, block: Arc<Shm>) {
         self.watch(block);
         self.0.armed.store(true, Ordering::Release);
-        Supervisor::wake_running();
+        self.0.wake_supervisor();
     }
 
     /// Makes `block` the one watched for hung cycles.
@@ -191,7 +203,7 @@ impl Drop for HostProcess {
     fn drop(&mut self) {
         self.expect_exit();
         self.kill();
-        Supervisor::wake_running();
+        self.0.wake_supervisor();
     }
 }
 
@@ -212,18 +224,22 @@ struct Supervisor {
     wake: OwnedFd,
 }
 
-static SUPERVISOR: OnceLock<Result<Supervisor, String>> = OnceLock::new();
+static SUPERVISOR: Mutex<Option<Arc<Supervisor>>> = Mutex::new(None);
 
 impl Supervisor {
-    /// The supervisor, started on first use.
-    fn get() -> io::Result<&'static Self> {
-        SUPERVISOR
-            .get_or_init(|| Self::start().map_err(|e| e.to_string()))
-            .as_ref()
-            .map_err(|e| io::Error::other(format!("cannot start the plugin supervisor: {e}")))
+    /// The supervisor, started on first use. A failed start is tried again by the next host.
+    fn get() -> io::Result<Arc<Self>> {
+        let mut supervisor = locked(&SUPERVISOR);
+        if let Some(supervisor) = &*supervisor {
+            return Ok(supervisor.clone());
+        }
+        let started = Self::start()
+            .map_err(|e| io::Error::other(format!("cannot start the plugin supervisor: {e}")))?;
+        *supervisor = Some(started.clone());
+        Ok(started)
     }
 
-    fn start() -> io::Result<Self> {
+    fn start() -> io::Result<Arc<Self>> {
         // SAFETY: plain syscall; a non-negative result is a new descriptor that we own.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
@@ -231,16 +247,15 @@ impl Supervisor {
         }
         // SAFETY: as above.
         let wake = unsafe { OwnedFd::from_raw_fd(fd) };
-        std::thread::Builder::new()
-            .name("plugin-supervisor".into())
-            .spawn(|| {
-                let supervisor = Self::get().expect("started by the time the thread runs");
-                supervisor.run();
-            })?;
-        Ok(Self {
+        let supervisor = Arc::new(Self {
             new: Mutex::default(),
             wake,
-        })
+        });
+        let running = supervisor.clone();
+        std::thread::Builder::new()
+            .name("plugin-supervisor".into())
+            .spawn(move || running.run())?;
+        Ok(supervisor)
     }
 
     fn wake(&self) {
@@ -250,13 +265,6 @@ impl Supervisor {
         unsafe { libc::write(self.wake.as_raw_fd(), one.as_ptr().cast(), one.len()) };
     }
 
-    /// Wakes the thread if there is one: without it there is nothing to tell.
-    fn wake_running() {
-        if let Some(Ok(supervisor)) = SUPERVISOR.get() {
-            supervisor.wake();
-        }
-    }
-
     fn run(&self) -> ! {
         let mut hosts: Vec<Host> = Vec::new();
         let mut fds: Vec<libc::pollfd> = Vec::new();
@@ -264,13 +272,22 @@ impl Supervisor {
             hosts.extend(locked(&self.new).drain(..).map(Host::new));
             fds.clear();
             fds.push(pollfd(self.wake.as_raw_fd()));
-            fds.extend(hosts.iter().map(|h| pollfd(h.watched.pidfd.as_raw_fd())));
+            fds.extend(hosts.iter().map(Host::pollfd));
             // Only watched cycles need the timer; exits wake the poll by themselves.
             let ticking = hosts.iter().any(Host::needs_tick);
             let timeout = if ticking { TICK.as_millis() as i32 } else { -1 };
-            // SAFETY: `fds` is a valid array of that length. On an error (EINTR) the events
-            // may be stale, which only costs a look at each host.
-            unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+            // SAFETY: `fds` is a valid array of that length.
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+            if ready < 0 {
+                // No events were written, so every host is only looked at. An interrupted
+                // call is retried at once; anything else would fail again, so wait a tick
+                // (stalls are still found; exits are not until it passes).
+                let e = io::Error::last_os_error();
+                if e.kind() != io::ErrorKind::Interrupted {
+                    log::error!("plugin supervisor: poll failed: {e}");
+                    std::thread::sleep(TICK);
+                }
+            }
             if fds[0].revents != 0 {
                 let mut count = [0u8; 8];
                 // SAFETY: reads 8 bytes into a valid buffer from our non-blocking eventfd.
@@ -304,6 +321,17 @@ impl Host {
             status: None,
             stall: Stall::default(),
         }
+    }
+
+    /// What to poll for this host: its pidfd until it has exited. The pidfd stays readable
+    /// from then on, and a host that waits for its owner to arm or drop it must not keep the
+    /// thread spinning; both of those wake the thread themselves.
+    fn pollfd(&self) -> libc::pollfd {
+        pollfd(match self.status {
+            None => self.watched.pidfd.as_raw_fd(),
+            // Ignored by `poll`.
+            Some(_) => -1,
+        })
     }
 
     fn needs_tick(&self) -> bool {
@@ -508,6 +536,25 @@ mod tests {
         assert_eq!(seen.exited.load(Ordering::SeqCst), 2);
     }
 
+    /// A pidfd stays readable once its process has exited, so polling it on would spin the
+    /// thread for as long as the host's owner takes to arm or drop it.
+    #[test]
+    fn an_exited_host_is_no_longer_polled() {
+        let quiet = limits(Duration::from_secs(60), Duration::from_secs(60));
+        let host = HostProcess::spawn(
+            &mut Command::new("true"),
+            Box::new(Arc::new(Seen::default())),
+            quiet,
+        )
+        .unwrap();
+        let mut seen_by_thread = Host::new(host.0.clone());
+        assert_eq!(seen_by_thread.pollfd().fd, host.pidfd().as_raw_fd());
+        host.wait(Duration::from_secs(10)).unwrap();
+        // Not armed and not dropped: it stays with the thread, unpolled.
+        assert!(seen_by_thread.look(true));
+        assert_eq!(seen_by_thread.pollfd().fd, -1);
+    }
+
     #[test]
     fn killing_a_host_kills_the_helpers_it_started() {
         let seen = Arc::new(Seen::default());
@@ -531,14 +578,14 @@ mod tests {
         });
         let helper = helper.unwrap();
         host.kill_and_wait();
-        // SAFETY: signal 0 only asks whether the process exists. A zombie still does, until
-        // init reaps it.
+        // A zombie still exists, until init reaps it.
         wait_for("the helper to die", || {
             let stat = std::fs::read_to_string(format!("/proc/{helper}/stat")).unwrap_or_default();
             let zombie = stat
                 .rsplit(')')
                 .next()
                 .is_some_and(|s| s.trim_start().starts_with('Z'));
+            // SAFETY: signal 0 only asks whether the process exists.
             zombie || unsafe { libc::kill(helper, 0) } != 0
         });
     }
