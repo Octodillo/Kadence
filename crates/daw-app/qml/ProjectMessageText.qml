@@ -90,6 +90,12 @@ QtObject {
         case Project.RoutingLoop:
             return i18nc("@info %1 is a track name",
                          "An output or send of “%1” would feed its sound back into itself, so it is left out.", m.name);
+        case Project.NotesUnplayed:
+            return i18nc("@info %1 is a track name",
+                         "No device on “%1” plays notes, so its notes are silent. Add an instrument to the track.", m.name);
+        case Project.LaneSkipped:
+            return i18nc("@info %1 is a device name",
+                         "“%1” cannot be automated while it plays, so its automation is left out.", m.name);
         case Project.NoInstrumentTrack:
             return i18nc("@info", "Arm an audio track to record audio, or add an instrument track to record MIDI on.");
         case Project.EngineNotRunning:

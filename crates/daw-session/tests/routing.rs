@@ -11,11 +11,12 @@ use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
 use daw_media::{AudioData, WavFormat, write_wav};
 use daw_model::commands::{
-    AddClip, AddDevice, AddSend, AddTrack, SendField, SetSend, SetTrack, TrackField,
+    AddClip, AddDevice, AddLane, AddSend, AddTrack, SendField, SetSend, SetTrack, TrackField,
 };
 use daw_model::{
-    AudioClip, AudioInput, Clip, ClipContent, Device, DeviceSource, Document, InputChannels,
-    Monitoring, Project, Send, SendId, Track, TrackId, TrackKind, TrackOutput,
+    AudioClip, AudioInput, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent,
+    Device, DeviceSource, Document, InputChannels, MidiClip, Monitoring, Note, Project, Send,
+    SendId, Track, TrackId, TrackKind, TrackOutput,
 };
 use daw_session::{LoadError, LoadedPlugin, PluginLoader, Session, SessionConfig, Warning};
 
@@ -162,8 +163,8 @@ impl Rig {
 const FAKE_LEVEL: f32 = 0.25;
 
 /// A plugin with the channel counts its id names ("1x1": one input, one output) and no
-/// event input. It passes its first input on to every output, or with no inputs plays
-/// [`FAKE_LEVEL`].
+/// event input. It passes each input on to the output of the same number (its last input to
+/// the outputs beyond), or with no inputs plays [`FAKE_LEVEL`].
 struct Fake {
     descriptor: PluginDescriptor,
 }
@@ -178,8 +179,8 @@ impl Node for Fake {
     }
     fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
     fn process(&mut self, ctx: &mut ProcessContext) {
-        for out in ctx.audio_out.iter_mut() {
-            match ctx.audio_in.first() {
+        for (i, out) in ctx.audio_out.iter_mut().enumerate() {
+            match ctx.audio_in.get(i).or(ctx.audio_in.last()) {
                 Some(input) => out.copy_from_slice(input),
                 None => out.fill(FAKE_LEVEL),
             }
@@ -482,17 +483,97 @@ fn an_instrument_track_syncs_with_a_first_device_that_takes_no_events() {
     rig.doc.execute(AddTrack::new(1, keys)).unwrap();
     rig.plugin(id, 0, "2x2");
     rig.sync();
-    assert!(rig.session.warnings().is_empty());
+    assert!(
+        matches!(rig.session.warnings(), [Warning::NotesUnplayed { track }] if track == "Keys"),
+        "{:?}",
+        rig.session.warnings()
+    );
     // An edit after it still reaches the engine.
     rig.set(rig.track, TrackField::VolumeDb(-144.0));
     assert_eq!(during(&rig.play(BEAT)), 0.0);
+
+    // The notes go to the first device that does take them.
+    let synth = DeviceSource::Builtin {
+        kind: "daw.synth".into(),
+    };
+    rig.doc
+        .execute(AddDevice {
+            track: id,
+            index: 1,
+            device: Device::new("Synth", synth),
+        })
+        .unwrap();
+    let mut notes = MidiClip::default();
+    notes
+        .notes
+        .push(Note::new(TickTime(0), TickTime(PPQ), 60, 0.8));
+    let clip = Clip::new(
+        "notes",
+        TickTime(0),
+        TickTime(PPQ),
+        ClipContent::Midi(notes),
+    );
+    rig.doc.execute(AddClip::new(id, clip)).unwrap();
+    let out = rig.play(BEAT);
+    assert!(rig.session.warnings().is_empty());
+    assert!(out.iter().any(|x| x.abs() > 1e-3), "the synth plays");
+}
+
+/// A lane on a parameter of a device that takes no events can't play; the graph is still
+/// accepted, and the user is told.
+#[test]
+fn a_lane_on_a_device_without_event_input_is_left_out() {
+    let mut rig = Rig::new();
+    rig.plugin(rig.track, 0, "2x2");
+    let device = rig.doc.project().tracks[0].devices[0].id;
+    let mut lane = AutomationLane::new(AutomationTarget::DeviceParam { device, param: 0 });
+    lane.points = vec![AutomationPoint {
+        tick: TickTime(0),
+        value: 1.0,
+        curve: 0.0,
+        step: true,
+    }];
+    rig.doc
+        .execute(AddLane {
+            track: rig.track,
+            lane,
+        })
+        .unwrap();
+    assert!(close(during(&rig.play(BEAT)), 0.5));
+    assert!(
+        matches!(rig.session.warnings(), [Warning::LaneSkipped { device }] if device == "2x2"),
+        "{:?}",
+        rig.session.warnings()
+    );
+}
+
+/// A device with inputs and no outputs (an analyser) only listens: the signal goes on
+/// past it, also when it is the first device of a bus or the master, where routed audio
+/// comes in.
+#[test]
+fn a_device_without_outputs_only_listens() {
+    let mut rig = Rig::new();
+    rig.plugin(rig.track, 0, "2x0");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "on the track");
+
+    let bus = rig.bus("Group");
+    rig.set(rig.track, TrackField::Output(TrackOutput::Bus(bus)));
+    rig.plugin(bus, 0, "2x0");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "first on a bus");
+    // An effect after it gets the routed audio as well.
+    rig.plugin(bus, 1, "2x2");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "before an effect");
+
+    let master = rig.doc.project().master.id;
+    rig.plugin(master, 0, "2x0");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "first on the master");
 }
 
 #[test]
 fn mute_and_solo_silence_pre_fader_sends() {
     let mut rig = Rig::new();
     let bus = rig.bus("Reverb");
-    rig.pre_fader_send(rig.track, bus);
+    let send = rig.pre_fader_send(rig.track, bus);
     // Only the send is heard.
     rig.set(rig.track, TrackField::VolumeDb(-144.0));
     assert!(close(during(&rig.play(BEAT)), 0.5));
@@ -513,9 +594,15 @@ fn mute_and_solo_silence_pre_fader_sends() {
     rig.set(other_id, TrackField::Solo(false));
     assert!(close(during(&rig.play(BEAT)), 0.5));
 
-    // Switching the send back to post-fader takes the stage out again.
-    rig.doc.undo().unwrap();
-    rig.sync();
+    // Switching the send back to post-fader takes the stage out again: the send follows
+    // the fader, and a mute has no stage to reach.
+    let field = SendField::PreFader(false);
+    rig.doc.execute(SetSend { id: send, field }).unwrap();
+    assert_eq!(during(&rig.play(BEAT)), 0.0, "post-fader");
+    rig.set(rig.track, TrackField::VolumeDb(0.0));
+    assert!(close(during(&rig.play(BEAT)), 1.0), "track and send");
+    rig.set(rig.track, TrackField::Mute(true));
+    assert_eq!(during(&rig.play(BEAT)), 0.0, "muted");
 }
 
 /// The usual cue mix while tracking: an armed track without effects, monitored, with a

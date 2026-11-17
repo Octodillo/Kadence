@@ -591,6 +591,53 @@ fn split_clip_of_a_file_at_another_rate_plays_through_the_cut() {
     }
 }
 
+/// A file at another rate cut twice, the later cut first: the middle part's file end is two
+/// rounded lengths from the file's start and the right part's offset one, a frame apart.
+/// They still continue each other.
+#[test]
+fn parts_of_a_file_at_another_rate_cut_twice_play_through_the_cuts() {
+    use daw_core::time::engine_to_file_frames;
+    const FILE_RATE: f64 = 44_100.0;
+    let mut rig = Rig::new(60.0);
+    let data = AudioData {
+        sample_rate: FILE_RATE as u32,
+        channels: vec![vec![0.5; 4 * FILE_RATE as usize]],
+    };
+    write_wav(rig.dir().join("pad.wav"), &data, WavFormat::Float32).unwrap();
+    let frames = |rig: &Rig, from: TickTime, to: TickTime| {
+        let len = rig.session.ticks_to_samples(to).0 - rig.session.ticks_to_samples(from).0;
+        engine_to_file_frames(len, FILE_RATE, RATE)
+    };
+    // A second cut (`a`) to the left of the first (`b`), where the roundings differ.
+    let b = TickTime(PPQ + 15);
+    let a = (1..PPQ)
+        .map(TickTime)
+        .find(|&a| {
+            frames(&rig, TickTime(0), a) + frames(&rig, a, b) != frames(&rig, TickTime(0), b)
+        })
+        .expect("a cut where two rounded lengths are not the rounded sum");
+    let mid_offset = frames(&rig, TickTime(0), a);
+    let right_offset = frames(&rig, TickTime(0), b);
+    let audio = |offset| ClipContent::Audio(AudioClip::new("pad.wav", SampleTime(offset)));
+    for (name, start, len, offset) in [
+        ("left", TickTime(0), a, 0),
+        ("mid", a, TickTime(b.0 - a.0), mid_offset),
+        ("right", b, TickTime(2 * PPQ), right_offset),
+    ] {
+        let clip = Clip::new(name, start, len, audio(offset));
+        rig.doc.execute(AddClip::new(rig.track, clip)).unwrap();
+    }
+    rig.sync();
+    rig.session.play().unwrap();
+    let out = rig.run(2 * BEAT as usize);
+    for cut in [a, b] {
+        let cut = rig.session.ticks_to_samples(cut).0 as usize;
+        for (i, &x) in out[cut.saturating_sub(128)..cut + 128].iter().enumerate() {
+            assert!((x - 0.5).abs() < 1e-3, "dip {i} samples around {cut}: {x}");
+        }
+    }
+}
+
 #[test]
 fn tempo_and_meter_edits_reach_the_engine() {
     let mut rig = Rig::new(f64::INFINITY);

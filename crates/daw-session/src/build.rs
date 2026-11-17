@@ -225,6 +225,9 @@ struct Signal {
     /// The first node the signal went into: where audio routed into the
     /// track joins it.
     head: Option<NodeId>,
+    /// Whether other tracks can be routed into this one (a bus or the
+    /// master), so that it needs a `head` that passes audio on.
+    takes_routes: bool,
 }
 
 /// A graph being built for a snapshot, one pass at a time: each track's
@@ -334,7 +337,10 @@ impl<'a> Builder<'a> {
     /// -> strip.
     fn track(&mut self, track: &'a Track) {
         let strip = self.strip(track);
-        let mut signal = Signal::default();
+        let mut signal = Signal {
+            takes_routes: matches!(track.kind, TrackKind::Bus | TrackKind::Master),
+            ..Signal::default()
+        };
         if track.kind == TrackKind::Audio {
             signal.sources.push(self.clip_player(track));
             // Monitored input goes through the track's devices like its
@@ -363,8 +369,14 @@ impl<'a> Builder<'a> {
         // graph), even when it is switched off: switching the instrument
         // off silences it, and it still gets the note-offs of notes that
         // were sounding.
-        if let (Some(player), Some(device)) = (midi, takes_notes) {
-            self.g.connect_events(player, device);
+        match (midi, takes_notes) {
+            (Some(player), Some(device)) => self.g.connect_events(player, device),
+            (Some(_), None) if !track.devices.is_empty() => {
+                self.session.warnings.push(Warning::NotesUnplayed {
+                    track: track.name.clone(),
+                });
+            }
+            _ => {}
         }
         let pre_fader = track.sends.iter().any(|s| s.pre_fader).then(|| {
             let stage = self.pre_fader_stage(track);
@@ -396,6 +408,14 @@ impl<'a> Builder<'a> {
     fn pass_through(&mut self, signal: &mut Signal, node: NodeId, name: &str) {
         let ports = self.ports(node);
         if ports.audio_in > 0 {
+            // A listener can't be where routed audio joins the track, as
+            // that audio would end in it: it joins at a stage in front.
+            if ports.audio_out == 0 && signal.head.is_none() && signal.takes_routes {
+                let stage = Box::new(Strip::send(STRIP_CHANNELS, 1.0));
+                let stage = self.g.add_device(format!("{name} input"), stage);
+                signal.head = Some(stage);
+                signal.sources.push(stage);
+            }
             let entry = self.stereo_entry(node, name);
             for &source in &signal.sources {
                 self.link(source, entry);
@@ -747,6 +767,9 @@ impl<'a> Builder<'a> {
                 // only a damaged project has a lane on a device without
                 // parameters.
                 if !self.ports(node).event_in {
+                    self.session.warnings.push(Warning::LaneSkipped {
+                        device: self.g.name(node).unwrap_or_default().to_owned(),
+                    });
                     continue;
                 }
                 if self.session.suspended.contains(&lane.id) {
@@ -1027,7 +1050,10 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         // Where the file is when the clip ends, in its own frames, as a
         // split works out the offset of its right half.
         let file_end = a.offset.0 + engine_to_file_frames(end - start, file_rate, engine_rate);
-        join_contiguous(&mut set.clips, &file_ends, &mut clip, a.offset.0);
+        // At another rate each part's length is rounded on its own, so the
+        // parts of a file cut more than once can be a frame out.
+        let slack = i64::from(file_rate != engine_rate);
+        join_contiguous(&mut set.clips, &file_ends, &mut clip, a.offset.0, slack);
         file_ends.push(file_end);
         set.clips.push(clip);
     }
@@ -1036,20 +1062,29 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
 
 /// A clip that continues an earlier one (the two halves of a split: same
 /// file, one ends where the next starts, the file running on) plays without
-/// the edge fades between them, and from the very sample the earlier one
-/// stops at, so a cut is inaudible.
+/// the edge fades between them, so a cut is inaudible.
 ///
 /// Whether the file runs on is asked in the file's own frames (`file_ends`
-/// of `clips`, `offset` of `next`), as the model has them: at the engine's
-/// rate both are rounded, and can be a sample apart when the rates differ.
-fn join_contiguous(clips: &mut [PlayClip], file_ends: &[i64], next: &mut PlayClip, offset: i64) {
+/// of `clips`, `offset` of `next`), as the model has them, give or take
+/// `slack` frames. Each clip keeps the file position its own offset gives
+/// it: one that followed its neighbour would have its stream seek, and
+/// drop out, whenever the neighbour is edited.
+fn join_contiguous(
+    clips: &mut [PlayClip],
+    file_ends: &[i64],
+    next: &mut PlayClip,
+    offset: i64,
+    slack: i64,
+) {
     let prev = clips.iter_mut().zip(file_ends).rev().find(|(p, file_end)| {
-        p.end == next.start && p.path == next.path && **file_end == offset && p.gain == next.gain
+        p.end == next.start
+            && p.path == next.path
+            && (**file_end - offset).abs() <= slack
+            && p.gain == next.gain
     });
     if let Some((prev, _)) = prev {
         prev.fade_out = false;
         next.fade_in = false;
-        next.file_start = prev.file_start + (prev.end - prev.start);
     }
 }
 
