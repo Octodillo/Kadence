@@ -11,9 +11,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use daw_core::event::{Event, EventList, ParamId};
+use daw_core::event::{EventList, ParamId};
 use daw_core::node::ProcessContext;
 use daw_core::plugin::{PluginError, PluginInstance, PluginProcessor};
+use daw_core::split::LateEvents;
 use daw_plugins::PluginRegistry;
 
 use crate::protocol::{
@@ -579,8 +580,9 @@ fn audio_loop(
     let cap = layout.event_capacity as usize;
     let mut events_in = EventList::with_capacity(cap);
     let mut events_out = EventList::with_capacity(cap);
-    // Events of a skipped cycle, delivered at the start of the next one the plugin processes.
-    let mut skipped = EventList::with_capacity(cap);
+    // What a plugin that does not split missed in cycles the main thread held it through. The
+    // application counts those cycles as done, so a note-off or a reset is late, not lost.
+    let mut late = LateEvents::with_capacity(cap);
     let n_in = layout.audio_in as usize;
     let n_out = layout.audio_out as usize;
     loop {
@@ -602,10 +604,6 @@ fn audio_loop(
         // SAFETY: the state word is REQUEST, so the buffers are ours until we store DONE.
         let records_in = unsafe { shm.events_in() };
         events_in.clear();
-        for e in skipped.iter() {
-            let _ = events_in.push(*e);
-        }
-        skipped.clear();
         for i in 0..(h.events_in.load(Ordering::Relaxed) as usize).min(cap) {
             if let Some(mut e) = decode_event(shm::record(records_in, i)) {
                 e.frame = e.frame.min(frames.saturating_sub(1) as u32);
@@ -625,50 +623,37 @@ fn audio_loop(
                 // SAFETY: as above.
                 *slot = unsafe { shm.audio_out(ch, frames) };
             }
-            let ran = {
-                let mut ctx = ProcessContext {
-                    frames: frames as u32,
-                    transport: &transport,
-                    audio_in: &ins[..n_in],
-                    audio_out: &mut outs[..n_out],
-                    events_in: &events_in,
-                    events_out: &mut events_out,
-                };
-                let ran = match half.as_deref_mut() {
-                    Some(half) => {
-                        if flags & FLAG_RESET != 0 {
-                            half.reset();
-                        }
-                        half.process(&mut ctx);
-                        true
-                    }
-                    None => {
-                        let mut guard = lock_for_cycle(plugin, h);
-                        match guard.as_mut().and_then(|g| g.as_mut()) {
-                            Some(p) => {
-                                if flags & FLAG_RESET != 0 {
-                                    p.reset();
-                                }
-                                p.process(&mut ctx);
-                                true
-                            }
-                            None => false,
-                        }
-                    }
-                };
-                if !ran {
-                    ctx.audio_out.iter_mut().for_each(|o| o.fill(0.0));
-                }
-                ran
+            let mut ctx = ProcessContext {
+                frames: frames as u32,
+                transport: &transport,
+                audio_in: &ins[..n_in],
+                audio_out: &mut outs[..n_out],
+                events_in: &events_in,
+                events_out: &mut events_out,
             };
-            if !ran {
-                // The application counts the cycle as done, so keep what it asked for: a
-                // note-off or a reset is late rather than lost.
-                for e in events_in.iter() {
-                    let _ = skipped.push(Event { frame: 0, ..*e });
+            let reset = flags & FLAG_RESET != 0;
+            match half.as_deref_mut() {
+                // A half keeps what it misses itself.
+                Some(half) => {
+                    if reset {
+                        half.reset();
+                    }
+                    half.process(&mut ctx);
                 }
-                if flags & FLAG_RESET != 0 {
-                    h.flags.fetch_or(FLAG_RESET, Ordering::Relaxed);
+                None => {
+                    if reset {
+                        late.reset();
+                    }
+                    let mut guard = lock_for_cycle(plugin, h);
+                    match guard.as_mut().and_then(|g| g.as_mut()) {
+                        Some(p) => {
+                            if late.take_reset() {
+                                p.reset();
+                            }
+                            late.deliver(&mut ctx, |ctx| p.process(ctx));
+                        }
+                        None => late.skip(&mut ctx),
+                    }
                 }
             }
         }
@@ -691,7 +676,7 @@ fn audio_loop(
 mod tests {
     use std::sync::atomic::AtomicU32;
 
-    use daw_core::event::EventKind;
+    use daw_core::event::{Event, EventKind};
     use daw_core::node::{Node, PortLayout};
     use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginFormatKind};
 
