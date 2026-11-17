@@ -13,7 +13,7 @@ Timer {
     onRunningChanged: last = Date.now()
     onTriggered: {
         const now = Date.now();
-        Mixer.tick(Project.playing, (now - last) / 1000);
+        Mixer.tick((now - last) / 1000);
         last = now;
     }
 }
