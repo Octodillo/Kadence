@@ -5,10 +5,24 @@
 #
 #   ci/arch-package.sh git OUT              kadence-git, from this checkout
 #   ci/arch-package.sh release OUT TARBALL  kadence, from a make-dist.sh tarball
+#   ci/arch-package.sh lint FILE...         only namcap, on a PKGBUILD or package
 set -euo pipefail
 
+# namcap exits 0 whatever it finds, so fail on its error lines.
+lint() {
+    local log
+    log=$(mktemp)
+    namcap "$@" | tee "$log"
+    ! grep -q ' E: ' "$log"
+}
+if [ "${1:-}" = lint ]; then
+    shift
+    lint "$@"
+    exit
+fi
+
 usage() {
-    echo "usage: $0 git OUT | release OUT TARBALL" >&2
+    echo "usage: $0 git OUT | release OUT TARBALL | lint FILE..." >&2
     exit 2
 }
 [ $# -ge 2 ] || usage
@@ -46,11 +60,7 @@ chown -R builder "$pkg"
 
 cd "$pkg"
 sudo -u builder --preserve-env=KADENCE_SOURCE makepkg --syncdeps --noconfirm
-# namcap exits 0 whatever it finds, so fail on its error lines.
-namcap PKGBUILD kadence-*.pkg.tar.zst | tee namcap.log
-if grep -q ' E: ' namcap.log; then
-    exit 1
-fi
+lint PKGBUILD kadence-*.pkg.tar.zst
 pacman -U --noconfirm kadence-*.pkg.tar.zst
 (cd "$top" && sudo -u builder env REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence)
 cp PKGBUILD kadence-*.pkg.tar.zst "$out/"

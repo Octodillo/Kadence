@@ -53,10 +53,19 @@ build() {
     flatpak run --command=sh $app -c 'ldconfig -p | grep -F libjack.so.0'
     smoke
 
-    # Again with everything the test saves, exports and recovers written to
-    # the home directory outside ~/Music: a project is a folder, which the
-    # file chooser portal cannot grant, so the sandbox has to reach it.
+    # Projects live in the home directory outside ~/Music too. The sandbox
+    # must see the host's folder there and write to it (without the grant it
+    # would get a private, empty home and the check must fail), and the smoke
+    # test must pass with everything it saves, exports and recovers there.
     scratch=$(mktemp -d "$HOME/kadence-flatpak-smoke.XXXXXX")
+    touch "$scratch/from-host"
+    reach="test -f '$scratch/from-host' && touch '$scratch/from-sandbox'"
+    if flatpak run --nofilesystem=home --command=sh $app -c "$reach"; then
+        echo "the sandbox reached $scratch without the home grant" >&2
+        exit 1
+    fi
+    flatpak run --command=sh $app -c "$reach"
+    test -f "$scratch/from-sandbox"
     smoke --env=TMPDIR="$scratch"
     rm -rf "$scratch"
 }

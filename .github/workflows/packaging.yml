@@ -59,11 +59,8 @@ jobs:
         run: |
           mkdir /tmp/release-pkgbuild
           packaging/arch/release-pkgbuild.sh 0.0.0 > /tmp/release-pkgbuild/PKGBUILD
-          cd /tmp/release-pkgbuild
-          bash -n PKGBUILD
-          set -o pipefail
-          namcap PKGBUILD | tee namcap.log
-          ! grep -q ' E: ' namcap.log
+          bash -n /tmp/release-pkgbuild/PKGBUILD
+          ci/arch-package.sh lint /tmp/release-pkgbuild/PKGBUILD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: arch-package
@@ -89,7 +86,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fedora-package
-          path: out/*.rpm
+          path: out/*.x86_64.rpm
           if-no-files-found: error
 
   neon:

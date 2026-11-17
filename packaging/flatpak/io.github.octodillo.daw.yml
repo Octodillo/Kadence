@@ -31,11 +31,13 @@ finish-args:
   # Audio and MIDI go through PipeWire's JACK interface, the only audio
   # path Kadence has.
   - --filesystem=xdg-run/pipewire-0
-  # A project is a folder (Name.kadence next to audio/ and backups/), and the
-  # file chooser portal grants one file at a time: Save As could not create
-  # the folder and Open could not read the audio next to the file. So the
-  # places people keep projects are granted outright: the home directory,
-  # the music folder in case it lives elsewhere, and removable drives.
+  # A project is a folder (Name.kadence next to audio/ and backups/), but
+  # Save As and Open ask for the .kadence file, and for a file the chooser
+  # portal grants only that file: Save As could not create the folder and
+  # Open could not read the audio next to the file. So the places people
+  # keep projects are granted outright: the home directory, the music folder
+  # in case it lives elsewhere, and removable drives. That is a wide grant
+  # (see packaging/README.md).
   - --filesystem=home
   - --filesystem=xdg-music
   - --filesystem=/run/media

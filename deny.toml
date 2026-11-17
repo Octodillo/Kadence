@@ -38,6 +38,7 @@ allow-wildcard-paths = true
 # release is built (release.yml), not on pull requests. An advisory that does
 # not apply to Kadence goes here, as { id = "RUSTSEC-…", reason = "…" }.
 [advisories]
+yanked = "deny"
 ignore = []
 
 [sources]

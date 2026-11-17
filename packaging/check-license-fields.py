@@ -5,12 +5,14 @@
     packaging/check-license-fields.py THIRD-PARTY-LICENSES
 
 THIRD-PARTY-LICENSES (written by third-party-licenses.py during the build)
-lists every crate linked into kadence with its SPDX expression. The Fedora
-spec's License tag and the Arch PKGBUILD's license array must name
+lists every crate linked into kadence with its SPDX expression.
 
-- enough licenses to cover every crate: for each crate, all the licenses of
-  at least one alternative of its expression, and
-- no license that no crate uses (Kadence's own aside).
+- The Fedora spec's License tag enumerates: its terms joined by AND must be
+  exactly the distinct expressions of the linked crates plus Kadence's own
+  (an `A AND B` crate counts as the two terms A and B).
+- The Arch PKGBUILD's license array covers: it names all the licenses of at
+  least one alternative of every crate's expression, and no license that no
+  crate uses.
 
 Standard library only.
 """
@@ -24,19 +26,69 @@ PACKAGING = os.path.dirname(os.path.abspath(__file__))
 CRATE_LINE = re.compile(r"^(\S+ \S+): (.+)$")
 
 
-def alternatives(expression):
-    """An SPDX expression as a list of alternatives, each a set of licenses.
+TOKEN = re.compile(r"\(|\)|\bAND\b|\bOR\b|/")
 
-    Crates use only flat expressions (`A OR B`, `A AND B`, the old `A/B`),
-    with AND binding tighter; `X WITH exception` counts as one license.
+
+def alternatives(expression):
+    """An SPDX expression as a set of alternatives, each a set of licenses.
+
+    AND binds tighter than OR, `A/B` is the old spelling of `A OR B`, and
+    `X WITH exception` counts as one license. `(A OR B) AND C` comes out as
+    {A, C} or {B, C}, so two spellings of one choice compare equal.
     """
-    if "(" in expression:
-        sys.exit(f"check-license-fields: nested expression not handled: {expression}")
-    expression = expression.replace("/", " OR ")
-    return [
-        {re.sub(r"\s+", " ", term).strip() for term in alternative.split(" AND ")}
-        for alternative in expression.split(" OR ")
-    ]
+    tokens, at = [], 0
+    for m in TOKEN.finditer(expression):
+        tokens += [expression[at : m.start()], m.group()]
+        at = m.end()
+    tokens.append(expression[at:])
+    tokens = [" ".join(t.split()) for t in tokens if t.strip()]
+    tokens.reverse()
+
+    def bad():
+        sys.exit(f"check-license-fields: cannot read the expression: {expression}")
+
+    def operand():
+        token = tokens.pop() if tokens else bad()
+        if token == "(":
+            inner = either()
+            if not tokens or tokens.pop() != ")":
+                bad()
+            return inner
+        if token in (")", "AND", "OR", "/"):
+            bad()
+        return {frozenset([token])}
+
+    def both():
+        result = operand()
+        while tokens and tokens[-1] == "AND":
+            tokens.pop()
+            right = operand()
+            result = {a | b for a in result for b in right}
+        return result
+
+    def either():
+        result = both()
+        while tokens and tokens[-1] in ("OR", "/"):
+            tokens.pop()
+            result = result | both()
+        return result
+
+    result = either()
+    if tokens:
+        bad()
+    return frozenset(result)
+
+
+def terms(expression):
+    """The terms a license tag joins with AND, each as `alternatives` gives it."""
+    options = alternatives(expression)
+    if len(options) == 1:
+        return {frozenset([frozenset([name])]) for name in next(iter(options))}
+    return {options}
+
+
+def spell(term):
+    return " OR ".join(sorted(" AND ".join(sorted(option)) for option in term))
 
 
 def linked_crates(path):
@@ -64,19 +116,37 @@ def field(path, pattern):
     return m.group(1)
 
 
-def declared():
-    """{recipe: set of licenses it names}."""
-    spec = field(os.path.join(PACKAGING, "fedora", "kadence.spec"), r"^License:\s*(.+)$")
-    pkgbuild = field(os.path.join(PACKAGING, "arch", "PKGBUILD"), r"^license=\((.+)\)$")
-    return {
-        "fedora/kadence.spec": {
-            name for alternative in alternatives(re.sub(r"[()]", "", spec)) for name in alternative
-        },
-        "arch/PKGBUILD": set(pkgbuild.split()),
-    }
+def spec_terms(tag):
+    """The top-level AND terms of the spec's License tag."""
+    found, depth, start = set(), 0, 0
+    for m in re.finditer(r"\(|\)|\bAND\b", tag):
+        if m.group() == "(":
+            depth += 1
+        elif m.group() == ")":
+            depth -= 1
+        elif depth == 0:
+            found |= terms(tag[start : m.start()])
+            start = m.end()
+    return found | terms(tag[start:])
 
 
-def problems(crates, names):
+def spec_problems(crates):
+    """The spec's tag against the exact list of expressions."""
+    tag = field(os.path.join(PACKAGING, "fedora", "kadence.spec"), r"^License:\s*(.+)$")
+    listed = spec_terms(tag)
+    wanted = terms(OWN)
+    for expression in crates.values():
+        wanted |= terms(expression)
+    return [f"{spell(term)} is missing from the License tag" for term in wanted - listed] + [
+        f"{spell(term)} is in the License tag but no linked crate has it"
+        for term in listed - wanted
+    ]
+
+
+def pkgbuild_problems(crates):
+    """The PKGBUILD's array against what covers every crate."""
+    array = field(os.path.join(PACKAGING, "arch", "PKGBUILD"), r"^license=\((.+)\)$")
+    names = set(array.replace("'", " ").replace('"', " ").split())
     found = []
     used = {OWN}
     for crate, expression in sorted(crates.items()):
@@ -94,13 +164,16 @@ def main():
         sys.exit(__doc__)
     crates = linked_crates(sys.argv[1])
     failed = False
-    for recipe, names in declared().items():
-        for problem in problems(crates, names):
+    for recipe, check in (
+        ("fedora/kadence.spec", spec_problems),
+        ("arch/PKGBUILD", pkgbuild_problems),
+    ):
+        for problem in sorted(check(crates)):
             print(f"packaging/{recipe}: {problem}", file=sys.stderr)
             failed = True
     if failed:
         sys.exit(1)
-    print(f"license fields cover all {len(crates)} linked crates")
+    print(f"license fields match all {len(crates)} linked crates")
 
 
 if __name__ == "__main__":

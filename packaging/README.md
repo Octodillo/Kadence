@@ -24,7 +24,9 @@ home directory outside `~/Music`, and checks that libjack is visible there.
 
 The Packaging and Release workflows run the same scripts (`ci/arch-package.sh`,
 `ci/fedora-package.sh`, `ci/flatpak-package.sh`), so a release is built the
-way every pull request was tested.
+way every pull request was tested. One part runs only for a release: the Arch
+package built from the release tarball (pull requests build `kadence-git`
+and only lint the generated release PKGBUILD).
 
 ## Runtime requirements
 
@@ -109,9 +111,13 @@ The manifest uses the KDE 6.11 runtime with the Rust and LLVM (for `lld`)
 SDK extensions. Audio goes through PipeWire's JACK interface; the sandbox
 gets the PipeWire socket and nothing else for audio.
 
-A project is a folder, which the file chooser portal cannot grant (it hands
-over single files), so the sandbox can read and write the home directory,
-the music folder and removable drives (`/run/media`, `/media`, `/mnt`).
+A project is a folder, but Save As and Open ask for its `.kadence` file, and
+for a file the chooser portal hands over only that file. So the sandbox can
+read and write the home directory, the music folder and removable drives
+(`/run/media`, `/media`, `/mnt`). That is a wide grant: the sandbox no
+longer keeps Kadence, or a plugin it loads, away from the rest of the home
+directory. Narrowing it needs Save As and Open to ask for the project's
+folder instead, which the portal can grant.
 Projects, exports and imported samples work anywhere there; other places,
 such as a second internal disk mounted elsewhere, need
 `flatpak override --user --filesystem=/path io.github.octodillo.daw`.

@@ -12,10 +12,11 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Digital audio workstation for KDE Plasma
 # Kadence is GPL-3.0-or-later. The binary also links the vendored crates it
-# depends on, among them symphonia (MPL-2.0). CI fails when this stops
-# covering them (packaging/check-license-fields.py); to see the full list:
+# depends on, among them symphonia (MPL-2.0), so the tag lists each distinct
+# license expression among them. CI fails when it stops matching
+# (packaging/check-license-fields.py); to see the list:
 #   cargo tree -p daw-app -e normal,no-proc-macro --prefix none -f '{l}' | sort -u
-License:        GPL-3.0-or-later AND MPL-2.0 AND Apache-2.0 AND MIT AND ISC AND Zlib AND (MIT OR Apache-2.0) AND (Unlicense OR MIT) AND (Zlib OR Apache-2.0 OR MIT) AND (0BSD OR Apache-2.0)
+License:        GPL-3.0-or-later AND MPL-2.0 AND Apache-2.0 AND MIT AND ISC AND Zlib AND (MIT OR Apache-2.0) AND (Unlicense OR MIT) AND (Zlib OR Apache-2.0 OR MIT) AND (0BSD OR Apache-2.0) AND (ISC OR MIT OR Apache-2.0) AND (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)
 URL:            https://github.com/Octodillo/Kadence
 Source0:        %{name}-%{version}.tar.gz
 
