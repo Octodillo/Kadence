@@ -661,6 +661,7 @@ dependencies = [
  "daw-plugins-vst3",
  "daw-test-support",
  "libc",
+ "log",
  "serde",
  "serde_json",
  "tempfile",

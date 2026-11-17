@@ -11,6 +11,7 @@
 
 mod cache;
 mod candidates;
+pub mod process;
 mod registry;
 mod scanner;
 
