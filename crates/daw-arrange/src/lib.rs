@@ -15,6 +15,7 @@
 pub mod automation;
 pub mod commands;
 mod draw;
+pub mod gesture;
 pub mod lane_editor;
 pub mod peaks;
 pub mod scene;
@@ -27,15 +28,17 @@ use std::sync::Arc;
 
 use daw_core::time::{PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::grid::Meter;
-use daw_model::commands::{AddClip, AddTrack, ClipField, RemoveClip, SetClip};
+use daw_model::commands::{AddClip, AddTrack, Batch, ClipField, MoveClip, RemoveClip, SetClip};
 use daw_model::{
     AudioClip, Clip, ClipContent, ClipId, Command, Document, Fade, FadeShape, LaneId, MidiClip,
     ModelError, Project, Track, TrackId, TrackKind,
 };
 
 pub use automation::{LaneScale, ParamCatalog, PointShape};
-use commands::{Group, PlaceClip, TrimClip};
+use commands::TrimClip;
 pub use draw::track_color;
+use gesture::DRAG_THRESHOLD;
+pub use gesture::DragStep;
 pub use lane_editor::{LaneEditor, LaneFrame, LaneGrid};
 pub use peaks::{PeakPool, Peaks};
 pub use scene::{Palette, Prim, Rect, Rgba, Scene};
@@ -47,9 +50,6 @@ pub const MIN_TRACK_HEIGHT: f64 = 24.0;
 pub const MAX_TRACK_HEIGHT: f64 = 400.0;
 /// A new timeline's track height.
 pub const DEFAULT_TRACK_HEIGHT: f64 = 64.0;
-
-/// A pointer must move this far before a press becomes a drag.
-const DRAG_THRESHOLD: f64 = 3.0;
 
 /// The shortest clip a trim leaves, in ticks (a 64th note).
 const MIN_CLIP_TICKS: i64 = PPQ / 16;
@@ -247,6 +247,31 @@ impl Outcome {
         }
     }
 
+    /// For a step of a drag that may have changed the document.
+    pub(crate) fn changed(document: bool) -> Self {
+        if document {
+            Self::document()
+        } else {
+            Self::default()
+        }
+    }
+
+    /// With `document` set if `changed`: for an edit that was refused after
+    /// the drag's step before it was taken back.
+    pub(crate) fn or_document(mut self, changed: bool) -> Self {
+        self.document |= changed;
+        self
+    }
+
+    /// What taking back a drag's edit ([`DragStep::rewind`]) did.
+    pub(crate) fn rewound(r: Result<bool, ModelError>) -> Self {
+        match r {
+            Ok(false) => Self::view(),
+            Ok(true) => Self::document(),
+            Err(e) => Self::from_result(Err(e)),
+        }
+    }
+
     fn from_result(r: Result<(), ModelError>) -> Self {
         match r {
             Ok(()) => Self::document(),
@@ -266,41 +291,10 @@ enum Drag {
         start: Pointer,
         hit: Hit,
     },
-    Move {
-        /// Tick and row under the pointer at the press.
-        tick: TickTime,
-        row: usize,
-        /// The clip that was grabbed; its start is what snaps.
-        lead: ClipId,
-        /// Each selected clip's original row and start.
-        clips: Vec<(ClipId, usize, TickTime)>,
-        /// Whether the drag has changed the document, so cancelling it has
-        /// something of its own to undo.
-        edited: bool,
-    },
-    Trim {
-        clip: ClipId,
-        zone: Zone,
-        tick: TickTime,
-        start: TickTime,
-        length: TickTime,
-        offset: Option<SampleTime>,
-        edited: bool,
-    },
-    Fade {
-        clip: ClipId,
-        out: bool,
-        /// Ticks from the press to the fade's edge, so grabbing the handle
-        /// anywhere doesn't make the fade jump.
-        grab: i64,
-        edited: bool,
-    },
-    Gain {
-        clip: ClipId,
-        /// Pointer y and clip gain at the press.
-        y: f64,
-        db: f64,
-        edited: bool,
+    /// Clips being edited, and the undo step that holds the edit so far.
+    Edit {
+        edit: ClipDrag,
+        step: DragStep,
     },
     Rubber {
         x0: f64,
@@ -313,6 +307,53 @@ enum Drag {
     Loop {
         from: TickTime,
     },
+}
+
+/// What a drag on a clip changes, with what it needs to know of the press.
+/// Every pointer move works the edit out from this again (see [`DragStep`]).
+#[derive(Clone, Debug)]
+enum ClipDrag {
+    Move {
+        /// Tick and row under the pointer at the press.
+        tick: TickTime,
+        row: usize,
+        /// The clip that was grabbed; its start is what snaps.
+        lead: ClipId,
+        /// Each selected clip's original row and start.
+        clips: Vec<(ClipId, usize, TickTime)>,
+    },
+    Trim {
+        clip: ClipId,
+        zone: Zone,
+        /// Tick under the pointer at the press, and the clip's extent then.
+        tick: TickTime,
+        start: TickTime,
+        length: TickTime,
+        offset: Option<SampleTime>,
+    },
+    Fade {
+        clip: ClipId,
+        out: bool,
+        /// Ticks from the press to the fade's edge, so grabbing the handle
+        /// anywhere doesn't make the fade jump.
+        grab: i64,
+    },
+    Gain {
+        clip: ClipId,
+        /// Pointer y and clip gain at the press.
+        y: f64,
+        db: f64,
+    },
+}
+
+impl ClipDrag {
+    fn cursor(&self) -> Cursor {
+        match self {
+            Self::Move { .. } => Cursor::Move,
+            Self::Trim { .. } | Self::Fade { .. } => Cursor::ResizeHorizontal,
+            Self::Gain { .. } => Cursor::ResizeVertical,
+        }
+    }
 }
 
 /// Names the arrange view gives what it creates. The front end sets them in
@@ -589,11 +630,8 @@ impl Arrange {
         if let Some(c) = self.lanes.cursor() {
             return c;
         }
-        match &self.drag {
-            Some(Drag::Move { .. }) => return Cursor::Move,
-            Some(Drag::Trim { .. } | Drag::Fade { .. }) => return Cursor::ResizeHorizontal,
-            Some(Drag::Gain { .. }) => return Cursor::ResizeVertical,
-            _ => {}
+        if let Some(Drag::Edit { edit, .. }) = &self.drag {
+            return edit.cursor();
         }
         match self.hit(project, x, y) {
             Hit::Ruler(_) => Cursor::Pointing,
@@ -668,7 +706,11 @@ impl Arrange {
     /// The gain of the clip being gain-dragged, so the front end can show
     /// the value by the pointer.
     pub fn dragged_gain(&self, project: &Project) -> Option<f64> {
-        let Some(Drag::Gain { clip, .. }) = &self.drag else {
+        let Some(Drag::Edit {
+            edit: ClipDrag::Gain { clip, .. },
+            ..
+        }) = &self.drag
+        else {
             return None;
         };
         match &project.clip(*clip)?.content {
@@ -875,51 +917,11 @@ impl Arrange {
                 self.begin_drag(doc, start, hit);
                 self.motion(doc, env, p)
             }
-            Drag::Move {
-                tick,
-                row,
-                lead,
-                clips,
-                ..
-            } => {
-                let o = self.drag_move(doc, p, tick, row, lead, &clips);
-                self.mark_edited(&o);
-                o
-            }
-            Drag::Trim {
-                clip,
-                zone,
-                tick,
-                start,
-                length,
-                offset,
-                ..
-            } => {
-                let o = self.drag_trim(doc, env, p, clip, zone, tick, start, length, offset);
-                self.mark_edited(&o);
-                o
-            }
-            Drag::Fade {
-                clip, out, grab, ..
-            } => {
-                let o = self.drag_fade(doc, p, clip, out, grab);
-                self.mark_edited(&o);
-                o
-            }
-            Drag::Gain { clip, y, db, .. } => {
-                let per_px = if p.shift {
-                    FINE_GAIN_DB_PER_PX
-                } else {
-                    GAIN_DB_PER_PX
-                };
-                let to = (db + (y - p.y) * per_px).clamp(MIN_CLIP_GAIN_DB, MAX_CLIP_GAIN_DB);
-                // Whole hundredths, so the shown value is the stored one.
-                let to = (to * 100.0).round() / 100.0;
-                let r = doc
-                    .execute(SetClip::new(clip, ClipField::AudioGainDb(to)))
-                    .map(|_| ());
-                let o = Outcome::from_result(r);
-                self.mark_edited(&o);
+            Drag::Edit { edit, mut step } => {
+                let o = self.drag_edit(doc, env, p, &edit, &mut step);
+                if self.drag.is_some() {
+                    self.drag = Some(Drag::Edit { edit, step });
+                }
                 o
             }
             Drag::Rubber { x0, y0, base, .. } => {
@@ -979,9 +981,9 @@ impl Arrange {
                 }
                 _ => Outcome::view(),
             },
-            Some(Drag::Move { .. } | Drag::Trim { .. } | Drag::Fade { .. } | Drag::Gain { .. }) => {
-                // The drag merged into one undo step; end it so the next edit
-                // doesn't merge in too.
+            Some(Drag::Edit { .. }) => {
+                // End the drag's undo step, so the next edit doesn't merge
+                // into it.
                 doc.seal();
                 Outcome::view()
             }
@@ -995,23 +997,14 @@ impl Arrange {
         }
     }
 
-    /// Drops the drag in progress (Escape, or the pointer was taken away).
+    /// Drops the drag in progress and takes back what it did (Escape, or the
+    /// pointer was taken away). Nothing of it is left to undo or redo.
     pub fn cancel(&mut self, doc: &mut Document) -> Outcome {
         if let Some(o) = self.lanes.cancel(doc) {
             return o;
         }
         match self.drag.take() {
-            Some(
-                Drag::Move { edited: true, .. }
-                | Drag::Trim { edited: true, .. }
-                | Drag::Fade { edited: true, .. }
-                | Drag::Gain { edited: true, .. },
-            ) => {
-                // The drag is one merged undo step: undo it.
-                doc.seal();
-                let _ = doc.undo();
-                Outcome::document()
-            }
+            Some(Drag::Edit { mut step, .. }) => Outcome::rewound(step.rewind(doc)),
             Some(_) => Outcome::view(),
             None => Outcome::default(),
         }
@@ -1022,23 +1015,8 @@ impl Arrange {
     /// drag neither merges with that edit nor works on clips it removed.
     pub fn end_drag(&mut self, doc: &mut Document) {
         self.lanes.end_drag(doc);
-        if let Some(Drag::Move { .. } | Drag::Trim { .. } | Drag::Fade { .. } | Drag::Gain { .. }) =
-            self.drag.take()
-        {
+        if let Some(Drag::Edit { .. }) = self.drag.take() {
             doc.seal();
-        }
-    }
-
-    fn mark_edited(&mut self, o: &Outcome) {
-        if o.document
-            && let Some(
-                Drag::Move { edited, .. }
-                | Drag::Trim { edited, .. }
-                | Drag::Fade { edited, .. }
-                | Drag::Gain { edited, .. },
-            ) = &mut self.drag
-        {
-            *edited = true;
         }
     }
 
@@ -1099,6 +1077,12 @@ impl Arrange {
     fn begin_drag(&mut self, doc: &mut Document, start: Pointer, hit: Hit) {
         let project = doc.project();
         let tick = self.view.x_to_tick(start.x);
+        let edit = |edit| {
+            Some(Drag::Edit {
+                edit,
+                step: DragStep::default(),
+            })
+        };
         self.drag = match hit {
             Hit::Clip {
                 clip,
@@ -1114,77 +1098,56 @@ impl Arrange {
                     .filter(|(_, c)| self.selection.contains(&c.id))
                     .map(|(r, c)| (c.id, r, c.start))
                     .collect();
-                doc.seal();
-                Some(Drag::Move {
+                edit(ClipDrag::Move {
                     tick,
                     row,
                     lead: clip,
                     clips,
-                    edited: false,
                 })
             }
-            Hit::Clip {
-                clip,
-                zone: zone @ (Zone::FadeIn | Zone::FadeOut | Zone::Gain),
-                ..
-            } => {
-                let Some(c) = project.clip(clip) else {
-                    self.drag = None;
-                    return;
-                };
-                let ClipContent::Audio(a) = &c.content else {
-                    self.drag = None;
-                    return;
-                };
-                let db = a.gain_db;
-                let (fi, fo) =
-                    daw_model::fit_fades(a.fade_in.length.0, a.fade_out.length.0, c.length.0);
-                let edge = if zone == Zone::FadeOut {
-                    c.start.0 + c.length.0 - fo
-                } else {
-                    c.start.0 + fi
-                };
+            // The clip can be gone if a shortcut deleted it while the button
+            // was down.
+            Hit::Clip { clip, zone, .. } => project.clip(clip).and_then(|c| {
                 self.selection = BTreeSet::from([clip]);
-                doc.seal();
-                Some(match zone {
-                    Zone::Gain => Drag::Gain {
+                match (zone, &c.content) {
+                    (Zone::Gain, ClipContent::Audio(a)) => edit(ClipDrag::Gain {
                         clip,
                         y: start.y,
-                        db,
-                        edited: false,
-                    },
-                    _ => Drag::Fade {
+                        db: a.gain_db,
+                    }),
+                    (Zone::FadeIn | Zone::FadeOut, ClipContent::Audio(a)) => {
+                        let (fi, fo) = daw_model::fit_fades(
+                            a.fade_in.length.0,
+                            a.fade_out.length.0,
+                            c.length.0,
+                        );
+                        let out = zone == Zone::FadeOut;
+                        let edge = if out {
+                            c.start.0 + c.length.0 - fo
+                        } else {
+                            c.start.0 + fi
+                        };
+                        edit(ClipDrag::Fade {
+                            clip,
+                            out,
+                            grab: edge - tick.0,
+                        })
+                    }
+                    // Only audio clips have handles.
+                    (Zone::Gain | Zone::FadeIn | Zone::FadeOut, ClipContent::Midi(_)) => None,
+                    (Zone::Start | Zone::End | Zone::Body, content) => edit(ClipDrag::Trim {
                         clip,
-                        out: zone == Zone::FadeOut,
-                        grab: edge - tick.0,
-                        edited: false,
-                    },
-                })
-            }
-            Hit::Clip { clip, zone, .. } => {
-                // The clip can be gone if a shortcut deleted it while the
-                // button was down.
-                let Some(c) = project.clip(clip) else {
-                    self.drag = None;
-                    return;
-                };
-                let offset = match &c.content {
-                    ClipContent::Audio(a) => Some(a.offset),
-                    ClipContent::Midi(_) => None,
-                };
-                let (start, length) = (c.start, c.length);
-                self.selection = BTreeSet::from([clip]);
-                doc.seal();
-                Some(Drag::Trim {
-                    clip,
-                    zone,
-                    tick,
-                    start,
-                    length,
-                    offset,
-                    edited: false,
-                })
-            }
+                        zone,
+                        tick,
+                        start: c.start,
+                        length: c.length,
+                        offset: match content {
+                            ClipContent::Audio(a) => Some(a.offset),
+                            ClipContent::Midi(_) => None,
+                        },
+                    }),
+                }
+            }),
             Hit::Lane { .. } | Hit::Empty(_) => {
                 let base = if start.shift || start.ctrl {
                     self.selection.clone()
@@ -1203,28 +1166,69 @@ impl Arrange {
         };
     }
 
-    fn drag_move(
+    /// One pointer move of a clip drag: puts the edit that takes the clips
+    /// to `p` in place of what the drag has done so far.
+    fn drag_edit(
         &mut self,
         doc: &mut Document,
+        env: &Env,
+        p: Pointer,
+        edit: &ClipDrag,
+        step: &mut DragStep,
+    ) -> Outcome {
+        let rewound = match step.rewind(doc) {
+            Ok(rewound) => rewound,
+            Err(e) => {
+                self.drag = None;
+                return Outcome::from_result(Err(e));
+            }
+        };
+        let project = doc.project();
+        let command = match *edit {
+            ClipDrag::Move {
+                tick,
+                row,
+                lead,
+                ref clips,
+            } => self.move_edit(project, p, tick, row, lead, clips),
+            ClipDrag::Trim {
+                clip,
+                zone,
+                tick,
+                start,
+                length,
+                offset,
+            } => self.trim_edit(project, env, p, clip, zone, tick, (start, length, offset)),
+            ClipDrag::Fade { clip, out, grab } => self.fade_edit(project, p, clip, out, grab),
+            ClipDrag::Gain { clip, y, db } => Self::gain_edit(project, p, clip, y, db),
+        };
+        match command {
+            Some(c) => Outcome::from_result(step.run(doc, c)).or_document(rewound),
+            // Back where the drag began.
+            None => Outcome::changed(rewound),
+        }
+    }
+
+    /// The edit that moves `clips` with the pointer at `p`, or `None` when
+    /// that is where they are (or they are gone).
+    fn move_edit(
+        &self,
+        project: &Project,
         p: Pointer,
         tick: TickTime,
         row: usize,
         lead: ClipId,
         clips: &[(ClipId, usize, TickTime)],
-    ) -> Outcome {
-        let project = doc.project();
+    ) -> Option<Box<dyn Command>> {
         let rows = project.tracks.len();
         if clips
             .iter()
             .any(|&(id, r, _)| r >= rows || project.clip(id).is_none())
         {
             // Tracks or clips went away under the drag.
-            self.end_drag(doc);
-            return Outcome::default();
+            return None;
         }
-        let Some(&(_, _, lead_start)) = clips.iter().find(|c| c.0 == lead) else {
-            return Outcome::default();
-        };
+        let &(_, _, lead_start) = clips.iter().find(|c| c.0 == lead)?;
         // Horizontal: move the grabbed clip's start to the grid (Shift
         // turns snapping off), and everything else by the same amount.
         let raw = lead_start.0 + (self.view.x_to_tick(p.x).0 - tick.0);
@@ -1261,77 +1265,106 @@ impl Arrange {
             drow = 0;
         }
 
-        let moves: Vec<Box<dyn Command>> = clips
+        let is_at = |id: ClipId, track: TrackId, start: TickTime| {
+            project
+                .track(track)
+                .is_some_and(|t| t.clips.iter().any(|c| c.id == id && c.start == start))
+        };
+        let moves: Vec<(ClipId, TrackId, TickTime)> = clips
             .iter()
             .map(|&(id, r, start)| {
                 let to = (r as i64 + drow) as usize;
-                Box::new(PlaceClip::new(
-                    id,
-                    project.tracks[to].id,
-                    TickTime(start.0 + delta),
-                )) as Box<dyn Command>
+                (id, project.tracks[to].id, TickTime(start.0 + delta))
             })
             .collect();
-        let key = clips.iter().map(|c| c.0).collect();
-        let r = doc
-            .execute(Group::new("Move Clips", key, moves))
-            .map(|_| ());
-        Outcome::from_result(r)
+        if moves
+            .iter()
+            .all(|&(id, track, start)| is_at(id, track, start))
+        {
+            return None;
+        }
+        let items = moves
+            .into_iter()
+            .map(|(id, track, start)| Box::new(MoveClip::new(id, track, start)) as Box<dyn Command>)
+            .collect();
+        Some(Box::new(Batch::new("Move Clips", items)))
     }
 
-    /// Sets a fade's length to reach the pointer, leaving the other fade
-    /// room. Not snapped: fades are usually set by ear.
-    fn drag_fade(
-        &mut self,
-        doc: &mut Document,
+    /// The edit that sets a fade's length to reach the pointer, leaving the
+    /// other fade room, or `None` when the fade is that long already. Not
+    /// snapped: fades are usually set by ear.
+    fn fade_edit(
+        &self,
+        project: &Project,
         p: Pointer,
         id: ClipId,
         out: bool,
         grab: i64,
-    ) -> Outcome {
-        let Some(clip) = doc.project().clip(id) else {
-            self.drag = None;
-            return Outcome::default();
-        };
+    ) -> Option<Box<dyn Command>> {
+        let clip = project.clip(id)?;
         let ClipContent::Audio(a) = &clip.content else {
-            return Outcome::default();
+            return None;
         };
         let at = self.view.x_to_tick(p.x).0 + grab;
         let end = clip.start.0 + clip.length.0;
-        let (fade, other) = if out {
-            (end - at, a.fade_in.length.0)
+        let (now, reach, other) = if out {
+            (a.fade_out, end - at, a.fade_in.length.0)
         } else {
-            (at - clip.start.0, a.fade_out.length.0)
+            (a.fade_in, at - clip.start.0, a.fade_out.length.0)
         };
         let room = (clip.length.0 - other.min(clip.length.0)).max(0);
-        let length = TickTime(fade.clamp(0, room));
+        let fade = Fade::new(TickTime(reach.clamp(0, room)), now.shape);
+        if fade == now {
+            return None;
+        }
         let field = if out {
-            ClipField::FadeOut(Fade::new(length, a.fade_out.shape))
+            ClipField::FadeOut(fade)
         } else {
-            ClipField::FadeIn(Fade::new(length, a.fade_in.shape))
+            ClipField::FadeIn(fade)
         };
-        let r = doc.execute(SetClip::new(id, field)).map(|_| ());
-        Outcome::from_result(r)
+        Some(Box::new(SetClip::new(id, field)))
     }
 
+    /// The edit that sets the gain a drag from `y`, where it was `db`, has
+    /// reached at `p`, or `None` when the clip has that gain already.
+    fn gain_edit(
+        project: &Project,
+        p: Pointer,
+        id: ClipId,
+        y: f64,
+        db: f64,
+    ) -> Option<Box<dyn Command>> {
+        let ClipContent::Audio(a) = &project.clip(id)?.content else {
+            return None;
+        };
+        let per_px = if p.shift {
+            FINE_GAIN_DB_PER_PX
+        } else {
+            GAIN_DB_PER_PX
+        };
+        let to = (db + (y - p.y) * per_px).clamp(MIN_CLIP_GAIN_DB, MAX_CLIP_GAIN_DB);
+        // Whole hundredths, so the shown value is the stored one.
+        let to = (to * 100.0).round() / 100.0;
+        (to != a.gain_db)
+            .then(|| Box::new(SetClip::new(id, ClipField::AudioGainDb(to))) as Box<dyn Command>)
+    }
+
+    /// The edit that trims a clip, whose extent was `from` at the press on
+    /// `tick`, to the pointer at `p`, or `None` when that is its extent
+    /// already.
     #[allow(clippy::too_many_arguments)]
-    fn drag_trim(
+    fn trim_edit(
         &mut self,
-        doc: &mut Document,
+        project: &Project,
         env: &Env,
         p: Pointer,
         id: ClipId,
         zone: Zone,
         tick: TickTime,
-        start: TickTime,
-        length: TickTime,
-        offset: Option<SampleTime>,
-    ) -> Outcome {
-        let project = doc.project();
-        let Some(clip) = project.clip(id) else {
-            self.drag = None;
-            return Outcome::default();
-        };
+        from: (TickTime, TickTime, Option<SampleTime>),
+    ) -> Option<Box<dyn Command>> {
+        let (start, length, offset) = from;
+        let clip = project.clip(id)?;
         let file_end = self.file_end_tick(env, clip, start, offset);
         let rate = match &clip.content {
             ClipContent::Audio(a) => self.file_rate(env, &a.source),
@@ -1347,7 +1380,7 @@ impl Arrange {
             }
         };
         let end = start.0 + length.0;
-        let cmd = match zone {
+        let to = match zone {
             Zone::End => {
                 let mut new_end = snap(TickTime(end + moved.0))
                     .0
@@ -1355,7 +1388,7 @@ impl Arrange {
                 if let Some(limit) = file_end {
                     new_end = new_end.min(limit.max(start.0 + MIN_CLIP_TICKS));
                 }
-                TrimClip::new(id, start, TickTime(new_end - start.0), offset)
+                (start, TickTime(new_end - start.0), offset)
             }
             Zone::Start | Zone::Body | Zone::FadeIn | Zone::FadeOut | Zone::Gain => {
                 let mut new_start = snap(TickTime(start.0 + moved.0))
@@ -1375,8 +1408,8 @@ impl Arrange {
                     }
                     None => {
                         // Don't cut notes off the front of a MIDI clip.
-                        // Notes keep their timeline position through a trim, so
-                        // the first one's is the same in every step of a drag.
+                        // Notes keep their timeline position through a trim,
+                        // so the first one's is the same all through a drag.
                         if let ClipContent::Midi(m) = &clip.content
                             && let Some(first) = m.notes.first()
                         {
@@ -1385,16 +1418,18 @@ impl Arrange {
                         None
                     }
                 };
-                TrimClip::new(
-                    id,
-                    TickTime(new_start),
-                    TickTime(end - new_start),
-                    new_offset,
-                )
+                (TickTime(new_start), TickTime(end - new_start), new_offset)
             }
         };
-        let r = doc.execute(cmd).map(|_| ());
-        Outcome::from_result(r)
+        let now = (
+            clip.start,
+            clip.length,
+            match &clip.content {
+                ClipContent::Audio(a) => Some(a.offset),
+                ClipContent::Midi(_) => None,
+            },
+        );
+        (to != now).then(|| Box::new(TrimClip::new(id, to.0, to.1, to.2)) as Box<dyn Command>)
     }
 
     /// The tick where an audio clip's file runs out, if known.
@@ -1480,7 +1515,7 @@ impl Arrange {
         } else {
             "Delete Clips"
         };
-        let r = doc.execute(Group::new(label, ids, items)).map(|_| ());
+        let r = doc.execute(Batch::new(label, items)).map(|_| ());
         doc.seal();
         self.selection.clear();
         Outcome::from_result(r)
@@ -1514,8 +1549,7 @@ impl Arrange {
                 Box::new(AddClip::new(t.id, copy)) as Box<dyn Command>
             })
             .collect();
-        let key = new_ids.iter().copied().collect();
-        let r = doc.execute(Group::new("Duplicate", key, items)).map(|_| ());
+        let r = doc.execute(Batch::new("Duplicate", items)).map(|_| ());
         doc.seal();
         if r.is_ok() {
             self.selection = new_ids;
@@ -1610,8 +1644,7 @@ impl Arrange {
             right_ids.push(right.id);
             items.push(Box::new(AddClip::new(*track, right)));
         }
-        let key = targets.iter().map(|(_, c)| c.id).collect();
-        let r = doc.execute(Group::new("Split", key, items)).map(|_| ());
+        let r = doc.execute(Batch::new("Split", items)).map(|_| ());
         doc.seal();
         if r.is_ok() {
             self.selection.extend(right_ids);
@@ -1654,11 +1687,9 @@ impl Arrange {
         fields: impl Fn(&AudioClip) -> Vec<ClipField>,
     ) -> Outcome {
         self.end_drag(doc);
-        let mut ids = Vec::new();
         let mut items: Vec<Box<dyn Command>> = Vec::new();
         for (_, c) in self.selected_clips(doc.project()) {
             if let ClipContent::Audio(a) = &c.content {
-                ids.push(c.id);
                 for f in fields(a) {
                     items.push(Box::new(SetClip::new(c.id, f)));
                 }
@@ -1667,7 +1698,7 @@ impl Arrange {
         if items.is_empty() {
             return Outcome::default();
         }
-        let r = doc.execute(Group::new(label, ids, items)).map(|_| ());
+        let r = doc.execute(Batch::new(label, items)).map(|_| ());
         doc.seal();
         Outcome::from_result(r)
     }
@@ -1702,12 +1733,11 @@ impl Arrange {
         let items: Vec<Box<dyn Command>> = sel
             .iter()
             .map(|(t, c)| {
-                Box::new(PlaceClip::new(c.id, t.id, TickTime(c.start.0 + delta)))
-                    as Box<dyn Command>
+                Box::new(MoveClip::new(c.id, t.id, TickTime(c.start.0 + delta))) as Box<dyn Command>
             })
             .collect();
-        let key = sel.iter().map(|(_, c)| c.id).collect();
-        let r = doc.execute(Group::new("Nudge", key, items)).map(|_| ());
+        let r = doc.execute(Batch::new("Nudge", items)).map(|_| ());
+        doc.seal();
         Outcome::from_result(r)
     }
 
@@ -1762,7 +1792,7 @@ impl Arrange {
         );
         let id = clip.id;
         items.push(Box::new(AddClip::new(target, clip)));
-        doc.execute(Group::new("Import Audio", vec![id], items))?;
+        doc.execute(Batch::new("Import Audio", items))?;
         doc.seal();
         self.selection = BTreeSet::from([id]);
         self.selected_track = Some(target);

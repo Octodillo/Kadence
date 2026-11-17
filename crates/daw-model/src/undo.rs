@@ -99,6 +99,31 @@ impl UndoStack {
         }
     }
 
+    /// Reverts the last command and forgets it, as if it had never run, when
+    /// it is the step at `position`: for a gesture the user cancelled, or one
+    /// that replaces its step as it goes. Unlike [`undo`](Self::undo) it
+    /// leaves nothing to redo. Returns `None`, changing nothing, when history
+    /// has moved on from `position`.
+    pub fn abandon(
+        &mut self,
+        project: &mut Project,
+        position: u64,
+    ) -> Result<Option<ChangeSet>, ModelError> {
+        if self.done.back().is_none_or(|e| e.seq != position) {
+            return Ok(None);
+        }
+        let mut entry = self.done.pop_back().expect("checked above");
+        self.sealed = true;
+        match entry.command.revert(project) {
+            Ok(changes) => Ok(Some(changes)),
+            Err(e) => {
+                self.done.push_back(entry);
+                self.on_error(&e);
+                Err(e)
+            }
+        }
+    }
+
     /// Re-applies the last undone command. Returns `None` if there is nothing
     /// to redo.
     pub fn redo(&mut self, project: &mut Project) -> Result<Option<ChangeSet>, ModelError> {

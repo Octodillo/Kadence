@@ -561,3 +561,50 @@ fn moving_points_in_time_keeps_their_values() {
     assert_eq!(pts[1].tick, TickTime(2 * BAR + BEAT));
     assert_eq!(pts[1].value, 12.0);
 }
+
+/// Issue #204 item 8, for lanes: Escape takes a point drag back without
+/// leaving it to redo, and a drag back to the start is no edit.
+#[test]
+fn cancelled_and_returned_point_drags_leave_no_step() {
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Pan);
+    r.click(r.x(BAR), r.y(0, 0, 0.5));
+    r.doc.seal();
+    let before = r.points(lane);
+    let steps = r.doc.history().undo_len();
+    let position = r.doc.history().position();
+    let tempo = r.tempo.clone();
+    let env = env(&tempo);
+    let (x, y) = (r.x(BAR), r.y(0, 0, 0.5));
+
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 64.0, y - 10.0));
+    assert_ne!(r.points(lane), before);
+    assert_eq!(r.doc.history().undo_len(), steps + 1);
+    let o = r.arrange.cancel(&mut r.doc);
+    assert!(o.document && o.error.is_none());
+    assert_eq!(r.points(lane), before);
+    assert!(!r.doc.history().can_redo(), "Redo re-applies the drag");
+    assert_eq!(r.doc.history().position(), position);
+
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 64.0, y - 10.0));
+    r.arrange.motion(&mut r.doc, &env, Pointer::left(x, y));
+    r.arrange.release(&mut r.doc, Pointer::left(x, y));
+    assert_eq!(r.points(lane), before);
+    assert_eq!(r.doc.history().undo_len(), steps);
+    assert_eq!(r.doc.history().position(), position);
+
+    // Escape during the click that adds a point takes the point away too.
+    let x = r.x(3 * BAR);
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 30.0, y - 5.0));
+    assert_eq!(r.points(lane).len(), 2);
+    assert_eq!(r.doc.history().undo_len(), steps + 1);
+    r.arrange.cancel(&mut r.doc);
+    assert_eq!(r.points(lane), before);
+    assert!(!r.doc.history().can_redo());
+}

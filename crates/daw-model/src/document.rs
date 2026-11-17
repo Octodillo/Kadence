@@ -144,6 +144,13 @@ impl Document {
         self.after_step(result)
     }
 
+    /// Takes back the step at history position `step` and forgets it, if it
+    /// is still the last one. See [`UndoStack::abandon`].
+    pub fn abandon(&mut self, step: u64) -> Result<Option<ChangeSet>, ModelError> {
+        let result = self.history.abandon(&mut self.project, step);
+        self.after_step(result)
+    }
+
     /// Stores a plugin's own state in its device without an undo step: the
     /// plugin changed it, not an edit, so undo neither reverts it nor loses
     /// its redo history to it. Does not mark the document modified.

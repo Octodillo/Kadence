@@ -12,16 +12,19 @@
 //! dragged in time (snapped unless Shift is held) and value, deleted with a
 //! double click or Delete, and given a shape from the context menu.
 //! Alt-dragging between two points bends the segment. Every gesture is one
-//! undoable [`SetLane`] edit.
+//! undoable [`SetLane`] edit (a drag keeps its own in a [`DragStep`]).
 
 use std::collections::BTreeSet;
 
 use daw_core::time::TickTime;
 use daw_midi::grid::Meter;
 use daw_model::commands::{LaneField, SetLane};
-use daw_model::{AutomationLane, AutomationPoint, Document, LaneId, MAX_CURVE, Project, Track};
+use daw_model::{
+    AutomationLane, AutomationPoint, Command, Document, LaneId, MAX_CURVE, Project, Track,
+};
 
 use crate::automation::{LaneScale, PointShape};
+use crate::gesture::DragStep;
 use crate::scene::{Palette, Prim, Rect, Rgba, Scene};
 use crate::{Button, Cursor, Outcome, Pointer, Snap, TimelineView};
 
@@ -129,43 +132,32 @@ pub fn lane_of(project: &Project, lane: LaneId) -> Option<(&Track, &AutomationLa
     Some((t, t.automation.get(index)?))
 }
 
+/// A drag on a lane.
 #[derive(Clone, Debug)]
-enum LaneDrag {
+struct LaneDrag {
+    lane: LaneId,
+    /// The lane's points at the press, which every pointer move works from
+    /// (with the point the press added, if it added one).
+    orig: Vec<AutomationPoint>,
+    kind: DragKind,
+    /// The undo step that holds what the drag did so far.
+    step: DragStep,
+}
+
+#[derive(Clone, Debug)]
+enum DragKind {
     /// Points being moved.
     Points {
-        lane: LaneId,
         /// Tick and y under the pointer at the press.
         tick: TickTime,
         y: f64,
         /// The point grabbed; its tick is what snaps.
         lead: usize,
-        /// The lane's points at the press, and the indices being moved.
-        orig: Vec<AutomationPoint>,
+        /// The indices being moved.
         moving: Vec<usize>,
-        edited: bool,
     },
     /// The bend of the segment after point `index`.
-    Curve {
-        lane: LaneId,
-        index: usize,
-        y: f64,
-        orig: Vec<AutomationPoint>,
-        edited: bool,
-    },
-}
-
-impl LaneDrag {
-    fn lane(&self) -> LaneId {
-        match self {
-            Self::Points { lane, .. } | Self::Curve { lane, .. } => *lane,
-        }
-    }
-
-    fn edited(&mut self) -> &mut bool {
-        match self {
-            Self::Points { edited, .. } | Self::Curve { edited, .. } => edited,
-        }
-    }
+    Curve { index: usize, y: f64 },
 }
 
 /// The selected points and the drag on lanes, for one view.
@@ -253,14 +245,14 @@ impl LaneEditor {
 
     /// The lane being dragged on, whose frame [`drag`](Self::drag) needs.
     pub fn dragging(&self) -> Option<LaneId> {
-        self.drag.as_ref().map(LaneDrag::lane)
+        self.drag.as_ref().map(|d| d.lane)
     }
 
     /// The pointer shape while dragging on a lane.
     pub fn cursor(&self) -> Option<Cursor> {
-        self.drag.as_ref().map(|d| match d {
-            LaneDrag::Points { .. } => Cursor::Move,
-            LaneDrag::Curve { .. } => Cursor::ResizeVertical,
+        self.drag.as_ref().map(|d| match d.kind {
+            DragKind::Points { .. } => Cursor::Move,
+            DragKind::Curve { .. } => Cursor::ResizeVertical,
         })
     }
 
@@ -342,14 +334,16 @@ impl LaneEditor {
                     .map(|(_, s)| s.iter().copied().collect())
                     .unwrap_or_default();
                 doc.seal();
-                self.drag = Some(LaneDrag::Points {
+                self.drag = Some(LaneDrag {
                     lane,
-                    tick,
-                    y: p.y,
-                    lead: i,
                     orig,
-                    moving,
-                    edited: false,
+                    kind: DragKind::Points {
+                        tick,
+                        y: p.y,
+                        lead: i,
+                        moving,
+                    },
+                    step: DragStep::default(),
                 });
                 Outcome::view()
             }
@@ -361,12 +355,11 @@ impl LaneEditor {
                 };
                 doc.seal();
                 self.selection = None;
-                self.drag = Some(LaneDrag::Curve {
+                self.drag = Some(LaneDrag {
                     lane,
-                    index,
-                    y: p.y,
                     orig,
-                    edited: false,
+                    kind: DragKind::Curve { index, y: p.y },
+                    step: DragStep::default(),
                 });
                 Outcome::view()
             }
@@ -389,20 +382,22 @@ impl LaneEditor {
                     }
                     points.insert(i, new);
                 }
-                doc.seal();
-                let r = set_lane_points(doc, lane, points.clone());
-                if r.is_err() {
-                    return Outcome::from_result(r);
+                // The drag's step starts with the new point.
+                let mut step = DragStep::default();
+                if let Err(e) = step.run(doc, set_points(lane, points.clone())) {
+                    return Outcome::from_result(Err(e));
                 }
                 self.selection = Some((lane, BTreeSet::from([i])));
-                self.drag = Some(LaneDrag::Points {
+                self.drag = Some(LaneDrag {
                     lane,
-                    tick: at,
-                    y: p.y,
-                    lead: i,
                     orig: points,
-                    moving: vec![i],
-                    edited: true,
+                    kind: DragKind::Points {
+                        tick: at,
+                        y: p.y,
+                        lead: i,
+                        moving: vec![i],
+                    },
+                    step,
                 });
                 Outcome::document()
             }
@@ -419,164 +414,68 @@ impl LaneEditor {
         grid: &LaneGrid,
         p: Pointer,
     ) -> Outcome {
-        let (Some(drag), Some(frame)) = (self.drag.clone(), frame) else {
+        let Some(frame) = frame else {
             self.end_drag(doc);
             return Outcome::default();
         };
-        let o = match drag {
-            LaneDrag::Points {
-                lane,
+        let Some(mut drag) = self.drag.take() else {
+            return Outcome::default();
+        };
+        // Work the edit out again from the points at the press, in place of
+        // what the drag did so far.
+        let rewound = match drag.step.rewind(doc) {
+            Ok(rewound) => rewound,
+            Err(e) => return Outcome::from_result(Err(e)),
+        };
+        let points = match drag.kind {
+            DragKind::Points {
                 tick,
                 y,
                 lead,
-                orig,
-                moving,
-                ..
-            } => self.drag_points(doc, frame, grid, p, lane, tick, y, lead, &orig, &moving),
-            LaneDrag::Curve {
-                lane,
-                index,
-                y,
-                orig,
-                ..
-            } => self.drag_curve(doc, frame, p, lane, index, y, &orig),
+                ref moving,
+            } => moved_points(frame, grid, p, &drag.orig, tick, y, lead, moving),
+            DragKind::Curve { index, y } => bent_points(frame, p, &drag.orig, index, y),
         };
-        if o.document
-            && let Some(d) = &mut self.drag
-        {
-            *d.edited() = true;
-        }
-        o
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn drag_points(
-        &mut self,
-        doc: &mut Document,
-        frame: &LaneFrame,
-        grid: &LaneGrid,
-        p: Pointer,
-        lane: LaneId,
-        tick: TickTime,
-        y: f64,
-        lead: usize,
-        orig: &[AutomationPoint],
-        moving: &[usize],
-    ) -> Outcome {
-        let Some((_, l)) = lane_of(doc.project(), lane) else {
-            self.end_drag(doc);
-            return Outcome::default();
+        let lane = lane_of(doc.project(), drag.lane).map(|(_, l)| l);
+        let o = match (points, lane) {
+            (Some(points), Some(l)) if points != l.points => {
+                Outcome::from_result(drag.step.run(doc, set_points(drag.lane, points)))
+                    .or_document(rewound)
+            }
+            // Back where the drag began.
+            (Some(_), Some(_)) => Outcome::changed(rewound),
+            // The lane or the points went away under the drag: it ends.
+            _ => {
+                doc.seal();
+                return Outcome::changed(rewound);
+            }
         };
-        if moving.iter().any(|&i| i >= orig.len()) || lead >= orig.len() {
-            self.end_drag(doc);
-            return Outcome::default();
-        }
-        // Time: snap the grabbed point, move the rest with it, and keep
-        // every moved point between its unmoved neighbours.
-        let raw = TickTime(orig[lead].tick.0 + (frame.x_tick(p.x).0 - tick.0));
-        let mut delta = grid.apply(frame, raw, p.shift).0 - orig[lead].tick.0;
-        let is_moving = |i: usize| moving.contains(&i);
-        for &i in moving {
-            let lo = (0..i)
-                .rev()
-                .find(|&j| !is_moving(j))
-                .map_or(0, |j| orig[j].tick.0 + 1);
-            let hi = (i + 1..orig.len())
-                .find(|&j| !is_moving(j))
-                .map(|j| orig[j].tick.0 - 1);
-            delta = delta.max(lo - orig[i].tick.0);
-            if let Some(hi) = hi {
-                delta = delta.min(hi - orig[i].tick.0);
-            }
-        }
-        // Value: by the same height for all.
-        let dn = (y - p.y) / frame.span();
-        let scale = frame.scale;
-        let mut points = orig.to_vec();
-        for &i in moving {
-            let q = &mut points[i];
-            q.tick = TickTime(orig[i].tick.0 + delta);
-            // Moving only in time keeps values exactly, even ones outside
-            // what the lane shows.
-            if dn != 0.0 {
-                q.value = scale.from_norm(scale.to_norm(orig[i].value) + dn);
-            }
-        }
-        if points == l.points {
-            return Outcome::default();
-        }
-        let r = set_lane_points(doc, lane, points);
+        self.drag = Some(drag);
         self.saw(doc.project());
-        Outcome::from_result(r)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn drag_curve(
-        &mut self,
-        doc: &mut Document,
-        frame: &LaneFrame,
-        p: Pointer,
-        lane: LaneId,
-        index: usize,
-        y: f64,
-        orig: &[AutomationPoint],
-    ) -> Outcome {
-        let Some((_, l)) = lane_of(doc.project(), lane) else {
-            self.end_drag(doc);
-            return Outcome::default();
-        };
-        let (Some(a), Some(b)) = (orig.get(index), orig.get(index + 1)) else {
-            self.end_drag(doc);
-            return Outcome::default();
-        };
-        let scale = frame.scale;
-        // Dragging up lifts the middle of the segment, whichever way it
-        // goes: a rising segment rises early, a falling one falls late.
-        let up = (y - p.y) / CURVE_PX;
-        let rising = scale.to_norm(b.value) >= scale.to_norm(a.value);
-        let bend = if rising { up } else { -up };
-        let mut points = orig.to_vec();
-        let q = &mut points[index];
-        q.step = false;
-        q.curve = ((a.curve + bend) * 10.0).round() / 10.0;
-        q.curve = q.curve.clamp(-MAX_CURVE, MAX_CURVE);
-        if points == l.points {
-            return Outcome::default();
-        }
-        Outcome::from_result(set_lane_points(doc, lane, points))
+        o
     }
 
     /// Lets go of the drag, if one is on a lane.
     pub fn release(&mut self, doc: &mut Document, p: Pointer) -> Option<Outcome> {
         let drag = self.drag.take()?;
         doc.seal();
-        if let LaneDrag::Points {
-            lane,
-            lead,
-            edited: false,
-            ..
-        } = drag
+        if let DragKind::Points { lead, .. } = drag.kind
+            && !drag.step.edited()
             && !p.shift
             && !p.ctrl
         {
             // A click (no drag) on one of several selected points selects
             // only it.
-            self.select_point(doc.project(), lane, lead);
+            self.select_point(doc.project(), drag.lane, lead);
         }
         Some(Outcome::view())
     }
 
-    /// Drops the drag, undoing what it did, if one is on a lane.
+    /// Drops the drag, if one is on a lane, and takes back what it did.
+    /// Nothing of it is left to undo or redo.
     pub fn cancel(&mut self, doc: &mut Document) -> Option<Outcome> {
         let mut drag = self.drag.take()?;
-        Some(if *drag.edited() {
-            // The drag is one merged undo step: undo it.
-            doc.seal();
-            let _ = doc.undo();
-            Outcome::document()
-        } else {
-            Outcome::view()
-        })
+        Some(Outcome::rewound(drag.step.rewind(doc)))
     }
 
     /// Ends the drag, keeping what it did, so it doesn't merge with the
@@ -753,25 +652,94 @@ impl LaneEditor {
     }
 }
 
-/// Sets `lane`'s points, merging into the undo step in progress.
-fn set_lane_points(
-    doc: &mut Document,
-    lane: LaneId,
-    points: Vec<AutomationPoint>,
-) -> Result<(), daw_model::ModelError> {
-    doc.execute(SetLane {
+/// The edit that sets `lane`'s points.
+fn set_points(lane: LaneId, points: Vec<AutomationPoint>) -> Box<dyn Command> {
+    Box::new(SetLane {
         id: lane,
         field: LaneField::Points(points),
     })
-    .map(|_| ())
 }
 
 /// Sets `lane`'s points as an undo step of its own.
 fn commit_points(doc: &mut Document, lane: LaneId, points: Vec<AutomationPoint>) -> Outcome {
     doc.seal();
-    let r = set_lane_points(doc, lane, points);
+    let r = doc.execute_boxed(set_points(lane, points)).map(|_| ());
     doc.seal();
     Outcome::from_result(r)
+}
+
+/// `orig` with the points `moving` dragged from the press at (`tick`, `y`)
+/// to `p`, or `None` if `orig` has no such points.
+#[allow(clippy::too_many_arguments)]
+fn moved_points(
+    frame: &LaneFrame,
+    grid: &LaneGrid,
+    p: Pointer,
+    orig: &[AutomationPoint],
+    tick: TickTime,
+    y: f64,
+    lead: usize,
+    moving: &[usize],
+) -> Option<Vec<AutomationPoint>> {
+    if moving.iter().any(|&i| i >= orig.len()) || lead >= orig.len() {
+        return None;
+    }
+    // Time: snap the grabbed point, move the rest with it, and keep
+    // every moved point between its unmoved neighbours.
+    let raw = TickTime(orig[lead].tick.0 + (frame.x_tick(p.x).0 - tick.0));
+    let mut delta = grid.apply(frame, raw, p.shift).0 - orig[lead].tick.0;
+    let is_moving = |i: usize| moving.contains(&i);
+    for &i in moving {
+        let lo = (0..i)
+            .rev()
+            .find(|&j| !is_moving(j))
+            .map_or(0, |j| orig[j].tick.0 + 1);
+        let hi = (i + 1..orig.len())
+            .find(|&j| !is_moving(j))
+            .map(|j| orig[j].tick.0 - 1);
+        delta = delta.max(lo - orig[i].tick.0);
+        if let Some(hi) = hi {
+            delta = delta.min(hi - orig[i].tick.0);
+        }
+    }
+    // Value: by the same height for all.
+    let dn = (y - p.y) / frame.span();
+    let scale = frame.scale;
+    let mut points = orig.to_vec();
+    for &i in moving {
+        let q = &mut points[i];
+        q.tick = TickTime(orig[i].tick.0 + delta);
+        // Moving only in time keeps values exactly, even ones outside
+        // what the lane shows.
+        if dn != 0.0 {
+            q.value = scale.from_norm(scale.to_norm(orig[i].value) + dn);
+        }
+    }
+    Some(points)
+}
+
+/// `orig` with the segment after point `index` bent by a drag from `y` to
+/// `p`, or `None` if `orig` has no such segment.
+fn bent_points(
+    frame: &LaneFrame,
+    p: Pointer,
+    orig: &[AutomationPoint],
+    index: usize,
+    y: f64,
+) -> Option<Vec<AutomationPoint>> {
+    let (a, b) = (orig.get(index)?, orig.get(index + 1)?);
+    let scale = frame.scale;
+    // Dragging up lifts the middle of the segment, whichever way it
+    // goes: a rising segment rises early, a falling one falls late.
+    let up = (y - p.y) / CURVE_PX;
+    let rising = scale.to_norm(b.value) >= scale.to_norm(a.value);
+    let bend = if rising { up } else { -up };
+    let mut points = orig.to_vec();
+    let q = &mut points[index];
+    q.step = false;
+    q.curve = ((a.curve + bend) * 10.0).round() / 10.0;
+    q.curve = q.curve.clamp(-MAX_CURVE, MAX_CURVE);
+    Some(points)
 }
 
 #[cfg(test)]

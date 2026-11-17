@@ -534,3 +534,39 @@ fn save_writes_through_a_symlinked_project_file() {
     );
     assert_eq!(bundle::read_project(&real).unwrap().tracks[0].name, "v0");
 }
+
+/// Issue #204: a cancelled gesture is taken back without becoming a redo
+/// step, and only while it is still the last step.
+#[test]
+fn abandoning_a_step_leaves_no_redo_and_restores_the_position() {
+    let (p, id) = project_with_track();
+    let mut doc = Document::new(p);
+    let rename = |n: &str| SetTrack::new(id, TrackField::Name(n.into()));
+    doc.execute(rename("kept")).unwrap();
+    doc.seal();
+    let kept = doc.history().position();
+    assert!(doc.abandon(kept + 100).unwrap().is_none(), "not a step");
+
+    doc.execute(rename("dragged")).unwrap();
+    let step = doc.history().position();
+    let revision = doc.revision();
+    assert!(doc.abandon(step).unwrap().is_some());
+    assert_eq!(doc.project().tracks[0].name, "kept");
+    assert_eq!(doc.history().position(), kept);
+    assert!(!doc.history().can_redo());
+    assert_eq!(doc.history().undo_len(), 1);
+    assert!(doc.revision() > revision, "the engine needs a new snapshot");
+
+    // The next edit doesn't merge into the step before the abandoned one.
+    doc.execute(rename("next")).unwrap();
+    assert_eq!(doc.history().undo_len(), 2);
+
+    // A step that is no longer the last one stays.
+    let buried = doc.history().position();
+    doc.seal();
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    assert!(doc.abandon(buried).unwrap().is_none());
+    assert_eq!(doc.project().tracks[0].name, "next");
+    assert_eq!(doc.history().undo_len(), 3);
+}
