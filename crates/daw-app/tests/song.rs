@@ -9,7 +9,8 @@
 //! volume and send automation drawn in the arrange view. Then it checks
 //! undo and redo, plays the song live (opening and closing
 //! the plugin's own editor, headless), exports it to WAV and FLAC the way the
-//! app's Export Song does, swaps the instrument to the sampler and back,
+//! app's Export Song does, swaps the instrument to the sampler, gives it a
+//! sample and swaps back,
 //! saves, reopens a moved copy, and checks that what comes out is
 //! music-shaped: not silent, each part audible where it should be, and the
 //! same after the round trip.
@@ -862,10 +863,9 @@ fn make_save_reload_and_render_a_song() {
     assert!(!doc.is_modified(), "undo returns to the saved state");
 
     // Swap the synth for the sampler from the mixer. With no samples
-    // loaded the keys go quiet, nothing else changes, and undo brings the
-    // synth back. Silence alone can't tell an empty sampler from a dropped
-    // instrument; the model check and the no-warnings check in `render`
-    // cover that until the sampler can be given a sample here.
+    // loaded the keys go quiet and nothing else changes; given the pluck as
+    // its sample in the device panel, the keys sound again. Undo takes the
+    // sample back, then brings the synth back.
     let sampler = instruments
         .position(&builtin_source("daw.sampler"))
         .and_then(|i| instruments.get(i))
@@ -893,8 +893,26 @@ fn make_save_reload_and_render_a_song() {
             "the keys start at beat 4"
         );
     }
+    let pluck_source = match &doc.project().track(pluck_track).unwrap().clips[0].content {
+        ClipContent::Audio(a) => a.source.clone(),
+        _ => unreachable!("the pluck track plays audio"),
+    };
+    panel.open(doc.project().track(keys).unwrap().devices[0].id);
+    panel.load_sample(&mut doc, &pluck_source).unwrap();
+    let sampled = render(&mut doc);
+    let sampled_keys = rms(&sampled, 4.5, 15.5);
+    assert!(
+        sampled_keys > 1e-3,
+        "the sampler plays its sample ({sampled_keys})"
+    );
     doc.undo().unwrap();
-    assert!(!doc.is_modified(), "one undo puts the synth back");
+    assert_eq!(
+        render(&mut doc).channels,
+        swapped.channels,
+        "undo empties it"
+    );
+    doc.undo().unwrap();
+    assert!(!doc.is_modified(), "one more undo puts the synth back");
     assert_eq!(render(&mut doc).channels, song.channels);
 
     // Reopen from disk, from a copy of the bundle somewhere else, so
