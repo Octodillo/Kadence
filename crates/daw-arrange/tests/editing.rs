@@ -309,14 +309,16 @@ fn split_falls_back_to_the_selected_track_when_the_selection_is_gone() {
     assert!(!r.arrange.selection.contains(&a));
     assert!(!r.arrange.clips_selected(r.doc.project()));
 
+    // The selection is kept, not pruned, so that redo selects the copy again.
+    r.doc.redo().unwrap();
+    assert!(r.arrange.clips_selected(r.doc.project()));
+    let copy = r.doc.project().tracks[0].clips[1].id;
+    assert!(r.arrange.selection.contains(&copy));
+    r.doc.undo().unwrap();
+
     let out = r.arrange.split_at(&mut r.doc, &env, TickTime(BAR));
     assert!(out.document, "{out:?}");
     assert_eq!(r.doc.project().tracks[0].clips.len(), 2);
-
-    // Redo of the duplicate would select the copy again.
-    r.doc.undo().unwrap();
-    r.doc.redo().unwrap();
-    assert!(r.arrange.clips_selected(r.doc.project()));
 }
 
 #[test]
