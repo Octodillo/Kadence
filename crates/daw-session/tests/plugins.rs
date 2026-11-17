@@ -319,6 +319,32 @@ impl Rig {
         self.session.play().unwrap();
     }
 
+    /// Kills the plugin's sandbox host and runs until the session notices.
+    fn crash(&mut self) {
+        let monitor = self.session.plugin_monitor(self.device).unwrap();
+        // SAFETY: plain syscall on a process this test started.
+        assert_eq!(
+            unsafe { libc::kill(monitor.pid() as libc::pid_t, libc::SIGKILL) },
+            0
+        );
+        let start = Instant::now();
+        while self.status() != Some(PluginStatus::Crashed) {
+            assert!(start.elapsed() < Duration::from_secs(20), "crash unnoticed");
+            self.run(BLOCK);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Reloads the crashed plugin and runs until it is back.
+    fn reload(&mut self) {
+        assert!(self.session.reload_plugin(self.device));
+        let start = Instant::now();
+        while self.status() != Some(PluginStatus::Running) {
+            assert!(start.elapsed() < Duration::from_secs(20), "no reload");
+            self.run(BLOCK);
+        }
+    }
+
     fn status(&self) -> Option<PluginStatus> {
         self.session.plugin_status(self.device)
     }
@@ -525,7 +551,9 @@ fn a_state_the_plugin_refuses_stays_in_the_document() {
     assert_eq!(rig.store_states(), 0);
     assert_eq!(state(&rig), Some(foreign_state().into()));
 
-    // A change made in the plugin's editor is the user's, and is recorded as an edit.
+    // A change made in the plugin's editor is the user's, and is recorded as an edit. (Not
+    // one reported in the tick after the refusal, which may be of the refused load.)
+    rig.run(BLOCK);
     rig.session.open_plugin_editor(device, "Gain").unwrap();
     rig.reports_change();
     rig.record_state();
@@ -656,6 +684,11 @@ fn a_state_lost_to_a_restart_or_removal_is_reported() {
     rig.sync();
     assert!(rig.session.warnings().is_empty(), "said once");
 
+    let set = rig
+        .session
+        .with_plugin(device, |p| p.load_state(&gain_state(0.75)));
+    set.unwrap().unwrap();
+    rig.settles_at(LEVEL * 0.75);
     rig.doc.execute(RemoveDevice::new(device)).unwrap();
     rig.sync();
     assert_eq!(rig.session.warnings(), &not_saved);
@@ -663,6 +696,7 @@ fn a_state_lost_to_a_restart_or_removal_is_reported() {
     rig.doc.undo().unwrap();
     rig.sync();
     assert!(rig.session.warnings().is_empty());
+    // Back from the document's state, as the warning said.
     rig.settles_at(LEVEL);
 }
 
@@ -679,18 +713,7 @@ fn a_crashed_plugin_is_reported_bypassed_and_reloaded() {
     rig.sync();
     rig.settles_at(LEVEL * 0.5);
 
-    let monitor = rig.session.plugin_monitor(rig.device).unwrap();
-    // SAFETY: plain syscall on a process this test started.
-    assert_eq!(
-        unsafe { libc::kill(monitor.pid() as libc::pid_t, libc::SIGKILL) },
-        0
-    );
-    let start = Instant::now();
-    while rig.status() != Some(PluginStatus::Crashed) {
-        assert!(start.elapsed() < Duration::from_secs(20), "crash unnoticed");
-        rig.run(BLOCK);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    rig.crash();
     assert!(
         rig.news
             .iter()
@@ -702,13 +725,53 @@ fn a_crashed_plugin_is_reported_bypassed_and_reloaded() {
     rig.settles_at(LEVEL);
     assert_eq!(rig.session.with_plugin(rig.device, |_| ()), None);
 
-    assert!(rig.session.reload_plugin(rig.device));
-    let start = Instant::now();
-    while rig.status() != Some(PluginStatus::Running) {
-        assert!(start.elapsed() < Duration::from_secs(20), "no reload");
-        rig.run(BLOCK);
-    }
+    rig.reload();
     rig.settles_at(LEVEL * 0.5);
+}
+
+/// A crashed plugin's sandbox remembers the state it last saved or loaded; an audio restart
+/// carries that over like a running plugin's.
+#[test]
+fn a_crashed_plugins_state_carries_over_to_a_new_session() {
+    let mut rig = Rig::new();
+    let set = rig
+        .session
+        .with_plugin(rig.device, |p| p.load_state(&gain_state(0.75)));
+    set.unwrap().unwrap();
+    rig.settles_at(LEVEL * 0.75);
+    rig.crash();
+    rig.restart_audio();
+    assert!(rig.session.warnings().is_empty());
+    rig.settles_at(LEVEL * 0.75);
+    assert_eq!(rig.store_states(), 1, "newer than the document's");
+}
+
+/// A state the document gets while the plugin's host is down is only remembered for the
+/// reload. If the reloaded plugin then refuses it, that is found out and the state stays.
+#[test]
+fn a_state_refused_after_a_reload_stays_in_the_document() {
+    let mut rig = Rig::new();
+    rig.crash();
+    rig.doc
+        .execute(SetDevice {
+            id: rig.device,
+            field: DeviceField::State(Some(foreign_state().into())),
+        })
+        .unwrap();
+    rig.sync();
+    assert!(rig.session.warnings().is_empty(), "not known yet");
+    rig.reload();
+    rig.news.clear();
+    let start = Instant::now();
+    while !rig.news.iter().any(is_rejection) {
+        assert!(start.elapsed() < Duration::from_secs(20), "{:?}", rig.news);
+        rig.run(BLOCK);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(rig.store_states(), 0);
+    let mut devices = rig.doc.project().all_tracks().flat_map(|t| &t.devices);
+    let device = devices.find(|d| d.id == rig.device).unwrap();
+    assert_eq!(device.state, Some(foreign_state().into()));
 }
 
 #[test]
