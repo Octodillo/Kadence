@@ -12,6 +12,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use daw_backend::{DummyBackend, DummySystem, Pacing, PortDirection, PortKind};
 use daw_plugin_host::{HostLauncher, SandboxConfig};
@@ -89,6 +90,9 @@ pub enum EngineError {
     /// The engine failed inside the audio callback and stopped processing.
     /// Applying the audio settings starts it again.
     Crashed,
+    /// Audio was restarted again and again and still fails, so the engine
+    /// stopped trying. Applying the audio settings tries again.
+    Unstable,
     /// The audio system failed for a reason of its own. The text comes from
     /// the backend or a library below it, so it is not translated; show it
     /// as a detail after a translated sentence.
@@ -103,6 +107,7 @@ impl fmt::Display for EngineError {
             Self::UnsupportedBufferSize(size) => write!(f, "unsupported buffer size {size}"),
             Self::ServerLost => write!(f, "the audio server went away"),
             Self::Crashed => write!(f, "the engine stopped after an internal error"),
+            Self::Unstable => write!(f, "audio keeps failing"),
             Self::Backend(message) => write!(f, "audio system error: {message}"),
         }
     }
@@ -118,9 +123,9 @@ pub trait EngineHandle {
     fn supported_sample_rates(&self) -> Vec<u32>;
     fn supported_buffer_sizes(&self) -> Vec<u32>;
     /// Restart audio with `config`. On error audio keeps running (or stays
-    /// failed) and [`audio_config`](Self::audio_config) says with what:
-    /// the previous config, or, when the audio system itself decided
-    /// otherwise during the restart, what it runs at.
+    /// failed) and [`audio_config`](Self::audio_config) says with what.
+    /// So it does after success: the audio system can come or go during
+    /// the restart, and then what runs is not what was asked for.
     fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError>;
     /// The configuration in effect.
     fn audio_config(&self) -> AudioConfig;
@@ -286,13 +291,68 @@ pub fn default_engine() -> Box<dyn EngineHandle> {
 pub struct SessionEngine {
     host: AudioHost,
     config: AudioConfig,
+    recovery: Recovery,
+}
+
+/// What the restarts so far say about the next one: the part of
+/// [`SessionEngine`] that keeps it from restarting audio every second for
+/// good, and from promising a reconnect it will not try.
+#[derive(Debug)]
+struct Recovery {
     /// The audio server went away under us and is not back yet.
     lost: bool,
-    /// Go back to the audio server as soon as one answers. Cleared when
-    /// that was tried and still ended silent, so a server that answers but
-    /// cannot be used is not retried every second; a server going away or
-    /// the user applying settings sets it again.
+    /// Go back to the audio server as soon as one answers. Off after a try
+    /// that a server answered and that still ended silent: such a server
+    /// is not asked again every second.
     reconnect: bool,
+    /// Automatic restarts since `since`.
+    recent: u32,
+    since: Instant,
+    /// Too many automatic restarts in a short time: no more of them until
+    /// the user applies the audio settings.
+    gave_up: bool,
+}
+
+impl Recovery {
+    /// More automatic restarts than this within [`Self::WINDOW`] and the
+    /// engine stops trying. A server that goes and comes back once costs two.
+    const MAX_RESTARTS: u32 = 6;
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    fn new(now: Instant) -> Self {
+        Self {
+            lost: false,
+            reconnect: true,
+            recent: 0,
+            since: now,
+            gave_up: false,
+        }
+    }
+
+    /// The user (re)started audio, which ended on a server or not: every
+    /// automatic recovery is worth trying again.
+    fn restarted_by_user(&mut self, on_server: bool, now: Instant) {
+        *self = Self {
+            lost: self.lost && !on_server,
+            ..Self::new(now)
+        };
+    }
+
+    /// Audio restarted by itself, from running on a server or not to
+    /// running on one or not.
+    fn restarted(&mut self, was_on_server: bool, on_server: bool, now: Instant) {
+        if now.duration_since(self.since) > Self::WINDOW {
+            self.since = now;
+            self.recent = 0;
+        }
+        self.recent += 1;
+        self.gave_up = self.recent > Self::MAX_RESTARTS;
+        // Silent after a server: it went away, and coming back is worth a
+        // try. Silent as before: a server answered and could not be used,
+        // which the backend's error explains better than "went away".
+        self.lost = was_on_server && !on_server;
+        self.reconnect = was_on_server || on_server;
+    }
 }
 
 impl SessionEngine {
@@ -309,20 +369,19 @@ impl SessionEngine {
         Self {
             host,
             config,
-            lost: false,
-            reconnect: true,
+            recovery: Recovery::new(Instant::now()),
         }
     }
 
     /// Restarts the host with `wanted` and takes the sample rate from what
     /// then runs: an audio server keeps its own whatever was asked for.
     fn restart(&mut self, wanted: HostConfig) {
-        self.reconnect = true;
         self.host.restart(wanted);
         self.config.sample_rate = self.host.sample_rate();
-        if self.host.kind() == HostKind::Jack {
-            self.lost = false;
-        }
+    }
+
+    fn on_server(&self) -> bool {
+        self.host.kind() == HostKind::Jack
     }
 
     /// Whether audio is not what it should be: failed, or silent for want
@@ -397,50 +456,53 @@ impl EngineHandle for SessionEngine {
             use_server: true,
             ..self.host.config().clone()
         };
-        // Also when nothing changed but audio is down: applying the
-        // settings again is how the user asks for another try.
-        if wanted != *self.host.config() || self.is_failed() {
-            let device = self.device().id;
+        // Compared with what runs, not with what was last asked for: a
+        // server may have settled on another rate since. Also when nothing
+        // changed but audio is down: applying the settings again is how the
+        // user asks for another try.
+        let changed = config.sample_rate != self.config.sample_rate
+            || config.buffer_size != self.config.buffer_size
+            || !self.host.config().use_server;
+        if changed || self.is_failed() {
+            let was_on_server = self.on_server();
             self.restart(wanted);
+            self.recovery
+                .restarted_by_user(self.on_server(), Instant::now());
             // The buffer size stays a request: a server applies it when it
             // can, and `status` reports the size in use.
             self.config.buffer_size = config.buffer_size;
-            if self.device().id != device {
-                // The restart ended on another backend (a server came or
-                // went), so the device asked for is not the one running.
+            if self.on_server() != was_on_server {
+                // A server came or went during the restart, so what was
+                // asked for was chosen from the wrong lists. Audio runs,
+                // and `audio_config` says with what.
                 self.config.device = None;
-                if config.device.is_some() {
-                    return Err(EngineError::UnknownDevice(device));
-                }
-            } else {
-                self.config.device.clone_from(&config.device);
+                return Ok(());
             }
             if self.config.sample_rate != config.sample_rate {
                 return Err(EngineError::UnsupportedSampleRate(config.sample_rate));
             }
-        } else {
-            self.config = config.clone();
         }
+        self.config.device.clone_from(&config.device);
         Ok(())
     }
 
     fn wants_restart(&self) -> bool {
+        if self.recovery.gave_up {
+            return false;
+        }
         match self.host.health() {
             HostHealth::ServerGone | HostHealth::RateChanged(_) => true,
             // Restarting on its own could crash again, every second.
             HostHealth::Crashed => false,
-            HostHealth::Ok => self.reconnect && self.host.server_appeared(),
+            HostHealth::Ok => self.recovery.reconnect && self.host.server_appeared(),
         }
     }
 
     fn restart_audio(&mut self) {
-        let gone = self.host.health() == HostHealth::ServerGone;
-        self.lost |= gone;
+        let was_on_server = self.on_server();
         self.restart(self.host.config().clone());
-        // After a server went away the restart ends silent, and the server
-        // coming back is worth a try. A try that a server answered and that
-        // still ended silent is not repeated: that waits for the user.
-        self.reconnect = gone || self.host.kind() == HostKind::Jack;
+        self.recovery
+            .restarted(was_on_server, self.on_server(), Instant::now());
     }
 
     fn audio_config(&self) -> AudioConfig {
@@ -450,8 +512,10 @@ impl EngineHandle for SessionEngine {
     fn status(&self) -> EngineStatus {
         let failed = match (self.host.health(), self.host.kind(), self.host.last_error()) {
             (HostHealth::Crashed, ..) => EngineError::Crashed,
+            (HostHealth::ServerGone, ..) if self.recovery.gave_up => EngineError::Unstable,
+            (_, HostKind::Silent, Some(_)) if self.recovery.gave_up => EngineError::Unstable,
             (HostHealth::ServerGone, ..) => EngineError::ServerLost,
-            (_, HostKind::Silent, Some(_)) if self.lost => EngineError::ServerLost,
+            (_, HostKind::Silent, Some(_)) if self.recovery.lost => EngineError::ServerLost,
             (_, HostKind::Silent, Some(e)) => EngineError::Backend(e.to_owned()),
             _ => {
                 return EngineStatus::Running {
@@ -662,6 +726,71 @@ impl EngineHandle for StubEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_that_goes_and_comes_back_is_taken_up_again() {
+        let t = Instant::now();
+        let mut r = Recovery::new(t);
+        r.restarted(true, false, t);
+        assert!(r.lost && r.reconnect && !r.gave_up);
+        r.restarted(false, true, t);
+        assert!(!r.lost && r.reconnect && !r.gave_up);
+    }
+
+    #[test]
+    fn a_server_that_answers_but_cannot_be_used_is_not_asked_again() {
+        let t = Instant::now();
+        let mut r = Recovery::new(t);
+        r.restarted(true, false, t);
+        r.restarted(false, false, t);
+        // Not "went away" either: the backend's error says what is wrong.
+        assert!(!r.lost && !r.reconnect);
+        // The user trying again makes it worth asking once more.
+        r.restarted_by_user(false, t);
+        assert!(!r.lost && r.reconnect);
+    }
+
+    #[test]
+    fn a_rate_change_that_ends_without_a_server_waits_for_it() {
+        let t = Instant::now();
+        let mut r = Recovery::new(t);
+        r.restarted(true, false, t);
+        assert!(r.lost && r.reconnect);
+        // Applying settings while it is away keeps saying so.
+        r.restarted_by_user(false, t);
+        assert!(r.lost && r.reconnect);
+        r.restarted_by_user(true, t);
+        assert!(!r.lost);
+    }
+
+    #[test]
+    fn restarts_in_quick_succession_stop_until_the_user_tries() {
+        let t = Instant::now();
+        let mut r = Recovery::new(t);
+        for i in 0..Recovery::MAX_RESTARTS {
+            r.restarted(
+                i % 2 == 0,
+                i % 2 != 0,
+                t + Duration::from_secs(u64::from(i)),
+            );
+            assert!(!r.gave_up, "after {} restarts", i + 1);
+        }
+        r.restarted(true, false, t + Duration::from_secs(30));
+        assert!(r.gave_up);
+        r.restarted_by_user(true, t + Duration::from_secs(31));
+        assert!(!r.gave_up);
+
+        // Spread out, the same number is no trouble.
+        let mut r = Recovery::new(t);
+        for i in 0..20 {
+            r.restarted(
+                true,
+                true,
+                t + Recovery::WINDOW * i + Duration::from_secs(1),
+            );
+        }
+        assert!(!r.gave_up);
+    }
 
     #[test]
     fn stub_accepts_supported_config() {

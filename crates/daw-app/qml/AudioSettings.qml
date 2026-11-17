@@ -35,6 +35,18 @@ ColumnLayout {
 
     Component.onCompleted: syncFromEngine()
 
+    // Audio can restart by itself (the server went away, came back or
+    // changed its rate), with other lists and values to choose from.
+    Connections {
+        target: Engine
+
+        function onBackendKindChanged(): void { settings.syncFromEngine(); }
+        function onSampleRateChanged(): void { settings.syncFromEngine(); }
+        function onSampleRatesChanged(): void { settings.syncFromEngine(); }
+        function onBufferSizeChanged(): void { settings.syncFromEngine(); }
+        function onDeviceIndexChanged(): void { settings.syncFromEngine(); }
+    }
+
     readonly property string backendLabel: {
         switch (Engine.backendKind) {
         case Engine.JackBackend:

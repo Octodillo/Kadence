@@ -36,8 +36,8 @@ pub enum HostKind {
     Silent,
 }
 
-/// What is wrong with the audio that is running, if anything. All but `Ok`
-/// last until [`AudioHost::restart`].
+/// What is wrong with the audio that is running, if anything. A lost server
+/// and a crash last until [`AudioHost::restart`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum HostHealth {
     Ok,

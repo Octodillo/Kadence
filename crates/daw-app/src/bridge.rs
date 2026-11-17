@@ -58,6 +58,8 @@ pub mod qobject {
         ServerLost,
         /// The engine stopped after an internal error.
         EngineCrashed,
+        /// Audio kept failing and the engine stopped restarting it.
+        AudioUnstable,
         /// `errorNumber` is the device combo box index.
         InvalidDeviceChoice,
         /// `errorNumber` is the sample rate given.
@@ -166,6 +168,7 @@ impl Problem {
             }
             Self::Engine(EngineError::ServerLost) => (K::ServerLost, 0, ""),
             Self::Engine(EngineError::Crashed) => (K::EngineCrashed, 0, ""),
+            Self::Engine(EngineError::Unstable) => (K::AudioUnstable, 0, ""),
             Self::Engine(EngineError::Backend(message)) => (K::BackendError, 0, message),
             Self::InvalidDeviceChoice(index) => (K::InvalidDeviceChoice, *index, ""),
             Self::InvalidSampleRate(rate) => (K::InvalidSampleRate, *rate, ""),
@@ -180,15 +183,28 @@ impl Problem {
 /// user, if anything: the first refusal if a fallback worked (that is why
 /// the saved settings are not in use), else the last one.
 ///
-/// With nothing saved there is nothing to refuse: the engine keeps what it
-/// runs at, whatever rate the audio server has.
+/// With nothing saved there is nothing to apply or refuse: the engine
+/// keeps what it runs at. And an audio server picks its own sample rate, so
+/// a saved one it does not run at (saved while there was no server, or
+/// before the server changed) gives way without a message.
 fn start_audio(
     engine: &mut dyn EngineHandle,
     saved: Option<&AudioConfig>,
 ) -> Option<(qobject::ErrorContext, EngineError)> {
+    let saved = saved?;
     let current = engine.audio_config();
-    let saved = saved.unwrap_or(&current);
     let first = engine.apply_audio_config(saved).err()?;
+    if matches!(first, EngineError::UnsupportedSampleRate(_))
+        && engine.backend_kind() == BackendKind::Jack
+    {
+        let at_server_rate = AudioConfig {
+            sample_rate: engine.audio_config().sample_rate,
+            ..saved.clone()
+        };
+        if engine.apply_audio_config(&at_server_rate).is_ok() {
+            return None;
+        }
+    }
     let fallbacks = [
         AudioConfig {
             device: None,
@@ -230,11 +246,12 @@ fn replacing_session<R>(
 /// recording does not survive the restart, and the user is told.
 fn poll_audio(s: &mut state::AppState) -> EngineStatus {
     if s.engine.wants_restart() {
-        let recording = s.is_recording();
-        replacing_session(s, |engine| engine.restart_audio());
-        if recording {
+        if s.is_recording() {
+            // First, so that a problem with the take itself, reported as
+            // the recording stops, is what stays on show.
             s.report(Message::Record(RecordProblem::AudioRestarted));
         }
+        replacing_session(s, |engine| engine.restart_audio());
     }
     s.engine.status()
 }
@@ -297,6 +314,9 @@ impl qobject::Engine {
         let result = result.and_then(|config| {
             state::with(|s| replacing_session(s, |engine| engine.apply_audio_config(&config)))
                 .map_err(Problem::Engine)?;
+            // What runs now, which is not what was asked for when the
+            // audio server came or went during the restart.
+            let config = state::with(|s| s.engine.audio_config());
             settings::save_audio_config(&mut KConfigStore, &config);
             Ok(())
         });
@@ -321,13 +341,20 @@ impl qobject::Engine {
         ok
     }
 
-    fn poll(self: Pin<&mut Self>) {
+    fn poll(mut self: Pin<&mut Self>) {
         let status = state::with(poll_audio);
-        // Setting a property notifies even when nothing changed, and the
-        // settings page would lose what the user is choosing.
-        if self.status.as_ref() != Some(&status) {
-            self.sync();
+        if self.status.as_ref() == Some(&status) {
+            return;
         }
+        // A failure that is new outranks a settings refusal still on show
+        // from earlier, which `sync` alone would keep.
+        if let EngineStatus::Failed(e) = status {
+            self.as_mut().set_error(
+                qobject::ErrorContext::AudioFailed,
+                Some(&Problem::Engine(e)),
+            );
+        }
+        self.sync();
     }
 
     /// Show `problem` (or nothing, with `NoError`) through the error
@@ -491,6 +518,10 @@ mod tests {
             (
                 Problem::Engine(EngineError::Crashed),
                 (ErrorKind::EngineCrashed, 0, ""),
+            ),
+            (
+                Problem::Engine(EngineError::Unstable),
+                (ErrorKind::AudioUnstable, 0, ""),
             ),
             (
                 Problem::Engine(EngineError::UnsupportedSampleRate(12_345)),

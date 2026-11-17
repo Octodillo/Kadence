@@ -27,7 +27,10 @@ QtObject {
             return i18nc("@info", "The audio server went away. Kadence reconnects when it is back.");
         case Engine.EngineCrashed:
             return i18nc("@info",
-                         "The audio engine stopped after an internal error. Apply the audio settings to start it again.");
+                         "The audio engine stopped after an internal error. To start it again, open the audio settings and choose any setting.");
+        case Engine.AudioUnstable:
+            return i18nc("@info",
+                         "The audio system keeps failing, so Kadence stopped restarting it. To try again, open the audio settings and choose any setting.");
         case Engine.BackendError:
             return i18nc("@info %1 is a message from the audio system, which may be in English",
                          "The audio system reported: %1", Engine.errorDetail);
