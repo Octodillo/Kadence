@@ -316,6 +316,54 @@ fn load_state_with_resolves_each_path_once() {
     assert_eq!(b.zones().len(), 4);
 }
 
+/// Issue #178: the app gives a sampler its sample by writing this state.
+#[test]
+fn state_with_one_sample_plays_it_over_every_key() {
+    let dir = tempfile::tempdir().unwrap();
+    write_hit(dir.path(), "hit.wav", 0.5);
+    let blob = Sampler::state_with_sample("audio/hit.wav");
+    assert_eq!(
+        Sampler::saved_samples(&blob).unwrap(),
+        [std::path::PathBuf::from("audio/hit.wav")]
+    );
+
+    let mut b = Sampler::new();
+    b.load_state_with(&blob, |p| {
+        assert_eq!(p, std::path::Path::new("audio/hit.wav"));
+        SampleBuffer::load(dir.path().join("hit.wav"))
+            .ok()
+            .map(Arc::new)
+    })
+    .unwrap();
+    let full = Zone::full(Arc::new(SampleBuffer::missing("audio/hit.wav")));
+    let mut expected = Sampler::new();
+    expected.set_zones(vec![full]);
+    assert_eq!(mapping(&b), mapping(&expected));
+    for p in daw_devices::param_specs(INFO.id).unwrap() {
+        assert_eq!(b.param_value(p.id), p.default, "{}", p.key);
+    }
+    let s = Setup::default();
+    for key in [0, 60, 127] {
+        let r = render(&mut b, 480, &[], &[(0, note_on(key, 0.1))], s);
+        assert!(r.channels[0].iter().any(|&v| v != 0.0), "key {key}");
+    }
+}
+
+#[test]
+fn saved_samples_lists_each_file_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = Sampler::saved_samples(&kit(dir.path()).save_state()).unwrap();
+    let names: Vec<_> = samples.iter().map(|p| p.file_name().unwrap()).collect();
+    assert_eq!(names, ["kick.wav", "snare.wav"]);
+    let old = br#"{"device":"daw.sampler","version":1,"params":{"gain":-20.0}}"#;
+    assert_eq!(
+        Sampler::saved_samples(old).unwrap(),
+        Vec::<std::path::PathBuf>::new()
+    );
+    let eq = daw_devices::create("daw.eq").unwrap().save_state();
+    assert!(Sampler::saved_samples(&eq).is_err());
+}
+
 #[test]
 fn zone_without_source_is_saved_as_placeholder() {
     let mut a = sampler_with(vec![0.5; 10], 48_000.0);

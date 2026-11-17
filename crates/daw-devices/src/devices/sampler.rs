@@ -428,8 +428,7 @@ impl Sampler {
         data: &[u8],
         mut resolve: impl FnMut(&Path) -> Option<Arc<SampleBuffer>>,
     ) -> Result<(), StateError> {
-        let (values, extra) = state::load_with(&INFO, PARAMS, data)?;
-        let saved: Option<SavedZones> = extra.map(serde_json::from_value).transpose()?;
+        let (values, saved) = load_saved(data)?;
         let zones = saved.map(|saved| {
             let mut cache: HashMap<PathBuf, Arc<SampleBuffer>> = HashMap::new();
             saved
@@ -494,6 +493,43 @@ impl Sampler {
             .collect();
         serde_json::to_value(SavedZones { zones }).expect("serializing plain data cannot fail")
     }
+
+    /// Saved state for a sampler that plays one file over every key and
+    /// velocity ([`Zone::full`]), with its parameters at their defaults.
+    /// `source` is saved as given; relative paths are relative to the
+    /// project (see [`load_state_with`](Self::load_state_with)). Nothing
+    /// is read from disk.
+    pub fn state_with_sample(source: impl Into<PathBuf>) -> Vec<u8> {
+        let mut sampler = Self::new();
+        let sample = Arc::new(SampleBuffer::missing(source));
+        sampler.set_zones(vec![Zone::full(sample)]);
+        crate::Device::save_state(&sampler)
+    }
+
+    /// The files the zones of saved state play, in zone order and as saved,
+    /// each once. Nothing is read from disk. Empty for state without a zone
+    /// map.
+    pub fn saved_samples(data: &[u8]) -> Result<Vec<PathBuf>, StateError> {
+        let (_, saved) = load_saved(data)?;
+        let mut samples: Vec<PathBuf> = Vec::new();
+        for path in saved
+            .into_iter()
+            .flat_map(|s| s.zones)
+            .filter_map(|z| z.sample.map(PathBuf::from))
+        {
+            if !samples.contains(&path) {
+                samples.push(path);
+            }
+        }
+        Ok(samples)
+    }
+}
+
+/// The parameter values and, if it has one, the zone map of saved state.
+fn load_saved(data: &[u8]) -> Result<(Vec<f64>, Option<SavedZones>), StateError> {
+    let (values, extra) = state::load_with(&INFO, PARAMS, data)?;
+    let saved = extra.map(serde_json::from_value).transpose()?;
+    Ok((values, saved))
 }
 
 /// The zone map in saved state. Sample audio is referenced by path.
