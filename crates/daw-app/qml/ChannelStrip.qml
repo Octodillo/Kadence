@@ -52,28 +52,12 @@ StripFrame {
     color: isMaster ? Kirigami.Theme.alternateBackgroundColor : Kirigami.Theme.backgroundColor
     slack: faderRow.height - faderRow.Layout.minimumHeight
 
-    function dbText(db: real): string {
-        if (db <= -60) {
-            return i18nc("@label fader at silence", "−∞");
-        }
-        const rounded = Math.round(db * 10) / 10;
-        return i18nc("@label decibels", "%1 dB", (rounded > 0 ? "+" : "") + rounded.toLocaleString(Qt.locale(), "f", 1));
-    }
-
     // A slider handles its own release after a TapHandler on it, and puts
     // the value back where the second click landed; a double-click's reset
     // runs after that. `control` and `send` as for Mixer.touch.
     function reset(control: string, send: int): void {
         const row = strip.index;
         Qt.callLater(() => Mixer.reset(row, control, send));
-    }
-
-    function panText(p: real): string {
-        const pct = Math.round(Math.abs(p) * 100);
-        if (pct === 0) {
-            return i18nc("@label pan centre", "C");
-        }
-        return p < 0 ? i18nc("@label pan left, percent", "L%1", pct) : i18nc("@label pan right, percent", "R%1", pct);
     }
 
     // Effects and sends scroll in a box of the same height on every
@@ -142,30 +126,9 @@ StripFrame {
                 icon.name: "list-add"
                 text: i18nc("@action:button", "Add Effect")
                 onClicked: effectMenu.popup()
-                QQC2.Menu {
+                AddEffectMenu {
                     id: effectMenu
-                    Repeater {
-                        model: Mixer.effectNames
-                        delegate: QQC2.MenuItem {
-                            required property int index
-                            required property string modelData
-                            text: modelData
-                            onTriggered: Mixer.addInsert(strip.index, index)
-                        }
-                    }
-                    QQC2.MenuSeparator {}
-                    QQC2.MenuItem {
-                        icon.name: "preferences-plugin"
-                        text: i18nc("@action:inmenu", "Browse Plugins…")
-                        onTriggered: {
-                            // The row now: the delegate may be gone by the time a
-                            // plugin is chosen.
-                            const row = strip.index;
-                            applicationWindow().browsePlugins(2, (format, pluginId, name) => {
-                                Mixer.addPluginInsert(row, format, pluginId, name);
-                            });
-                        }
-                    }
+                    row: strip.index
                 }
             }
             // Gain reduction of the strip's compressor.
@@ -232,7 +195,7 @@ StripFrame {
                             value: strip.sendLevels[sendRow.index] ?? -60
                             onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
                             onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
-                            QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2 (double-click for 0 dB)", sendRow.target, strip.dbText(value))
+                            QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2 (double-click for 0 dB)", sendRow.target, ValueText.level(value))
                             QQC2.ToolTip.visible: hovered || pressed
                             Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.target)
                             TapHandler {
@@ -269,17 +232,10 @@ StripFrame {
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                 onClicked: sendMenu.popup()
-                QQC2.Menu {
+                AddSendMenu {
                     id: sendMenu
-                    Repeater {
-                        model: strip.sendChoices
-                        delegate: QQC2.MenuItem {
-                            required property int index
-                            required property string modelData
-                            text: modelData
-                            onTriggered: Mixer.addSend(strip.index, index)
-                        }
-                    }
+                    row: strip.index
+                    choices: strip.sendChoices
                 }
             }
         }
@@ -297,7 +253,7 @@ StripFrame {
             font: Kirigami.Theme.smallFont
         }
         QQC2.Label {
-            text: strip.panText(panSlider.value)
+            text: ValueText.pan(panSlider.value)
             font: Kirigami.Theme.smallFont
         }
     }
@@ -313,7 +269,7 @@ StripFrame {
         onMoved: Mixer.setPan(strip.index, value)
         onPressedChanged: Mixer.touch(strip.index, "pan", -1, pressed)
         Accessible.name: i18nc("@label:slider", "Pan")
-        QQC2.ToolTip.text: i18nc("@info:tooltip", "Pan: %1 (double-click to centre)", strip.panText(value))
+        QQC2.ToolTip.text: i18nc("@info:tooltip", "Pan: %1 (double-click to centre)", ValueText.pan(value))
         QQC2.ToolTip.visible: hovered || pressed
         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         TapHandler {
@@ -357,7 +313,7 @@ StripFrame {
         Layout.fillWidth: true
         horizontalAlignment: Text.AlignHCenter
         font.features: { "tnum": 1 }
-        text: strip.dbText(fader.value)
+        text: ValueText.level(fader.value)
     }
 
     // Mute and solo

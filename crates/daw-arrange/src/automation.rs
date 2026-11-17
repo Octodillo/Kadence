@@ -254,8 +254,8 @@ pub fn static_value(
     }
 }
 
-/// The arrange view's lanes: one row per lane under each expanded track
-/// (see [`Arrange::expanded`]), in the model's order, edited by its
+/// The arrange view's lanes: drawn in the rows under each expanded track
+/// (see [`Arrange::lane_rows`]) and edited by its
 /// [`LaneEditor`](crate::lane_editor::LaneEditor).
 impl Arrange {
     // -----------------------------------------------------------------------
@@ -292,11 +292,11 @@ impl Arrange {
     /// The frame `lane` is drawn in, if it shows.
     pub fn lane_frame(&self, project: &Project, lane: LaneId) -> Option<LaneFrame> {
         let (t, l) = lane_of(project, lane)?;
-        if !self.expanded.contains(&t.id) {
-            return None;
-        }
         let row = project.tracks.iter().position(|x| x.id == t.id)?;
-        let index = t.automation.iter().position(|x| x.id == lane)?;
+        let index = self
+            .lane_rows(row)
+            .iter()
+            .position(|r| r.lane == Some(lane))?;
         Some(self.frame_at(t, row, index, l.target))
     }
 
@@ -313,11 +313,15 @@ impl Arrange {
         let index = ((y - self.lane_y(row, 0)) / self.lane_height)
             .floor()
             .max(0.0) as usize;
-        let lane = track.automation.get(index);
+        let lane = self
+            .lane_rows(row)
+            .get(index)
+            .and_then(|r| r.lane_in(track));
         let point = lane.and_then(|l| self.frame_at(track, row, index, l.target).point_at(l, x, y));
         Hit::Automation {
             track: track.id,
             row,
+            index,
             lane: lane.map(|l| l.id),
             tick,
             point,

@@ -6,7 +6,8 @@
 //! lane plays) or write (it plays, and moving its control during playback
 //! records over it, as with the mixer's Write Automation switch). The
 //! control is the same wherever it is moved: on the Mix page, in the device
-//! panel or in the lane's header, which goes through the same mixer.
+//! panel or in the lane's header, which goes through the same mixer. A
+//! control is addressed by its target, so it works with or without a lane.
 
 use std::collections::HashSet;
 
@@ -137,34 +138,76 @@ impl AppState {
         Some((t, l))
     }
 
+    /// What lane `lane` of track `track` automates.
+    fn lane_target(&self, track: i32, lane: i32) -> Option<AutomationTarget> {
+        self.lane_at(track, lane).map(|(_, l)| l.target)
+    }
+
     /// The value lane `lane` of track `track` controls, as it is now.
     pub fn lane_control(&self, track: i32, lane: i32) -> Option<LaneControl> {
-        let (t, l) = self.lane_at(track, lane)?;
-        let scale = lane_scale(self.arrange.params.as_ref(), t, l.target);
-        let following = l.enabled && !l.points.is_empty();
-        let value = if following {
-            l.value_at(self.playhead())
-        } else {
-            None
+        self.target_control(track, self.lane_target(track, lane)?)
+    }
+
+    /// See [`begin_control`](Self::begin_control).
+    pub fn begin_lane_control(&mut self, track: i32, lane: i32) {
+        if let Some(target) = self.lane_target(track, lane) {
+            self.begin_control(track, target);
         }
-        .unwrap_or_else(|| static_value(self.arrange.params.as_ref(), t, l.target));
+    }
+
+    /// See [`set_control`](Self::set_control).
+    pub fn set_lane_control(&mut self, track: i32, lane: i32, norm: f64) {
+        if let Some(target) = self.lane_target(track, lane) {
+            self.set_control(track, target, norm);
+        }
+    }
+
+    /// See [`end_control`](Self::end_control).
+    pub fn end_lane_control(&mut self, track: i32, lane: i32) {
+        if let Some(target) = self.lane_target(track, lane) {
+            self.end_control(track, target);
+        }
+    }
+
+    /// How a device-parameter lane's parameter is described; see
+    /// [`target_param`](Self::target_param).
+    pub fn lane_param(&self, track: i32, lane: i32) -> Option<ParamDesc> {
+        self.target_param(track, self.lane_target(track, lane)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Controls by target. A control is there whether or not a lane
+    // automates it, so these take the target and look for its lane.
+
+    /// `target` on track `track` as it is now: what it is set to, or what
+    /// its lane plays at the playhead.
+    pub fn target_control(&self, track: i32, target: AutomationTarget) -> Option<LaneControl> {
+        let t = self.track_at_index(track)?;
+        let lane = t.automation.iter().find(|l| l.target == target);
+        let scale = lane_scale(self.arrange.params.as_ref(), t, target);
+        let following = lane.is_some_and(|l| l.enabled && !l.points.is_empty());
+        let value = lane
+            .filter(|_| following)
+            .and_then(|l| l.value_at(self.playhead()))
+            .unwrap_or_else(|| static_value(self.arrange.params.as_ref(), t, target));
         Some(LaneControl {
             norm: scale.to_norm(value),
             value,
             following,
-            writes: self.mixer.write() || (l.enabled && self.lanes.write.contains(&l.id)),
+            writes: self.mixer.write()
+                || lane.is_some_and(|l| l.enabled && self.lanes.write.contains(&l.id)),
         })
     }
 
-    /// The mixer control a lane's header drives: its strip and control,
-    /// and for a built-in device's parameter, its description.
-    fn lane_mixer_control(
+    /// The mixer control behind `target`: its strip and control, and for a
+    /// built-in device's parameter, its description.
+    fn mixer_control(
         &self,
         track: i32,
-        lane: i32,
+        target: AutomationTarget,
     ) -> Option<(StripId, Control, Option<ParamDesc>)> {
-        let (t, l) = self.lane_at(track, lane)?;
-        let control = match l.target {
+        let t = self.track_at_index(track)?;
+        let control = match target {
             AutomationTarget::Volume => Control::Volume,
             AutomationTarget::Pan => Control::Pan,
             AutomationTarget::SendLevel { send } => {
@@ -173,18 +216,18 @@ impl AppState {
             }
             AutomationTarget::DeviceParam { device, param } => Control::Param { device, param },
         };
-        Some((strip_id(t.id), control, self.lane_param(track, lane)))
+        Some((strip_id(t.id), control, self.target_param(track, target)))
     }
 
-    /// Runs a change to a lane's control as the mixer runs its own: after
-    /// pending edits elsewhere, with the lanes' write modes, then plays it.
-    fn control_lane(
+    /// Runs a change to a control as the mixer runs its own: after pending
+    /// edits elsewhere, with the lanes' write modes, then plays it.
+    fn run_control(
         &mut self,
         track: i32,
-        lane: i32,
+        target: AutomationTarget,
         f: impl FnOnce(&mut Self, StripId, Control, Option<ParamDesc>) -> Result<(), Message>,
     ) {
-        let Some((id, control, param)) = self.lane_mixer_control(track, lane) else {
+        let Some((id, control, param)) = self.mixer_control(track, target) else {
             return;
         };
         self.end_drag();
@@ -197,14 +240,14 @@ impl AppState {
         }
     }
 
-    /// The user grabbed a lane's control: a new undo step, and during
-    /// playback with writing armed, a take, as grabbing the same control on
-    /// the Mix page or device panel would start.
-    pub fn begin_lane_control(&mut self, track: i32, lane: i32) {
+    /// The user grabbed a control: a new undo step, and during playback
+    /// with writing armed, a take, as grabbing the same control on the Mix
+    /// page or device panel would start.
+    pub fn begin_control(&mut self, track: i32, target: AutomationTarget) {
         let static_value = self
-            .lane_at(track, lane)
-            .map(|(t, l)| static_value(self.arrange.params.as_ref(), t, l.target));
-        self.control_lane(track, lane, |s, id, control, param| {
+            .track_at_index(track)
+            .map(|t| static_value(self.arrange.params.as_ref(), t, target));
+        self.run_control(track, target, |s, id, control, param| {
             s.doc.seal();
             let session = s.engine.session_mut();
             match param {
@@ -221,53 +264,55 @@ impl AppState {
         });
     }
 
-    /// Moves a lane's control to height `norm` on the lane's scale. Like
-    /// the mixer's controls, it records while a take runs and otherwise
-    /// sets the static value; a lane playing its points ignores it unless
-    /// it writes. Moves until
-    /// [`end_lane_control`](Self::end_lane_control) are one undo step.
-    pub fn set_lane_control(&mut self, track: i32, lane: i32, norm: f64) {
+    /// Moves a control to height `norm` on its lane's scale. Like the
+    /// mixer's controls, it records while a take runs and otherwise sets
+    /// the static value; a control whose lane plays its points ignores it
+    /// unless the lane writes. Moves until
+    /// [`end_control`](Self::end_control) are one undo step.
+    pub fn set_control(&mut self, track: i32, target: AutomationTarget, norm: f64) {
         if !norm.is_finite() {
             return;
         }
-        let Some(c) = self.lane_control(track, lane) else {
+        let Some(c) = self.target_control(track, target) else {
             return;
         };
         if c.following && !c.writes {
             return;
         }
         let Some(scale) = self
-            .lane_at(track, lane)
-            .map(|(t, l)| lane_scale(self.arrange.params.as_ref(), t, l.target))
+            .track_at_index(track)
+            .map(|t| lane_scale(self.arrange.params.as_ref(), t, target))
         else {
             return;
         };
-        self.control_lane(track, lane, |s, id, control, param| {
+        self.run_control(track, target, |s, id, control, param| {
             let value = param.map_or_else(|| scale.from_norm(norm), |p| p.from_normalized(norm));
             let session = s.engine.session_mut();
             s.mixer.set(&mut s.doc, session, id, control, value)
         });
     }
 
-    /// The user let go of a lane's control: ends its take and the undo
-    /// step.
-    pub fn end_lane_control(&mut self, track: i32, lane: i32) {
-        self.control_lane(track, lane, |s, id, control, _| {
+    /// The user let go of a control: ends its take and the undo step.
+    pub fn end_control(&mut self, track: i32, target: AutomationTarget) {
+        self.run_control(track, target, |s, id, control, _| {
             let session = s.engine.session_mut();
             s.mixer.touch(&mut s.doc, session, id, control, false)
         });
     }
 
-    /// How a device-parameter lane's parameter is described (its unit,
-    /// control and choices); `None` for other lanes and unknown devices.
-    pub fn lane_param(&self, track: i32, lane: i32) -> Option<ParamDesc> {
-        let (t, l) = self.lane_at(track, lane)?;
-        let AutomationTarget::DeviceParam { device, param } = l.target else {
+    /// How a device parameter is described (its unit, control and
+    /// choices); `None` for other targets and unknown devices.
+    pub fn target_param(&self, track: i32, target: AutomationTarget) -> Option<ParamDesc> {
+        let AutomationTarget::DeviceParam { device, param } = target else {
             return None;
         };
+        let t = self.track_at_index(track)?;
         let d = t.devices.iter().find(|d| d.id == device)?;
         self.lanes.params.param(d, param)
     }
+
+    // -----------------------------------------------------------------------
+    // Lanes
 
     pub fn lane_count(&self, track: i32) -> usize {
         self.track_at_index(track).map_or(0, |t| t.automation.len())

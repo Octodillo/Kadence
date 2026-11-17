@@ -212,7 +212,7 @@ impl qobject::Automation {
     }
 
     // These play the change and bump the view's revision themselves (see
-    // `AppState::control_lane`); the lanes' own revision doesn't change.
+    // `AppState::run_control`); the lanes' own revision doesn't change.
     fn begin_lane_control(self: Pin<&mut Self>, track: i32, lane: i32) {
         state::with(|s| s.begin_lane_control(track, lane));
     }

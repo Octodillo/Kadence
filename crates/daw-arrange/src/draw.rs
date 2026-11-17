@@ -52,7 +52,7 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
         };
         s.rect(Rect::new(0.0, y, w, a.track_height), fill);
         s.hline(y + a.track_height - 0.5, 0.0, w, line, 1.0);
-        for i in 0..a.lanes_shown(track) {
+        for i in 0..a.lane_rows(row).len() {
             let r = a.lane_rect(row, i);
             s.rect(r, lane_fill);
             s.hline(r.bottom() - 0.5, 0.0, w, line.mix(pal.background, 0.4), 1.0);
@@ -81,16 +81,17 @@ pub(crate) fn scene(a: &mut Arrange, project: &Project, env: &Env) -> Scene {
             }
             draw_clip(&mut s, a, env, row, clip, color);
         }
-        if a.expanded.contains(&track.id) {
-            for (i, lane) in track.automation.iter().enumerate() {
-                let r = a.lane_rect(row, i);
-                if r.bottom() < a.ruler_height || r.y > a.height {
-                    continue;
-                }
-                let frame = a.frame_at(track, row, i, lane.target);
-                let resting = static_value(a.params.as_ref(), track, lane.target);
-                a.lanes.draw(&mut s, &frame, &pal, lane, resting, color);
+        for (i, lane_row) in a.lane_rows(row).iter().enumerate() {
+            let Some(lane) = lane_row.lane_in(track) else {
+                continue;
+            };
+            let r = a.lane_rect(row, i);
+            if r.bottom() < a.ruler_height || r.y > a.height {
+                continue;
             }
+            let frame = a.frame_at(track, row, i, lane.target);
+            let resting = static_value(a.params.as_ref(), track, lane.target);
+            a.lanes.draw(&mut s, &frame, &pal, lane, resting, color);
         }
     }
     if let Some(r) = a.rubber_band() {
