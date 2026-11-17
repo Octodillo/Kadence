@@ -11,10 +11,10 @@ use std::time::Instant;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QList, QString, QUrl};
-use daw_arrange::{Button, Cursor, Hit, Pointer, Rgba, Scene};
+use daw_arrange::Hit;
 
 use crate::message::{Context, Message};
-use crate::paint::{self, PaintOp};
+use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
 use crate::state;
 
 #[cxx_qt::bridge]
@@ -144,9 +144,6 @@ pub mod qobject {
         /// A clip was double-clicked: open it in the editor.
         #[qsignal]
         fn clip_activated(self: Pin<&mut ArrangeView>);
-        /// The document or view changed through this item.
-        #[qsignal]
-        fn edited(self: Pin<&mut ArrangeView>);
     }
 
     unsafe extern "RustQt" {
@@ -179,10 +176,7 @@ pub struct ArrangeViewRust {
     cursor_shape: i32,
     gain_dragging: bool,
     dragged_gain: f64,
-    /// The last scene, flattened for the painter.
-    ops: Vec<PaintOp>,
-    texts: Vec<String>,
-    waves: Vec<f32>,
+    scene: DisplayList,
     /// Where the last press was, for placing a context menu.
     last_press: (f64, f64),
     /// What refreshes and paints cost since `take_costs`.
@@ -219,9 +213,7 @@ impl Default for ArrangeViewRust {
             cursor_shape: 0,
             gain_dragging: false,
             dragged_gain: 0.0,
-            ops: Vec::new(),
-            texts: Vec::new(),
-            waves: Vec::new(),
+            scene: DisplayList::default(),
             last_press: (0.0, 0.0),
             costs: Costs::default(),
         }
@@ -242,64 +234,15 @@ impl cxx_qt::Constructor<()> for qobject::ArrangeView {
     }
 }
 
-pub(crate) fn to_qcolor(c: Rgba) -> QColor {
-    QColor::from_rgba(
-        i32::from(c.r()),
-        i32::from(c.g()),
-        i32::from(c.b()),
-        i32::from(c.a()),
-    )
-}
-
-pub(crate) fn to_rgba(c: &QColor) -> Rgba {
-    let ch = |v: i32| v.clamp(0, 255) as u32;
-    Rgba(ch(c.alpha()) << 24 | ch(c.red()) << 16 | ch(c.green()) << 8 | ch(c.blue()))
-}
-
-// Qt::KeyboardModifier and Qt::MouseButton values.
-const SHIFT: i32 = 0x0200_0000;
-const CTRL: i32 = 0x0400_0000;
-const ALT: i32 = 0x0800_0000;
-
-pub(crate) fn pointer(x: f64, y: f64, button: i32, modifiers: i32) -> Pointer {
-    Pointer {
-        x,
-        y,
-        button: match button {
-            2 => Button::Right,
-            4 => Button::Middle,
-            _ => Button::Left,
-        },
-        shift: modifiers & SHIFT != 0,
-        ctrl: modifiers & CTRL != 0,
-        alt: modifiers & ALT != 0,
-    }
-}
-
-/// Qt::CursorShape values.
-pub(crate) fn cursor_shape(c: Cursor) -> i32 {
-    match c {
-        Cursor::Arrow => 0,
-        Cursor::Move => 17,
-        Cursor::ResizeHorizontal => 6,
-        Cursor::ResizeVertical => 5,
-        Cursor::Pointing => 13,
-        Cursor::Crosshair => 2,
-    }
-}
-
 impl qobject::ArrangeView {
     /// # Safety
     /// Called by Qt with a valid painter for the duration of the call.
     unsafe fn paint(mut self: Pin<&mut Self>, painter: *mut cxx_qt_lib::QPainter) {
-        // SAFETY: Qt passes a live, active painter.
-        let Some(painter) = (unsafe { painter.as_mut() }) else {
-            return;
-        };
-        // SAFETY: QPainter is not moved while we hold it.
-        let painter = unsafe { Pin::new_unchecked(painter) };
         let start = Instant::now();
-        paint::paint_scene(painter, &self.ops, &self.texts, &self.waves);
+        // SAFETY: Qt passes a live, active painter.
+        if !unsafe { self.scene.paint(painter) } {
+            return;
+        }
         let costs = &mut self.as_mut().rust_mut().costs;
         costs.paint_ms += millis_since(start);
         costs.paints += 1;
@@ -319,22 +262,10 @@ impl qobject::ArrangeView {
         out
     }
 
-    fn palette(&self) -> daw_arrange::Palette {
-        daw_arrange::Palette {
-            background: to_rgba(&self.background_color),
-            alternate_background: to_rgba(&self.alternate_background_color),
-            text: to_rgba(&self.text_color),
-            disabled_text: to_rgba(&self.disabled_text_color),
-            highlight: to_rgba(&self.highlight_color),
-            highlighted_text: to_rgba(&self.highlighted_text_color),
-            negative: to_rgba(&self.negative_color),
-        }
-    }
-
     fn refresh(mut self: Pin<&mut Self>) {
         let start = Instant::now();
         let (w, h) = (self.width(), self.height());
-        let palette = self.palette();
+        let palette = paint::theme_palette!(self);
         let ruler = self.ruler_height;
         let lane_height = self.lane_height;
         let (scene, geometry) = state::with(|s| {
@@ -357,7 +288,7 @@ impl qobject::ArrangeView {
             );
             (scene, geometry)
         });
-        self.as_mut().store(scene);
+        self.as_mut().rust_mut().scene.store(scene);
         // Not the setters below: they run QML bindings (the headers follow
         // the scroll position).
         let costs = &mut self.as_mut().rust_mut().costs;
@@ -370,17 +301,6 @@ impl qobject::ArrangeView {
         self.as_mut().set_content_height(ch);
         self.as_mut().set_track_height(th);
         self.update();
-    }
-
-    fn store(self: Pin<&mut Self>, scene: Scene) {
-        let mut r = self.rust_mut();
-        let r = &mut *r;
-        r.ops.clear();
-        r.texts.clear();
-        r.waves.clear();
-        for p in scene.prims {
-            r.ops.push(paint::op(p, &mut r.texts, &mut r.waves));
-        }
     }
 
     /// Applies an outcome, then redraws and tells QML.
@@ -398,7 +318,6 @@ impl qobject::ArrangeView {
         }
         if any {
             self.as_mut().refresh();
-            self.as_mut().edited();
         }
         if open {
             self.as_mut().clip_activated();
@@ -568,7 +487,6 @@ impl qobject::ArrangeView {
             }
         });
         self.as_mut().refresh();
-        self.as_mut().edited();
         ok
     }
 }
