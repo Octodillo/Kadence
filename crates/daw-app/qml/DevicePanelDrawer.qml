@@ -2,13 +2,14 @@
 
 import QtQuick
 import QtQuick.Controls as QQC2
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
 
 // The open device's controls, in a drawer on the right: bypass, its place
-// in the chain, and a control per parameter. Open it with
+// in the chain, a sampler's sample, and a control per parameter. Open it with
 // DevicePanel.open(id) from anywhere; it closes when the device goes away.
 Kirigami.OverlayDrawer {
     id: drawer
@@ -52,6 +53,24 @@ Kirigami.OverlayDrawer {
         if (!reopening) {
             DevicePanel.close();
         }
+    }
+
+    Kirigami.Action {
+        id: loadSampleAction
+        icon.name: "document-open"
+        text: i18nc("@action:button", "Load Sample…")
+        onTriggered: sampleDialog.open()
+    }
+
+    FileDialog {
+        id: sampleDialog
+        title: i18nc("@title:window", "Load Sample")
+        // The formats the decoder reads, as Import Audio offers them.
+        nameFilters: [
+            i18nc("@item:inlistbox", "Audio files (*.wav *.flac *.ogg *.oga *.mp3 *.aif *.aiff)"),
+            i18nc("@item:inlistbox", "All files (*)")
+        ]
+        onAccepted: DevicePanel.loadSample(selectedFile)
     }
 
     Connections {
@@ -222,6 +241,17 @@ Kirigami.OverlayDrawer {
             ]
         }
 
+        // A sampler plays nothing until it is given a sample.
+        Kirigami.InlineMessage {
+            objectName: "noSampleMessage"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: DevicePanel.sampler && DevicePanel.sampleName === ""
+            type: Kirigami.MessageType.Information
+            text: i18nc("@info", "No sample loaded. The sampler is silent until you load one.")
+            actions: [loadSampleAction]
+        }
+
         QQC2.ScrollView {
             id: scroll
             Layout.fillWidth: true
@@ -232,6 +262,31 @@ Kirigami.OverlayDrawer {
             ColumnLayout {
                 width: scroll.availableWidth
                 spacing: 0
+
+                // The sample a sampler plays, and loading another.
+                RowLayout {
+                    objectName: "sampleRow"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.largeSpacing
+                    Layout.rightMargin: Kirigami.Units.largeSpacing
+                    Layout.topMargin: Kirigami.Units.smallSpacing
+                    Layout.bottomMargin: Kirigami.Units.smallSpacing
+                    visible: DevicePanel.sampler && DevicePanel.sampleName !== ""
+                    Kirigami.Icon {
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        source: "audio-x-generic"
+                    }
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        text: DevicePanel.sampleName
+                        elide: Text.ElideMiddle
+                        Accessible.name: i18nc("@label %1 is a file name", "Sample: %1", DevicePanel.sampleName)
+                    }
+                    QQC2.Button {
+                        action: loadSampleAction
+                    }
+                }
 
                 Repeater {
                     model: DevicePanel
