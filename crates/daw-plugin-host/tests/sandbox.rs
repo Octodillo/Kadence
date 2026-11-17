@@ -15,7 +15,8 @@ use daw_core::plugin::{
     PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 use daw_plugin_host::{
-    CrashReason, HostLauncher, SandboxConfig, SandboxFormat, SandboxStatus, SandboxedInstance,
+    CrashReason, HostLauncher, Realtime, SandboxConfig, SandboxFormat, SandboxStatus,
+    SandboxedInstance,
 };
 
 #[global_allocator]
@@ -1053,4 +1054,49 @@ fn a_new_rate_refreshes_parameter_ranges() {
     plugin.prepare(2.0 * SR, MAX);
     let info = output(&plugin);
     assert!((info.max - 0.45 * 2.0 * SR).abs() < 0.01, "{info:?}");
+}
+
+/// Whether the host's plugin-audio thread runs under `SCHED_FIFO`, as the kernel tells it.
+fn audio_thread_is_fifo(pid: u32) -> bool {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("the host runs");
+    let audio = tasks
+        .filter_map(Result::ok)
+        .find(|t| {
+            std::fs::read_to_string(t.path().join("comm")).is_ok_and(|n| n.trim() == "plugin-audio")
+        })
+        .expect("the host has its audio thread");
+    let thread: libc::pid_t = audio.file_name().to_str().unwrap().parse().unwrap();
+    // SAFETY: plain syscall wrapper.
+    let policy = unsafe { libc::sched_getscheduler(thread) };
+    assert!(policy >= 0, "the thread's policy can be read");
+    policy & !libc::SCHED_RESET_ON_FORK == libc::SCHED_FIFO
+}
+
+#[test]
+fn the_monitor_tells_how_the_hosts_audio_thread_is_scheduled() {
+    let plain = instance();
+    assert_eq!(plain.monitor().realtime(), Realtime::Off);
+    assert!(!audio_thread_is_fifo(plain.monitor().pid()));
+
+    // Whether this machine grants it differs (a container usually does not, a desktop does
+    // through one of its brokers), but what the monitor says is what the kernel says.
+    let mut config = config();
+    config.rt_priority = Some(1);
+    let mut wanted = instance_with(config);
+    let monitor = wanted.monitor();
+    assert_ne!(monitor.realtime(), Realtime::Off);
+    assert_eq!(
+        monitor.realtime().is_granted(),
+        audio_thread_is_fifo(monitor.pid())
+    );
+
+    // A prepare starts the thread anew, and it is asked for again.
+    wanted.prepare(SR, MAX * 2);
+    assert_eq!(
+        monitor.realtime().is_granted(),
+        audio_thread_is_fifo(monitor.pid())
+    );
+    // The plugin still plays.
+    let (out, _) = run(&mut wanted, 64, 0.5, &[]);
+    assert!(out[0].iter().all(|s| s.is_finite()));
 }

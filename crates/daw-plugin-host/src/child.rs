@@ -21,6 +21,7 @@ use crate::protocol::{
     FrameReader, InstanceInfo, Reply, Request, Response, WireError, WireParam, WirePorts,
     blob_fits, write_frame,
 };
+use crate::realtime::{self, Realtime};
 use crate::shm::{
     self, DONE, FLAG_RESET, Header, MAX_CHANNELS, REQUEST, Shm, decode_event, encode_event,
     futex_wait, futex_wake,
@@ -495,16 +496,27 @@ impl AudioThread {
         let quit = Arc::new(AtomicBool::new(false));
         let mut half = lock(&plugin).as_mut().and_then(|p| p.split());
         let split = half.is_some();
+        let (thread_id, started) = std::sync::mpsc::channel();
         let handle = {
             let (shm, quit, plugin) = (shm.clone(), quit.clone(), plugin.clone());
             std::thread::Builder::new()
                 .name("plugin-audio".into())
                 .spawn(move || {
-                    audio_loop(&shm, &plugin, &mut half, &quit, rt_priority);
+                    let _ = thread_id.send(realtime::current_thread());
+                    audio_loop(&shm, &plugin, &mut half, &quit);
                     half
                 })
                 .expect("spawn the audio thread")
         };
+        // Promoted from here, not by the thread itself: asking a broker takes a while, and
+        // the thread is already answering cycles.
+        let scheduling = match (rt_priority, started.recv()) {
+            (Some(priority), Ok(thread)) => realtime::promote(thread, priority),
+            _ => Realtime::Off,
+        };
+        shm.header()
+            .realtime
+            .store(scheduling as u32, Ordering::Release);
         Self {
             quit,
             shm,
@@ -552,31 +564,12 @@ fn lock_for_cycle<'a>(
     }
 }
 
-fn set_realtime(priority: i32) {
-    let param = libc::sched_param {
-        sched_priority: priority,
-    };
-    // SAFETY: plain syscall wrapper on the calling thread with a valid parameter struct.
-    let err =
-        unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) };
-    if err != 0 {
-        eprintln!(
-            "daw-plugin-host: real-time priority {priority} not granted ({}); audio may glitch",
-            std::io::Error::from_raw_os_error(err)
-        );
-    }
-}
-
 fn audio_loop(
     shm: &Shm,
     plugin: &SharedPlugin,
     half: &mut Option<Box<dyn PluginProcessor>>,
     quit: &AtomicBool,
-    rt_priority: Option<i32>,
 ) {
-    if let Some(p) = rt_priority {
-        set_realtime(p);
-    }
     // Plugins run with whatever mode the thread has; few set it themselves.
     daw_core::denormals::flush_to_zero();
     let layout = shm.layout();

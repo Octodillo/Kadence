@@ -21,9 +21,9 @@ use daw_core::time::{MusicalPosition, SampleTime};
 use memmap2::MmapMut;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"KDSB");
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 /// Bytes reserved for [`Header`] at the start of the block.
-const HEADER_BYTES: usize = 192;
+const HEADER_BYTES: usize = 256;
 /// `u64` words per event record.
 const EVENT_WORDS: usize = 4;
 
@@ -84,6 +84,9 @@ pub struct Header {
     /// Nonzero while the plugin's editor is open, as the host last saw it: before it answers
     /// a call, and after each main-thread pump.
     pub editor_open: AtomicU32,
+    /// How the host's audio thread is scheduled: a [`Realtime`](crate::Realtime) as its
+    /// `u32`, written by the host each time it starts that thread.
+    pub realtime: AtomicU32,
     /// Main-thread pumps the host has started plus those it has finished: odd while its main
     /// thread is in one, that is in the plugin's own main-thread callbacks. A plugin whose
     /// editor runs a modal dialog (a file chooser, say) stays in one until the user closes it.
