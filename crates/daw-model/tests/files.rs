@@ -361,22 +361,49 @@ fn collect_leaves_out_what_is_not_audio() {
 
 #[cfg(unix)]
 #[test]
-fn save_as_keeps_a_link_in_the_audio_folder_a_link() {
+fn save_as_copies_only_what_is_really_in_the_audio_folder() {
+    use std::os::unix::fs::symlink;
     let fx = fixture();
     let secret = fx.outside.join("id_ed25519");
     write(&secret, b"secret");
     let mut doc = saved(&fx, project_with(&["audio/tone.wav".into()]));
-    write(&fx.root.join("audio/real.wav"), b"real");
-    std::os::unix::fs::symlink(&secret, fx.root.join("audio/tone.wav")).unwrap();
-    std::os::unix::fs::symlink("../../Samples/id_ed25519", fx.root.join("audio/near.wav")).unwrap();
+    let audio = fx.root.join("audio");
+    write(&audio.join("real.wav"), b"real");
+    symlink(&secret, audio.join("tone.wav")).unwrap();
+    symlink("../../Samples/id_ed25519", audio.join("near.wav")).unwrap();
+    symlink("real.wav", audio.join("alias.wav")).unwrap();
+    symlink("nowhere.wav", audio.join("dangling.wav")).unwrap();
+    symlink(&fx.outside, audio.join("folder")).unwrap();
 
     let new = fx.outside.join("deeper/Copy");
     doc.save_as(&new).unwrap();
-    assert_eq!(fs::read(new.join("audio/real.wav")).unwrap(), b"real");
+    let new_audio = new.join("audio");
+    assert_eq!(fs::read(new_audio.join("real.wav")).unwrap(), b"real");
     for name in ["tone.wav", "near.wav"] {
-        let copy = new.join("audio").join(name);
+        let copy = new_audio.join(name);
         // Still a link to the same file, not a copy of what is in it.
         assert!(copy.symlink_metadata().unwrap().is_symlink(), "{name}");
         assert_eq!(fs::read(&copy).unwrap(), b"secret", "{name}");
     }
+    // A link to a file of the folder is that file: it must not go on
+    // pointing into the old bundle.
+    let alias = new_audio.join("alias.wav");
+    assert!(alias.symlink_metadata().unwrap().is_file());
+    assert_eq!(fs::read(alias).unwrap(), b"real");
+    for name in ["dangling.wav", "folder"] {
+        assert!(new_audio.join(name).symlink_metadata().is_err(), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn save_as_copies_nothing_through_a_linked_audio_folder() {
+    let fx = fixture();
+    write(&fx.outside.join("id_ed25519"), b"secret");
+    let mut doc = saved(&fx, project_with(&["audio/id_ed25519".into()]));
+    fs::remove_dir(fx.root.join("audio")).unwrap();
+    std::os::unix::fs::symlink(&fx.outside, fx.root.join("audio")).unwrap();
+    let new = fx._tmp.path().join("Copy");
+    doc.save_as(&new).unwrap();
+    assert!(!new.join("audio/id_ed25519").exists());
 }
