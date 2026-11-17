@@ -172,7 +172,8 @@ pub trait AudioBackend: Send {
     ///
     /// If the audio system fails to stop (JACK: deactivation fails, as it
     /// can once the server is gone), the backend is left closed, as after
-    /// [`close`](Self::close), and the error says so.
+    /// [`close`](Self::close), and the error says so. A callback that
+    /// panicked is no such failure: [`health`](Self::health) reports it.
     fn stop(&mut self) -> Result<(), BackendError>;
 
     /// Stop if running, then unregister ports and disconnect from the server.

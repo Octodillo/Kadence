@@ -114,10 +114,16 @@ impl DummySystem {
 
     /// The pretend server shuts down, as when `jackd` exits or PipeWire
     /// restarts: a running backend ends its cycles before the next one and
-    /// reports [`BackendHealth::ServerGone`], and so does every later
-    /// `start`, until the backend is closed and opened again.
+    /// reports [`BackendHealth::ServerGone`]. Until [`restore`](Self::restore)
+    /// there is no server: `start` fails and closes the backend, and `open`
+    /// fails to connect, as with JACK.
     pub fn shut_down(&self) {
         self.faults.server_gone.store(true, Relaxed);
+    }
+
+    /// The pretend server is there again, for the next `open`.
+    pub fn restore(&self) {
+        self.faults.server_gone.store(false, Relaxed);
     }
 
     /// The next cycle panics in place of calling the process callback, for
@@ -197,8 +203,7 @@ pub struct DummyBackend {
 
 struct Running {
     stop: Arc<AtomicBool>,
-    /// The worker, and whether the callback panicked.
-    thread: JoinHandle<(Worker, bool)>,
+    thread: JoinHandle<Worker>,
 }
 
 impl DummyBackend {
@@ -403,6 +408,17 @@ impl Default for DummyBackend {
     }
 }
 
+impl DummyBackend {
+    /// Forgets the connection: ports, links and configuration.
+    fn set_closed(&mut self) {
+        self.cfg = None;
+        self.world().connections.clear();
+        self.extra = None;
+        self.extra_control = None;
+        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
+    }
+}
+
 impl AudioBackend for DummyBackend {
     fn name(&self) -> &'static str {
         "Dummy"
@@ -411,6 +427,11 @@ impl AudioBackend for DummyBackend {
     fn open(&mut self, cfg: BackendConfig) -> Result<(), BackendError> {
         if self.cfg.is_some() {
             return Err(BackendError::AlreadyOpen);
+        }
+        if self.faults.server_gone.load(Relaxed) {
+            return Err(BackendError::Connect(
+                "the pretend server is shut down".into(),
+            ));
         }
         let rate = cfg.sample_rate.unwrap_or(DEFAULT_RATE);
         let frames = cfg.buffer_size.unwrap_or(DEFAULT_FRAMES);
@@ -422,9 +443,9 @@ impl AudioBackend for DummyBackend {
         self.shared = Arc::new(SharedStats::new());
         self.shared.sample_rate.store(rate, Relaxed);
         self.shared.buffer_size.store(frames, Relaxed);
-        // A new connection, to a server that is there again.
-        self.faults.server_gone.store(false, Relaxed);
+        // Faults asked of the last connection do not reach this one.
         self.faults.callback_panic.store(false, Relaxed);
+        self.faults.new_rate.store(0, Relaxed);
         self.world().connections.clear();
         let (extra, control) = midi_inputs(cfg.midi_capacity);
         self.extra = Some(extra);
@@ -439,6 +460,13 @@ impl AudioBackend for DummyBackend {
             return Err(BackendError::AlreadyRunning);
         }
         let cfg = self.cfg()?.clone();
+        if self.faults.server_gone.load(Relaxed) {
+            // A client of a server that is gone cannot be activated.
+            self.set_closed();
+            return Err(BackendError::Other(
+                "the pretend server is shut down".into(),
+            ));
+        }
         let frames = self.shared.buffer_size.load(Relaxed);
         self.shared.callback_panicked.store(false, Relaxed);
         let mut worker = Worker {
@@ -479,9 +507,10 @@ impl AudioBackend for DummyBackend {
             .spawn(move || {
                 daw_core::denormals::flush_to_zero();
                 // Catch a panic so `stop` gets the worker, and its queues, back.
+                // `health` reports the panic.
                 let panicked = catch_unwind(AssertUnwindSafe(|| worker.run(&stop2))).is_err();
                 worker.shared.callback_panicked.store(panicked, Relaxed);
-                (worker, panicked)
+                worker
             })
             .map_err(|e| BackendError::Other(e.to_string()))?;
         self.running = Some(Running { stop, thread });
@@ -498,7 +527,7 @@ impl AudioBackend for DummyBackend {
         running.stop.store(true, Relaxed);
         // Wake the worker from its wait for the next period.
         running.thread.thread().unpark();
-        let (worker, panicked) = running
+        let worker = running
             .thread
             .join()
             .map_err(|_| BackendError::Other("the dummy audio thread panicked".into()))?;
@@ -515,20 +544,13 @@ impl AudioBackend for DummyBackend {
         self.midi_out_tx = self.midi_out_tx.take().or(midi_out_tx);
         self.extra = Some(extra);
         self.apply_extra_now();
-        if panicked {
-            return Err(BackendError::Other("the process callback panicked".into()));
-        }
         Ok(())
     }
 
     fn close(&mut self) -> Result<(), BackendError> {
         // Close even if the run ended badly, then say that it did.
         let result = self.stop();
-        self.cfg = None;
-        self.world().connections.clear();
-        self.extra = None;
-        self.extra_control = None;
-        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
+        self.set_closed();
         result
     }
 

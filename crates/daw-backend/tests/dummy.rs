@@ -375,7 +375,7 @@ fn queues_survive_a_panicking_callback() {
     }))
     .unwrap();
     rx.recv_timeout(WAIT).unwrap();
-    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
+    b.stop().unwrap();
     let rx = start_forwarding_midi_in(&mut b);
     assert!(inject.send(&CC));
     let e = rx.recv_timeout(WAIT).expect("MIDI after the panic");
@@ -548,14 +548,19 @@ fn health_reports_a_server_that_went_away() {
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(b.stats().cycles, cycles);
     assert!(b.is_running());
-    // Stopping and starting does not bring the server back.
+    // Without a server the backend cannot start again, and is closed for
+    // trying; nor can it connect.
     b.stop().unwrap();
-    b.start(Box::new(|_| {})).unwrap();
-    wait_for_health(&b, BackendHealth::ServerGone);
-    assert_eq!(b.stats().cycles, cycles);
+    assert_eq!(b.health(), BackendHealth::ServerGone);
+    assert!(b.start(Box::new(|_| {})).is_err());
+    assert!(matches!(
+        b.start(Box::new(|_| {})),
+        Err(BackendError::NotOpen)
+    ));
+    assert!(matches!(b.open(cfg(32)), Err(BackendError::Connect(_))));
 
     // Reopening connects to a server that is there again.
-    b.close().unwrap();
+    system.restore();
     b.open(cfg(32)).unwrap();
     b.start(Box::new(|_| {})).unwrap();
     assert!(b.wait_for_cycles(10, WAIT));
@@ -569,7 +574,8 @@ fn health_reports_a_panicked_callback_until_the_next_start() {
     b.start(Box::new(|_| panic!("callback bug"))).unwrap();
     wait_for_health(&b, BackendHealth::CallbackPanicked);
     assert!(b.stats().callback_panicked);
-    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
+    // Stopping works as usual: the panic is in `health`.
+    b.stop().unwrap();
     assert_eq!(b.health(), BackendHealth::CallbackPanicked);
 
     // A callback that works clears it; the system can make that one panic.
@@ -580,13 +586,20 @@ fn health_reports_a_panicked_callback_until_the_next_start() {
     assert_eq!(b.health(), BackendHealth::Ok);
     system.panic_callback();
     wait_for_health(&b, BackendHealth::CallbackPanicked);
-    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
-
-    // A lost server outranks it.
-    system.shut_down();
-    b.start(Box::new(|_| {})).unwrap();
-    wait_for_health(&b, BackendHealth::ServerGone);
     b.stop().unwrap();
+}
+
+#[test]
+fn a_rate_change_asked_of_one_connection_does_not_reach_the_next() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    let system = b.system();
+    b.open(cfg(32)).unwrap();
+    system.change_sample_rate(44_100);
+    b.close().unwrap();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.sample_rate(), 48_000.0);
 }
 
 #[test]
@@ -596,7 +609,7 @@ fn close_after_a_panicked_callback_still_closes() {
     b.add_midi_input("pads").unwrap();
     b.start(Box::new(|_| panic!("callback bug"))).unwrap();
     wait_for_health(&b, BackendHealth::CallbackPanicked);
-    assert!(matches!(b.close(), Err(BackendError::Other(_))));
+    b.close().unwrap();
     assert!(!b.is_running());
     assert!(b.midi_inputs().is_empty());
     assert!(matches!(

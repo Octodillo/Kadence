@@ -145,7 +145,7 @@ impl JackBackend {
     /// keeps them for the next `start`. `close` has no use for them.
     ///
     /// On an error the client is gone and the backend closed.
-    fn deactivate(&mut self, save_links: bool) -> Result<(), BackendError> {
+    fn end_run(&mut self, save_links: bool) -> Result<(), BackendError> {
         let active = match std::mem::take(&mut self.state) {
             State::Running(active) => active,
             other => {
@@ -497,11 +497,11 @@ impl AudioBackend for JackBackend {
     }
 
     fn stop(&mut self) -> Result<(), BackendError> {
-        self.deactivate(true)
+        self.end_run(true)
     }
 
     fn close(&mut self) -> Result<(), BackendError> {
-        let result = self.deactivate(false);
+        let result = self.end_run(false);
         self.set_closed();
         match result {
             // A server that is gone cannot deactivate us, and there is
