@@ -407,7 +407,7 @@ fn thousand_track_project_loads_fast() {
     }
     let dir = tempfile::tempdir().unwrap();
     let b = Bundle::create(dir.path().join("Big")).unwrap();
-    b.save(&p).unwrap();
+    b.save(&p, Link::Replace).unwrap();
 
     let started = Instant::now();
     let loaded = b.load().unwrap();

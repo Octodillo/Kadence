@@ -288,13 +288,22 @@ impl Bundle {
 
     /// Writes the project file atomically, first copying the previous version
     /// into `backups/`. Removes any autosave, since it is now older.
-    pub fn save(&self, project: &Project) -> Result<(), FormatError> {
+    ///
+    /// `link` says what happens if the project file is a symlink. Pass
+    /// [`Link::Follow`] only when `project` was loaded through it with
+    /// [`Bundle::load`].
+    pub fn save(&self, project: &Project, link: Link) -> Result<(), FormatError> {
         self.make_dirs()?;
         let file = self.project_file();
-        if file.exists() {
+        let previous = match link {
+            Link::Follow => fs::metadata(&file),
+            // What a link points to is not a previous version of this project.
+            Link::Replace => fs::symlink_metadata(&file),
+        };
+        if previous.is_ok_and(|m| m.is_file()) {
             self.backup(&file)?;
         }
-        write_atomic(&file, &file, Link::Follow, project)?;
+        write_atomic(&file, &file, link, project)?;
         self.discard_autosave()
     }
 
@@ -307,7 +316,8 @@ impl Bundle {
         // millisecond or the clock was set back.
         let mut stamp = backups
             .last()
-            .map_or(now, |&(newest, _)| now.max(newest + 1));
+            .map_or(now, |&(newest, _)| now.max(newest + 1))
+            .min(MAX_STAMP);
         let dest = loop {
             let dest = self
                 .backups_dir()
@@ -318,6 +328,11 @@ impl Bundle {
                 Err(FormatError::Io { source, .. })
                     if source.kind() == std::io::ErrorKind::AlreadyExists =>
                 {
+                    // No later name exists. Saving without a backup is not
+                    // an option, so the save fails and names the file.
+                    if stamp == MAX_STAMP {
+                        return Err(FormatError::Io { path: dest, source });
+                    }
                     stamp += 1;
                 }
                 result => break result.map(|()| dest)?,
@@ -515,26 +530,36 @@ pub fn write_project(path: &Path, project: &Project) -> Result<(), FormatError> 
     write_atomic(path, path, Link::Replace, project)
 }
 
-/// Copies `src` to `dest`, which must not exist yet: a link put at `dest`
-/// beforehand is refused, not written through.
+/// The largest time stamp a backup's 16-digit name holds.
+const MAX_STAMP: u64 = 9_999_999_999_999_999;
+
+/// Copies the file `src` to `dest`, which must not exist yet: a link put at
+/// `dest` beforehand is refused, not written through. A failed copy leaves
+/// nothing at `dest`.
 fn copy_new(src: &Path, dest: &Path) -> Result<(), FormatError> {
     let mut from = File::open(src).map_err(FormatError::io(src))?;
+    let meta = from.metadata().map_err(FormatError::io(src))?;
     let mut to = File::create_new(dest).map_err(FormatError::io(dest))?;
-    #[cfg(unix)]
-    if let Ok(m) = from.metadata() {
-        to.set_permissions(m.permissions())
+    let copied = (|| {
+        #[cfg(unix)]
+        to.set_permissions(meta.permissions())
             .map_err(FormatError::io(dest))?;
+        std::io::copy(&mut from, &mut to).map_err(FormatError::io(src))?;
+        Ok(())
+    })();
+    if copied.is_err() {
+        let _ = fs::remove_file(dest);
     }
-    std::io::copy(&mut from, &mut to).map_err(FormatError::io(dest))?;
-    Ok(())
+    copied
 }
 
-/// What [`write_atomic`] does with a symlink at the path it writes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Link {
+/// What a write does with a symlink at the path it writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
     /// Write the file the link points to and keep the link. Only for a file
-    /// that was read through the same link, which is the project file: a user
-    /// may keep it elsewhere and link it into the bundle.
+    /// whose contents were read through the same link, which makes it the
+    /// project file of a user who keeps it elsewhere and links it into the
+    /// bundle.
     Follow,
     /// Replace the link with the new file. For files only Kadence creates,
     /// where a link can only have come with a bundle from somewhere else and

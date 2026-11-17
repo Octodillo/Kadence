@@ -31,13 +31,17 @@ My Song/                      bundle directory
   file was renamed, are left alone), then writes the new file atomically:
   write a new `<name>.kadence.<pid>-<n>.tmp`, fsync, rename, fsync the
   directory. A crash never leaves a half-written project. The new file keeps
-  the old one's permissions, and a symlinked project file is written through
-  rather than replaced.
+  the old one's permissions.
+- A symlinked project file is written through, and stays a link, only when
+  the open project was read from it. After recovering an autosave or Save As
+  the project file was not read, so a link there is replaced by the new file
+  and what it pointed to is neither backed up nor changed.
 - Temporary files and backups are only ever created new, never opened if the
   name is taken, so a link at such a name in a bundle from somewhere else
   cannot direct a write to another file.
 - Autosave writes `<name>.kadence.autosave` the same atomic way and never
-  touches the project file. A link at that name is replaced, not followed. Saving deletes it, and so does undoing back to the
+  touches the project file. A link at that name is replaced, not followed.
+  Symlinked `audio/` and `backups/` folders are still followed. Saving deletes it, and so does undoing back to the
   saved state. If one exists when a bundle is opened, `Document::open` fails
   with `FormatError::AutosavePending` instead of loading the older file: the
   app asks the user, then calls `Document::recover` (load the autosave) or
