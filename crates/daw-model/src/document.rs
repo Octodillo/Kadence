@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::bundle::Bundle;
+use crate::bundle::{Bundle, Link};
 use crate::change::ChangeSet;
 use crate::command::Command;
 use crate::error::{FormatError, ModelError};
@@ -17,6 +17,10 @@ pub struct Document {
     project: Project,
     history: UndoStack,
     bundle: Option<Bundle>,
+    /// What saving does with a symlinked project file: followed only when
+    /// this document was loaded through it, so a link in a bundle whose
+    /// project file was never read cannot choose the file a save replaces.
+    project_link: Link,
     /// Bumped on every change, including undo and redo.
     revision: u64,
     /// History position at the last save, or `None` if that state is gone.
@@ -38,6 +42,7 @@ impl Document {
             project,
             history: UndoStack::default(),
             bundle: None,
+            project_link: Link::Replace,
             revision: 0,
             saved_at: Some(0),
             autosaved_revision: 0,
@@ -78,6 +83,7 @@ impl Document {
         let project = bundle.load()?;
         Ok(Self {
             bundle: Some(bundle),
+            project_link: Link::Follow,
             ..Self::new(project)
         })
     }
@@ -211,7 +217,7 @@ impl Document {
     /// Saves to the document's bundle.
     pub fn save(&mut self) -> Result<(), FormatError> {
         let bundle = self.bundle.as_ref().ok_or(FormatError::NoBundle)?;
-        bundle.save(&self.project)?;
+        bundle.save(&self.project, self.project_link)?;
         self.mark_saved();
         Ok(())
     }
@@ -224,11 +230,12 @@ impl Document {
             Some(old) => copy_dir_files(&old.audio_dir(), &new.audio_dir())?,
             None => Vec::new(),
         };
-        if let Err(e) = new.save(&self.project) {
+        if let Err(e) = new.save(&self.project, Link::Replace) {
             // Leave the target as it was, so the user can retry there.
             remove_files(&copied);
             return Err(e);
         }
+        self.project_link = Link::Replace;
         if let Some(old) = self.bundle.replace(new) {
             // The unsaved edits it held now live in the new bundle. Failing
             // to delete it only means a stale recovery offer later.
