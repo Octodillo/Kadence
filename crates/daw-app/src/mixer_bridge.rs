@@ -1,4 +1,4 @@
-//! `Mixer`: the QML list model of channel strips, over a [`MixerHandle`].
+//! `Mixer`: the QML list model of channel strips, over the app's mixer ([`AppMixer`]).
 //!
 //! Each row is a strip. `tick` advances the meters and signals only the
 //! meter roles, so a strip's controls are left alone while its meters move.
@@ -9,15 +9,13 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QStringList,
-    QVariant, QVector,
+    QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QStringList, QVariant, QVector,
 };
 
-use crate::mixer::{
-    Control, MeterBallistics, MeterDisplay, MixerHandle, StripId, StripInfo, StripKind,
-    default_mixer,
-};
-use crate::qt_lists::{list, string_list};
+use crate::mixer::{Control, MeterBallistics, MeterDisplay, StripId, StripInfo, StripKind};
+use crate::model_roles;
+use crate::qt_lists::{ModelRole, list, role_numbers, row, string_list};
+use crate::session_mixer::AppMixer;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -51,9 +49,6 @@ pub mod qobject {
         #[base = QAbstractListModel]
         #[qml_element]
         #[qml_singleton]
-        /// The meter roles of every row, flattened: left, right, left hold,
-        /// right hold, gain reduction. For tests and overviews.
-        #[qproperty(QList_f64, levels)]
         /// Names of the effects `add_insert` can add, in catalog order.
         #[qproperty(QStringList, effect_names)]
         #[qproperty(bool, any_soloed)]
@@ -70,8 +65,6 @@ pub mod qobject {
         fn set_muted(self: Pin<&mut Mixer>, row: i32, muted: bool);
         #[qinvokable]
         fn set_soloed(self: Pin<&mut Mixer>, row: i32, soloed: bool);
-        #[qinvokable]
-        fn send_level(self: &Mixer, row: i32, send: i32) -> f64;
         #[qinvokable]
         fn set_send_level(self: Pin<&mut Mixer>, row: i32, send: i32, db: f64);
         /// Adds a send to the bus at `choice` in the row's `sendChoices`.
@@ -121,10 +114,14 @@ pub mod qobject {
         /// default, taking back the first click's edit.
         #[qinvokable]
         fn reset(self: Pin<&mut Mixer>, row: i32, control: &QString, send: i32);
-        /// Picks up edits made elsewhere, records held controls and
-        /// refreshes `levels`; `seconds` since the last call.
+        /// Picks up edits made elsewhere and moves the meters on by
+        /// `seconds`, the time since the last call.
         #[qinvokable]
-        fn tick(self: Pin<&mut Mixer>, playing: bool, seconds: f64);
+        fn tick(self: Pin<&mut Mixer>, seconds: f64);
+        /// The meter roles of every row, flattened: left, right, left hold,
+        /// right hold, gain reduction. For the self test.
+        #[qinvokable]
+        fn meter_levels(self: &Mixer) -> QList_f64;
 
         /// Re-reads the strips now rather than at the next `tick`, so rows
         /// match the project (after an edit another view made).
@@ -173,45 +170,45 @@ pub mod qobject {
     impl cxx_qt::Initialize for Mixer {}
 }
 
-/// Model roles, after Qt::UserRole.
-const ROLES: &[&str] = &[
-    "name",
-    "kind",
-    "volumeDb",
-    "pan",
-    "muted",
-    "soloed",
-    "silenced",
-    "hasInstrument",
-    "instrument",
-    "instrumentChoice",
-    "inserts",
-    "insertsEnabled",
-    "insertMeters",
-    "sends",
-    "sendLevels",
-    "sendPreFader",
-    "sendChoices",
-    "outputChoices",
-    "outputIndex",
-    "levelLeft",
-    "levelRight",
-    "holdLeft",
-    "holdRight",
-    "gainReduction",
-];
+model_roles!(
+    /// What a strip delegate reads.
+    enum Role {
+        Name => "name",
+        Kind => "kind",
+        VolumeDb => "volumeDb",
+        Pan => "pan",
+        Muted => "muted",
+        Soloed => "soloed",
+        Silenced => "silenced",
+        HasInstrument => "hasInstrument",
+        Instrument => "instrument",
+        InstrumentChoice => "instrumentChoice",
+        Inserts => "inserts",
+        InsertsEnabled => "insertsEnabled",
+        InsertMeters => "insertMeters",
+        Sends => "sends",
+        SendLevels => "sendLevels",
+        SendPreFader => "sendPreFader",
+        SendChoices => "sendChoices",
+        OutputChoices => "outputChoices",
+        OutputIndex => "outputIndex",
+        LevelLeft => "levelLeft",
+        LevelRight => "levelRight",
+        HoldLeft => "holdLeft",
+        HoldRight => "holdRight",
+        GainReduction => "gainReduction",
+    }
+);
 /// The roles `tick` changes.
-const METER_ROLES: &[&str] = &[
-    "levelLeft",
-    "levelRight",
-    "holdLeft",
-    "holdRight",
-    "gainReduction",
+const METER_ROLES: &[Role] = &[
+    Role::LevelLeft,
+    Role::LevelRight,
+    Role::HoldLeft,
+    Role::HoldRight,
+    Role::GainReduction,
 ];
-const USER_ROLE: i32 = 0x0100;
 
 pub struct MixerRust {
-    levels: QList<f64>,
     effect_names: QStringList,
     any_soloed: bool,
     write_automation: bool,
@@ -221,13 +218,12 @@ pub struct MixerRust {
     meters: Vec<MeterDisplay>,
     ballistics: MeterBallistics,
     effect_ids: Vec<String>,
-    mixer: Box<dyn MixerHandle>,
+    mixer: AppMixer,
 }
 
 impl Default for MixerRust {
     fn default() -> Self {
         Self {
-            levels: QList::default(),
             effect_names: QStringList::default(),
             any_soloed: false,
             write_automation: false,
@@ -236,7 +232,7 @@ impl Default for MixerRust {
             meters: Vec::new(),
             ballistics: MeterBallistics::default(),
             effect_ids: Vec::new(),
-            mixer: default_mixer(),
+            mixer: AppMixer,
         }
     }
 }
@@ -249,31 +245,6 @@ fn kind_name(kind: StripKind) -> &'static str {
     }
 }
 
-fn flatten(meters: &[MeterDisplay]) -> QList<f64> {
-    list(meters.iter().flat_map(|m| {
-        [
-            m.level[0],
-            m.level[1],
-            m.hold[0],
-            m.hold[1],
-            m.gain_reduction_db.unwrap_or(-1.0),
-        ]
-    }))
-}
-
-fn role(name: &str) -> i32 {
-    let i = ROLES.iter().position(|r| *r == name).expect("known role");
-    USER_ROLE + i as i32
-}
-
-fn roles(names: &[&str]) -> QVector<i32> {
-    let mut v = QVector::default();
-    for n in names {
-        v.append(role(n));
-    }
-    v
-}
-
 impl cxx_qt::Initialize for qobject::Mixer {
     fn initialize(mut self: Pin<&mut Self>) {
         let effects = self.mixer.effects();
@@ -283,7 +254,6 @@ impl cxx_qt::Initialize for qobject::Mixer {
         let strips = self.mixer.strips();
         let soloed = strips.iter().any(|s| s.soloed);
         let meters = vec![MeterDisplay::default(); strips.len()];
-        self.as_mut().set_levels(flatten(&meters));
         let revision = self.mixer.revision();
         let mut rust = self.as_mut().rust_mut();
         rust.strips = strips;
@@ -325,17 +295,6 @@ impl qobject::Mixer {
             self.as_mut().rust_mut().mixer.set_soloed(id, soloed);
             self.reload();
         }
-    }
-
-    fn send_level(&self, row: i32, send: i32) -> f64 {
-        let Ok(row) = usize::try_from(row) else {
-            return f64::NAN;
-        };
-        let send = usize::try_from(send).ok();
-        self.strips
-            .get(row)
-            .and_then(|s| s.sends.get(send?))
-            .map_or(f64::NAN, |s| s.level_db)
     }
 
     fn set_send_level(mut self: Pin<&mut Self>, row: i32, send: i32, db: f64) {
@@ -546,13 +505,11 @@ impl qobject::Mixer {
         } else {
             self.as_mut().begin_reset_model();
             let meters = vec![MeterDisplay::default(); strips.len()];
-            let flat = flatten(&meters);
             let mut rust = self.as_mut().rust_mut();
             rust.meters = meters;
             rust.ballistics = MeterBallistics::default();
             rust.strips = strips;
             self.as_mut().end_reset_model();
-            self.as_mut().set_levels(flat);
         }
         self.as_mut().set_any_soloed(soloed);
     }
@@ -563,8 +520,19 @@ impl qobject::Mixer {
         }
     }
 
-    fn tick(mut self: Pin<&mut Self>, playing: bool, seconds: f64) {
-        self.as_mut().rust_mut().mixer.tick(playing, seconds);
+    fn meter_levels(&self) -> QList<f64> {
+        list(self.meters.iter().flat_map(|m| {
+            [
+                m.level[0],
+                m.level[1],
+                m.hold[0],
+                m.hold[1],
+                m.gain_reduction_db.unwrap_or(-1.0),
+            ]
+        }))
+    }
+
+    fn tick(mut self: Pin<&mut Self>, seconds: f64) {
         self.as_mut().sync();
         let mut rust = self.as_mut().rust_mut();
         let levels = rust.mixer.levels();
@@ -573,100 +541,92 @@ impl qobject::Mixer {
             return;
         }
         rust.meters = meters;
-        let flat = flatten(&self.meters);
-        self.as_mut().set_levels(flat);
         let count = self.strips.len() as i32;
         if count > 0 {
             let root = QModelIndex::default();
             let first = self.index(0, 0, &root);
             let last = self.index(count - 1, 0, &root);
             self.as_mut()
-                .data_changed(&first, &last, &roles(METER_ROLES));
+                .data_changed(&first, &last, &role_numbers(METER_ROLES));
         }
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let row = usize::try_from(index.row()).ok();
-        let Some(s) = row.and_then(|r| self.strips.get(r)) else {
+        let Some(s) = row(&self.strips, index) else {
             return QVariant::default();
         };
-        let m = row
-            .and_then(|r| self.meters.get(r))
-            .copied()
-            .unwrap_or_default();
-        match ROLES.get((role - USER_ROLE) as usize).copied() {
-            Some("name") => QVariant::from(&QString::from(s.name.as_str())),
-            Some("kind") => QVariant::from(&QString::from(kind_name(s.kind))),
-            Some("volumeDb") => QVariant::from(&s.volume_db),
-            Some("pan") => QVariant::from(&s.pan),
-            Some("muted") => QVariant::from(&s.muted),
-            Some("soloed") => QVariant::from(&s.soloed),
-            Some("silenced") => QVariant::from(&s.silenced),
-            Some("hasInstrument") => QVariant::from(&s.has_instrument),
-            Some("instrument") => QVariant::from(&QString::from(
+        let m = row(&self.meters, index).copied().unwrap_or_default();
+        let Some(role) = Role::from_qt(role) else {
+            return QVariant::default();
+        };
+        match role {
+            Role::Name => QVariant::from(&QString::from(s.name.as_str())),
+            Role::Kind => QVariant::from(&QString::from(kind_name(s.kind))),
+            Role::VolumeDb => QVariant::from(&s.volume_db),
+            Role::Pan => QVariant::from(&s.pan),
+            Role::Muted => QVariant::from(&s.muted),
+            Role::Soloed => QVariant::from(&s.soloed),
+            Role::Silenced => QVariant::from(&s.silenced),
+            Role::HasInstrument => QVariant::from(&s.has_instrument),
+            Role::Instrument => QVariant::from(&QString::from(
                 s.instrument.as_ref().map_or("", |i| i.name.as_str()),
             )),
-            Some("instrumentChoice") => QVariant::from(
+            Role::InstrumentChoice => QVariant::from(
                 &s.instrument_choice
                     .and_then(|i| i32::try_from(i).ok())
                     .unwrap_or(-1),
             ),
-            Some("inserts") => {
+            Role::Inserts => {
                 QVariant::from(&string_list(s.inserts.iter().map(|i| i.name.as_str())))
             }
-            Some("insertsEnabled") => {
+            Role::InsertsEnabled => {
                 let mut on = QList::<bool>::default();
                 for i in &s.inserts {
                     on.append(i.enabled);
                 }
                 QVariant::from(&on)
             }
-            Some("insertMeters") => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
-            Some("sends") => {
+            Role::InsertMeters => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
+            Role::Sends => {
                 QVariant::from(&string_list(s.sends.iter().map(|x| x.target_name.as_str())))
             }
-            Some("sendLevels") => {
+            Role::SendLevels => {
                 let mut levels = QList::<f64>::default();
                 for x in &s.sends {
                     levels.append(x.level_db);
                 }
                 QVariant::from(&levels)
             }
-            Some("sendPreFader") => {
+            Role::SendPreFader => {
                 let mut pre = QList::<bool>::default();
                 for x in &s.sends {
                     pre.append(x.pre_fader);
                 }
                 QVariant::from(&pre)
             }
-            Some("sendChoices") => {
+            Role::SendChoices => {
                 QVariant::from(&string_list(s.send_choices.iter().map(|c| c.name.as_str())))
             }
-            Some("outputChoices") => QVariant::from(&string_list(
+            Role::OutputChoices => QVariant::from(&string_list(
                 s.output_choices.iter().map(|c| c.name.as_str()),
             )),
-            Some("outputIndex") => {
+            Role::OutputIndex => {
                 let i = s
                     .output
                     .as_ref()
                     .and_then(|o| s.output_choices.iter().position(|c| c.id == o.id));
                 QVariant::from(&i.map_or(-1, |i| i as i32))
             }
-            Some("levelLeft") => QVariant::from(&m.level[0]),
-            Some("levelRight") => QVariant::from(&m.level[1]),
-            Some("holdLeft") => QVariant::from(&m.hold[0]),
-            Some("holdRight") => QVariant::from(&m.hold[1]),
-            Some("gainReduction") => QVariant::from(&m.gain_reduction_db.unwrap_or(-1.0)),
-            _ => QVariant::default(),
+            Role::LevelLeft => QVariant::from(&m.level[0]),
+            Role::LevelRight => QVariant::from(&m.level[1]),
+            Role::HoldLeft => QVariant::from(&m.hold[0]),
+            Role::HoldRight => QVariant::from(&m.hold[1]),
+            Role::GainReduction => QVariant::from(&m.gain_reduction_db.unwrap_or(-1.0)),
         }
     }
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
-        let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
-        for (i, name) in ROLES.iter().enumerate() {
-            roles.insert(USER_ROLE + i as i32, QByteArray::from(*name));
-        }
-        roles
+        Role::names()
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {

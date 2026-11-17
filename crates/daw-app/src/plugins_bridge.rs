@@ -11,12 +11,13 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QUrl, QVariant,
+    QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QUrl, QVariant,
 };
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
 use daw_session::catalog::{FORMATS, Filter, PluginKind};
 
-use crate::qt_lists::string_list;
+use crate::model_roles;
+use crate::qt_lists::{ModelRole, row, string_list};
 use crate::settings::{self, KConfigStore};
 use crate::state;
 
@@ -134,17 +135,18 @@ pub mod qobject {
     impl cxx_qt::Initialize for Plugins {}
 }
 
-/// `name` and `vendor` are the plugin's; `format` is its display name,
-/// `formatId` the name `Mixer.addPluginInsert` takes; `pluginId` its id.
-const ROLES: &[&str] = &[
-    "name",
-    "vendor",
-    "format",
-    "formatId",
-    "pluginId",
-    "instrument",
-];
-const USER_ROLE: i32 = 0x0100;
+model_roles!(
+    /// `name` and `vendor` are the plugin's; `format` is its display name,
+    /// `formatId` the name `Mixer.addPluginInsert` takes; `pluginId` its id.
+    enum Role {
+        Name => "name",
+        Vendor => "vendor",
+        Format => "format",
+        FormatId => "formatId",
+        PluginId => "pluginId",
+        Instrument => "instrument",
+    }
+);
 
 #[derive(Default)]
 pub struct PluginsRust {
@@ -384,30 +386,25 @@ impl qobject::Plugins {
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let Some(p) = usize::try_from(index.row())
-            .ok()
-            .and_then(|r| self.rows.get(r))
-        else {
+        let Some(p) = row(&self.rows, index) else {
             return QVariant::default();
         };
         let text = |s: &str| QVariant::from(&QString::from(s));
-        match ROLES.get((role - USER_ROLE) as usize).copied() {
-            Some("name") => text(&p.name),
-            Some("vendor") => text(&p.vendor),
-            Some("format") => text(format_label(&p.format)),
-            Some("formatId") => text(daw_plugins::kind_name(&p.format)),
-            Some("pluginId") => text(&p.id),
-            Some("instrument") => QVariant::from(&p.is_instrument),
-            _ => QVariant::default(),
+        let Some(role) = Role::from_qt(role) else {
+            return QVariant::default();
+        };
+        match role {
+            Role::Name => text(&p.name),
+            Role::Vendor => text(&p.vendor),
+            Role::Format => text(format_label(&p.format)),
+            Role::FormatId => text(daw_plugins::kind_name(&p.format)),
+            Role::PluginId => text(&p.id),
+            Role::Instrument => QVariant::from(&p.is_instrument),
         }
     }
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
-        let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
-        for (i, name) in ROLES.iter().enumerate() {
-            roles.insert(USER_ROLE + i as i32, QByteArray::from(*name));
-        }
-        roles
+        Role::names()
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
