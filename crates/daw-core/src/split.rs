@@ -5,12 +5,17 @@
 //! [`SharedAudio::lend`] hands out; the main thread reaches it with [`SharedAudio::main`],
 //! only for the few short calls that must not overlap a block. A block that comes during one
 //! of those waits a few microseconds, then is silent, and what it carried is kept in
-//! [`LateEvents`] for the next block: a note-off or a reset is late, never lost.
+//! [`LateEvents`] for the next block, so a note-off or a reset is late rather than lost.
+//! That holds for the half only, and has limits: the list is finite, a reset drops the notes
+//! that waited to start, and a half that is taken back keeps nothing but a reset. A graph
+//! node that cannot reach the half at all (while the plugin is prepared) still drops its
+//! block.
 //!
 //! [`PluginInstance::split`]: crate::plugin::PluginInstance::split
 
 use std::any::Any;
-use std::sync::Arc;
+
+use crate::sync::Arc;
 
 use crate::event::{Event, EventKind, EventList};
 use crate::exclusive::Exclusive;
@@ -22,6 +27,10 @@ pub const LATE_EVENT_CAPACITY: usize = 1024;
 
 /// What a plugin missed in blocks it could not be run for: their events and a reset, to
 /// deliver at the start of the next block it runs. Real-time safe once made.
+///
+/// The list is finite. Only the newest value waits for each parameter, so automation running
+/// through a long wait does not fill it; once it is full all the same, the newest events are
+/// dropped.
 #[derive(Debug)]
 pub struct LateEvents {
     events: EventList,
@@ -37,12 +46,13 @@ impl LateEvents {
         }
     }
 
-    /// Notes a reset for the next block that runs. Notes still waiting are older than the
-    /// reset, which would have ended them, so only the parameter changes stay.
+    /// Notes a reset for the next block that runs. Notes waiting to start are older than
+    /// the reset and must not sound after it, so they go; everything else (note-offs,
+    /// controllers, parameter changes) is harmless after a reset and may be what silences a
+    /// plugin whose reset does not, so it stays.
     pub fn reset(&mut self) {
         self.reset = true;
-        self.events
-            .retain(|e| matches!(e.kind, EventKind::ParamValue { .. }));
+        self.events.retain(survives_reset);
     }
 
     /// Whether a reset is owed, once: the caller resets the plugin before it runs the block.
@@ -73,13 +83,24 @@ impl LateEvents {
     pub fn skip(&mut self, ctx: &mut ProcessContext) {
         ctx.silence_outputs();
         for e in ctx.events_in {
+            if let EventKind::ParamValue { param, .. } = e.kind {
+                self.events.retain(
+                    |w| !matches!(w.kind, EventKind::ParamValue { param: p, .. } if p == param),
+                );
+            }
             let _ = self.events.push(Event { frame: 0, ..*e });
         }
     }
+}
 
-    /// Whether events or a reset wait for the next block.
-    pub fn is_pending(&self) -> bool {
-        self.reset || !self.events.is_empty()
+/// Whether an event that was sent before a reset may still be delivered after it: anything
+/// but the start of a note. For every list that holds events back past a reset.
+pub fn survives_reset(e: &Event) -> bool {
+    match e.kind {
+        EventKind::NoteOn { .. } => false,
+        // A MIDI note-on; with velocity 0 it is a note-off.
+        EventKind::Midi([status, _, velocity]) => status & 0xf0 != 0x90 || velocity == 0,
+        EventKind::NoteOff { .. } | EventKind::ParamValue { .. } => true,
     }
 }
 
@@ -138,15 +159,18 @@ impl<A: SplitAudio> SharedAudio<A> {
     }
 
     /// Takes back the half [`lend`](Self::lend) handed out, for [`PluginInstance::join`].
-    /// Returns false, and changes nothing, for a processor that is not this one's. What the
-    /// half still held for a later block is dropped: the host joins to prepare the plugin
-    /// again or to drop it.
+    /// Returns false for a processor that is not this one's, which is dropped: `join` has
+    /// nowhere to send it. A reset the half still owed is done here; the events it held for a
+    /// later block are dropped, as the host joins to prepare the plugin again or to drop it.
     ///
     /// [`PluginInstance::join`]: crate::plugin::PluginInstance::join
     pub fn take_back(&mut self, processor: Box<dyn PluginProcessor>) -> bool {
         match processor.into_any().downcast::<SharedProcessor<A>>() {
-            Ok(half) if Arc::ptr_eq(&half.audio, &self.audio) => {
+            Ok(mut half) if Arc::ptr_eq(&half.audio, &self.audio) => {
                 self.lent = false;
+                if half.late.take_reset() {
+                    self.audio.main(A::reset);
+                }
                 true
             }
             _ => false,
@@ -259,6 +283,13 @@ mod tests {
         }
     }
 
+    fn midi(frame: u32, bytes: [u8; 3]) -> Event {
+        Event {
+            frame,
+            kind: EventKind::Midi(bytes),
+        }
+    }
+
     fn param(frame: u32, value: f64) -> Event {
         Event {
             frame,
@@ -316,20 +347,66 @@ mod tests {
         let mut shared = SharedAudio::new(Probe::default());
         let mut half = shared.lend().unwrap();
         shared.main(|_| {
-            block(half.as_mut(), &[on(1, 60), param(2, 0.25)]);
+            block(
+                half.as_mut(),
+                &[
+                    on(1, 60),
+                    midi(1, [0x90, 62, 100]),
+                    off(2, 59),
+                    param(2, 0.25),
+                ],
+            );
+            block(
+                half.as_mut(),
+                &[midi(0, [0xb0, 64, 0]), midi(1, [0x90, 62, 0])],
+            );
             half.reset();
-            block(half.as_mut(), &[off(3, 61)]);
+            block(half.as_mut(), &[on(3, 61)]);
         });
         block(half.as_mut(), &[]);
-        // The note from before the reset is gone; the parameter change and what came after
-        // the reset are not.
+        // The notes that waited to start are gone. What ends or changes something is not,
+        // nor is what came after the reset.
         assert_eq!(
             seen(&shared),
-            [Seen::Reset, Seen::Block(vec![param(0, 0.25), off(0, 61)])]
+            [
+                Seen::Reset,
+                Seen::Block(vec![
+                    off(0, 59),
+                    param(0, 0.25),
+                    midi(0, [0xb0, 64, 0]),
+                    midi(0, [0x90, 62, 0]),
+                    on(0, 61)
+                ])
+            ]
         );
         half.reset();
         block(half.as_mut(), &[]);
         assert_eq!(seen(&shared), [Seen::Reset, Seen::Block(vec![])]);
+    }
+
+    #[test]
+    fn only_the_newest_value_of_a_parameter_waits() {
+        let mut shared = SharedAudio::new(Probe::default());
+        let mut half = shared.lend().unwrap();
+        shared.main(|_| {
+            block(half.as_mut(), &[param(0, 0.1), off(1, 60), param(2, 0.2)]);
+            block(half.as_mut(), &[param(0, 0.3)]);
+        });
+        block(half.as_mut(), &[]);
+        assert_eq!(
+            seen(&shared),
+            [Seen::Block(vec![off(0, 60), param(0, 0.3)])]
+        );
+    }
+
+    #[test]
+    fn a_reset_still_owed_at_the_join_is_done_then() {
+        let mut shared = SharedAudio::new(Probe::default());
+        let mut half = shared.lend().unwrap();
+        shared.main(|_| block(half.as_mut(), &[off(1, 60)]));
+        half.reset();
+        assert!(shared.take_back(half));
+        assert_eq!(seen(&shared), [Seen::Reset]);
     }
 
     #[test]
@@ -385,9 +462,9 @@ mod tests {
             events_out: &mut events_out,
         };
         late.skip(&mut ctx);
-        assert!(late.is_pending());
         let got = late.deliver(&mut ctx, |ctx| ctx.events_in.as_slice().to_vec());
         assert_eq!(got, [off(0, 60), off(0, 61)]);
-        assert!(!late.is_pending());
+        let got = late.deliver(&mut ctx, |ctx| ctx.events_in.len());
+        assert_eq!(got, 3, "nothing waits any more");
     }
 }

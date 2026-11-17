@@ -2037,6 +2037,26 @@ mod tests {
         p.join(half);
     }
 
+    /// The main thread holds the audio state for a few calls (activation, the parameter
+    /// flush). A block that comes then is silent, and what it carried is not lost.
+    #[test]
+    fn a_block_the_main_thread_made_a_split_half_skip_delivers_its_events_with_the_next() {
+        let mut p = instance();
+        let mut half = p.split().unwrap();
+        let gain = EventKind::ParamValue {
+            param: GAIN,
+            value: 0.25,
+        };
+        let skipped = p.audio.main(|_| {
+            let heard = heard_through(&mut |ctx| half.process(ctx), &[gain]);
+            half.reset();
+            heard
+        });
+        assert_eq!(skipped, 0.0);
+        assert_eq!(heard_through(&mut |ctx| half.process(ctx), &[]), 0.25);
+        p.join(half);
+    }
+
     #[test]
     fn nothing_splits_before_the_first_prepare() {
         let mut p = Vst3Instance::new(&testgain()).unwrap();

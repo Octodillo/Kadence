@@ -129,6 +129,8 @@ pub trait PluginInstance: Node {
 /// [`Node::process`].
 pub trait PluginProcessor: Send {
     fn process(&mut self, ctx: &mut ProcessContext);
+    /// Clears the plugin's internal state, at the latest at the start of the next
+    /// [`process`](Self::process): a half that cannot reach the plugin now may defer it.
     fn reset(&mut self) {}
     /// For [`PluginInstance::join`] to take back its own type.
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;

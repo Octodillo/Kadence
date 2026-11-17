@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use daw_core::event::{Event, EventKind, EventList, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor};
-use daw_core::split::{SharedAudio, SplitAudio};
+use daw_core::split::{SharedAudio, SplitAudio, survives_reset};
 use daw_plugins::Scanner;
 
 use crate::child::HOST_ARG;
@@ -731,9 +731,11 @@ impl SplitAudio for Audio {
         self.process_block(ctx);
     }
 
-    /// Goes out to the host with the next cycle.
+    /// Goes out to the host with the next cycle. Notes still waiting for the host would
+    /// start after the reset there, so they go, as they do for any late event.
     fn reset(&mut self) {
         self.rt.reset_pending = true;
+        self.rt.carry.retain(survives_reset);
     }
 }
 

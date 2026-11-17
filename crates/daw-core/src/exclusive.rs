@@ -11,7 +11,11 @@ use std::sync::atomic::Ordering;
 
 /// How many times [`Exclusive::try_audio_spin`] tries before it gives up: a few microseconds,
 /// enough for a short main-thread call to finish.
+#[cfg(not(loom))]
 pub const AUDIO_RETRIES: u32 = 100;
+/// Few enough for loom to explore every interleaving.
+#[cfg(loom)]
+pub const AUDIO_RETRIES: u32 = 2;
 
 const FREE: u32 = 0;
 const AUDIO: u32 = 1;
