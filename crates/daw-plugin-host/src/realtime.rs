@@ -8,16 +8,35 @@
 //! that can be reached from inside a container or a Flatpak. PipeWire takes the same three
 //! routes for the application's own audio thread.
 //!
-//! The outcome is a [`Realtime`], which the host leaves in the block's header for the
-//! application to show.
+//! Asking a broker means D-Bus round trips, and a bus that does not answer must not hold up
+//! the host. So the host hands each audio thread it starts to a [`Promoter`], whose own
+//! thread does the asking and leaves the outcome, a [`Realtime`], in the block's header for
+//! the application to show.
+//!
+//! RealtimeKit rations what it grants: by default 15 processes and 25 threads per user, and
+//! 25 requests in 20 seconds, and the portal passes requests on to it. Every plugin has its
+//! own host process, so a large project can use the ration up and its later plugins are
+//! refused. A refusal is asked about again a few times, which gets a project loaded in one
+//! go past the limit on requests; nothing here gets past the limit on processes. Granting
+//! `RLIMIT_RTPRIO` to the user (the `realtime` group) lifts both.
+//!
+//! A broker also demands that the process bounds how long its real-time threads may run
+//! without sleeping (`RLIMIT_RTTIME`, 200 ms with RealtimeKit's defaults). The kernel kills a
+//! process that goes over, so a plugin that computes for that long inside one cycle takes its
+//! host down, which the application reports as a crash.
 
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder as ConnectionBuilder;
 use zbus::blocking::proxy::Builder as ProxyBuilder;
 use zbus::proxy::CacheProperties;
+
+use crate::shm::Shm;
 
 /// How a host's plugin-audio thread is scheduled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,6 +53,8 @@ pub enum Realtime {
     /// Nobody granted it: the thread runs at normal priority and the plugin's audio will
     /// drop out whenever the machine is busy.
     Refused = 3,
+    /// Asked for, and no answer yet. A bus that never answers leaves it here.
+    Pending = 4,
 }
 
 impl Realtime {
@@ -42,6 +63,7 @@ impl Realtime {
             1 => Self::Direct,
             2 => Self::Brokered,
             3 => Self::Refused,
+            4 => Self::Pending,
             _ => Self::Off,
         }
     }
@@ -52,8 +74,13 @@ impl Realtime {
     }
 }
 
-/// How long a broker may take to answer before the next route is tried.
+/// How long a broker may take to answer a call before the next route is tried.
 const BROKER_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long after a refusal the routes are tried again: the time in which RealtimeKit counts
+/// requests against its limit.
+const RETRY_AFTER: Duration = Duration::from_secs(20);
+/// How often a refused thread is asked about again.
+const RETRIES: u32 = 3;
 
 /// A D-Bus service that makes threads real-time for processes that may not do it themselves.
 /// RealtimeKit and the portal offer the same properties and method under different names.
@@ -142,9 +169,9 @@ impl Broker {
 }
 
 /// Lowers `RLIMIT_RTTIME` to `micros` where it is higher: the time a real-time thread of this
-/// process may run without a blocking call before the kernel signals and then kills the
-/// process. An audio thread blocks every cycle, so only a plugin stuck in a loop gets there,
-/// and the application reports that host as crashed.
+/// process may run without a blocking call before the kernel kills the process. Brokers look
+/// at the hard limit, and both are set, as PipeWire does. See the module documentation for
+/// what that means for plugins.
 fn limit_realtime_run(micros: i64) -> std::io::Result<()> {
     let Ok(micros) = libc::rlim_t::try_from(micros) else {
         return Ok(());
@@ -170,16 +197,33 @@ fn limit_realtime_run(micros: i64) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Asks the kernel for `SCHED_FIFO` at `priority` for the thread.
-fn promote_directly(thread: libc::pid_t, priority: i32) -> Result<(), Refusal> {
+/// Asks the kernel for `SCHED_FIFO` for the thread, at `priority` or the highest priority
+/// this process may give itself. Threads the plugin starts from it do not inherit it, as with
+/// a broker.
+fn promote_directly(thread: libc::pid_t, priority: i32) -> std::io::Result<()> {
     let param = libc::sched_param {
-        sched_priority: priority,
+        sched_priority: priority.min(own_priority_limit().unwrap_or(priority)),
     };
+    let policy = libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK;
     // SAFETY: plain syscall wrapper given a valid parameter struct.
-    match unsafe { libc::sched_setscheduler(thread, libc::SCHED_FIFO, &param) } {
+    match unsafe { libc::sched_setscheduler(thread, policy, &param) } {
         0 => Ok(()),
-        _ => Err(Refusal::Os(std::io::Error::last_os_error())),
+        _ => Err(std::io::Error::last_os_error()),
     }
+}
+
+/// The highest real-time priority `RLIMIT_RTPRIO` lets this process take, if it lets it take
+/// any. Without one, only a privileged process gets what it asks for.
+fn own_priority_limit() -> Option<i32> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: fills the struct it is given.
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_RTPRIO, &mut limit) } == 0;
+    (read && limit.rlim_cur > 0)
+        .then(|| i32::try_from(limit.rlim_cur).ok())
+        .flatten()
 }
 
 /// The calling thread's id, as [`promote`] takes it.
@@ -190,13 +234,15 @@ pub(crate) fn current_thread() -> libc::pid_t {
     libc::pid_t::try_from(id).expect("a thread id fits pid_t")
 }
 
-/// Gives a thread of this process `SCHED_FIFO` scheduling at `priority`, or the highest
-/// priority a broker allows below it. It may take as long as the brokers take to answer, so
-/// it is called from another thread than the one promoted. A refusal is written to stderr
-/// with each route's reason.
-pub(crate) fn promote(thread: libc::pid_t, priority: i32) -> Realtime {
+/// Gives a thread of this process real-time scheduling at `priority`, or the highest
+/// priority below it that is allowed: `SCHED_FIFO` from the kernel, or whatever policy a
+/// broker gives (RealtimeKit's default is `SCHED_RR`). It may take as long as the brokers
+/// take to answer. With `explain`, a refusal is written to stderr with each route's reason.
+fn promote(thread: libc::pid_t, priority: i32, explain: bool) -> Realtime {
     let direct = match promote_directly(thread, priority) {
         Ok(()) => return Realtime::Direct,
+        // The thread is gone: its host was prepared again, and the new one is asked for.
+        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Realtime::Off,
         Err(e) => e,
     };
     let mut reasons = format!("the kernel: {direct}");
@@ -206,10 +252,81 @@ pub(crate) fn promote(thread: libc::pid_t, priority: i32) -> Realtime {
             Err(e) => reasons.push_str(&format!("; {}: {e}", broker.name)),
         }
     }
-    eprintln!(
-        "daw-plugin-host: real-time priority {priority} not granted, audio may glitch ({reasons})"
-    );
+    if explain {
+        eprintln!(
+            "daw-plugin-host: real-time priority {priority} not granted, audio may glitch \
+             ({reasons})"
+        );
+    }
     Realtime::Refused
+}
+
+/// An audio thread to promote, and the block whose header gets the outcome.
+struct Request {
+    thread: libc::pid_t,
+    priority: i32,
+    block: Arc<Shm>,
+    /// How often it has been refused.
+    refusals: u32,
+}
+
+/// Promotes the host's audio threads on a thread of its own, started with the first request.
+#[derive(Default)]
+pub(crate) struct Promoter {
+    requests: Option<Sender<Request>>,
+}
+
+impl Promoter {
+    /// Asks for real-time scheduling at `priority` for `thread`, which serves `block`. The
+    /// block's header says [`Realtime::Pending`] until the outcome is known.
+    pub(crate) fn ask(&mut self, thread: libc::pid_t, priority: i32, block: Arc<Shm>) {
+        let header = block.header();
+        header
+            .realtime
+            .store(Realtime::Pending as u32, Ordering::Release);
+        let request = Request {
+            thread,
+            priority,
+            block,
+            refusals: 0,
+        };
+        let requests = self.requests.get_or_insert_with(|| {
+            let (requests, inbox) = mpsc::channel();
+            // Without the thread the requests stay pending, which is what they then are.
+            let _ = std::thread::Builder::new()
+                .name("plugin-realtime".into())
+                .spawn(move || serve(&inbox));
+            requests
+        });
+        let _ = requests.send(request);
+    }
+}
+
+/// Answers requests until the [`Promoter`] is dropped. Only the newest one counts: an older
+/// one is for an audio thread that has ended since.
+fn serve(inbox: &Receiver<Request>) {
+    let mut refused: Option<Request> = None;
+    loop {
+        let next = match &refused {
+            None => inbox.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(_) => inbox.recv_timeout(RETRY_AFTER),
+        };
+        let request = match next {
+            Ok(request) => inbox.try_iter().last().unwrap_or(request),
+            Err(RecvTimeoutError::Timeout) => refused.take().expect("it timed out waiting to"),
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let outcome = promote(request.thread, request.priority, request.refusals == 0);
+        request
+            .block
+            .header()
+            .realtime
+            .store(outcome as u32, Ordering::Release);
+        refused = (outcome == Realtime::Refused && request.refusals < RETRIES).then(|| Request {
+            refusals: request.refusals + 1,
+            ..request
+        });
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +465,7 @@ mod tests {
             Realtime::Direct,
             Realtime::Brokered,
             Realtime::Refused,
+            Realtime::Pending,
         ] {
             assert_eq!(Realtime::from_wire(r as u32), r);
         }

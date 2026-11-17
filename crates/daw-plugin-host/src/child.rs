@@ -21,7 +21,7 @@ use crate::protocol::{
     FrameReader, InstanceInfo, Reply, Request, Response, WireError, WireParam, WirePorts,
     blob_fits, write_frame,
 };
-use crate::realtime::{self, Realtime};
+use crate::realtime::{self, Promoter, Realtime};
 use crate::shm::{
     self, DONE, FLAG_RESET, Header, MAX_CHANNELS, REQUEST, Shm, decode_event, encode_event,
     futex_wait, futex_wake,
@@ -74,6 +74,7 @@ pub fn run_host_child(
         state_changed: Cell::new(false),
         editor_open: Cell::new(false),
         rt_priority: None,
+        promoter: Promoter::default(),
         requests: 0,
     };
     let result = host.run();
@@ -127,6 +128,7 @@ struct Host<'a> {
     /// Whether the plugin's editor is open, as last seen.
     editor_open: Cell<bool>,
     rt_priority: Option<i32>,
+    promoter: Promoter,
     /// Control requests read so far, which numbers them as the application does.
     requests: u64,
 }
@@ -388,11 +390,8 @@ impl Host<'_> {
             WirePorts::from(&p.ports())
         };
         if let Some(block) = block {
-            self.audio = Some(AudioThread::start(
-                block,
-                self.plugin.clone(),
-                self.rt_priority,
-            ));
+            let promotion = self.rt_priority.map(|p| (&mut self.promoter, p));
+            self.audio = Some(AudioThread::start(block, self.plugin.clone(), promotion));
         }
         Ok(Reply::Prepared(ports))
     }
@@ -492,7 +491,9 @@ struct AudioThread {
 }
 
 impl AudioThread {
-    fn start(shm: Arc<Shm>, plugin: SharedPlugin, rt_priority: Option<i32>) -> Self {
+    /// Starts the thread on `shm`. `promotion` is whom to ask for real-time scheduling, and
+    /// the priority to ask for.
+    fn start(shm: Arc<Shm>, plugin: SharedPlugin, promotion: Option<(&mut Promoter, i32)>) -> Self {
         let quit = Arc::new(AtomicBool::new(false));
         let mut half = lock(&plugin).as_mut().and_then(|p| p.split());
         let split = half.is_some();
@@ -508,15 +509,12 @@ impl AudioThread {
                 })
                 .expect("spawn the audio thread")
         };
-        // Promoted from here, not by the thread itself: asking a broker takes a while, and
-        // the thread is already answering cycles.
-        let scheduling = match (rt_priority, started.recv()) {
-            (Some(priority), Ok(thread)) => realtime::promote(thread, priority),
-            _ => Realtime::Off,
-        };
         shm.header()
             .realtime
-            .store(scheduling as u32, Ordering::Release);
+            .store(Realtime::Off as u32, Ordering::Release);
+        if let (Some((promoter, priority)), Ok(thread)) = (promotion, started.recv()) {
+            promoter.ask(thread, priority, shm.clone());
+        }
         Self {
             quit,
             shm,
@@ -833,6 +831,7 @@ mod tests {
             state_changed: Cell::new(false),
             editor_open: Cell::new(false),
             rt_priority: None,
+            promoter: Promoter::default(),
             requests: 0,
         };
         // The host pumps between reads; close the socket once it has pumped at least once.
@@ -875,6 +874,7 @@ mod tests {
                     state_changed: Cell::new(false),
                     editor_open: Cell::new(false),
                     rt_priority: None,
+                    promoter: Promoter::default(),
                     requests: 0,
                 };
                 host.run().unwrap();
@@ -1054,6 +1054,7 @@ mod tests {
             state_changed: Cell::new(false),
             editor_open: Cell::new(false),
             rt_priority: None,
+            promoter: Promoter::default(),
             requests: 0,
         };
         for (value, want) in [

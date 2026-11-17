@@ -99,9 +99,9 @@ pub struct SandboxConfig {
     /// silence. `None` (the default) waits at most one buffer's duration, since any longer is
     /// an xrun anyway.
     pub process_timeout: Option<Duration>,
-    /// `SCHED_FIFO` priority for the host's audio thread; `None` leaves it at normal
-    /// priority. Default 70, below JACK's own threads. Whether the host got it, by itself or
-    /// through a broker, is in [`SandboxMonitor::realtime`].
+    /// Real-time priority for the host's audio thread; `None` leaves it at normal priority.
+    /// Default 70, below JACK's own threads. Whether the host got it, by itself or through a
+    /// broker (which may give less), is in [`SandboxMonitor::realtime`].
     pub rt_priority: Option<i32>,
     /// Told when a plugin crashes or hangs, so the UI can offer to reload it.
     pub on_crash: Option<CrashHook>,
@@ -232,8 +232,8 @@ impl Shared {
         }
     }
 
-    /// Takes over how the host scheduled its audio thread from the block it wrote that to,
-    /// which it does each time it starts the thread.
+    /// Takes over how the host's audio thread is scheduled from the block, where the host
+    /// writes it some time after it has started the thread.
     fn note_realtime(&self, header: &Header) {
         let now = Realtime::from_wire(header.realtime.load(Ordering::Acquire));
         let before = Realtime::from_wire(self.realtime.swap(now as u32, Ordering::AcqRel));
@@ -300,9 +300,10 @@ impl SandboxMonitor {
         self.0.late_cycles.load(Ordering::Relaxed)
     }
 
-    /// How the host's audio thread is scheduled. [`Realtime::Refused`] explains late cycles:
-    /// the user's system grants this process no real-time priority, directly or through
-    /// RealtimeKit or the desktop portal.
+    /// How the host's audio thread is scheduled, as of the last
+    /// [`PluginInstance::on_main_thread`] call. [`Realtime::Refused`] explains late cycles:
+    /// the user's system grants this host no real-time priority, directly or through
+    /// RealtimeKit or the desktop portal, which ration it.
     pub fn realtime(&self) -> Realtime {
         Realtime::from_wire(self.0.realtime.load(Ordering::Acquire))
     }
@@ -529,7 +530,6 @@ impl Link {
 
         let shm = Arc::new(shm);
         shared.pid.store(host.pid(), Ordering::Relaxed);
-        shared.note_realtime(shm.header());
         host.arm(shm.clone());
         Ok((
             Self {
@@ -996,9 +996,6 @@ impl SandboxedInstance {
             self.latency = latency;
             self.ports = ports;
         }
-        // Each of those started the host's audio thread anew.
-        let link = self.link.as_ref().expect("still there");
-        self.shared.note_realtime(link.shm.header());
         Ok(())
     }
 
@@ -1576,6 +1573,7 @@ impl PluginInstance for SandboxedInstance {
             return;
         };
         let header = link.shm.header();
+        self.shared.note_realtime(header);
         let layout_changed = header.layout_changed.swap(0, Ordering::AcqRel) != 0;
         let state_changed = header.state_changed.swap(0, Ordering::AcqRel) != 0;
         // The user closed the window. (A host that is down keeps the editor "open", so a
