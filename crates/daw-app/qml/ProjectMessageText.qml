@@ -80,7 +80,7 @@ QtObject {
             return i18nc("@info %1 is a file path, %2 a message which may be in English",
                          "“%1” could not be played from disk, so its clips are silent (%2).", m.path, m.detail);
         case Project.CannotRead:
-            return i18nc("@info %1 is a file path", "“%1” could not be read, so its clips are silent.", m.path);
+            return i18nc("@info %1 is a file path", "“%1” could not be read, so it plays as silence.", m.path);
         case Project.NotesDropped:
             return i18nc("@info %1 is a track name",
                          "Changes to the notes on “%1” have not reached the audio engine yet.", m.name);
@@ -90,6 +90,12 @@ QtObject {
         case Project.RoutingLoop:
             return i18nc("@info %1 is a track name",
                          "An output or send of “%1” would feed its sound back into itself, so it is left out.", m.name);
+        case Project.NotesUnplayed:
+            return i18nc("@info %1 is a track name",
+                         "No device on “%1” plays notes, so its notes are silent. Add an instrument to the track.", m.name);
+        case Project.LaneSkipped:
+            return i18nc("@info %1 is a device name",
+                         "“%1” cannot be automated while it plays, so its automation is left out.", m.name);
         case Project.NoInstrumentTrack:
             return i18nc("@info", "Arm an audio track to record audio, or add an instrument track to record MIDI on.");
         case Project.EngineNotRunning:

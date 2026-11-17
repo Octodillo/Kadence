@@ -96,6 +96,10 @@ pub enum Reason {
     ClipsDropped,
     /// An output or send of track `name` would loop, so it is left out.
     RoutingLoop,
+    /// No device on instrument track `name` takes notes.
+    NotesUnplayed,
+    /// Device `name` can't be automated, so a lane on it is left out.
+    LaneSkipped,
     /// Recording needs an armed track or an instrument track.
     NoInstrumentTrack,
     /// Recording needs the audio engine running.
@@ -456,6 +460,12 @@ impl Message {
                 }
                 Warning::RoutingLoop { track } => {
                     Fields::new(C::Playback, R::RoutingLoop).name(track)
+                }
+                Warning::NotesUnplayed { track } => {
+                    Fields::new(C::Playback, R::NotesUnplayed).name(track)
+                }
+                Warning::LaneSkipped { device } => {
+                    Fields::new(C::Playback, R::LaneSkipped).name(device)
                 }
             },
         }

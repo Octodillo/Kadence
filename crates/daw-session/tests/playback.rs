@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_core::event::EventList;
 use daw_core::time::{PPQ, SampleTime, TempoMap, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
@@ -16,9 +15,9 @@ use daw_model::{
     TrackKind,
 };
 use daw_session::{Session, SessionConfig, Warning, effective_mutes};
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const RATE: f64 = 48_000.0;
 const BLOCK: usize = 256;
@@ -109,9 +108,7 @@ impl Rig {
         while done < frames {
             let n = BLOCK.min(frames - done);
             let mut outs: [&mut [f32]; 2] = [&mut l[..n], &mut r[..n]];
-            let before = violation_count();
-            assert_no_alloc(|| self.proc.process(n, &[], &mut outs, &events));
-            assert_eq!(violation_count(), before, "process allocated");
+            assert_no_alloc("process", || self.proc.process(n, &[], &mut outs, &events));
             out.extend_from_slice(&l[..n]);
             done += n;
         }
@@ -579,6 +576,95 @@ fn split_clip_plays_through_the_cut_without_a_dip() {
             "dip at {}: {x} vs {level}",
             cut - 128 + i
         );
+    }
+}
+
+/// A split of a file at another sample rate: the right half's offset is kept in the file's
+/// frames, so at the engine's rate it can land a sample off where the left half stops. The
+/// halves still continue each other.
+#[test]
+fn split_clip_of_a_file_at_another_rate_plays_through_the_cut() {
+    use daw_core::time::{engine_to_file_frames, file_to_engine_frames};
+    const FILE_RATE: f64 = 44_100.0;
+    let mut rig = Rig::new(60.0);
+    let data = AudioData {
+        sample_rate: FILE_RATE as u32,
+        channels: vec![vec![0.5; 4 * FILE_RATE as usize]],
+    };
+    write_wav(rig.dir().join("pad.wav"), &data, WavFormat::Float32).unwrap();
+    // A cut a beat and 15 ticks in, as the arrange view's split makes it.
+    let at = TickTime(PPQ + 15);
+    let shift = rig.session.ticks_to_samples(at).0;
+    let offset = engine_to_file_frames(shift, FILE_RATE, RATE);
+    assert_ne!(
+        file_to_engine_frames(offset, FILE_RATE, RATE),
+        shift,
+        "a cut that rounds apart at the engine's rate"
+    );
+    let audio = |offset| ClipContent::Audio(AudioClip::new("pad.wav", SampleTime(offset)));
+    let left = Clip::new("left", TickTime(0), at, audio(0));
+    let right = Clip::new("right", at, TickTime(2 * PPQ), audio(offset));
+    rig.doc.execute(AddClip::new(rig.track, left)).unwrap();
+    rig.doc.execute(AddClip::new(rig.track, right)).unwrap();
+    rig.sync();
+    rig.session.play().unwrap();
+    let out = rig.run(2 * BEAT as usize);
+    let cut = shift as usize;
+    let level = out[cut - 2_000];
+    assert!((level - 0.5).abs() < 1e-3, "{level}");
+    for (i, &x) in out[cut - 128..cut + 128].iter().enumerate() {
+        assert!(
+            (x - level).abs() < 1e-3,
+            "dip at {}: {x} vs {level}",
+            cut - 128 + i
+        );
+    }
+}
+
+/// A file at another rate cut twice, the later cut first: the middle part's file end is two
+/// rounded lengths from the file's start and the right part's offset one, a frame apart.
+/// They still continue each other.
+#[test]
+fn parts_of_a_file_at_another_rate_cut_twice_play_through_the_cuts() {
+    use daw_core::time::engine_to_file_frames;
+    const FILE_RATE: f64 = 44_100.0;
+    let mut rig = Rig::new(60.0);
+    let data = AudioData {
+        sample_rate: FILE_RATE as u32,
+        channels: vec![vec![0.5; 4 * FILE_RATE as usize]],
+    };
+    write_wav(rig.dir().join("pad.wav"), &data, WavFormat::Float32).unwrap();
+    let frames = |rig: &Rig, from: TickTime, to: TickTime| {
+        let len = rig.session.ticks_to_samples(to).0 - rig.session.ticks_to_samples(from).0;
+        engine_to_file_frames(len, FILE_RATE, RATE)
+    };
+    // A second cut (`a`) to the left of the first (`b`), where the roundings differ.
+    let b = TickTime(PPQ + 15);
+    let a = (1..PPQ)
+        .map(TickTime)
+        .find(|&a| {
+            frames(&rig, TickTime(0), a) + frames(&rig, a, b) != frames(&rig, TickTime(0), b)
+        })
+        .expect("a cut where two rounded lengths are not the rounded sum");
+    let mid_offset = frames(&rig, TickTime(0), a);
+    let right_offset = frames(&rig, TickTime(0), b);
+    let audio = |offset| ClipContent::Audio(AudioClip::new("pad.wav", SampleTime(offset)));
+    for (name, start, len, offset) in [
+        ("left", TickTime(0), a, 0),
+        ("mid", a, TickTime(b.0 - a.0), mid_offset),
+        ("right", b, TickTime(2 * PPQ), right_offset),
+    ] {
+        let clip = Clip::new(name, start, len, audio(offset));
+        rig.doc.execute(AddClip::new(rig.track, clip)).unwrap();
+    }
+    rig.sync();
+    rig.session.play().unwrap();
+    let out = rig.run(2 * BEAT as usize);
+    for cut in [a, b] {
+        let cut = rig.session.ticks_to_samples(cut).0 as usize;
+        for (i, &x) in out[cut.saturating_sub(128)..cut + 128].iter().enumerate() {
+            assert!((x - 0.5).abs() < 1e-3, "dip {i} samples around {cut}: {x}");
+        }
     }
 }
 

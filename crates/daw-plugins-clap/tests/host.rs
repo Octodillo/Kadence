@@ -4,16 +4,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{ProcessContext, TransportState};
 use daw_core::plugin::{
     PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 use daw_plugins_clap::ClapFormat;
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const ID: &str = "org.daw.test.gain";
 const GAIN: u32 = 1;
@@ -315,12 +314,12 @@ fn process_does_not_allocate() {
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        assert_no_alloc(|| plugin.process(&mut ctx));
+        assert_no_alloc("process", || plugin.process(&mut ctx));
     }
     // The gain change from the first block persists into later ones.
     assert_eq!(left[0], 0.25);
     assert_eq!(left[255], 0.25);
-    assert_no_alloc(|| plugin.reset());
+    assert_no_alloc("reset", || plugin.reset());
 }
 
 #[test]
@@ -381,7 +380,7 @@ fn a_flood_of_output_events_is_dropped_without_allocating() {
     };
     plugin.process(&mut ctx); // warm up: starts processing
     ctx.events_out.clear();
-    assert_no_alloc(|| plugin.process(&mut ctx));
+    assert_no_alloc("process", || plugin.process(&mut ctx));
     assert_eq!(ctx.events_out.len(), 8);
 }
 

@@ -1,20 +1,19 @@
 //! Headless hosting tests: the `testgain` example plugin always, and the VST 3 SDK's `again`
-//! sample when `DAW_VST3_AGAIN` points at a built `again.vst3` bundle (CI builds it).
+//! sample when `KADENCE_VST3_AGAIN` points at a built `again.vst3` bundle (CI builds it).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use daw_core::{
     Event, EventKind, EventList, PluginDescriptor, PluginFormat, PluginInstance, ProcessContext,
     TransportState,
 };
 use daw_plugins_vst3::Vst3Format;
+use daw_test_support::no_alloc::assert_no_alloc;
 
 mod support;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const FRAMES: u32 = 64;
 const SAMPLE_RATE: f64 = 48_000.0;
@@ -64,14 +63,7 @@ fn run(
             events_in: &events_in,
             events_out: &mut events_out,
         };
-        // The workspace enables `warn_debug`/`warn_release`, so allocations are counted rather than aborting.
-        let before = assert_no_alloc::violation_count();
-        assert_no_alloc(|| plugin.process(&mut ctx));
-        assert_eq!(
-            assert_no_alloc::violation_count(),
-            before,
-            "process allocated"
-        );
+        assert_no_alloc("process", || plugin.process(&mut ctx));
     }
     let out_events = events_out.iter().copied().collect();
     let mut outs = outs.into_iter();
@@ -227,13 +219,7 @@ fn reset_keeps_the_plugin_active() {
 
     // `reset` runs on the audio thread, where setActive (which plugins allocate and lock in)
     // must not be called.
-    let violations = assert_no_alloc::violation_count();
-    assert_no_alloc(|| p.reset());
-    assert_eq!(
-        assert_no_alloc::violation_count(),
-        violations,
-        "reset allocated"
-    );
+    assert_no_alloc("reset", || p.reset());
 
     let (out, events) = run(p.as_mut(), &input, &[]);
     assert_eq!(reported(&events, ACTIVATIONS), Some(before));
@@ -264,7 +250,7 @@ fn many_instances_share_one_module() {
 
 /// The SDK's `again` sample: split component/controller built from the real SDK classes.
 fn again() -> Option<Vec<PluginDescriptor>> {
-    match std::env::var_os("DAW_VST3_AGAIN") {
+    match std::env::var_os("KADENCE_VST3_AGAIN") {
         Some(path) => {
             let found = Vst3Format.scan(Path::new(&path)).unwrap().plugins;
             assert!(!found.is_empty(), "no classes in {path:?}");
@@ -272,10 +258,10 @@ fn again() -> Option<Vec<PluginDescriptor>> {
         }
         None => {
             assert!(
-                std::env::var_os("DAW_VST3_REQUIRE_SDK_PLUGINS").is_none(),
-                "DAW_VST3_AGAIN is not set but SDK plugins are required"
+                std::env::var_os("KADENCE_VST3_REQUIRE_SDK_PLUGINS").is_none(),
+                "KADENCE_VST3_AGAIN is not set but SDK plugins are required"
             );
-            eprintln!("DAW_VST3_AGAIN not set; the SDK again test has nothing to load");
+            eprintln!("KADENCE_VST3_AGAIN not set; the SDK again test has nothing to load");
             None
         }
     }
@@ -339,7 +325,7 @@ fn sdk_again_editor_opens_in_a_floating_window() {
     let Some(found) = again() else { return };
     if std::env::var_os("DISPLAY").is_none() {
         assert!(
-            std::env::var_os("DAW_VST3_REQUIRE_SDK_PLUGINS").is_none(),
+            std::env::var_os("KADENCE_VST3_REQUIRE_SDK_PLUGINS").is_none(),
             "no X display for the editor test"
         );
         return;

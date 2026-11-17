@@ -286,6 +286,41 @@ fn split_and_duplicate() {
     assert!(!r.arrange.selection.contains(&a));
 }
 
+/// Issue #204 item 3: a selection that holds only clips that are gone (the
+/// copy an undone Duplicate made) counts as none.
+#[test]
+fn split_falls_back_to_the_selected_track_when_the_selection_is_gone() {
+    let mut r = Rig::new();
+    let a = r.audio(0, 0, 2 * BAR, 0);
+    let tempo = r.tempo.clone();
+    let env = Env {
+        tempo: &tempo,
+        sample_rate: 48_000.0,
+        root: None,
+        playhead: TickTime(0),
+        loop_range: None,
+    };
+    // Click the clip (which selects its track), duplicate, undo.
+    let (x, y) = (r.x(BAR / 2), r.y(0));
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange.release(&mut r.doc, Pointer::left(x, y));
+    r.arrange.duplicate_selection(&mut r.doc);
+    r.doc.undo().unwrap();
+    assert!(!r.arrange.selection.contains(&a));
+    assert!(!r.arrange.clips_selected(r.doc.project()));
+
+    // The selection is kept, not pruned, so that redo selects the copy again.
+    r.doc.redo().unwrap();
+    assert!(r.arrange.clips_selected(r.doc.project()));
+    let copy = r.doc.project().tracks[0].clips[1].id;
+    assert!(r.arrange.selection.contains(&copy));
+    r.doc.undo().unwrap();
+
+    let out = r.arrange.split_at(&mut r.doc, &env, TickTime(BAR));
+    assert!(out.document, "{out:?}");
+    assert_eq!(r.doc.project().tracks[0].clips.len(), 2);
+}
+
 #[test]
 fn double_click_on_instrument_lane_makes_a_bar_long_clip() {
     let mut r = Rig::new();

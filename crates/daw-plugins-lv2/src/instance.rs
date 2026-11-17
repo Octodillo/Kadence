@@ -1065,18 +1065,17 @@ mod tests {
     /// test) where the bundle is not installed and not required.
     fn installed(bundle: &str, id: &str) -> Option<Lv2Instance> {
         let format = crate::Lv2Format::new();
+        let dir = daw_test_support::lv2::find_bundles(format.default_search_paths(), &[bundle])?;
         let found = format
-            .default_search_paths()
-            .into_iter()
-            .find(|d| d.join(bundle).is_dir())
-            .and_then(|dir| format.scan(&dir.join(bundle)).ok())
+            .scan(&dir.join(bundle))
+            .ok()
             .and_then(|scan| scan.plugins.into_iter().find(|d| d.id == id));
         let Some(d) = found else {
             assert!(
-                std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
-                "{id} of {bundle} must be installed"
+                std::env::var_os(daw_test_support::lv2::REQUIRE_ENV).is_none(),
+                "{bundle} must contain {id}"
             );
-            eprintln!("skipped: {id} of {bundle} not installed");
+            eprintln!("skipped: {bundle} has no {id}");
             return None;
         };
         Some(format.instantiate_lv2(&d, 48_000.0).unwrap())

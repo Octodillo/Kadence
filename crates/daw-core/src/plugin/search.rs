@@ -87,12 +87,13 @@ impl Environment {
 /// library directories and, inside Flatpak, the plugin extension and the application's own
 /// plugins. `LV2_PATH` replaces the home and system directories; the other two add to them.
 ///
-/// Only paths that exist are returned, each once: the same directory is often listed twice or
-/// reached through a symlink (`/usr/lib64` is a link to `/usr/lib` on Arch). A path from the
-/// variable may also be a single bundle.
+/// Each path is returned once: the same directory is often listed twice or reached through a
+/// symlink (`/usr/lib64` is a link to `/usr/lib` on Arch). Paths that do not exist yet are
+/// listed too, so the application can show where plugins may be put. A path from the variable
+/// may also be a single bundle.
 pub fn default_search_paths(kind: &PluginFormatKind) -> Vec<PathBuf> {
     let layout = layout(kind);
-    existing(listed(&layout, &Environment::current(&layout)))
+    once_each(listed(&layout, &Environment::current(&layout)))
 }
 
 /// Every path the layout names in `environment`, whether or not it exists.
@@ -127,13 +128,12 @@ fn listed(layout: &Layout, environment: &Environment) -> Vec<PathBuf> {
     paths
 }
 
-/// The paths that exist, without the ones that name an earlier path again.
-fn existing(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+/// `paths` without the ones that name an earlier path again, by another spelling or through
+/// a symlink.
+fn once_each(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
+    paths.retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
     paths
-        .into_iter()
-        .filter(|p| p.canonicalize().is_ok_and(|real| seen.insert(real)))
-        .collect()
 }
 
 #[cfg(test)]
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_repeated_paths_are_dropped() {
+    fn a_path_is_listed_once_and_missing_ones_stay_listed() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("lib");
         let link = dir.path().join("lib64");
@@ -220,13 +220,15 @@ mod tests {
         // A path may be one bundle rather than a directory of them.
         let bundle = dir.path().join("one.clap");
         std::fs::write(&bundle, "").unwrap();
-        let found = existing(vec![
+        let missing = dir.path().join("missing");
+        let found = once_each(vec![
             real.clone(),
-            dir.path().join("missing"),
+            missing.clone(),
             link,
             bundle.clone(),
             real.clone(),
+            missing.clone(),
         ]);
-        assert_eq!(found, [real, bundle]);
+        assert_eq!(found, [real, missing, bundle]);
     }
 }

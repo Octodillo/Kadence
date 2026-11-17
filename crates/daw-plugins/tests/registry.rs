@@ -373,19 +373,11 @@ fn earlier_search_paths_win_for_duplicate_plugins() {
 /// LV2 goes through the same out-of-process scan, when mda-lv2 is installed.
 #[test]
 fn registry_scans_and_instantiates_lv2() {
-    let Some(mda) = daw_plugins_lv2::format()
-        .default_search_paths()
-        .into_iter()
-        .map(|d| d.join("mda.lv2"))
-        .find(|b| b.is_dir())
-    else {
-        assert!(
-            std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
-            "mda-lv2 must be installed"
-        );
-        eprintln!("skipped: mda-lv2 not installed");
+    let dirs = daw_plugins_lv2::format().default_search_paths();
+    let Some(dir) = daw_test_support::lv2::find_bundles(dirs, &["mda.lv2"]) else {
         return;
     };
+    let mda = dir.join("mda.lv2");
     let dir = tempfile::tempdir().unwrap();
     let mut registry = default_registry();
     registry.set_search_paths(PluginFormatKind::Clap, Vec::new());

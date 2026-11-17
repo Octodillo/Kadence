@@ -159,6 +159,13 @@ impl PluginCatalog {
         &self.extra_folders
     }
 
+    /// The folders a scan searches for `format` before the user's extra ones, in search
+    /// order: the format's own (its environment variable included), or those given to
+    /// [`with_folders`](Self::with_folders). Some may not exist.
+    pub fn format_folders(&self, format: &PluginFormatKind) -> Vec<PathBuf> {
+        own_folders(&self.folders, &daw_plugins::default_registry(), format)
+    }
+
     /// Starts a scan on a background thread. Bundles scanned before and unchanged since are
     /// answered from the cache; with `retry_failed`, bundles that failed are loaded again.
     /// While a scan runs, another one is queued to start when it ends.
@@ -295,6 +302,18 @@ fn same_plugins(a: &[PluginDescriptor], b: &[PluginDescriptor]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| key(x) == key(y))
 }
 
+/// Where `format` is searched: `replaced[format]` if there, otherwise the format's own folders.
+fn own_folders(
+    replaced: &HashMap<PluginFormatKind, Vec<PathBuf>>,
+    registry: &daw_plugins::PluginRegistry,
+    format: &PluginFormatKind,
+) -> Vec<PathBuf> {
+    match replaced.get(format) {
+        Some(paths) => paths.clone(),
+        None => registry.search_paths(format),
+    }
+}
+
 /// One scan, as the background thread runs it.
 struct Job {
     scanner: Scanner,
@@ -308,10 +327,7 @@ impl Job {
     fn run(self, done: &AtomicUsize, total: &AtomicUsize) -> Outcome {
         let mut registry = daw_plugins::default_registry();
         for format in FORMATS {
-            let mut paths = match self.folders.get(&format) {
-                Some(paths) => paths.clone(),
-                None => registry.search_paths(&format),
-            };
+            let mut paths = own_folders(&self.folders, &registry, &format);
             paths.extend(self.extra_folders.iter().cloned());
             registry.set_search_paths(format, paths);
         }
@@ -361,6 +377,21 @@ mod tests {
             is_instrument: instrument,
             ports: (if instrument { 0 } else { 2 }, 2),
         }
+    }
+
+    #[test]
+    fn format_folders_are_the_formats_own_unless_replaced() {
+        let scanner = Scanner::new("unused", Vec::<std::ffi::OsString>::new());
+        let mut catalog = PluginCatalog::new(scanner)
+            .with_folders(PluginFormatKind::Clap, vec![PathBuf::from("/replaced")]);
+        catalog.set_extra_folders(vec![PathBuf::from("/extra")]);
+        assert_eq!(
+            catalog.format_folders(&PluginFormatKind::Clap),
+            [PathBuf::from("/replaced")]
+        );
+        let own = daw_plugins::default_registry().search_paths(&PluginFormatKind::Vst3);
+        assert!(own.contains(&PathBuf::from("/usr/lib/vst3")));
+        assert_eq!(catalog.format_folders(&PluginFormatKind::Vst3), own);
     }
 
     #[test]

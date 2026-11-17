@@ -147,7 +147,8 @@ pub enum Warning {
     /// An audio file could not be streamed; its clips are silent.
     #[error("can't stream {}: {detail}", path.display())]
     CannotStream { path: PathBuf, detail: String },
-    /// An audio file could not be read; its clips are silent.
+    /// An audio file could not be read; the clips or sampler zones that
+    /// play it are silent.
     #[error("can't read {}", path.display())]
     CannotRead { path: PathBuf },
     /// A track's notes did not reach the engine; the next sync retries.
@@ -160,6 +161,14 @@ pub enum Warning {
     /// so it is left out. Edits never allow this; a damaged project could.
     #[error("routing from track {track} would loop; it is left out")]
     RoutingLoop { track: String },
+    /// None of an instrument track's devices takes notes, so its notes
+    /// play nothing.
+    #[error("no device on track {track} takes notes")]
+    NotesUnplayed { track: String },
+    /// A device takes no parameter changes while it plays, so a lane on
+    /// one of its parameters does nothing.
+    #[error("device {device} can't be automated; its lane is left out")]
+    LaneSkipped { device: String },
 }
 
 impl Warning {

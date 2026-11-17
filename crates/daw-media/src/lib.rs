@@ -15,7 +15,10 @@ mod stream;
 mod write;
 
 pub use data::AudioData;
-pub use decode::{AudioFileInfo, Decoder, decode_file, load_file};
+pub use decode::{
+    AudioFileInfo, Decoder, MAX_CHANNELS, SAMPLE_RATES, decode_file, decode_file_within,
+    load_file_within,
+};
 pub use error::MediaError;
 pub use peaks::{BASE_FRAMES_PER_PEAK, PeakBuilder, PeakCache, PeakLevel};
 pub use record::{RecordInput, RecordedFile, Recorder, RecordingStats};

@@ -15,7 +15,7 @@ daw-model = { path = "../daw-model" }
 [dev-dependencies]
 daw-devices = { path = "../daw-devices" }
 daw-engine = { path = "../daw-engine" }
-assert_no_alloc.workspace = true
+daw-test-support.workspace = true
 proptest.workspace = true
 
 [lints]

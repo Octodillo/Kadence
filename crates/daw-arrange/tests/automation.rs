@@ -715,3 +715,30 @@ fn clicking_a_point_does_not_move_it() {
     assert!(r.points(lane)[2].value > added);
     r.arrange.release(&mut r.doc, Pointer::left(x, y - 2.0));
 }
+
+/// Issue #204 item 5.
+#[test]
+fn select_all_selects_clips_instead_of_points() {
+    use daw_core::time::SampleTime;
+    use daw_model::commands::AddClip;
+    use daw_model::{AudioClip, Clip, ClipContent};
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Pan);
+    let track = r.doc.project().tracks[0].id;
+    let clip = Clip::new(
+        "a",
+        TickTime(0),
+        TickTime(BAR),
+        ClipContent::Audio(AudioClip::new("missing.wav", SampleTime(0))),
+    );
+    r.doc.execute(AddClip::new(track, clip)).unwrap();
+    r.doc.seal();
+    r.click(r.x(BAR), r.y(0, 0, 0.5));
+    assert!(r.arrange.lanes.points_selected(r.doc.project()));
+
+    r.arrange.select_all(r.doc.project());
+    assert!(!r.arrange.lanes.points_selected(r.doc.project()));
+    r.arrange.delete_selection(&mut r.doc);
+    assert!(r.doc.project().tracks[0].clips.is_empty());
+    assert_eq!(r.points(lane).len(), 1, "Delete took the point");
+}

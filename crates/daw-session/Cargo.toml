@@ -22,7 +22,7 @@ thiserror.workspace = true
 log = "0.4"
 
 [dev-dependencies]
-assert_no_alloc.workspace = true
+daw-test-support.workspace = true
 # A loopback cable for the JACK record test.
 jack.workspace = true
 libc = "0.2"

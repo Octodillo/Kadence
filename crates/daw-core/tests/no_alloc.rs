@@ -1,11 +1,6 @@
 //! Checks that the RT-side operations never touch the allocator.
-//!
-//! The workspace's `warn_debug`/`warn_release` make violations count instead of abort,
-//! so everything runs inside one test: the violation counter is global and parallel
-//! tests would see each other's.
 #![cfg(not(loom))]
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::dispose::deferred_drop;
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::meter::PeakMeter;
@@ -18,9 +13,9 @@ use daw_core::split::{SharedAudio, SplitAudio};
 use daw_core::time::{
     Meter, MeterPoint, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline,
 };
+use daw_test_support::no_alloc::allocations_in;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 /// Counts the events it is given.
 struct Counter(usize);
@@ -34,17 +29,8 @@ impl SplitAudio for Counter {
     }
 }
 
-fn allocations_in(f: impl FnOnce()) -> u32 {
-    reset_violation_count();
-    assert_no_alloc(f);
-    violation_count()
-}
-
 #[test]
 fn rt_operations_do_not_allocate() {
-    // The checker itself must notice an allocation.
-    assert!(allocations_in(|| drop(vec![1u8])) > 0);
-
     let mut list = EventList::with_capacity(64);
     let ev = |frame| Event {
         frame,

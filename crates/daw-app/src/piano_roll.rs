@@ -13,6 +13,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QString};
 use daw_arrange::Scene;
 use daw_midi::edit::{Quantize, QuantizeEnds};
+use daw_pianoroll::Accidentals;
 
 use crate::arrange_view::{cursor_shape, pointer, to_qcolor, to_rgba};
 use crate::automation_bridge::{shape, shape_index};
@@ -52,6 +53,8 @@ pub mod qobject {
         /// height of each (set by QML).
         #[qproperty(bool, lanes_shown)]
         #[qproperty(f64, lane_height)]
+        /// Whether note names spell the black keys as flats (set by QML).
+        #[qproperty(bool, flat_note_names)]
         /// The height the lane rows take, and the clip's track's row in
         /// the project and its number of lanes, for the lane headers.
         #[qproperty(f64, lanes_height)]
@@ -177,6 +180,7 @@ pub struct PianoRollRust {
     velocity_height: f64,
     lanes_shown: bool,
     lane_height: f64,
+    flat_note_names: bool,
     lanes_height: f64,
     track_index: i32,
     lane_count: i32,
@@ -212,6 +216,7 @@ impl Default for PianoRollRust {
             velocity_height: d.velocity_height,
             lanes_shown: d.lanes_shown,
             lane_height: d.lane_height,
+            flat_note_names: d.accidentals == Accidentals::Flats,
             lanes_height: 0.0,
             track_index: -1,
             lane_count: 0,
@@ -290,6 +295,11 @@ impl qobject::PianoRoll {
         let palette = self.palette();
         let (rh, kw, vh) = (self.ruler_height, self.keyboard_width, self.velocity_height);
         let (lanes_shown, lh) = (self.lanes_shown, self.lane_height);
+        let accidentals = if self.flat_note_names {
+            Accidentals::Flats
+        } else {
+            Accidentals::Sharps
+        };
         let (scene, shown) = state::with(|s| {
             s.piano.palette = palette;
             s.piano.ruler_height = rh;
@@ -297,6 +307,7 @@ impl qobject::PianoRoll {
             s.piano.velocity_height = vh;
             s.piano.lanes_shown = lanes_shown;
             s.piano.lane_height = lh;
+            s.piano.accidentals = accidentals;
             s.piano.resize(w, h);
             s.piano.sync(s.doc.project());
             s.piano.fit_if_pending(s.doc.project());

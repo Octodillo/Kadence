@@ -57,7 +57,7 @@ jobs:
         # and drops the connection of a test opening a plugin UI in parallel.
         run: xvfb-run -a -s "-noreset" cargo nextest run --workspace --exclude daw-app --no-tests=warn
         env:
-          DAW_REQUIRE_LV2_PLUGINS: 1
+          KADENCE_REQUIRE_LV2_PLUGINS: 1
       - name: vendored livi tests
         # Its own workspace (see third_party/livi/KADENCE.md); its tests
         # build small C plugins and use the LV2 example plugins.
