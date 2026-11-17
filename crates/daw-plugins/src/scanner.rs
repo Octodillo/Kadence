@@ -35,6 +35,9 @@ pub fn kind_from_name(name: &str) -> Option<PluginFormatKind> {
 pub enum ScanError {
     #[error("could not start the scanner: {0}")]
     Spawn(std::io::Error),
+    /// The scanner has no program to run; see [`Scanner::unavailable`].
+    #[error("plugins cannot be scanned: {0}")]
+    Unavailable(String),
     #[error("the scanner crashed ({0})")]
     Crashed(ExitStatus),
     #[error("the scan took longer than {0:?}")]
@@ -65,7 +68,8 @@ impl ScanError {
 /// Runs scans in child processes: `<program> <args>... --scan <format> <bundle>`.
 #[derive(Clone, Debug)]
 pub struct Scanner {
-    program: PathBuf,
+    /// The program to run, or why there is none.
+    program: Result<PathBuf, String>,
     args: Vec<OsString>,
     timeout: Duration,
     jobs: usize,
@@ -78,7 +82,7 @@ impl Scanner {
         args: impl IntoIterator<Item = impl Into<OsString>>,
     ) -> Self {
         Self {
-            program: program.into(),
+            program: Ok(program.into()),
             args: args.into_iter().map(Into::into).collect(),
             timeout: Duration::from_secs(30),
             jobs: std::thread::available_parallelism().map_or(2, |n| n.get().min(8)),
@@ -87,8 +91,24 @@ impl Scanner {
 
     /// A scanner that runs the current executable, for applications that forward `--scan` to
     /// [`run_scan_child`].
-    pub fn current_exe() -> std::io::Result<Self> {
-        Ok(Self::new(std::env::current_exe()?, Vec::<OsString>::new()))
+    ///
+    /// When the executable's path cannot be read (no `/proc`, say) the scanner is
+    /// [`unavailable`](Self::unavailable). Running a program of the same name from `PATH`
+    /// instead could run another version, or anything a writable `PATH` entry holds.
+    pub fn current_exe() -> Self {
+        match std::env::current_exe() {
+            Ok(exe) => Self::new(exe, Vec::<OsString>::new()),
+            Err(e) => Self::unavailable(format!("this program cannot find itself: {e}")),
+        }
+    }
+
+    /// A scanner with no program to run. Every scan fails with [`ScanError::Unavailable`] and
+    /// `why`, which is reported for each bundle and never cached.
+    pub fn unavailable(why: impl Into<String>) -> Self {
+        Self {
+            program: Err(why.into()),
+            ..Self::new(PathBuf::new(), Vec::<OsString>::new())
+        }
     }
 
     /// How long one bundle may take before its scanner is killed. Default 30 s.
@@ -109,7 +129,11 @@ impl Scanner {
 
     /// Scans one bundle in a child process.
     pub fn scan(&self, kind: &PluginFormatKind, bundle: &Path) -> Result<BundleScan, ScanError> {
-        let mut command = Command::new(&self.program);
+        let program = self
+            .program
+            .as_ref()
+            .map_err(|why| ScanError::Unavailable(why.clone()))?;
+        let mut command = Command::new(program);
         command
             .args(&self.args)
             .arg(SCAN_ARG)

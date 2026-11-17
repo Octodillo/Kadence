@@ -127,7 +127,10 @@ impl AppState {
         };
         // A plugin's live state can be newer than the document's.
         self.store_plugin_states();
-        let loader = self.engine.export_plugin_loader();
+        // The export finds the plugins playback does: the catalog's.
+        let loader = self
+            .engine
+            .export_plugin_loader(self.plugins.plugins().to_vec());
         let job = ExportJob::start(
             self.doc.snapshot(),
             Some(self.media_root()),

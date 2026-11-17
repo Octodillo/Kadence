@@ -130,12 +130,11 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 /// The app's plugin catalog: scanned by this executable (which answers
-/// `--scan`; see [`run_plugin_child`](crate::run_plugin_child)), sharing the
-/// session's scan cache.
+/// `--scan`; see [`run_plugin_child`](crate::run_plugin_child)), with the
+/// results cached between runs. It is the only thing that looks for
+/// plugins: playback and exports load what it lists.
 fn plugin_catalog() -> PluginCatalog {
-    let scanner = Scanner::current_exe()
-        .unwrap_or_else(|_| Scanner::new("kadence", Vec::<std::ffi::OsString>::new()));
-    let catalog = PluginCatalog::new(scanner);
+    let catalog = PluginCatalog::new(Scanner::current_exe());
     match crate::engine::plugin_cache_file() {
         Some(file) => catalog.with_cache_file(file),
         None => catalog,

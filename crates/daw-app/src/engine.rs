@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use daw_backend::{DummyBackend, Pacing, PortDirection, PortKind};
+use daw_core::plugin::PluginDescriptor;
 use daw_plugin_host::{HostLauncher, SandboxConfig};
 pub use daw_session::host::MidiSource;
 use daw_session::host::{AudioHost, HostConfig, HostKind};
@@ -130,9 +131,14 @@ pub trait EngineHandle {
         0
     }
 
-    /// How an export loads plugins, as the session does: `None` when the
-    /// session has no plugin loader either (the stub engine).
-    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
+    /// How an export loads plugins, as the session does, out of `known`
+    /// (the plugin catalog's list, which is also what the session was
+    /// told): `None` when the session has no plugin loader either (the stub
+    /// engine).
+    fn export_plugin_loader(
+        &self,
+        _known: Vec<PluginDescriptor>,
+    ) -> Option<daw_session::export::LoaderFactory> {
         None
     }
 
@@ -190,31 +196,27 @@ macro_rules! host_midi {
 }
 
 /// Loads plugins in sandbox host processes: this executable again, which
-/// answers `--plugin-host` and `--scan` before Qt starts (see
-/// [`run_plugin_child`](crate::run_plugin_child)). Scan results are cached
-/// in `$XDG_CACHE_HOME/kadence/plugins.json`.
+/// answers `--plugin-host` before Qt starts (see
+/// [`run_plugin_child`](crate::run_plugin_child)). The loader learns which
+/// plugins are installed from the plugin catalog, through
+/// [`Session::set_known_plugins`].
 fn plugin_loader() -> Option<Box<dyn PluginLoader>> {
-    sandbox_loader(|c| c)
+    Some(Box::new(sandbox_loader(|c| c)?))
 }
 
-/// [`plugin_loader`] for an export, which renders faster than real time.
-fn export_plugin_loader() -> Option<Box<dyn PluginLoader>> {
-    sandbox_loader(daw_session::export::offline_sandbox)
+/// [`plugin_loader`] for an export, which renders faster than real time and
+/// starts out knowing the catalog's plugins.
+fn export_plugin_loader(known: Vec<PluginDescriptor>) -> Option<Box<dyn PluginLoader>> {
+    let loader = sandbox_loader(daw_session::export::offline_sandbox)?;
+    Some(Box::new(loader.with_known(known)))
 }
 
-fn sandbox_loader(
-    adjust: impl FnOnce(SandboxConfig) -> SandboxConfig,
-) -> Option<Box<dyn PluginLoader>> {
+fn sandbox_loader(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> Option<SandboxLoader> {
     let launcher = HostLauncher::current_exe().ok()?;
-    let mut loader = SandboxLoader::new(adjust(SandboxConfig::new(launcher)));
-    if let Some(file) = plugin_cache_file() {
-        loader = loader.with_cache_file(file);
-    }
-    Some(Box::new(loader))
+    Some(SandboxLoader::new(adjust(SandboxConfig::new(launcher))))
 }
 
-/// Where plugin scan results are kept, shared by the session's loader and
-/// the plugin browser's scan.
+/// Where the plugin catalog keeps its scan results between runs.
 pub(crate) fn plugin_cache_file() -> Option<PathBuf> {
     crate::paths::cache_dir().map(|dir| dir.join("plugins.json"))
 }
@@ -296,8 +298,11 @@ impl Default for SessionEngine {
 }
 
 impl EngineHandle for SessionEngine {
-    fn export_plugin_loader(&self) -> Option<daw_session::export::LoaderFactory> {
-        Some(Box::new(export_plugin_loader))
+    fn export_plugin_loader(
+        &self,
+        known: Vec<PluginDescriptor>,
+    ) -> Option<daw_session::export::LoaderFactory> {
+        Some(Box::new(move || export_plugin_loader(known)))
     }
 
     fn backend_kind(&self) -> BackendKind {

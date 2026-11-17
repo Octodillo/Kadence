@@ -74,28 +74,43 @@ fn binaries() -> &'static (PathBuf, PathBuf) {
     })
 }
 
-/// A loader that finds only the test plugin, set up as an export's.
+/// What a scan of the test plugin's folder finds, as a catalog would hand it to a loader.
+fn known_plugins() -> Vec<PluginDescriptor> {
+    static KNOWN: OnceLock<Vec<PluginDescriptor>> = OnceLock::new();
+    KNOWN
+        .get_or_init(|| {
+            let (plugins, host) = binaries();
+            HostLauncher::new(host, Vec::<String>::new())
+                .scanner()
+                .scan(&PluginFormatKind::Clap, &plugins.join("test-gain.clap"))
+                .expect("the test plugin scans")
+                .plugins
+        })
+        .clone()
+}
+
+/// A loader that knows only the test plugin, set up as an export's.
 fn export_loader() -> SandboxLoader {
     loader_with(daw_session::export::offline_sandbox)
 }
 
-/// A loader that finds only the test plugin.
+/// A loader that knows only the test plugin.
 fn loader() -> SandboxLoader {
     loader_with(|c| c)
 }
 
 fn loader_with(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
-    let (plugins, host) = binaries();
+    blind_loader_with(adjust).with_known(known_plugins())
+}
+
+/// A loader that has been told of no plugins, as before the app's first scan ends.
+fn blind_loader_with(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
+    let (_, host) = binaries();
     let mut config = SandboxConfig::new(HostLauncher::new(host, Vec::<String>::new()));
     // CI machines are slow and the host is a debug build.
     config.process_timeout = Some(Duration::from_secs(5));
     config.rt_priority = None;
-    let mut loader = SandboxLoader::new(adjust(config));
-    let registry = loader.registry_mut();
-    registry.set_search_paths(PluginFormatKind::Clap, vec![plugins.clone()]);
-    registry.set_search_paths(PluginFormatKind::Lv2, vec![]);
-    registry.set_search_paths(PluginFormatKind::Vst3, vec![]);
-    loader
+    SandboxLoader::new(adjust(config))
 }
 
 /// A catalog that scans only `extra` (as the user's added folders), with the sandbox host as
@@ -892,12 +907,9 @@ fn the_catalog_scans_added_folders_in_the_background() {
 #[test]
 fn a_missing_plugin_loads_once_a_scan_finds_it() {
     let mut rig = Rig::new();
-    // A loader that finds nothing by itself, as when the plugin is in a folder the user added.
-    let mut blind = loader();
-    for format in daw_session::catalog::FORMATS {
-        blind.registry_mut().set_search_paths(format, vec![]);
-    }
-    rig.session.set_plugin_loader(Some(Box::new(blind)));
+    // A loader looks nowhere by itself: until a scan's result arrives, every plugin is missing.
+    rig.session
+        .set_plugin_loader(Some(Box::new(blind_loader_with(|c| c))));
     let mut second = gain_plugin();
     second.name = "Second".into();
     let second_id = second.id;
