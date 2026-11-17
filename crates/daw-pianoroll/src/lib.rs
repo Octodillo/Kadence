@@ -38,6 +38,7 @@ pub mod lanes;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use daw_arrange::gesture::DRAG_THRESHOLD;
 use daw_arrange::{
     Button, Cursor, Env, LaneEditor, Outcome, Palette, ParamCatalog, Pointer, Rect, Refusal, Scene,
     Snap, TimelineView,
@@ -60,8 +61,6 @@ pub const MAX_KEY_HEIGHT: f64 = 48.0;
 /// Row height a clip opens at when its notes fit.
 pub const DEFAULT_KEY_HEIGHT: f64 = 14.0;
 
-/// A pointer must move this far before a press becomes a drag.
-const DRAG_THRESHOLD: f64 = 3.0;
 /// Width of a note's resize zones.
 const EDGE_PX: f64 = 6.0;
 /// How close to a stem a velocity press must be: a target as wide as a

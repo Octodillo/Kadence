@@ -332,8 +332,9 @@ fn fades(
     }
 }
 
-/// The fade and gain handles: small squares along the clip's top edge,
-/// filled where they are set to something.
+/// The fade and gain handles: small squares along the clip's top edge (see
+/// [`Arrange::handles`](crate::Arrange::handles)), filled where they are set
+/// to something.
 fn handles(s: &mut Scene, h: &crate::Handles, audio: &AudioClip, pal: Palette, ink: Rgba) {
     let set = [
         (h.fade_in, !audio.fade_in.is_none()),
