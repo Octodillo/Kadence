@@ -319,8 +319,11 @@ impl qobject::DevicePanel {
     /// Re-reads the open device: signals the rows that changed, or resets
     /// the model when the parameters themselves did.
     fn reload(mut self: Pin<&mut Self>) {
-        let view = self.panel.view();
+        // The revision first: reading it brings the plugin's parameters
+        // and values up to date, and the view must not be older than the
+        // revision kept for it, or `refresh` would never show the rest.
         let revision = self.panel.revision();
+        let view = self.panel.view();
         self.as_mut().rust_mut().revision = revision;
         if view == self.view {
             return;

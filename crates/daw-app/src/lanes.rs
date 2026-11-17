@@ -7,11 +7,21 @@
 //! records over it, as with the mixer's Write Automation switch). The
 //! control is the same wherever it is moved: on the Mix page, in the device
 //! panel or in the lane's header, which goes through the same mixer.
+//!
+//! [`LaneParams`] is what the lanes know about device parameters (their
+//! names, ranges and tapers), for built-in devices and loaded plugins
+//! alike, so a lane's row, its header control and the device panel's
+//! slider all move along one scale.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use daw_arrange::automation::{lane_scale, static_value};
-use daw_model::{AutomationLane, AutomationTarget, LaneId, Project, Track};
+use daw_arrange::{LaneScale, ParamCatalog};
+use daw_core::event::ParamId;
+use daw_model::{
+    AutomationLane, AutomationTarget, Device, DeviceId, DeviceSource, LaneId, Project, Track,
+};
 
 use crate::device_panel::{BuiltinParams, ParamDesc};
 use crate::message::Message;
@@ -46,10 +56,102 @@ pub struct TargetName {
     pub param: String,
 }
 
+/// The device parameters the automation lanes know: every built-in
+/// device's, and each loaded plugin's as it described them when it loaded
+/// ([`LaneParams::set_plugins`]). The timeline and the piano roll ask it
+/// for a lane's scale ([`ParamCatalog`]), and the headers for its name and
+/// unit.
+///
+/// A plugin that is not loaded (missing, or no audio engine) is unknown
+/// here: its lanes keep the plain 0 to 1 scale and show the parameter's
+/// number until it loads.
+#[derive(Debug, Default)]
+pub struct LaneParams {
+    builtin: BuiltinParams,
+    /// Behind a lock only because the views hold the catalog as a shared
+    /// `Send + Sync` object; it is written on the thread that reads it.
+    plugins: RwLock<HashMap<DeviceId, Arc<[ParamDesc]>>>,
+}
+
+impl LaneParams {
+    fn plugin(&self, device: &Device) -> Option<Arc<[ParamDesc]>> {
+        if matches!(device.source, DeviceSource::Builtin { .. }) {
+            return None;
+        }
+        self.plugins
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&device.id)
+            .cloned()
+    }
+
+    /// One parameter of `device`, if it is known.
+    pub fn param(&self, device: &Device, param: ParamId) -> Option<ParamDesc> {
+        self.builtin
+            .param(device, param)
+            .or_else(|| self.plugin(device)?.iter().find(|p| p.id == param).cloned())
+    }
+
+    /// The name of a parameter, for headers.
+    pub fn name(&self, device: &Device, param: ParamId) -> Option<String> {
+        self.param(device, param).map(|p| p.name)
+    }
+
+    /// Takes the parameters of the loaded plugins among `devices`:
+    /// `describe` gives a loaded plugin's, as the session does. Plugins no
+    /// longer among them are forgotten. Returns true if anything a lane
+    /// shows changed.
+    pub fn set_plugins<'a>(
+        &self,
+        devices: impl Iterator<Item = &'a Device>,
+        describe: impl Fn(DeviceId) -> Option<&'a [daw_core::plugin::ParamInfo]>,
+    ) -> bool {
+        let mut plugins = self.plugins.write().unwrap_or_else(PoisonError::into_inner);
+        let mut changed = false;
+        let mut next = HashMap::new();
+        for device in devices {
+            let Some(infos) = describe(device.id) else {
+                continue;
+            };
+            // A plugin's parameters stay as they are while it is loaded
+            // (there may be thousands): describe them again only if they
+            // differ.
+            let kept = plugins.remove(&device.id).filter(|known| {
+                known.len() == infos.len() && known.iter().zip(infos).all(|(d, i)| d.describes(i))
+            });
+            let descs = kept.unwrap_or_else(|| {
+                changed = true;
+                infos.iter().map(ParamDesc::from_info).collect()
+            });
+            next.insert(device.id, descs);
+        }
+        changed |= !plugins.is_empty();
+        *plugins = next;
+        changed
+    }
+}
+
+impl ParamCatalog for LaneParams {
+    /// The built-in devices' only: a plugin may have thousands of
+    /// parameters, too many to offer in a menu. A plugin parameter gets
+    /// its lane when it is moved with Write Automation on.
+    fn automatable(&self, device: &Device) -> Vec<ParamId> {
+        self.builtin.automatable(device)
+    }
+
+    fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
+        self.param(device, param).map(|p| p.scale())
+    }
+
+    fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
+        self.param(device, param).map(|p| p.default)
+    }
+}
+
 /// Names `target` on `track`.
 pub fn target_name(
     project: &Project,
-    params: &BuiltinParams,
+    params: &LaneParams,
     track: &Track,
     target: AutomationTarget,
 ) -> TargetName {
@@ -71,7 +173,7 @@ pub fn target_name(
             let name = d.map(|d| d.name.clone()).unwrap_or_default();
             let p = d
                 .and_then(|d| params.name(d, param))
-                .map_or_else(|| param.to_string(), str::to_owned);
+                .unwrap_or_else(|| param.to_string());
             (LaneKind::DeviceParam, name, p)
         }
     };
@@ -106,7 +208,7 @@ pub struct Lanes {
     /// Lanes in write mode. Not saved with the project: writing is armed
     /// for this session only, like a record button.
     pub write: HashSet<LaneId>,
-    pub params: std::sync::Arc<BuiltinParams>,
+    pub params: Arc<LaneParams>,
 }
 
 impl AppState {
@@ -350,9 +452,8 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use daw_arrange::{LaneScale, ParamCatalog};
     use daw_model::commands::AddDevice;
-    use daw_model::{Device, DeviceSource, Document, TrackKind};
+    use daw_model::{Document, TrackKind};
 
     fn eq_device() -> Device {
         Device::new(
@@ -432,6 +533,83 @@ mod tests {
         }
     }
 
+    /// A plugin's parameters have the plugin's own ranges: a lane for one
+    /// is drawn and edited along that range, not from 0 to 1.
+    #[test]
+    fn a_loaded_plugins_params_have_their_own_ranges_and_names() {
+        use daw_core::plugin::ParamInfo;
+        let plugin = Device::new(
+            "Filter",
+            DeviceSource::Plugin {
+                format: daw_core::plugin::PluginFormatKind::Clap,
+                id: "com.example.filter".into(),
+            },
+        );
+        let cutoff = ParamInfo {
+            id: 7,
+            name: "Cutoff".into(),
+            min: 20.0,
+            max: 20_000.0,
+            default: 1_000.0,
+            automatable: true,
+        };
+        let infos = [cutoff];
+        let p = LaneParams::default();
+        assert_eq!(p.scale(&plugin, 7), None, "unknown until it loads");
+
+        let devices = [plugin.clone(), eq_device()];
+        let loaded = |id| (id == plugin.id).then_some(&infos[..]);
+        assert!(p.set_plugins(devices.iter(), loaded));
+        assert!(!p.set_plugins(devices.iter(), loaded), "nothing new");
+        let scale = p.scale(&plugin, 7).expect("a range");
+        assert_eq!(scale.from_norm(0.0), 20.0);
+        assert_eq!(scale.from_norm(1.0), 20_000.0);
+        assert_eq!(p.name(&plugin, 7).as_deref(), Some("Cutoff"));
+        assert_eq!(p.default_value(&plugin, 7), Some(1_000.0));
+        assert_eq!(p.scale(&plugin, 8), None, "not one of its parameters");
+        // Too many to offer in the Add Automation Lane menu.
+        assert!(p.automatable(&plugin).is_empty());
+        // Built-in devices are known as before.
+        assert!(!p.automatable(&devices[1]).is_empty());
+
+        // The lane's scale as the timeline asks for it.
+        let mut track = Track::new(TrackKind::Audio, "A");
+        track.devices.push(plugin.clone());
+        let catalog: Arc<dyn ParamCatalog> = Arc::new(p);
+        let target = AutomationTarget::DeviceParam {
+            device: plugin.id,
+            param: 7,
+        };
+        assert_eq!(lane_scale(Some(&catalog), &track, target), scale);
+        assert_eq!(static_value(Some(&catalog), &track, target), 1_000.0);
+    }
+
+    #[test]
+    fn an_unloaded_plugin_is_forgotten() {
+        use daw_core::plugin::ParamInfo;
+        let plugin = Device::new(
+            "Filter",
+            DeviceSource::Plugin {
+                format: daw_core::plugin::PluginFormatKind::Clap,
+                id: "com.example.filter".into(),
+            },
+        );
+        let infos = [ParamInfo {
+            id: 1,
+            name: "Gain".into(),
+            min: -24.0,
+            max: 24.0,
+            default: 0.0,
+            automatable: true,
+        }];
+        let p = LaneParams::default();
+        assert!(p.set_plugins(std::iter::once(&plugin), |_| Some(&infos[..])));
+        // Removed from the project, or its plugin is gone.
+        assert!(p.set_plugins(std::iter::once(&plugin), |_| None));
+        assert_eq!(p.scale(&plugin, 1), None);
+        assert!(!p.set_plugins(std::iter::empty(), |_| None));
+    }
+
     #[test]
     fn target_names_name_devices_and_params() {
         let mut doc = Document::new(Project::new("t"));
@@ -446,7 +624,7 @@ mod tests {
             device: d,
         })
         .unwrap();
-        let p = BuiltinParams;
+        let p = LaneParams::default();
         let track = doc.project().track(id).unwrap().clone();
         let targets = daw_arrange::automation::lane_targets(
             &track,

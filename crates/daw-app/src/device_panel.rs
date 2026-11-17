@@ -4,10 +4,11 @@
 //! What a device's parameters are comes from a [`ParamSource`]. Built-in
 //! devices describe theirs with [`BuiltinParams`]; plugins add a source of
 //! their own (their parameters are known once the plugin is loaded), and
-//! the panel shows them the same way. [`BuiltinParams`] is also the
-//! automation lanes' [`ParamCatalog`], so a built-in parameter has one
-//! range, taper and unit wherever it shows, and [`ParamDesc::scale`] is the
-//! one mapping between values and slider or lane positions.
+//! the panel shows them the same way. The automation lanes describe
+//! parameters with the same [`ParamDesc`] (see
+//! [`LaneParams`](crate::lanes::LaneParams)), so a parameter has one range,
+//! taper and unit wherever it shows, and [`ParamDesc::scale`] is the one
+//! mapping between values and slider or lane positions.
 //!
 //! A parameter drag is one undo step: [`DevicePanel::set_value`] runs
 //! [`SetParam`], which merges with the previous edit of the same parameter
@@ -93,6 +94,16 @@ impl ParamDesc {
             unit: ParamUnit::None,
             automatable: info.automatable,
         }
+    }
+
+    /// Whether this is what [`from_info`](Self::from_info) makes of `info`.
+    pub fn describes(&self, info: &daw_core::plugin::ParamInfo) -> bool {
+        self.id == info.id
+            && self.name == info.name
+            && self.min == info.min
+            && self.max == info.max
+            && self.default == info.default
+            && self.automatable == info.automatable
     }
 
     fn is_discrete(&self) -> bool {
