@@ -13,10 +13,10 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use daw_backend::{DummyBackend, Pacing, PortDirection, PortKind};
+use daw_backend::{DummyBackend, DummySystem, Pacing, PortDirection, PortKind};
 use daw_plugin_host::{HostLauncher, SandboxConfig};
 pub use daw_session::host::MidiSource;
-use daw_session::host::{AudioHost, HostConfig, HostKind};
+use daw_session::host::{AudioHost, HostConfig, HostHealth, HostKind};
 use daw_session::{PluginLoader, SandboxLoader, Session};
 
 /// An audio device the user can pick in the settings.
@@ -83,6 +83,12 @@ pub enum EngineError {
     UnsupportedSampleRate(u32),
     /// The device cannot run with this buffer size, in frames.
     UnsupportedBufferSize(u32),
+    /// The audio server went away while audio was running (it exited, or
+    /// PipeWire restarted) and has not come back yet.
+    ServerLost,
+    /// The engine failed inside the audio callback and stopped processing.
+    /// Applying the audio settings starts it again.
+    Crashed,
     /// The audio system failed for a reason of its own. The text comes from
     /// the backend or a library below it, so it is not translated; show it
     /// as a detail after a translated sentence.
@@ -95,6 +101,8 @@ impl fmt::Display for EngineError {
             Self::UnknownDevice(id) => write!(f, "unknown audio device “{id}”"),
             Self::UnsupportedSampleRate(rate) => write!(f, "unsupported sample rate {rate} Hz"),
             Self::UnsupportedBufferSize(size) => write!(f, "unsupported buffer size {size}"),
+            Self::ServerLost => write!(f, "the audio server went away"),
+            Self::Crashed => write!(f, "the engine stopped after an internal error"),
             Self::Backend(message) => write!(f, "audio system error: {message}"),
         }
     }
@@ -109,10 +117,29 @@ pub trait EngineHandle {
     fn audio_devices(&self) -> Vec<AudioDevice>;
     fn supported_sample_rates(&self) -> Vec<u32>;
     fn supported_buffer_sizes(&self) -> Vec<u32>;
-    /// Restart audio with `config`. On error the previous config stays live.
+    /// Restart audio with `config`. On error audio keeps running (or stays
+    /// failed) and [`audio_config`](Self::audio_config) says with what:
+    /// the previous config, or, when the audio system itself decided
+    /// otherwise during the restart, what it runs at.
     fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError>;
+    /// The configuration in effect.
     fn audio_config(&self) -> AudioConfig;
+    /// Whether audio is flowing now. It can fail at any time (the audio
+    /// server may go away), so ask again every second or so.
     fn status(&self) -> EngineStatus;
+
+    /// Whether [`restart_audio`](Self::restart_audio) would mend or improve
+    /// things now: the audio server went away, came back, or changed its
+    /// sample rate. Ask together with [`status`](Self::status).
+    fn wants_restart(&self) -> bool {
+        false
+    }
+
+    /// Restarts audio on whatever the audio system runs at now, keeping the
+    /// rest of the configuration. Like
+    /// [`apply_audio_config`](Self::apply_audio_config) it may replace the
+    /// session.
+    fn restart_audio(&mut self) {}
 
     fn play(&mut self);
     fn stop(&mut self);
@@ -259,6 +286,13 @@ pub fn default_engine() -> Box<dyn EngineHandle> {
 pub struct SessionEngine {
     host: AudioHost,
     config: AudioConfig,
+    /// The audio server went away under us and is not back yet.
+    lost: bool,
+    /// Go back to the audio server as soon as one answers. Cleared when
+    /// that was tried and still ended silent, so a server that answers but
+    /// cannot be used is not retried every second; a server going away or
+    /// the user applying settings sets it again.
+    reconnect: bool,
 }
 
 impl SessionEngine {
@@ -272,7 +306,29 @@ impl SessionEngine {
             sample_rate: host.sample_rate(),
             buffer_size: host.buffer_size(),
         };
-        Self { host, config }
+        Self {
+            host,
+            config,
+            lost: false,
+            reconnect: true,
+        }
+    }
+
+    /// Restarts the host with `wanted` and takes the sample rate from what
+    /// then runs: an audio server keeps its own whatever was asked for.
+    fn restart(&mut self, wanted: HostConfig) {
+        self.reconnect = true;
+        self.host.restart(wanted);
+        self.config.sample_rate = self.host.sample_rate();
+        if self.host.kind() == HostKind::Jack {
+            self.lost = false;
+        }
+    }
+
+    /// Whether audio is not what it should be: failed, or silent for want
+    /// of a server.
+    fn is_failed(&self) -> bool {
+        matches!(self.status(), EngineStatus::Failed(_))
     }
 
     fn device(&self) -> AudioDevice {
@@ -341,11 +397,50 @@ impl EngineHandle for SessionEngine {
             use_server: true,
             ..self.host.config().clone()
         };
-        if wanted != *self.host.config() {
-            self.host.restart(wanted);
+        // Also when nothing changed but audio is down: applying the
+        // settings again is how the user asks for another try.
+        if wanted != *self.host.config() || self.is_failed() {
+            let device = self.device().id;
+            self.restart(wanted);
+            // The buffer size stays a request: a server applies it when it
+            // can, and `status` reports the size in use.
+            self.config.buffer_size = config.buffer_size;
+            if self.device().id != device {
+                // The restart ended on another backend (a server came or
+                // went), so the device asked for is not the one running.
+                self.config.device = None;
+                if config.device.is_some() {
+                    return Err(EngineError::UnknownDevice(device));
+                }
+            } else {
+                self.config.device.clone_from(&config.device);
+            }
+            if self.config.sample_rate != config.sample_rate {
+                return Err(EngineError::UnsupportedSampleRate(config.sample_rate));
+            }
+        } else {
+            self.config = config.clone();
         }
-        self.config = config.clone();
         Ok(())
+    }
+
+    fn wants_restart(&self) -> bool {
+        match self.host.health() {
+            HostHealth::ServerGone | HostHealth::RateChanged(_) => true,
+            // Restarting on its own could crash again, every second.
+            HostHealth::Crashed => false,
+            HostHealth::Ok => self.reconnect && self.host.server_appeared(),
+        }
+    }
+
+    fn restart_audio(&mut self) {
+        let gone = self.host.health() == HostHealth::ServerGone;
+        self.lost |= gone;
+        self.restart(self.host.config().clone());
+        // After a server went away the restart ends silent, and the server
+        // coming back is worth a try. A try that a server answered and that
+        // still ended silent is not repeated: that waits for the user.
+        self.reconnect = gone || self.host.kind() == HostKind::Jack;
     }
 
     fn audio_config(&self) -> AudioConfig {
@@ -353,13 +448,19 @@ impl EngineHandle for SessionEngine {
     }
 
     fn status(&self) -> EngineStatus {
-        match (self.host.kind(), self.host.last_error()) {
-            (HostKind::Silent, Some(e)) => EngineStatus::Failed(EngineError::Backend(e.to_owned())),
-            _ => EngineStatus::Running {
-                sample_rate: self.host.sample_rate(),
-                buffer_size: self.host.buffer_size(),
-            },
-        }
+        let failed = match (self.host.health(), self.host.kind(), self.host.last_error()) {
+            (HostHealth::Crashed, ..) => EngineError::Crashed,
+            (HostHealth::ServerGone, ..) => EngineError::ServerLost,
+            (_, HostKind::Silent, Some(_)) if self.lost => EngineError::ServerLost,
+            (_, HostKind::Silent, Some(e)) => EngineError::Backend(e.to_owned()),
+            _ => {
+                return EngineStatus::Running {
+                    sample_rate: self.host.sample_rate(),
+                    buffer_size: self.host.buffer_size(),
+                };
+            }
+        };
+        EngineStatus::Failed(failed)
     }
 
     fn play(&mut self) {
@@ -400,28 +501,18 @@ pub struct StubEngine {
     config: AudioConfig,
     running: bool,
     host: AudioHost,
+    /// The pretend audio server `host` plays on.
+    system: DummySystem,
 }
 
 impl Default for StubEngine {
     fn default() -> Self {
-        let dummy = DummyBackend::new(Pacing::RealTime);
-        let system = dummy.system();
-        for (name, physical) in Self::MIDI_SOURCES {
-            system.add_port(name, PortKind::Midi, PortDirection::Output, physical);
-        }
-        let config = HostConfig {
-            use_server: false,
-            ..Default::default()
-        };
+        let (host, system) = Self::start_host();
         Self {
             config: AudioConfig::default(),
             running: false,
-            host: {
-                let mut host = AudioHost::with_backend(Box::new(dummy), &config)
-                    .expect("the dummy backend always opens");
-                host.session_mut().set_plugin_loader(plugin_loader());
-                host
-            },
+            host,
+            system,
         }
     }
 }
@@ -436,6 +527,28 @@ impl fmt::Debug for StubEngine {
 }
 
 impl StubEngine {
+    /// A host on a pretend audio server of its own, and that server.
+    fn start_host() -> (AudioHost, DummySystem) {
+        let dummy = DummyBackend::new(Pacing::RealTime);
+        let system = dummy.system();
+        for (name, physical) in Self::MIDI_SOURCES {
+            system.add_port(name, PortKind::Midi, PortDirection::Output, physical);
+        }
+        let config = HostConfig {
+            use_server: false,
+            ..Default::default()
+        };
+        let mut host = AudioHost::with_backend(Box::new(dummy), &config)
+            .expect("the dummy backend always opens");
+        host.session_mut().set_plugin_loader(plugin_loader());
+        (host, system)
+    }
+
+    /// The pretend audio server, to make it fail under the engine.
+    pub fn system(&self) -> &DummySystem {
+        &self.system
+    }
+
     const DEVICES: [(&'static str, &'static str); 2] = [
         ("stub:default", "Default output (stub)"),
         ("stub:usb", "USB audio interface (stub)"),
@@ -495,14 +608,24 @@ impl EngineHandle for StubEngine {
     }
 
     fn status(&self) -> EngineStatus {
-        if self.running {
-            EngineStatus::Running {
+        match self.host.health() {
+            HostHealth::ServerGone => EngineStatus::Failed(EngineError::ServerLost),
+            HostHealth::Crashed => EngineStatus::Failed(EngineError::Crashed),
+            _ if self.running => EngineStatus::Running {
                 sample_rate: self.config.sample_rate,
                 buffer_size: self.config.buffer_size,
-            }
-        } else {
-            EngineStatus::Stopped
+            },
+            _ => EngineStatus::Stopped,
         }
+    }
+
+    fn wants_restart(&self) -> bool {
+        self.host.health() == HostHealth::ServerGone
+    }
+
+    /// The pretend server is back at once, with a fresh session.
+    fn restart_audio(&mut self) {
+        (self.host, self.system) = Self::start_host();
     }
 
     fn play(&mut self) {

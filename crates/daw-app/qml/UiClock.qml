@@ -13,7 +13,8 @@ import io.github.octodillo.daw
 //
 // Each beat, in order: the project (engine position, peak loading,
 // autosave), the plugin scan, a running export, then `ticked` for views;
-// on every third beat `slow`, and about once a second the MIDI devices.
+// on every third beat `slow`, and about once a second the audio engine's
+// health and the MIDI devices.
 // While the transport runs the clock also beats `frame` at the display's
 // pace, after the beat's own work, so a view draws what the beat read.
 //
@@ -64,8 +65,11 @@ QtObject {
                 if (beats % clock.slowBeats === 0) {
                     clock.slow();
                 }
-                // MIDI devices plugged in or out.
+                // The audio engine's health, then MIDI devices plugged in
+                // or out: in this order, so the MIDI ports are made on the
+                // audio that is left after a restart.
                 if (beats % clock.midiBeats === 0) {
+                    Engine.poll();
                     AppSettings.refreshMidi();
                 }
             }

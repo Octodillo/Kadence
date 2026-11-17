@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Latency, MAX_MIDI_INPUTS,
-    MidiInputPort, Pacing, PortDirection, PortFilter, PortInfo, PortKind,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, DummyBackend, JackBackend, Latency,
+    MAX_MIDI_INPUTS, MidiInputPort, Pacing, PortDirection, PortFilter, PortInfo, PortKind,
 };
 use daw_core::event::EventList;
 use daw_core::time::TickTime;
@@ -34,6 +34,23 @@ pub enum HostKind {
     Jack,
     /// No audio server: a silent stand-in that keeps time.
     Silent,
+}
+
+/// What is wrong with the audio that is running, if anything. All but `Ok`
+/// last until [`AudioHost::restart`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum HostHealth {
+    Ok,
+    /// The audio server shut down or dropped us (`jackd` exited, PipeWire
+    /// restarted). Nothing plays and the playhead stands still.
+    ServerGone,
+    /// The engine failed inside the audio callback, which is not called
+    /// again: the output is silent and the playhead stands still.
+    Crashed,
+    /// The audio server switched to this rate, in Hz, while the engine
+    /// still runs at the one it was built for, so everything plays at the
+    /// wrong speed and pitch.
+    RateChanged(u32),
 }
 
 /// How to run audio. JACK servers decide the rate and period themselves,
@@ -212,6 +229,46 @@ impl AudioHost {
             midi: Vec::new(),
             midi_physical: HashMap::new(),
         })
+    }
+
+    /// Whether the audio still does its job; see [`HostHealth`]. Cheap
+    /// enough to ask every second or so.
+    pub fn health(&self) -> HostHealth {
+        match self.backend.health() {
+            BackendHealth::ServerGone => HostHealth::ServerGone,
+            BackendHealth::CallbackPanicked => HostHealth::Crashed,
+            BackendHealth::Ok => {
+                let rate = self.backend.sample_rate().round() as u32;
+                if rate == self.sample_rate() {
+                    HostHealth::Ok
+                } else {
+                    HostHealth::RateChanged(rate)
+                }
+            }
+        }
+    }
+
+    /// Whether this host runs silent for want of an audio server and one
+    /// answers now, so a [`restart`](Self::restart) would bring sound back.
+    /// Asks the server; without one that is a refused connection.
+    pub fn server_appeared(&self) -> bool {
+        if self.kind != HostKind::Silent || !self.config.use_server {
+            return false;
+        }
+        let mut probe = JackBackend::new();
+        let answered = probe
+            .open(BackendConfig {
+                client_name: format!("{}-probe", self.config.client_name),
+                audio_inputs: 0,
+                audio_outputs: 0,
+                midi_input: false,
+                midi_output: false,
+                auto_connect: false,
+                ..Default::default()
+            })
+            .is_ok();
+        let _ = probe.close();
+        answered
     }
 
     /// Gives each source in `sources` (full port names, see
@@ -421,8 +478,10 @@ impl AudioHost {
         self.last_error.as_deref()
     }
 
+    /// The rate the engine runs at: the backend's when it was opened. A
+    /// server that changes its rate later shows in [`health`](Self::health).
     pub fn sample_rate(&self) -> u32 {
-        self.backend.sample_rate().round() as u32
+        self.session.sample_rate().round() as u32
     }
 
     pub fn buffer_size(&self) -> u32 {

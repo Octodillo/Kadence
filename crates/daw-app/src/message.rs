@@ -150,6 +150,8 @@ pub enum Reason {
     TrackGoneWhileRecording,
     /// The audio system missed `number` cycles while recording.
     RecordXruns,
+    /// Recording stopped because audio had to restart.
+    RecordAudioRestarted,
     /// The bundle at `path` is open in another Kadence.
     AlreadyOpen,
 }
@@ -220,6 +222,9 @@ pub enum RecordProblem {
     Take(TakeProblem),
     /// The audio system missed this many cycles while recording.
     Xruns(u64),
+    /// Audio had to restart (the server went away, came back or changed
+    /// its rate), which ended the recording. The take so far is kept.
+    AudioRestarted,
 }
 
 /// What went wrong with exporting the song.
@@ -393,6 +398,7 @@ impl Message {
                 RecordProblem::NothingRecorded => Fields::new(C::Record, R::NothingRecorded),
                 RecordProblem::Refused(e) => Fields::new(C::Record, R::EditRefused).detail(e),
                 RecordProblem::Take(t) => take_fields(t),
+                RecordProblem::AudioRestarted => Fields::new(C::Record, R::RecordAudioRestarted),
                 RecordProblem::Xruns(n) => Fields {
                     number: *n,
                     ..Fields::new(C::Record, R::RecordXruns)

@@ -23,6 +23,11 @@ QtObject {
             return i18ncp("@info", "The audio device does not support a buffer size of %1 sample.",
                           "The audio device does not support a buffer size of %1 samples.",
                           Engine.errorNumber);
+        case Engine.ServerLost:
+            return i18nc("@info", "The audio server went away. Kadence reconnects when it is back.");
+        case Engine.EngineCrashed:
+            return i18nc("@info",
+                         "The audio engine stopped after an internal error. Apply the audio settings to start it again.");
         case Engine.BackendError:
             return i18nc("@info %1 is a message from the audio system, which may be in English",
                          "The audio system reported: %1", Engine.errorDetail);

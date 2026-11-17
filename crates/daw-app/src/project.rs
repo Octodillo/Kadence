@@ -104,6 +104,7 @@ pub mod qobject {
         PositionJumped,
         TrackGoneWhileRecording,
         RecordXruns,
+        RecordAudioRestarted,
         AlreadyOpen,
     }
 
@@ -465,6 +466,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::PositionJumped => QR::PositionJumped,
         Reason::TrackGoneWhileRecording => QR::TrackGoneWhileRecording,
         Reason::RecordXruns => QR::RecordXruns,
+        Reason::RecordAudioRestarted => QR::RecordAudioRestarted,
         Reason::AlreadyOpen => QR::AlreadyOpen,
     };
     let text = |s: &str| QVariant::from(&QString::from(s));

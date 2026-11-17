@@ -41,19 +41,23 @@ impl SettingsStore for KConfigStore {
 const AUDIO: &str = "Audio";
 
 /// Read the saved audio configuration, falling back to defaults per key.
-pub fn load_audio_config(store: &dyn SettingsStore) -> AudioConfig {
-    let defaults = AudioConfig::default();
-    let number = |key: &str, fallback: u32| {
-        store
-            .read(AUDIO, key)
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(fallback)
-    };
-    AudioConfig {
-        device: store.read(AUDIO, "Device"),
-        sample_rate: number("SampleRate", defaults.sample_rate),
-        buffer_size: number("BufferSize", defaults.buffer_size),
+/// `None` when the user never saved one: then there is nothing to hold the
+/// audio system to, and whatever it runs at is right.
+pub fn load_audio_config(store: &dyn SettingsStore) -> Option<AudioConfig> {
+    let device = store.read(AUDIO, "Device");
+    let number = |key: &str| store.read(AUDIO, key);
+    let (rate, size) = (number("SampleRate"), number("BufferSize"));
+    if device.is_none() && rate.is_none() && size.is_none() {
+        return None;
     }
+    let defaults = AudioConfig::default();
+    let parsed =
+        |value: Option<String>, fallback| value.and_then(|v| v.parse().ok()).unwrap_or(fallback);
+    Some(AudioConfig {
+        device,
+        sample_rate: parsed(rate, defaults.sample_rate),
+        buffer_size: parsed(size, defaults.buffer_size),
+    })
 }
 
 pub fn save_audio_config(store: &mut dyn SettingsStore, config: &AudioConfig) {
@@ -469,11 +473,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_store_gives_defaults() {
-        assert_eq!(
-            load_audio_config(&MemoryStore::default()),
-            AudioConfig::default()
-        );
+    fn an_empty_store_has_no_saved_audio_config() {
+        assert_eq!(load_audio_config(&MemoryStore::default()), None);
     }
 
     #[test]
@@ -485,14 +486,14 @@ mod tests {
             buffer_size: 64,
         };
         save_audio_config(&mut store, &config);
-        assert_eq!(load_audio_config(&store), config);
+        assert_eq!(load_audio_config(&store), Some(config.clone()));
 
         let default_device = AudioConfig {
             device: None,
             ..config
         };
         save_audio_config(&mut store, &default_device);
-        assert_eq!(load_audio_config(&store), default_device);
+        assert_eq!(load_audio_config(&store), Some(default_device));
     }
 
     #[test]
@@ -566,7 +567,7 @@ mod tests {
         let mut store = MemoryStore::default();
         store.write(AUDIO, "SampleRate", "fast");
         store.write(AUDIO, "BufferSize", "128");
-        let config = load_audio_config(&store);
+        let config = load_audio_config(&store).expect("a key is saved");
         assert_eq!(config.sample_rate, AudioConfig::default().sample_rate);
         assert_eq!(config.buffer_size, 128);
     }
