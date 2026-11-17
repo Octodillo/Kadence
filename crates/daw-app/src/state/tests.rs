@@ -318,3 +318,82 @@ fn a_saved_projects_unsaved_work_is_recovered_from_the_offer() {
     assert_eq!(s.bundle_root().as_deref(), Some(song.as_path()));
     assert!(s.doc.is_modified());
 }
+
+/// An instrument track with a sampler, open in a device panel.
+fn add_sampler(s: &mut AppState) -> crate::device_panel::DevicePanel {
+    let track = Track::new(TrackKind::Instrument, "Drums");
+    let tid = track.id;
+    s.doc.execute(AddTrack::new(0, track)).unwrap();
+    let device = daw_model::Device::new(
+        "Sampler",
+        daw_model::DeviceSource::Builtin {
+            kind: "daw.sampler".into(),
+        },
+    );
+    let id = device.id;
+    s.doc
+        .execute(daw_model::commands::AddDevice {
+            track: tid,
+            index: 0,
+            device,
+        })
+        .unwrap();
+    s.doc.seal();
+    let mut panel = crate::device_panel::DevicePanel::default();
+    panel.open(id);
+    panel
+}
+
+fn loaded_sample(s: &AppState, panel: &crate::device_panel::DevicePanel) -> Option<PathBuf> {
+    panel.view(s.doc.project()).unwrap().sampler.unwrap().sample
+}
+
+#[test]
+fn a_sample_is_copied_into_the_bundle_and_named_relative_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kick.wav");
+    let data = daw_media::AudioData {
+        sample_rate: 48_000,
+        channels: vec![vec![0.5; 480]],
+    };
+    daw_media::write_wav(&file, &data, daw_media::WavFormat::Float32).unwrap();
+    let mut s = state();
+    let panel = add_sampler(&mut s);
+    s.save_as(&dir.path().join("Song")).unwrap();
+
+    s.load_sample(&panel, &file).unwrap();
+    let source = loaded_sample(&s, &panel).unwrap();
+    assert!(source.is_relative(), "{source:?}");
+    let bundle = s.doc.bundle().unwrap();
+    assert_eq!(
+        std::fs::read(bundle.resolve(&source)).unwrap(),
+        std::fs::read(&file).unwrap()
+    );
+    s.doc.undo().unwrap();
+    assert_eq!(loaded_sample(&s, &panel), None, "undo takes it back");
+}
+
+#[test]
+fn a_file_that_is_not_audio_is_refused_and_not_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "not audio").unwrap();
+    let mut s = state();
+    let panel = add_sampler(&mut s);
+    s.save_as(&dir.path().join("Song")).unwrap();
+    let revision = s.doc.revision();
+
+    let e = s.load_sample(&panel, &file).unwrap_err();
+    let fields = e.fields();
+    assert_eq!(
+        (fields.context, fields.reason, fields.file),
+        (
+            Context::Import,
+            crate::message::Reason::CannotDecode,
+            Some(file)
+        )
+    );
+    assert_eq!(s.doc.revision(), revision, "nothing changed");
+    let audio = s.doc.bundle().unwrap().root().join("audio");
+    assert!(!audio.exists() || std::fs::read_dir(audio).unwrap().next().is_none());
+}

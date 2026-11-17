@@ -16,10 +16,12 @@
 
 use daw_arrange::{LaneScale, ParamCatalog};
 use daw_core::event::ParamId;
-use daw_devices::{ParamKind, ParamSpec, ParamUnit, Taper};
-use daw_model::commands::{DeviceField, MoveDevice, SetDevice, SetParam};
+use daw_devices::devices::sampler;
+use daw_devices::{ParamKind, ParamSpec, ParamUnit, Sampler, Taper};
+use daw_model::commands::{Batch, DeviceField, MoveDevice, SetDevice, SetParam};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -324,6 +326,36 @@ pub struct DeviceView {
     /// Empty when no source describes the device (a plugin that isn't
     /// loaded).
     pub params: Vec<ParamView>,
+    /// What the device plays, when it is a sampler.
+    pub sampler: Option<SamplerView>,
+}
+
+/// What a sampler device plays, as the panel shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SamplerView {
+    /// The file it plays as the project stores it, or `None` while it has
+    /// none (or its saved state can't be read). A zone map with several
+    /// files names its first.
+    pub sample: Option<PathBuf>,
+}
+
+impl SamplerView {
+    /// The sampler part of `device`'s view, `None` for other devices.
+    fn of(device: &Device) -> Option<Self> {
+        if !is_sampler(device) {
+            return None;
+        }
+        let sample = device
+            .state
+            .as_ref()
+            .and_then(|s| Sampler::saved_samples(&s.0).ok())
+            .and_then(|samples| samples.into_iter().next());
+        Some(Self { sample })
+    }
+}
+
+fn is_sampler(device: &Device) -> bool {
+    matches!(&device.source, DeviceSource::Builtin { kind } if kind == sampler::INFO.id)
 }
 
 impl DeviceView {
@@ -437,6 +469,7 @@ impl DevicePanel {
             chain_len: track.devices.len(),
             instrument_track: track.kind == TrackKind::Instrument,
             params,
+            sampler: SamplerView::of(device),
         })
     }
 
@@ -541,6 +574,29 @@ impl DevicePanel {
             id: view.id,
             field: DeviceField::Enabled(on),
         });
+        doc.seal();
+        r.map(|_| ()).map_err(Message::from)
+    }
+
+    /// Gives the open device, when it is a sampler, one sample to play over
+    /// every key, replacing what it played, as an undo step of its own.
+    /// `source` is the file as the project stores it (see
+    /// [`AppState::store_audio`](crate::state::AppState::store_audio)).
+    /// Other devices are left alone.
+    pub fn load_sample(&self, doc: &mut Document, source: &Path) -> Result<(), Message> {
+        let Some(view) = self.view(doc.project()) else {
+            return Ok(());
+        };
+        if view.sampler.is_none() {
+            return Ok(());
+        }
+        let state = Sampler::state_with_sample(source);
+        let set = SetDevice {
+            id: view.id,
+            field: DeviceField::State(Some(state.into())),
+        };
+        doc.seal();
+        let r = doc.execute(Batch::new("Load Sample", vec![Box::new(set)]));
         doc.seal();
         r.map(|_| ()).map_err(Message::from)
     }
@@ -895,6 +951,18 @@ impl AppDevicePanel {
         });
     }
 
+    /// Loads `file` into the open sampler: the file is checked and brought
+    /// into the project as an imported clip's file is, then given to the
+    /// sampler as an undo step. Problems go to the status line.
+    pub fn load_sample(&mut self, file: &Path) {
+        crate::state::with(|s| {
+            s.end_drag();
+            if let Err(e) = s.load_sample(&self.inner, file) {
+                s.report(e);
+            }
+        });
+    }
+
     /// Runs an edit, plays the change and reports errors on the status
     /// line.
     pub fn edit(&mut self, f: impl FnOnce(&DevicePanel, &mut Document) -> Result<(), Message>) {
@@ -1083,6 +1151,75 @@ mod tests {
         let view = panel.view(doc.project()).unwrap();
         assert!(view.params[eq::OUTPUT as usize].automated);
         assert!(!view.params[eq::LOW_GAIN as usize].automated);
+    }
+
+    /// An instrument track whose instrument is a sampler, open in the panel.
+    fn sampler_rig() -> (Document, DevicePanel, DeviceId) {
+        let mut project = Project::new("Panel");
+        let track = Track::new(TrackKind::Instrument, "Drums");
+        let tid = track.id;
+        project.tracks = vec![Arc::new(track)];
+        let mut doc = Document::new(project);
+        let device = builtin(sampler::INFO.id);
+        let id = device.id;
+        doc.execute(AddDevice {
+            track: tid,
+            index: 0,
+            device,
+        })
+        .unwrap();
+        doc.seal();
+        let mut panel = DevicePanel::default();
+        panel.open(id);
+        (doc, panel, id)
+    }
+
+    fn sample(doc: &Document, panel: &DevicePanel) -> Option<PathBuf> {
+        panel.view(doc.project()).unwrap().sampler.unwrap().sample
+    }
+
+    #[test]
+    fn a_sample_load_is_an_undo_step_that_brings_back_the_one_before() {
+        let (mut doc, panel, id) = sampler_rig();
+        assert_eq!(sample(&doc, &panel), None, "a new sampler plays nothing");
+        panel
+            .load_sample(&mut doc, Path::new("audio/kick.wav"))
+            .unwrap();
+        assert_eq!(doc.history().undo_label().as_deref(), Some("Load Sample"));
+        assert_eq!(sample(&doc, &panel), Some("audio/kick.wav".into()));
+        // The state the session restores: one zone over every key.
+        let (track, index) = doc.project().device_location(id).unwrap();
+        let device = &doc.project().track(track).unwrap().devices[index];
+        assert_eq!(
+            device.state.as_ref().unwrap().0[..],
+            Sampler::state_with_sample("audio/kick.wav")[..]
+        );
+
+        panel
+            .load_sample(&mut doc, Path::new("audio/snare.wav"))
+            .unwrap();
+        assert_eq!(sample(&doc, &panel), Some("audio/snare.wav".into()));
+        doc.undo().unwrap();
+        assert_eq!(
+            sample(&doc, &panel),
+            Some("audio/kick.wav".into()),
+            "each load is its own step"
+        );
+        doc.undo().unwrap();
+        assert_eq!(sample(&doc, &panel), None);
+        doc.redo().unwrap();
+        assert_eq!(sample(&doc, &panel), Some("audio/kick.wav".into()));
+    }
+
+    #[test]
+    fn only_a_sampler_takes_a_sample() {
+        let (mut doc, panel, _, _) = rig(TrackKind::Audio);
+        assert_eq!(panel.view(doc.project()).unwrap().sampler, None);
+        let before = doc.revision();
+        panel
+            .load_sample(&mut doc, Path::new("audio/kick.wav"))
+            .unwrap();
+        assert_eq!(doc.revision(), before, "an EQ is left alone");
     }
 
     #[test]

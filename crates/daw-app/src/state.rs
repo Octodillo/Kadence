@@ -1280,6 +1280,21 @@ impl AppState {
         Ok(())
     }
 
+    /// Gives the sampler open in `panel` the audio file `file` to play,
+    /// brought into the project as [`import_audio`](Self::import_audio)
+    /// brings in a clip's file.
+    pub fn load_sample(
+        &mut self,
+        panel: &crate::device_panel::DevicePanel,
+        file: &Path,
+    ) -> Result<(), Message> {
+        probe_audio(file)?;
+        let stored = self.store_audio(file)?;
+        let r = panel.load_sample(&mut self.doc, &stored.source);
+        self.sync();
+        r
+    }
+
     /// Brings an audio file the user picked into the project: a copy in the
     /// bundle's audio folder when there is a bundle, else the file where it
     /// is. Check it with [`probe_audio`] first, so a file that can't be
