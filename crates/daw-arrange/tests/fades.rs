@@ -133,6 +133,48 @@ fn handles_sit_along_the_top_of_audio_clips() {
     );
 }
 
+/// Issue #204 item 6: a fade that ends mid-clip doesn't hide the gain handle
+/// under its own, or the other way round.
+#[test]
+fn the_gain_handle_steps_aside_for_a_fade_handle() {
+    use daw_model::commands::{ClipField, SetClip};
+    use daw_model::{Fade, FadeShape};
+    let mut r = Rig::new();
+    let id = r.clip(BAR, 4 * BAR);
+    r.arrange.selection = [id].into();
+    let h = r.arrange.handle_px;
+    for (half, out) in [(2 * BAR, false), (2 * BAR - 60, false), (2 * BAR, true)] {
+        let fade = Fade::new(TickTime(half), FadeShape::default());
+        let (set, clear) = if out {
+            (ClipField::FadeOut(fade), ClipField::FadeIn(Fade::default()))
+        } else {
+            (ClipField::FadeIn(fade), ClipField::FadeOut(Fade::default()))
+        };
+        r.doc.execute(SetClip::new(id, set)).unwrap();
+        r.doc.execute(SetClip::new(id, clear)).unwrap();
+        r.doc.seal();
+        let clip = r.doc.project().clip(id).unwrap().clone();
+        let hs = r.arrange.handles(0, &clip).unwrap();
+        let fade_handle = if out { hs.fade_out } else { hs.fade_in };
+        assert!(!hs.gain.intersects(&fade_handle), "{hs:?}");
+        assert_eq!(hs.gain.y, fade_handle.y + h);
+        // Each is hit where it is drawn.
+        let centre = |q: daw_arrange::Rect| (q.x + q.w / 2.0, q.y + q.h / 2.0);
+        let (gx, gy) = centre(hs.gain);
+        let (fx, fy) = centre(fade_handle);
+        assert_eq!(r.zone(gx, gy), Some(Zone::Gain));
+        let fade_zone = if out { Zone::FadeOut } else { Zone::FadeIn };
+        assert_eq!(r.zone(fx, fy), Some(fade_zone));
+    }
+    // With the fades out of the way it is back on the top edge.
+    r.doc
+        .execute(SetClip::new(id, ClipField::FadeOut(Fade::default())))
+        .unwrap();
+    let clip = r.doc.project().clip(id).unwrap().clone();
+    let hs = r.arrange.handles(0, &clip).unwrap();
+    assert_eq!(hs.gain.y, hs.fade_in.y);
+}
+
 #[test]
 fn tiny_clips_have_no_handles() {
     let mut r = Rig::new();
