@@ -25,6 +25,7 @@ pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;
 mod paint;
+mod paths;
 pub mod piano_roll;
 pub mod plugin_editors_bridge;
 pub mod plugins_bridge;
