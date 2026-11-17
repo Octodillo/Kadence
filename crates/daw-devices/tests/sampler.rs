@@ -466,3 +466,73 @@ fn all_sound_off_silences_quickly() {
     let r = render(&mut sampler, 2000, &[], &events, s);
     assert!(r.channels[0][1999] > 0.4);
 }
+
+/// Issue #178: Gain was latched into each voice at note-on, so turning it
+/// down did nothing to a sample that was already playing.
+#[test]
+fn gain_changes_reach_sounding_voices_smoothly() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 48_000], s.sample_rate);
+    let events = [(0, note_on(60, 1.0)), (1000, param(GAIN, -70.0))];
+    let r = render(&mut sampler, 12000, &[], &events, s);
+    let out = &r.channels[0];
+    assert_eq!(out[999], 0.5);
+    assert!(out[10000..].iter().all(|&x| x == 0.0));
+    // A glide, not a step.
+    let steepest = out[1..]
+        .windows(2)
+        .fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+    assert!(steepest < 0.005, "{steepest}");
+}
+
+/// Issue #178: Tune was latched at note-on too.
+#[test]
+fn tune_changes_reach_sounding_voices() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 4800], s.sample_rate);
+    let events = [(0, note_on(60, 1.0)), (2400, param(TUNE, 12.0))];
+    let r = render(&mut sampler, 20000, &[], &events, s);
+    // The second half of the sample plays an octave up, in half the time.
+    assert!(sounding(&r.channels[0]).abs_diff(3600) <= 2);
+}
+
+/// Velocity Sensitivity is read at note-on only; sounding voices keep theirs.
+#[test]
+fn velocity_sensitivity_applies_from_the_next_note() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 4800], s.sample_rate);
+    let events = [
+        (0, note_on(60, 0.5)),
+        (1000, param(VELOCITY, 0.0)),
+        (6000, note_on(60, 0.5)),
+    ];
+    let r = render(&mut sampler, 8000, &[], &events, s);
+    assert_eq!(r.channels[0][500], 0.25);
+    assert_eq!(r.channels[0][2000], 0.25);
+    assert_eq!(r.channels[0][7000], 0.5);
+}
+
+/// Snapping (as loading state does) jumps to the new gain instead of gliding.
+#[test]
+fn snapped_gain_does_not_glide() {
+    let s = Setup::default();
+    let mut sampler = sampler_with(vec![0.5; 4800], s.sample_rate);
+    daw_core::node::Node::prepare(&mut sampler, s.sample_rate, s.block as u32);
+    sampler.set_param(GAIN, -6.0);
+    sampler.snap_smoothing();
+    let timeline = daw_core::time::Timeline::constant(s.bpm, 4, 4);
+    let r = render_prepared(
+        &mut sampler,
+        64,
+        &[],
+        &[(0, note_on(60, 1.0))],
+        s,
+        &timeline,
+    );
+    let expected = 0.5 * 10f32.powf(-6.0 / 20.0);
+    assert!(
+        (r.channels[0][0] - expected).abs() < 1e-6,
+        "{}",
+        r.channels[0][0]
+    );
+}

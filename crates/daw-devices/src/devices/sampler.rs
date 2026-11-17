@@ -4,6 +4,9 @@
 //! every voice is busy the quietest releasing voice (else the oldest) is
 //! stolen; it fades out over a few milliseconds instead of cutting off.
 //!
+//! Gain and Tune act on sounding voices; Velocity Sensitivity is read when a
+//! note starts.
+//!
 //! Saved state holds the zone map with each sample's source path; loading it
 //! decodes the files again (see [`Sampler::load_state_with`]).
 
@@ -14,7 +17,7 @@ use std::sync::Arc;
 use daw_core::event::{NoteId, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Adsr, db_to_gain};
+use crate::dsp::{Adsr, Smoother, db_to_gain};
 use crate::events::{Note, Segmented, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::state::{self, StateError};
@@ -33,6 +36,8 @@ pub const GAIN: ParamId = 1;
 pub const ATTACK: ParamId = 2;
 pub const RELEASE: ParamId = 3;
 pub const TUNE: ParamId = 4;
+/// How much a note's velocity scales its level. Read at note-on: changing it
+/// leaves sounding voices as they are.
 pub const VELOCITY: ParamId = 5;
 
 pub const MODE_ONE_SHOT: f64 = 0.0;
@@ -228,7 +233,9 @@ struct Voice {
     key: u8,
     id: NoteId,
     pos: f64,
+    /// Source samples per output sample, before Tune.
     rate: f64,
+    /// Zone gain and velocity; the Gain parameter scales the summed voices.
     gain: f32,
     age: u64,
     env: Adsr,
@@ -241,6 +248,9 @@ pub struct Sampler {
     sample_rate: f64,
     fade_step: f32,
     clock: u64,
+    gain: Smoother,
+    /// The Tune parameter as a playback rate ratio.
+    tune: f64,
 }
 
 impl Default for Sampler {
@@ -271,14 +281,18 @@ fn hermite(data: &[f32], pos: f64) -> f32 {
 
 impl Sampler {
     pub fn new() -> Self {
-        Self {
+        let mut s = Self {
             params: ParamStore::new(PARAMS),
             zones: Vec::new(),
             voices: [Voice::default(); POOL],
             sample_rate: 48000.0,
-            fade_step: (1000.0 / (STEAL_FADE_MS * 48000.0)) as f32,
+            fade_step: 0.0,
             clock: 0,
-        }
+            gain: Smoother::new(1.0),
+            tune: 1.0,
+        };
+        s.prepare(48000.0, 0);
+        s
     }
 
     /// Replace the zone map. Call off the real-time thread; stops all voices.
@@ -301,12 +315,19 @@ impl Sampler {
     }
 
     fn apply_param(&mut self, id: ParamId) {
-        if id == ATTACK || id == RELEASE {
-            let sr = self.sample_rate;
-            let (a, r) = (self.params.get(ATTACK), self.params.get(RELEASE));
-            for v in &mut self.voices {
-                v.env.set(a, 1.0, 1.0, r, sr);
+        match id {
+            ATTACK | RELEASE => {
+                let sr = self.sample_rate;
+                let (a, r) = (self.params.get(ATTACK), self.params.get(RELEASE));
+                for v in &mut self.voices {
+                    v.env.set(a, 1.0, 1.0, r, sr);
+                }
             }
+            GAIN => self
+                .gain
+                .set_target(db_to_gain(self.params.get(GAIN)) as f32),
+            TUNE => self.tune = (self.params.get(TUNE) / 12.0).exp2(),
+            _ => {}
         }
     }
 
@@ -320,16 +341,14 @@ impl Sampler {
         if zone.sample.is_empty() || !(source_rate.is_finite() && source_rate > 0.0) {
             return;
         }
-        let mut semis = self.params.get(TUNE);
-        if !self.one_shot() {
-            semis += key as f64 - zone.root_key as f64;
-        }
+        let semis = if self.one_shot() {
+            0.0
+        } else {
+            key as f64 - zone.root_key as f64
+        };
         let rate = source_rate / self.sample_rate * (semis / 12.0).exp2();
         let sens = self.params.get_f32(VELOCITY);
-        // Multiply rather than add dB, so Gain at its -inf minimum stays silent
-        // whatever the zone's own gain.
-        let gain = (db_to_gain(self.params.get(GAIN)) * db_to_gain(zone.gain_db as f64)) as f32
-            * (1.0 - sens + sens * velocity);
+        let gain = db_to_gain(zone.gain_db as f64) as f32 * (1.0 - sens + sens * velocity);
 
         if self.active_voices() >= VOICES {
             self.steal();
@@ -509,6 +528,10 @@ struct SavedZone {
 }
 
 impl_device!(Sampler, INFO, PARAMS, {
+    fn snap_smoothing(&mut self) {
+        self.gain.reset(self.gain.target());
+    }
+
     fn save_state(&self) -> Vec<u8> {
         state::save_with(
             &INFO,
@@ -551,6 +574,7 @@ impl Segmented for Sampler {
 
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         let fade_step = self.fade_step;
+        let tune = self.tune;
         for i in start..end {
             let (mut l, mut r) = (0.0, 0.0);
             for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -580,9 +604,12 @@ impl Segmented for Sampler {
                 let right = sample.channels.get(1).unwrap_or(left);
                 l += hermite(left, v.pos) * g;
                 r += hermite(right, v.pos) * g;
-                v.pos += v.rate;
+                v.pos += v.rate * tune;
             }
-            output(ctx, i, l, r);
+            // Gain multiplies the mix rather than adding dB per voice, so its
+            // -inf minimum stays silent whatever the zones' own gains.
+            let gain = self.gain.tick();
+            output(ctx, i, l * gain, r * gain);
         }
     }
 }
@@ -600,6 +627,8 @@ impl Node for Sampler {
     fn prepare(&mut self, sample_rate: f64, _max_frames: u32) {
         self.sample_rate = sample_rate;
         self.fade_step = (1000.0 / (STEAL_FADE_MS * sample_rate)) as f32;
+        self.gain.set_time(10.0, sample_rate);
+        self.gain.reset(db_to_gain(self.params.get(GAIN)) as f32);
         self.reset();
     }
 

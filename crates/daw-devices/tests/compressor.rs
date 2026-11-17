@@ -83,3 +83,64 @@ fn denormals() {
 fn recovers_from_non_finite_input() {
     check_recovers_from_non_finite(&mut Compressor::new());
 }
+
+/// Largest change between neighbouring samples.
+fn steepest(x: &[f32]) -> f32 {
+    x.windows(2).fold(0.0, |m, w| m.max((w[1] - w[0]).abs()))
+}
+
+/// Issue #178: makeup and mix were applied unsmoothed, so a knob move or an
+/// automation step changed the output level in one sample.
+#[test]
+fn makeup_and_mix_glide() {
+    let s = Setup::default();
+    // A steady level below the threshold, so only makeup moves the output.
+    let mut c = Compressor::new();
+    let r = render(
+        &mut c,
+        4800,
+        &[vec![0.01; 4800]],
+        &[(1000, param(MAKEUP, 24.0))],
+        s,
+    );
+    let out = &r.channels[0];
+    let target = 0.01 * 10f32.powf(24.0 / 20.0);
+    assert_eq!(out[999], 0.01);
+    assert!((out[4799] - target).abs() < 1e-4, "{}", out[4799]);
+    assert!(steepest(out) < 0.01 * (target - 0.01), "{}", steepest(out));
+
+    // A steady level above it: mix fades from the compressed to the dry signal.
+    let mut c = Compressor::new();
+    let r = render(
+        &mut c,
+        48000,
+        &[vec![0.5; 48000]],
+        &[(40000, param(MIX, 0.0))],
+        s,
+    );
+    let out = &r.channels[0];
+    let wet = out[39999];
+    assert!(wet < 0.3, "{wet}");
+    assert!((out[47999] - 0.5).abs() < 1e-5, "{}", out[47999]);
+    assert!(steepest(&out[39000..]) < 0.01 * (0.5 - wet));
+}
+
+/// Loading state jumps to the saved makeup and mix instead of gliding there.
+#[test]
+fn load_state_after_prepare_does_not_glide() {
+    let s = Setup::default();
+    let mut saved = Compressor::new();
+    saved.set_param(MAKEUP, 12.0);
+    saved.set_param(MIX, 0.5);
+    let mut c = Compressor::new();
+    daw_core::node::Node::prepare(&mut c, s.sample_rate, s.block as u32);
+    c.load_state(&saved.save_state()).unwrap();
+    let timeline = daw_core::time::Timeline::constant(s.bpm, 4, 4);
+    let r = render_prepared(&mut c, 64, &[vec![0.01; 64]], &[], s, &timeline);
+    let expected = 0.01 * (0.5 + 0.5 * 10f32.powf(12.0 / 20.0));
+    assert!(
+        (r.channels[0][0] - expected).abs() < 1e-6,
+        "{}",
+        r.channels[0][0]
+    );
+}

@@ -114,3 +114,55 @@ fn denormals() {
 fn recovers_from_non_finite_input() {
     check_recovers_from_non_finite(&mut Delay::new());
 }
+
+/// Largest change between neighbouring samples.
+fn steepest(x: &[f32]) -> f32 {
+    x.windows(2).fold(0.0, |m, w| m.max((w[1] - w[0]).abs()))
+}
+
+/// Issue #178: the time smoother stalled 37.5 samples short of this target
+/// and then jumped the read tap there, clicking in the wet signal.
+#[test]
+fn time_glide_ends_without_a_click() {
+    let s = Setup {
+        sample_rate: 96000.0,
+        ..Setup::default()
+    };
+    let mut d = Delay::new();
+    d.set_param(SYNC, 0.0);
+    d.set_param(TIME, 1000.0);
+    d.set_param(MIX, 1.0);
+    d.set_param(FEEDBACK, 0.0);
+    let frames = 4 * 96000;
+    let input = sine(20.0, 1.0, s.sample_rate, frames);
+    let glide_at = 2 * 96000;
+    let events = [(glide_at, param(TIME, 2000.0))];
+    let r = render(&mut d, frames, std::slice::from_ref(&input), &events, s);
+    // Well into the glide the tap has all but stopped, so the echo is no
+    // steeper than the tone itself.
+    let settling = &r.channels[0][glide_at + 9600..];
+    assert!(
+        steepest(settling) < 1.5 * steepest(&input),
+        "{} vs {}",
+        steepest(settling),
+        steepest(&input)
+    );
+}
+
+/// Issue #177: reset used to zero both delay buffers, megabytes of memory,
+/// on the audio thread. Whatever it leaves behind must still read as silence.
+#[test]
+fn reset_silences_the_echoes() {
+    let s = Setup::default();
+    let mut d = Delay::new();
+    d.set_param(MIX, 1.0);
+    d.set_param(FEEDBACK, 0.9);
+    render(&mut d, 30000, &[noise(3, 1.0, 30000)], &[], s);
+    Node::reset(&mut d);
+    let timeline = Timeline::constant(s.bpm, 4, 4);
+    let r = render_prepared(&mut d, 30000, &[impulse(30000)], &[], s, &timeline);
+    for ch in &r.channels {
+        assert_eq!(ch.iter().position(|&x| x != 0.0), Some(24000));
+        assert_eq!(ch[24000], 1.0);
+    }
+}
