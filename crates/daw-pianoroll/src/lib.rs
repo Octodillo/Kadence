@@ -36,7 +36,7 @@ mod draw;
 pub mod lanes;
 mod view;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use daw_arrange::gesture::DRAG_THRESHOLD;
@@ -114,7 +114,7 @@ enum Gesture {
     /// until the pointer moves sideways away from it.
     Velocity {
         last: (f64, f64),
-        ids: Vec<NoteUid>,
+        ids: HashSet<NoteUid>,
         grabbed: Option<NoteUid>,
     },
 }
@@ -549,25 +549,20 @@ impl PianoRoll {
                 let Some((c, m)) = self.clip(project) else {
                     return Outcome::default();
                 };
-                let mut ids: Vec<NoteUid> = m
+                // The selected notes, or every note when none is.
+                let mut targets: Vec<Note> = m
                     .notes
                     .iter()
                     .filter(|n| self.selection.contains(&n.id))
-                    .map(|n| n.id)
+                    .cloned()
                     .collect();
-                if ids.is_empty() {
-                    ids = m.notes.iter().map(|n| n.id).collect();
+                if targets.is_empty() {
+                    targets = m.notes.clone();
                 }
                 let (lx, _) = self.local(p.x, p.y);
                 let (top, lane) = self.velocity_lane();
                 let ly = p.y - top;
                 let v = self.grid_view(c.start);
-                let targets: Vec<Note> = m
-                    .notes
-                    .iter()
-                    .filter(|n| ids.contains(&n.id))
-                    .cloned()
-                    .collect();
                 let hit = lane.hit_test(&v, &targets, lx, STEM_TOLERANCE);
                 let out = match hit {
                     Some(i) => {
@@ -585,7 +580,7 @@ impl PianoRoll {
                 };
                 self.gesture = Some(Gesture::Velocity {
                     last: (lx, ly),
-                    ids,
+                    ids: targets.iter().map(|n| n.id).collect(),
                     grabbed: hit.map(|i| targets[i].id),
                 });
                 let _ = env;
@@ -682,10 +677,11 @@ impl PianoRoll {
                 let v = self.grid_view(c.start);
                 let (lx, ly) = self.local(p.x, p.y);
                 let data = drag.update(&v, lx, ly, snap.as_ref());
+                let by_id: HashMap<NoteUid, &Note> = m.notes.iter().map(|n| (n.id, n)).collect();
                 let mut before: Vec<Note> = Vec::with_capacity(ids.len());
                 let mut after: Vec<Note> = Vec::with_capacity(ids.len());
                 for (id, d) in ids.iter().zip(data) {
-                    if let Some(n) = m.notes.iter().find(|n| n.id == *id) {
+                    if let Some(&n) = by_id.get(id) {
                         let mut moved = n.clone();
                         moved.set_data(d);
                         before.push(n.clone());
@@ -963,9 +959,11 @@ impl PianoRoll {
     /// layout.
     pub fn sync(&mut self, project: &Project) {
         match self.clip(project) {
-            Some((_, m)) => self
-                .selection
-                .retain(|s| m.notes.iter().any(|n| n.id == *s)),
+            Some((_, m)) if !self.selection.is_empty() => {
+                let ids = note_ids(m);
+                self.selection.retain(|s| ids.contains(s));
+            }
+            Some(_) => {}
             None => self.selection.clear(),
         }
         self.lane_count = self.lane_track(project).map_or(0, |t| t.automation.len());
@@ -1007,11 +1005,12 @@ impl PianoRoll {
 
     fn selected(&self, project: &Project) -> Option<(ClipId, MidiClip, Vec<NoteUid>, Clip)> {
         let (c, m) = self.clip(project)?;
+        let ids = note_ids(m);
         let ids: Vec<NoteUid> = self
             .selection
             .iter()
             .copied()
-            .filter(|s| m.notes.iter().any(|n| n.id == *s))
+            .filter(|s| ids.contains(s))
             .collect();
         Some((c.id, m.clone(), ids, (*c).clone()))
     }
@@ -1208,6 +1207,11 @@ impl Accidentals {
             ],
         }
     }
+}
+
+/// The IDs of a clip's notes, for looking many of them up.
+fn note_ids(clip: &MidiClip) -> HashSet<NoteUid> {
+    clip.notes.iter().map(|n| n.id).collect()
 }
 
 /// Note names with C4 as middle C (key 60), as KDE and most DAWs show them.

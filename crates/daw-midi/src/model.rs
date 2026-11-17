@@ -4,7 +4,8 @@
 //! operations, then turns the result into one undoable command with
 //! [`NoteEdit`]. Everything here runs off the audio thread.
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use daw_core::time::{SegmentTempoMap, TempoMap, TickTime, Timeline};
 use daw_model::commands::{AddNotes, Batch, EditNotes, RemoveNotes};
@@ -118,6 +119,8 @@ pub struct NoteEdit {
     label: String,
     remove: Vec<NoteUid>,
     edit: Vec<Note>,
+    /// Where each edited note is in `edit`.
+    edited: HashMap<NoteUid, usize>,
     add: Vec<Note>,
     drag: bool,
     any_changed: bool,
@@ -130,6 +133,7 @@ impl NoteEdit {
             label: label.into(),
             remove: Vec::new(),
             edit: Vec::new(),
+            edited: HashMap::new(),
             add: Vec::new(),
             drag: false,
             any_changed: false,
@@ -147,7 +151,7 @@ impl NoteEdit {
 
     /// Records every note in `after` that differs from the note with the
     /// same ID in `before` (in a drag, every note in both). Notes not in
-    /// `before` are ignored.
+    /// `before` are ignored, and a note recorded before gets its new value.
     pub fn changed(mut self, before: &[Note], after: &[Note]) -> Self {
         let old: HashMap<NoteUid, &Note> = before.iter().map(|n| (n.id, n)).collect();
         for n in after {
@@ -155,8 +159,13 @@ impl NoteEdit {
             let differs = *o != n;
             self.any_changed |= differs;
             if differs || self.drag {
-                self.edit.retain(|e| e.id != n.id);
-                self.edit.push(n.clone());
+                match self.edited.entry(n.id) {
+                    Entry::Occupied(at) => self.edit[*at.get()] = n.clone(),
+                    Entry::Vacant(at) => {
+                        at.insert(self.edit.len());
+                        self.edit.push(n.clone());
+                    }
+                }
             }
         }
         self
@@ -226,6 +235,7 @@ fn is_edit(c: &dyn Command) -> bool {
 /// Copies of the notes in `clip` whose IDs are in `selected`, in clip
 /// order.
 pub fn selected_notes(clip: &MidiClip, selected: &[NoteUid]) -> Vec<Note> {
+    let selected: HashSet<NoteUid> = selected.iter().copied().collect();
     clip.notes
         .iter()
         .filter(|n| selected.contains(&n.id))
@@ -551,6 +561,34 @@ mod tests {
         assert_eq!(keys, [60, 64]);
         doc.undo().unwrap();
         assert_eq!(notes(&doc, cid).len(), 2);
+    }
+
+    #[test]
+    fn a_note_changed_twice_is_edited_once_with_its_last_value() {
+        let (a, b) = (n(0, 100, 60), n(200, 100, 62));
+        let (mut doc, cid) = doc_with_clip(vec![a.clone(), b.clone()]);
+        let before = [a, b];
+        let mut first = before.clone();
+        edit::nudge(&mut first, 10);
+        let mut second = before.clone();
+        edit::nudge(&mut second[..1], 30);
+        let cmd = NoteEdit::new(cid, "x")
+            .changed(&before, &first)
+            .changed(&before, &second)
+            .into_command()
+            .unwrap();
+        doc.execute_boxed(cmd).unwrap();
+        let starts: Vec<i64> = notes(&doc, cid).iter().map(|n| n.start.0).collect();
+        assert_eq!(starts, [30, 210]);
+    }
+
+    #[test]
+    fn selected_notes_come_in_clip_order() {
+        let (doc, cid) = doc_with_clip(vec![n(0, 10, 60), n(100, 10, 62), n(200, 10, 64)]);
+        let clip = midi_clip(doc.project(), cid).unwrap();
+        let ids = [clip.notes[2].id, clip.notes[0].id, NoteUid::new()];
+        let keys: Vec<u8> = selected_notes(clip, &ids).iter().map(|n| n.key).collect();
+        assert_eq!(keys, [60, 64]);
     }
 
     #[test]
