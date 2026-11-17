@@ -537,6 +537,10 @@ impl<'a> Builder<'a> {
             self.session.warnings.push(Warning::UnknownDevice {
                 kind: kind.to_owned(),
             });
+            // The saved values count as sent: a bypass has no use for them.
+            self.built
+                .params
+                .extend(d.params.iter().map(|(&p, &v)| ((key, p), v)));
             return self.add(NodeKind::Device, &d.name, Box::new(Bypass), key);
         };
         // Samplers find relative sample paths in the project bundle.
