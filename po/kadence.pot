@@ -2280,7 +2280,7 @@ msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:77
 msgctxt "@info %1 is a file path"
-msgid "“%1” could not be read, so its clips are silent."
+msgid "“%1” could not be read, so it plays as silence."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:80

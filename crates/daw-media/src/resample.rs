@@ -1,7 +1,8 @@
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Resampler};
 
-use crate::{AudioData, MediaError, Result, SAMPLE_RATES};
+use crate::decode::{check_channels, check_rate};
+use crate::{AudioData, MediaError, Result};
 
 const CHUNK: usize = 1024;
 
@@ -10,14 +11,12 @@ fn err(e: impl std::fmt::Display) -> MediaError {
 }
 
 /// An FFT resampler between two rates. Its filter and buffers are sized from
-/// the rates, so rates no file or device has are refused here, wherever they
-/// came from.
+/// the rates and the channel count, so values no file or device has are
+/// refused here, wherever they came from.
 fn fft(from: u32, to: u32, channels: usize, sync: FixedSync) -> Result<Fft<f32>> {
-    for rate in [from, to] {
-        if !SAMPLE_RATES.contains(&rate) {
-            return Err(err(format_args!("sample rate of {rate} Hz")));
-        }
-    }
+    check_rate(from)?;
+    check_rate(to)?;
+    check_channels(channels)?;
     Fft::new(from as usize, to as usize, CHUNK, channels, sync).map_err(err)
 }
 
@@ -128,11 +127,19 @@ impl ChunkResampler {
     /// Push out what is still inside the resampler (end of input).
     pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<()> {
         let expected = (self.pushed as f64 * self.ratio).ceil() as u64;
-        let mut guard = 0;
-        while self.produced < expected && guard < 64 {
+        // Each run takes in one input block, and output comes a whole block
+        // at a time: many runs apart when the rates share no factor. So run
+        // for as much input as the output still owed stands for, the trimmed
+        // delay and one block of slack included.
+        let owed = expected.saturating_sub(self.produced) + self.to_trim as u64;
+        let owed_input = (owed + self.output[0].len() as u64) as f64 / self.ratio;
+        let runs = (owed_input / self.input[0].len() as f64).ceil() as u64 + 1;
+        for _ in 0..runs {
+            if self.produced >= expected {
+                break;
+            }
             let partial = self.filled;
             self.run(Some(partial), out)?;
-            guard += 1;
         }
         let excess = (self.produced.saturating_sub(expected)) as usize * self.channels;
         out.truncate(out.len().saturating_sub(excess));

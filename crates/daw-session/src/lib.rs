@@ -144,7 +144,8 @@ pub enum Warning {
     /// An audio file could not be streamed; its clips are silent.
     #[error("can't stream {}: {detail}", path.display())]
     CannotStream { path: PathBuf, detail: String },
-    /// An audio file could not be read; its clips are silent.
+    /// An audio file could not be read; the clips or sampler zones that
+    /// play it are silent.
     #[error("can't read {}", path.display())]
     CannotRead { path: PathBuf },
     /// A track's notes did not reach the engine; the next sync retries.

@@ -16,7 +16,7 @@ mod write;
 
 pub use data::AudioData;
 pub use decode::{
-    AudioFileInfo, Decoder, SAMPLE_RATES, decode_file, decode_file_within, load_file,
+    AudioFileInfo, Decoder, MAX_CHANNELS, SAMPLE_RATES, decode_file, decode_file_within,
     load_file_within,
 };
 pub use error::MediaError;

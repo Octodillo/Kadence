@@ -50,17 +50,54 @@ pub struct Decoder {
 /// follow it.
 pub const SAMPLE_RATES: RangeInclusive<u32> = 1_000..=768_000;
 
+/// The most channels a file may state. Buffers are sized per channel, and a
+/// header can claim tens of thousands.
+pub const MAX_CHANNELS: usize = 64;
+
+/// Refuses a sample rate outside [`SAMPLE_RATES`].
+pub(crate) fn check_rate(rate: u32) -> Result<()> {
+    if SAMPLE_RATES.contains(&rate) {
+        Ok(())
+    } else {
+        Err(MediaError::Unsupported(format!("sample rate of {rate} Hz")))
+    }
+}
+
+/// Refuses more than [`MAX_CHANNELS`] channels.
+pub(crate) fn check_channels(channels: usize) -> Result<()> {
+    if channels <= MAX_CHANNELS {
+        Ok(())
+    } else {
+        Err(MediaError::Unsupported(format!("{channels} channels")))
+    }
+}
+
+/// Opens `path` for reading if it is a regular file. A FIFO or a device can
+/// block for good, on opening or on reading, so those are refused; the check
+/// is on the open file, which cannot be swapped for another afterwards.
+fn open_regular(path: &Path) -> Result<File> {
+    let mut options = File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Without this, opening a FIFO waits for a writer.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|e| MediaError::io(path, e))?;
+    let meta = file.metadata().map_err(|e| MediaError::io(path, e))?;
+    if !meta.is_file() {
+        return Err(MediaError::Unsupported("not a regular file".into()));
+    }
+    Ok(file)
+}
+
 impl Decoder {
     /// Opens an audio file. The file is untrusted: its header is checked
     /// here, so nothing later sizes work from a value no real file has.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        // Opening a FIFO or a device can block for good.
-        let meta = std::fs::metadata(path).map_err(|e| MediaError::io(path, e))?;
-        if !meta.is_file() {
-            return Err(MediaError::Unsupported("not a regular file".into()));
-        }
-        let file = File::open(path).map_err(|e| MediaError::io(path, e))?;
+        let file = open_regular(path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -85,12 +122,9 @@ impl Decoder {
         let sample_rate = params
             .sample_rate
             .ok_or_else(|| MediaError::Unsupported("unknown sample rate".into()))?;
-        if !SAMPLE_RATES.contains(&sample_rate) {
-            return Err(MediaError::Unsupported(format!(
-                "sample rate of {sample_rate} Hz"
-            )));
-        }
+        check_rate(sample_rate)?;
         let channels = params.channels.as_ref().map_or(0, |c| c.count());
+        check_channels(channels)?;
         let track_id = track.id;
         let time_base = track.time_base;
         let frames = track.num_frames;
@@ -121,6 +155,7 @@ impl Decoder {
             if this.info.channels == 0 {
                 return Err(MediaError::Unsupported("unknown channel count".into()));
             }
+            check_channels(this.info.channels)?;
         }
         Ok(this)
     }
@@ -265,23 +300,23 @@ impl Decoder {
 /// program wrote or the caller otherwise trusts: memory use follows the
 /// file's real length. See [`decode_file_within`].
 pub fn decode_file(path: impl AsRef<Path>) -> Result<AudioData> {
-    let data = decode_all(Decoder::open(path)?, f64::INFINITY)?;
-    Ok(data.expect("no limit to exceed"))
+    let data = decode_all(Decoder::open(path)?, u64::MAX)?;
+    Ok(data.expect("a file cannot hold more samples than that"))
 }
 
-/// Decode a whole file into memory unless it holds more than `max_seconds`
-/// of audio, in which case nothing is kept and `None` is returned. The
-/// length is measured while decoding, since the one in the header need not
-/// be true.
-pub fn decode_file_within(path: impl AsRef<Path>, max_seconds: f64) -> Result<Option<AudioData>> {
-    decode_all(Decoder::open(path)?, max_seconds)
+/// Decode a whole file into memory unless it holds more than `max_samples`
+/// samples over all its channels, in which case nothing is kept and `None`
+/// is returned. Samples, not seconds, since those are what memory follows:
+/// the file picks its own rate and channel count. They are counted while
+/// decoding, since the length in the header need not be true.
+pub fn decode_file_within(path: impl AsRef<Path>, max_samples: u64) -> Result<Option<AudioData>> {
+    decode_all(Decoder::open(path)?, max_samples)
 }
 
-fn decode_all(mut dec: Decoder, max_seconds: f64) -> Result<Option<AudioData>> {
+fn decode_all(mut dec: Decoder, max_samples: u64) -> Result<Option<AudioData>> {
     let ch = dec.info().channels;
     let rate = dec.info().sample_rate;
-    // Saturates: no limit is `u64::MAX` frames.
-    let max_frames = (max_seconds * f64::from(rate)).ceil() as u64;
+    let max_frames = max_samples / ch.max(1) as u64;
     // The header's frame count is untrusted (truncated or corrupt files), so only use
     // it as a capped hint; the planes grow to the real decoded length.
     // Cap the total reservation (all channels), not per plane.
@@ -311,19 +346,14 @@ fn decode_all(mut dec: Decoder, max_seconds: f64) -> Result<Option<AudioData>> {
     Ok(Some(data))
 }
 
-/// Decode a whole file and resample it to `sample_rate` if needed. This is what the
-/// sampler and other in-memory users want. Like [`decode_file`], for trusted files.
-pub fn load_file(path: impl AsRef<Path>, sample_rate: u32) -> Result<AudioData> {
-    to_rate(decode_file(path)?, sample_rate)
-}
-
-/// [`load_file`] with the length limit of [`decode_file_within`].
+/// [`decode_file_within`], then resampled to `sample_rate` if needed. The
+/// limit is on the file as decoded, before resampling.
 pub fn load_file_within(
     path: impl AsRef<Path>,
     sample_rate: u32,
-    max_seconds: f64,
+    max_samples: u64,
 ) -> Result<Option<AudioData>> {
-    decode_file_within(path, max_seconds)?
+    decode_file_within(path, max_samples)?
         .map(|data| to_rate(data, sample_rate))
         .transpose()
 }

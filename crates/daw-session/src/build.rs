@@ -338,10 +338,7 @@ pub(crate) fn graph(
                     id
                 }
                 _ => {
-                    let (node, meter, warning) = device_node(d, session.media.root());
-                    if let Some(w) = warning {
-                        session.warnings.push(w);
-                    }
+                    let (node, meter) = device_node(d, session.media.root(), &mut session.warnings);
                     if let Some(m) = meter {
                         built.device_meters.insert(d.id, m);
                     }
@@ -844,11 +841,13 @@ fn join_contiguous(set: &mut ClipSet) {
 }
 
 /// Restores a built-in device's saved state. A sampler's relative sample
-/// paths are relative to `root`.
+/// paths are relative to `root`; a sample that will not load leaves its zone
+/// silent and a warning in `warnings`.
 fn load_device_state(
     dev: &mut dyn daw_devices::Device,
     data: &[u8],
     root: Option<&Path>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), daw_devices::StateError> {
     let Some(sampler) = dev.as_any_mut().downcast_mut::<daw_devices::Sampler>() else {
         return dev.load_state(data);
@@ -858,7 +857,13 @@ fn load_device_state(
             Some(root) if path.is_relative() => root.join(path),
             _ => path.to_path_buf(),
         };
-        daw_devices::SampleBuffer::load(&path).ok().map(Arc::new)
+        match daw_devices::SampleBuffer::load(&path) {
+            Ok(sample) => Some(Arc::new(sample)),
+            Err(_) => {
+                warnings.push(Warning::CannotRead { path });
+                None
+            }
+        }
     })
 }
 
@@ -893,22 +898,22 @@ fn plugin_node(
     id
 }
 
-/// The engine node for a model device, its gain reduction meter if it has
-/// one, and a warning if it can't be made.
+/// The engine node for a model device and its gain reduction meter if it
+/// has one. What it can't do fully goes to `warnings`.
 ///
 /// Samplers find relative sample paths in `root`, the project bundle.
 fn device_node(
     d: &Device,
     root: Option<&Path>,
-) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
+    warnings: &mut Vec<Warning>,
+) -> (Box<dyn Node>, Option<Arc<PeakMeter>>) {
     match &d.source {
         DeviceSource::Builtin { kind } => match daw_devices::create(kind) {
             Some(mut dev) => {
-                let mut warning = None;
                 if let Some(state) = &d.state
-                    && let Err(e) = load_device_state(dev.as_mut(), &state.0, root)
+                    && let Err(e) = load_device_state(dev.as_mut(), &state.0, root, warnings)
                 {
-                    warning = Some(Warning::DeviceStateRejected {
+                    warnings.push(Warning::DeviceStateRejected {
                         device: d.name.clone(),
                         detail: e.to_string(),
                     });
@@ -917,13 +922,12 @@ fn device_node(
                     dev.set_param(p, v);
                 }
                 let meter = dev.gain_reduction_meter();
-                (dev, meter, warning)
+                (dev, meter)
             }
-            None => (
-                Box::new(Bypass),
-                None,
-                Some(Warning::UnknownDevice { kind: kind.clone() }),
-            ),
+            None => {
+                warnings.push(Warning::UnknownDevice { kind: kind.clone() });
+                (Box::new(Bypass), None)
+            }
         },
         DeviceSource::Plugin { .. } => unreachable!("plugins are made by plugin_node"),
     }
