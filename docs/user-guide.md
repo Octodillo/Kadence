@@ -44,8 +44,9 @@ that each hold a list of folders separated by colons. The folders in
 `CLAP_PATH` and `VST3_PATH` are searched before the others; `LV2_PATH`, if
 set, replaces the LV2 folders above.
 
-The plugin section of the **Audio** settings page lists the folders Kadence
-searches on your system and shows what was found. **Add Folder…** adds
+The plugin section of the **Audio** settings page lists the ones of these
+folders that exist on your system, along with those in your home folder,
+and shows what was found. **Add Folder…** adds
 another folder, which is searched after these for all three formats, and
 **Rescan** looks again. Each plugin
 runs in a process of its own, so a plugin that crashes is switched off and
@@ -53,7 +54,8 @@ reported instead of closing Kadence.
 
 In the Flatpak, install plugins from Flathub (their IDs start with
 `org.freedesktop.LinuxAudio.Plugins.`) or put them in `~/.clap`, `~/.vst3`
-or `~/.lv2`, which the Flatpak may read. The Flathub plugins are found in
+or `~/.lv2`, which the Flatpak may read; if you had to create the folder,
+restart Kadence so it can see it. The Flathub plugins are found in
 `/app/extensions/Plugins/clap`, `/app/extensions/Plugins/vst3` and
 `/app/extensions/Plugins/lv2`. The system folders above are then the
 Flatpak runtime's, not your system's, so plugins installed with your

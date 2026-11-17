@@ -162,7 +162,7 @@ impl PluginCatalog {
     /// order: the format's own (its environment variable included), or those given to
     /// [`with_folders`](Self::with_folders). Some may not exist.
     pub fn format_folders(&self, format: &PluginFormatKind) -> Vec<PathBuf> {
-        format_folders(&self.folders, &daw_plugins::default_registry(), format)
+        own_folders(&self.folders, &daw_plugins::default_registry(), format)
     }
 
     /// Starts a scan on a background thread. Bundles scanned before and unchanged since are
@@ -301,7 +301,7 @@ fn same_plugins(a: &[PluginDescriptor], b: &[PluginDescriptor]) -> bool {
 }
 
 /// Where `format` is searched: `replaced[format]` if there, otherwise the format's own folders.
-fn format_folders(
+fn own_folders(
     replaced: &HashMap<PluginFormatKind, Vec<PathBuf>>,
     registry: &daw_plugins::PluginRegistry,
     format: &PluginFormatKind,
@@ -325,7 +325,7 @@ impl Job {
     fn run(self, done: &AtomicUsize, total: &AtomicUsize) -> Outcome {
         let mut registry = daw_plugins::default_registry();
         for format in FORMATS {
-            let mut paths = format_folders(&self.folders, &registry, &format);
+            let mut paths = own_folders(&self.folders, &registry, &format);
             paths.extend(self.extra_folders.iter().cloned());
             registry.set_search_paths(format, paths);
         }

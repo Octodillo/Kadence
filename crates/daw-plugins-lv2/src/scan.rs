@@ -45,7 +45,9 @@ fn candidate_paths(
     flatpak: bool,
 ) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = match lv2_path {
-        Some(p) if !p.is_empty() => std::env::split_paths(&p).collect(),
+        Some(p) if !p.is_empty() => std::env::split_paths(&p)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect(),
         _ => {
             let mut v = Vec::new();
             if let Some(home) = home {
@@ -220,6 +222,11 @@ mod tests {
         assert_eq!(
             custom,
             ["/a", "/b", "/app/extensions/Plugins/lv2", "/app/lib/lv2"].map(PathBuf::from)
+        );
+        // An empty entry names no folder.
+        assert_eq!(
+            candidate_paths(Some("/a::/b:".into()), None, false),
+            ["/a", "/b"].map(PathBuf::from)
         );
         assert_eq!(
             candidate_paths(Some("/a".into()), None, false),

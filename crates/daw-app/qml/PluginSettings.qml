@@ -53,25 +53,30 @@ Kirigami.FormLayout {
         spacing: Kirigami.Units.smallSpacing
 
         Repeater {
-            // Order matches Plugins.formatFolders. CLAP, VST3 and LV2 are names.
-            model: ["CLAP", "VST3", "LV2"]
+            // CLAP, VST3 and LV2: names, so not translated.
+            model: Plugins.formatNames()
             delegate: ColumnLayout {
-                id: formatFolders
+                id: formatGroup
                 required property int index
                 required property string modelData
                 spacing: 0
                 QQC2.Label {
-                    text: formatFolders.modelData
+                    text: formatGroup.modelData
                 }
                 Repeater {
-                    model: Plugins.formatFolders(formatFolders.index + 1)
+                    model: Plugins.formatFolders(formatGroup.index + 1)
                     delegate: QQC2.Label {
+                        id: searchedFolder
                         required property string modelData
                         text: modelData
                         font: Kirigami.Theme.smallFont
                         elide: Text.ElideMiddle
                         Layout.maximumWidth: Kirigami.Units.gridUnit * 16
                         opacity: 0.7
+                        QQC2.ToolTip.text: modelData
+                        QQC2.ToolTip.visible: truncated && searchedFolderHover.hovered
+                        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                        HoverHandler { id: searchedFolderHover }
                     }
                 }
             }

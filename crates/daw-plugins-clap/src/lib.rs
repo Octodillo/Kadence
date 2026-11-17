@@ -50,7 +50,12 @@ impl PluginFormat for ClapFormat {
     /// `$CLAP_PATH`, then `~/.clap` and `/usr/lib/clap`, as the CLAP spec lays out.
     fn default_search_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = std::env::var_os("CLAP_PATH")
-            .map(|p| std::env::split_paths(&p).collect())
+            .map(|p| {
+                // An empty entry (`a::b`, or an empty variable) names no folder.
+                std::env::split_paths(&p)
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
         if let Some(home) = std::env::var_os("HOME") {
             paths.push(PathBuf::from(home).join(".clap"));
