@@ -585,6 +585,7 @@ dependencies = [
  "daw-core",
  "flacenc",
  "hound",
+ "libc",
  "rtrb 0.4.1",
  "rubato",
  "symphonia",

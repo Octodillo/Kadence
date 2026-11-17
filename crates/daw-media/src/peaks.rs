@@ -323,7 +323,7 @@ impl PeakCache {
         let channels = get!(u32) as usize;
         let frames = get!(u64);
         let n = get!(u32) as usize;
-        if n == 0 || n > 64 || channels == 0 || channels > 1024 {
+        if n == 0 || n > 64 || channels == 0 || channels > crate::MAX_CHANNELS {
             return Err(bad("corrupt header"));
         }
         let mut levels = Vec::with_capacity(n);

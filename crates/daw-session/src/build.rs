@@ -545,7 +545,12 @@ impl<'a> Builder<'a> {
         };
         // Samplers find relative sample paths in the project bundle.
         if let Some(state) = &d.state
-            && let Err(e) = load_device_state(dev.as_mut(), &state.0, self.session.media.root())
+            && let Err(e) = load_device_state(
+                dev.as_mut(),
+                &state.0,
+                self.session.media.root(),
+                &mut self.session.warnings,
+            )
         {
             self.session.warnings.push(Warning::DeviceStateRejected {
                 device: d.name.clone(),
@@ -978,11 +983,13 @@ fn join_contiguous(set: &mut ClipSet) {
 }
 
 /// Restores a built-in device's saved state. A sampler's relative sample
-/// paths are relative to `root`.
+/// paths are relative to `root`; a sample that will not load leaves its zone
+/// silent and a warning in `warnings`.
 fn load_device_state(
     dev: &mut dyn daw_devices::Device,
     data: &[u8],
     root: Option<&Path>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), daw_devices::StateError> {
     let Some(sampler) = dev.as_any_mut().downcast_mut::<daw_devices::Sampler>() else {
         return dev.load_state(data);
@@ -992,7 +999,13 @@ fn load_device_state(
             Some(root) if path.is_relative() => root.join(path),
             _ => path.to_path_buf(),
         };
-        daw_devices::SampleBuffer::load(&path).ok().map(Arc::new)
+        match daw_devices::SampleBuffer::load(&path) {
+            Ok(sample) => Some(Arc::new(sample)),
+            Err(_) => {
+                warnings.push(Warning::CannotRead { path });
+                None
+            }
+        }
     })
 }
 

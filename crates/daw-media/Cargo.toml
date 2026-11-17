@@ -17,6 +17,9 @@ rubato = "5"
 symphonia = { version = "0.6", default-features = false, features = ["aiff", "flac", "mp3", "ogg", "pcm", "vorbis", "wav", "adpcm", "opt-simd"] }
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 assert_no_alloc.workspace = true
 tempfile = "3"
