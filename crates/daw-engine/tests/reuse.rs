@@ -317,3 +317,146 @@ fn input_node_can_be_metered() {
     proc.process(16, &[&input], &mut [&mut out], &EventList::with_capacity(0));
     assert_eq!(meter.take(), vec![0.75]);
 }
+
+const LATE: NodeKey = NodeKey(7);
+
+/// A counter straight into master beside a silent path through a node with
+/// `latency`, so the counter's edge gets a compensation delay that long.
+fn compensated(ctl: &EngineController, latency: usize) -> GraphDesc {
+    let mut g = ctl.graph(0, 1);
+    let counter = g.reuse(SYNTH).unwrap_or_else(|| {
+        let id = g.add_device("counter", Box::new(Counter(0.0)));
+        g.set_key(id, SYNTH);
+        id
+    });
+    let silence = g.add_device("silence", Box::new(Dc(0.0)));
+    let late = g.add_device("late", Box::new(Delay::new(latency)));
+    g.set_key(late, LATE);
+    g.connect(silence, late);
+    g.connect(late, g.master());
+    g.connect(counter, g.master());
+    g
+}
+
+#[test]
+fn latency_compensation_keeps_its_audio_across_swaps() {
+    let (mut ctl, mut proc) = engine();
+    ctl.set_graph(compensated(&ctl, 5)).unwrap();
+    assert_eq!(
+        run(&mut proc, 8),
+        vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0]
+    );
+
+    // A structural edit that leaves the latency alone: the five samples in
+    // flight come out as if nothing happened.
+    let mut g = compensated(&ctl, 5);
+    let extra = g.add_track("extra", 1);
+    g.connect(extra, g.master());
+    ctl.set_graph(g).unwrap();
+    assert_eq!(run(&mut proc, 4), vec![4.0, 5.0, 6.0, 7.0]);
+
+    // More latency: the path waits out the difference, then carries on
+    // with what it held.
+    ctl.set_graph(compensated(&ctl, 7)).unwrap();
+    assert_eq!(run(&mut proc, 5), vec![0.0, 0.0, 8.0, 9.0, 10.0]);
+
+    // Less: the oldest audio is skipped, the newest kept. The line held
+    // 11..=17, of which the last three fit.
+    ctl.set_graph(compensated(&ctl, 3)).unwrap();
+    assert_eq!(run(&mut proc, 4), vec![15.0, 16.0, 17.0, 18.0]);
+    assert_eq!(proc.graph().unwrap().delay_lines(), 1);
+    ctl.collect_garbage();
+}
+
+#[test]
+fn compensation_on_the_input_survives_swaps_too() {
+    let (mut ctl, mut proc) = engine();
+    let graph = |ctl: &EngineController| {
+        let mut g = ctl.graph(1, 1);
+        let late = g.add_device("late", Box::new(Delay::new(3)));
+        g.connect(g.input(), late);
+        g.connect(late, g.master());
+        // The dry path is delayed to match; both arrive together.
+        g.connect(g.input(), g.master());
+        g
+    };
+    let none = EventList::with_capacity(0);
+    let feed = |proc: &mut EngineProcessor, input: [f32; 4]| {
+        let mut out = [0.0; 4];
+        proc.process(4, &[&input], &mut [&mut out], &none);
+        out
+    };
+    ctl.set_graph(graph(&ctl)).unwrap();
+    assert_eq!(feed(&mut proc, [1.0, 2.0, 3.0, 4.0]), [0.0, 0.0, 0.0, 2.0]);
+    // The latent node is new (and empty); the dry path still holds 2, 3, 4.
+    ctl.set_graph(graph(&ctl)).unwrap();
+    assert_eq!(feed(&mut proc, [5.0, 6.0, 7.0, 8.0]), [2.0, 3.0, 4.0, 10.0]);
+}
+
+/// A probe with `lanes` automated parameters, playing from the start.
+fn automated_probe(
+    config: EngineConfig,
+    lanes: impl IntoIterator<Item = AutomationLane>,
+) -> (EngineController, EngineProcessor) {
+    let (mut ctl, proc) = EngineController::new(config);
+    let mut g = ctl.graph(0, 1);
+    let probe = g.add_device("probe", Box::new(support::EventProbe));
+    g.connect(probe, g.master());
+    for (param, lane) in lanes.into_iter().enumerate() {
+        g.automate(probe, param as u32, lane);
+    }
+    ctl.set_graph(g).unwrap();
+    ctl.play().unwrap();
+    (ctl, proc)
+}
+
+fn pt(t: i64, value: f64, curve: Curve) -> AutomationPoint {
+    AutomationPoint {
+        time: SampleTime(t),
+        value,
+        curve,
+    }
+}
+
+#[test]
+fn every_automated_parameter_of_a_node_gets_its_ramp() {
+    // 64 ramps over a 1024-frame block are 64 * 32 events, four times the
+    // default event capacity; each lane brings its own room.
+    let ramp = || {
+        AutomationLane::new(vec![
+            pt(0, 0.0, Curve::Linear),
+            pt(100_000, 1.0, Curve::Step),
+        ])
+    };
+    let config = EngineConfig::default();
+    let (ctl, mut proc) = automated_probe(config, (0..64).map(|_| ramp()));
+    let out = run(&mut proc, 1024);
+    for (frame, events) in out.iter().enumerate() {
+        let expected = if frame % 32 == 0 { 64.0 } else { 0.0 };
+        assert_eq!(*events, expected, "frame {frame}");
+    }
+    assert_eq!(ctl.dropped_params(), 0);
+}
+
+#[test]
+fn a_lane_too_dense_to_fit_cannot_starve_the_others() {
+    // The first lane changes on every sample; the second is one ramp.
+    let dense = AutomationLane::new((0..64).map(|t| pt(t, t as f64, Curve::Step)).collect());
+    let ramp = AutomationLane::new(vec![pt(0, 0.0, Curve::Linear), pt(64, 1.0, Curve::Step)]);
+    let config = EngineConfig {
+        max_frames: 64,
+        event_capacity: 8,
+        ..Default::default()
+    };
+    let (ctl, mut proc) = automated_probe(config, [dense, ramp]);
+    let out = run(&mut proc, 64);
+    // Both start values, then the dense lane's share of the room and no
+    // more, which leaves the ramp its update at frame 32.
+    assert_eq!(out[0], 2.0);
+    assert_eq!(out[1..10], [1.0; 9]);
+    assert_eq!(out[10..32], [0.0; 22]);
+    assert_eq!(out[32], 1.0);
+    assert_eq!(ctl.dropped_params(), 63 - 9);
+    // The next block starts both parameters at their true values again.
+    assert_eq!(run(&mut proc, 64)[0], 2.0);
+}

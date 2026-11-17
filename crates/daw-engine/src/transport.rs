@@ -3,11 +3,28 @@ use std::sync::Arc;
 use daw_core::node::{CountIn, TransportLoop, TransportState};
 use daw_core::time::{SampleTime, Timeline};
 
+/// The shortest loop the transport plays, in seconds.
+///
+/// Every pass through a loop is at least one run of the whole graph, so
+/// without a floor a loop a few samples long would have the audio thread
+/// run the graph hundreds of times per cycle. With it, a cycle is split
+/// into at most one block per this much audio.
+pub const MIN_LOOP_SECONDS: f64 = 0.01;
+
 /// A loop from `start` (inclusive) to `end` (exclusive).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LoopRange {
     pub start: SampleTime,
     pub end: SampleTime,
+}
+
+impl LoopRange {
+    /// Whether the transport loops this range at `sample_rate`: it must be
+    /// at least [`MIN_LOOP_SECONDS`] long. Anything that shows or stores a
+    /// loop should ask this first, so it never shows one that is not played.
+    pub fn is_playable(&self, sample_rate: f64) -> bool {
+        (self.end.0.saturating_sub(self.start.0)) as f64 >= MIN_LOOP_SECONDS * sample_rate
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -19,7 +36,8 @@ pub enum TransportCommand {
     PlayWithCountIn(u32),
     Stop,
     Locate(SampleTime),
-    /// `None`, or a range with `end <= start`, turns looping off.
+    /// `None`, or a range that is not [playable](LoopRange::is_playable),
+    /// turns looping off.
     SetLoop(Option<LoopRange>),
 }
 
@@ -91,7 +109,9 @@ impl Transport {
                 self.position = t.0;
                 self.count_in = None;
             }
-            TransportCommand::SetLoop(r) => self.loop_range = r.filter(|r| r.end > r.start),
+            TransportCommand::SetLoop(r) => {
+                self.loop_range = r.filter(|r| r.is_playable(self.sample_rate));
+            }
         }
     }
 
@@ -179,14 +199,14 @@ mod tests {
     fn loop_wraps_on_block_boundary() {
         let mut t = Transport::new(48_000.0);
         t.apply(TransportCommand::SetLoop(Some(LoopRange {
-            start: SampleTime(100),
-            end: SampleTime(200),
+            start: SampleTime(1000),
+            end: SampleTime(2000),
         })));
-        t.apply(TransportCommand::Locate(SampleTime(150)));
+        t.apply(TransportCommand::Locate(SampleTime(1950)));
         t.apply(TransportCommand::Play);
         assert_eq!(t.block_len(64), 50);
         t.advance(50);
-        assert_eq!(t.position(), SampleTime(100));
+        assert_eq!(t.position(), SampleTime(1000));
         assert_eq!(t.block_len(64), 64);
     }
 
@@ -204,13 +224,13 @@ mod tests {
         let mut t = Transport::new(48_000.0);
         t.apply(TransportCommand::SetLoop(Some(LoopRange {
             start: SampleTime(0),
-            end: SampleTime(100),
+            end: SampleTime(1000),
         })));
-        t.apply(TransportCommand::Locate(SampleTime(500)));
+        t.apply(TransportCommand::Locate(SampleTime(5000)));
         t.apply(TransportCommand::Play);
         assert_eq!(t.block_len(64), 64);
         t.advance(64);
-        assert_eq!(t.position(), SampleTime(564));
+        assert_eq!(t.position(), SampleTime(5064));
     }
 
     #[test]
@@ -273,13 +293,44 @@ mod tests {
     }
 
     #[test]
-    fn invalid_loop_is_ignored() {
+    fn empty_and_tiny_loops_are_ignored() {
         let mut t = Transport::new(48_000.0);
-        t.apply(TransportCommand::SetLoop(Some(LoopRange {
-            start: SampleTime(10),
-            end: SampleTime(10),
-        })));
-        assert_eq!(t.loop_range(), None);
+        // 10 ms at 48 kHz is 480 samples.
+        for (start, end) in [
+            (10, 10),
+            (10, 5),
+            (0, 1),
+            (1000, 1479),
+            (i64::MIN, i64::MAX),
+        ] {
+            t.apply(TransportCommand::SetLoop(Some(LoopRange {
+                start: SampleTime(start),
+                end: SampleTime(end),
+            })));
+            if (start, end) == (i64::MIN, i64::MAX) {
+                assert!(t.loop_range().is_some(), "a huge range must not overflow");
+            } else {
+                assert_eq!(t.loop_range(), None, "{start}..{end}");
+            }
+        }
+        let shortest = LoopRange {
+            start: SampleTime(1000),
+            end: SampleTime(1480),
+        };
+        t.apply(TransportCommand::SetLoop(Some(shortest)));
+        assert_eq!(t.loop_range(), Some(shortest));
+        // So a cycle is never split into more blocks than it has 10 ms.
+        t.apply(TransportCommand::Locate(SampleTime(1000)));
+        t.apply(TransportCommand::Play);
+        let mut blocks = 0;
+        let mut left = 4096;
+        while left > 0 {
+            let len = t.block_len(left);
+            t.advance(len);
+            left -= len;
+            blocks += 1;
+        }
+        assert_eq!(blocks, 4096_usize.div_ceil(480));
     }
 
     #[test]

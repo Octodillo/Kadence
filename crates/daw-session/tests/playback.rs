@@ -454,6 +454,23 @@ fn stream_edited_while_stopped_plays_without_gap() {
 }
 
 #[test]
+fn a_loop_too_short_to_play_is_not_kept() {
+    let mut rig = Rig::new(0.0);
+    let beat = (TickTime(2 * PPQ), TickTime(3 * PPQ));
+    rig.session.set_loop(Some(beat)).unwrap();
+    assert_eq!(rig.session.loop_range(), Some(beat));
+    // One tick is far below the engine's shortest loop; an empty or
+    // backwards range is no loop either.
+    for range in [(2 * PPQ, 2 * PPQ + 1), (PPQ, PPQ), (PPQ, 0)] {
+        rig.session.set_loop(Some(beat)).unwrap();
+        rig.session
+            .set_loop(Some((TickTime(range.0), TickTime(range.1))))
+            .unwrap();
+        assert_eq!(rig.session.loop_range(), None, "{range:?}");
+    }
+}
+
+#[test]
 fn loop_wraps_cleanly_after_offset_edit() {
     let mut rig = Rig::new(0.0);
     dc_file(rig.dir(), "long.wav", 16 * BEAT as usize, 0.25);
