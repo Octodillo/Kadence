@@ -683,11 +683,35 @@ fn a_plugin_with_many_parameters_gets_them_all() {
     let mut rounds = 0;
     while rig.session.wants_sync() {
         rounds += 1;
-        assert!(rounds < 10, "never done");
+        assert!(rounds < 20, "never done");
         rig.sync();
         rig.process(BLOCK, 0.0);
     }
     assert_eq!(*rig.sent.lock().unwrap(), params);
+}
+
+/// The same with the syncs coming faster than the audio cycles, as with a large buffer:
+/// nothing is sent that the engine has no room for, so nothing is dropped and sent over.
+#[test]
+fn many_parameters_arrive_when_syncs_outpace_the_audio() {
+    let mut rig = Rig::new();
+    let params: BTreeMap<u32, f64> = (0..150).map(|p| (p, f64::from(p) / 150.0)).collect();
+    rig.plugin_with(rig.track, 0, "2x2p", params.clone());
+    let mut rounds = 0;
+    loop {
+        // A sync per tick whether asked for or not, as during a fader drag.
+        rig.sync();
+        rig.sync();
+        rig.sync();
+        rig.process(BLOCK, 0.0);
+        if !rig.session.wants_sync() {
+            break;
+        }
+        rounds += 1;
+        assert!(rounds < 20, "never done");
+    }
+    assert_eq!(*rig.sent.lock().unwrap(), params);
+    assert_eq!(rig.session.controller().dropped_params(), 0);
 }
 
 /// A value sent right before a graph is rebuilt, with no audio cycle in between, went to the

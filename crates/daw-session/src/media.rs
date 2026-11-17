@@ -20,9 +20,14 @@ const NOMINAL_SAMPLES_PER_SECOND: u64 = 192_000 * 8;
 
 /// What tells a file from an earlier version of itself: its modification
 /// time and length.
-type Stamp = (std::time::SystemTime, u64);
+pub type Stamp = (std::time::SystemTime, u64);
 
-fn stamp(path: &Path) -> Option<Stamp> {
+/// A file as it was at one look: its path and its [`Stamp`] then, `None`
+/// if it was not there.
+pub type Seen = (PathBuf, Option<Stamp>);
+
+/// The file's [`Stamp`] now, `None` if there is no such file.
+pub(crate) fn stamp(path: &Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
 }
@@ -41,9 +46,11 @@ pub(crate) enum Loaded {
 pub struct MediaPool {
     sample_rate: u32,
     root: Option<PathBuf>,
-    /// Files read so far, each with its [`stamp`] at the time: a file that
-    /// changed since is read again. Files that could not be read are not
-    /// kept, so each look tries them again.
+    /// Files looked at so far, each with its [`stamp`] at the time: a file
+    /// that changed since is read again, also one that could not be read.
+    /// The change is noticed when a track's clips are next sent to its
+    /// player: on an edit of them, or after
+    /// [`Session::reload_media`](crate::Session::reload_media).
     loaded: HashMap<PathBuf, (Loaded, Stamp)>,
     streamer: DiskStreamer,
     memory_limit: f64,
@@ -98,27 +105,23 @@ impl MediaPool {
         self.loaded.retain(|p, _| keep.contains(p));
     }
 
-    pub(crate) fn get(&mut self, path: &Path) -> Loaded {
+    /// How to play the file, and which version of it that is.
+    pub(crate) fn get(&mut self, path: &Path) -> (Loaded, Option<Stamp>) {
         let Some(now) = stamp(path) else {
             self.loaded.remove(path);
-            return Loaded::Missing;
+            return (Loaded::Missing, None);
         };
         if let Some((loaded, then)) = self.loaded.get(path)
             && *then == now
         {
-            return loaded.clone();
+            return (loaded.clone(), Some(now));
         }
-        match self.load(path) {
-            Ok(loaded) => {
-                self.loaded
-                    .insert(path.to_path_buf(), (loaded.clone(), now));
-                loaded
-            }
-            Err(_) => {
-                self.loaded.remove(path);
-                Loaded::Missing
-            }
-        }
+        // A file that can't be read is kept too: decoding it again gives
+        // the same until it changes.
+        let loaded = self.load(path).unwrap_or(Loaded::Missing);
+        self.loaded
+            .insert(path.to_path_buf(), (loaded.clone(), now));
+        (loaded, Some(now))
     }
 
     pub(crate) fn open_streams(&self, path: &Path) -> Result<Streams, MediaError> {
@@ -183,16 +186,16 @@ mod tests {
         let mut pool = MediaPool::new(48_000);
         pool.set_memory_limit(0.5);
         assert!(matches!(
-            pool.get(&flac(dir.path(), false)),
+            pool.get(&flac(dir.path(), false)).0,
             Loaded::Stream(48_000)
         ));
         assert!(matches!(
-            pool.get(&flac(dir.path(), true)),
+            pool.get(&flac(dir.path(), true)).0,
             Loaded::Stream(48_000)
         ));
         pool.set_memory_limit(1.0);
         for honest in [false, true] {
-            let Loaded::Memory(data, 48_000) = pool.get(&flac(dir.path(), honest)) else {
+            let Loaded::Memory(data, 48_000) = pool.get(&flac(dir.path(), honest)).0 else {
                 panic!("a file within the limit is held in memory");
             };
             assert_eq!(data.frames(), 48_000);

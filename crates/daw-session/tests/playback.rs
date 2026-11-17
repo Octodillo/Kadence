@@ -1450,8 +1450,9 @@ fn a_refused_graph_is_sent_again() {
     assert_eq!(rig.session.controller().graphs_swapped(), swaps + 1);
 }
 
-/// A file that could not be read is looked for again by every sync, and a new document has
-/// every file read afresh.
+/// A file that could not be read is looked for again by every sync, a file that changed is
+/// read again when its track's clips are next sent, and a new document has every file
+/// looked at afresh.
 #[test]
 fn a_file_that_appears_or_changes_is_read_again() {
     let mut rig = Rig::new(60.0);
@@ -1473,12 +1474,78 @@ fn a_file_that_appears_or_changes_is_read_again() {
     rig.sync();
     assert!(!rig.session.wants_sync());
 
-    // Written over (another length, so it shows whatever the clock's grain): the next
-    // look at the file reads it again, as when the project is opened again.
+    // Written over (another length each time, so it shows whatever the clock's grain):
+    // the next edit of the track's clips reads it again.
     dc_file(rig.dir(), "late.wav", 5 * BEAT as usize, 0.25);
+    rig.add_clip("late.wav", 6, 1);
+    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.25);
+    // And so does opening the project again.
+    dc_file(rig.dir(), "late.wav", 6 * BEAT as usize, 0.125);
     rig.session.reload_media();
     rig.sync();
-    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.25);
+    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.125);
+}
+
+/// A file that is there but is no audio is not decoded again by every sync, nor are its
+/// track's clips sent again: only once it has changed.
+#[test]
+fn a_file_that_is_no_audio_is_tried_again_once_it_changed() {
+    let mut rig = Rig::new(60.0);
+    let path = rig.dir().join("bad.wav");
+    std::fs::write(&path, b"not audio").unwrap();
+    rig.add_clip("bad.wav", 0, 4);
+    assert_eq!(
+        rig.session.warnings(),
+        [Warning::CannotRead { path: path.clone() }]
+    );
+    rig.sync();
+    assert!(rig.session.warnings().is_empty(), "not tried again");
+
+    dc_file(rig.dir(), "bad.wav", 4 * BEAT as usize, 0.5);
+    rig.sync();
+    assert!(rig.session.warnings().is_empty());
+    rig.session.play().unwrap();
+    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.5);
+}
+
+/// A streamed file that changed is opened again: the clip does not keep the readers of the
+/// file as it was.
+#[test]
+fn a_streamed_file_that_changed_is_opened_again() {
+    let mut rig = Rig::new(0.0);
+    dc_file(rig.dir(), "long.wav", 4 * BEAT as usize, 0.5);
+    rig.add_clip("long.wav", 0, 4);
+    rig.session.play().unwrap();
+    let out = rig.run_paced(BEAT as usize);
+    assert_eq!(out[BEAT as usize - 1], 0.5);
+
+    std::fs::remove_file(rig.dir().join("long.wav")).unwrap();
+    dc_file(rig.dir(), "long.wav", 5 * BEAT as usize, 0.25);
+    rig.session.reload_media();
+    rig.sync();
+    rig.session.locate(TickTime(0)).unwrap();
+    let out = rig.run_paced(BEAT as usize);
+    assert_eq!(out[BEAT as usize - 1], 0.25);
+}
+
+/// A loop the engine could not take (its queue was full) is owed: the session asks for a
+/// sync, which sends it.
+#[test]
+fn a_refused_loop_is_set_by_the_next_sync() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 8 * BEAT as usize, 0.5);
+    rig.add_clip("a.wav", 0, 1);
+    fill_queue(&mut rig, 0);
+    let range = Some((TickTime(0), TickTime(2 * PPQ)));
+    assert!(rig.session.set_loop(range).is_err());
+    assert!(rig.session.wants_sync());
+    rig.run(BLOCK);
+    rig.sync();
+    assert!(!rig.session.wants_sync());
+    rig.session.play().unwrap();
+    // Around the loop: the clip's beat plays a second time.
+    let out = rig.run(3 * BEAT as usize);
+    assert_eq!(out[2 * BEAT as usize + 1_000], 0.5);
 }
 
 /// The engine takes the new tempo and then refuses the next command: what is kept in

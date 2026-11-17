@@ -92,6 +92,7 @@ struct Shared {
     counting_in: AtomicBool,
     latency: AtomicU32,
     swaps: AtomicU64,
+    cycles: AtomicU64,
     dropped: AtomicU64,
     /// Timelines a dropped controller still held. The audio thread may
     /// still swap them in, so they live until the processor is dropped.
@@ -348,6 +349,15 @@ impl EngineController {
         self.shared.swaps.load(Ordering::Relaxed)
     }
 
+    /// How many cycles the audio thread has finished: calls of
+    /// [`process`](EngineProcessor::process) that played something. Each
+    /// takes the commands sent before it started and empties every node's
+    /// queue of parameter changes, so what was sent while this said `n` has
+    /// been through once it says `n + 2`.
+    pub fn cycles(&self) -> u64 {
+        self.shared.cycles.load(Ordering::Relaxed)
+    }
+
     /// Parameter changes dropped because a node's queue was full, the node
     /// was not in the running graph, it has no event input, or automation
     /// had more changes in one block than fit the node's event list.
@@ -469,6 +479,9 @@ impl EngineProcessor {
             }
             self.transport.advance(len);
             offset += len;
+        }
+        if frames > 0 {
+            self.shared.cycles.fetch_add(1, Ordering::Release);
         }
         self.shared
             .position

@@ -24,7 +24,7 @@ use daw_midi::player::midi_player;
 
 use crate::Warning;
 use crate::capture::input_tap;
-use crate::media::Loaded;
+use crate::media::{Loaded, Seen};
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
 use crate::{Built, MetronomeSettings, Session, db_to_gain};
 
@@ -567,8 +567,8 @@ impl<'a> Builder<'a> {
             let handle = self.old.players.remove(&track.id).expect("checked");
             self.taken.players.push(track.id);
             self.built.players.insert(track.id, handle);
-            if self.old.unread.contains(&track.id) {
-                self.built.unread.insert(track.id);
+            if let Some(files) = self.old.unread.get(&track.id) {
+                self.built.unread.insert(track.id, files.clone());
             }
             if let Some(c) = self.old.clips.remove(&track.id) {
                 self.built.clips.insert(track.id, c);
@@ -580,9 +580,7 @@ impl<'a> Builder<'a> {
             self.session.offline.clone(),
         );
         let set = clip_set(self.session, track, &handle);
-        if set.has_unread() {
-            self.built.unread.insert(track.id);
-        }
+        note_unread(&mut self.built.unread, track.id, &set);
         // A fresh queue has room for the first set.
         let _ = handle.send(set);
         self.built.clips.insert(track.id, track.clips.clone());
@@ -732,9 +730,7 @@ impl<'a> Builder<'a> {
         let key = device_key(d.id);
         let session = &mut *self.session;
         let (sample_rate, max_frames) = (session.sample_rate(), session.config.engine.max_frames);
-        let live = session
-            .plugins
-            .ensure(d, sample_rate, max_frames, &mut session.warnings);
+        let live = session.plugins.ensure(d, sample_rate, max_frames);
         let node: Box<dyn Node> = match live {
             Some(live) => {
                 // A fresh plugin has had none of the document's values:
@@ -1090,12 +1086,13 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         let path = session.media.resolve(&a.source);
         let engine_rate = session.sample_rate();
         let mut file_rate = engine_rate;
-        let source = match session.media.get(&path) {
+        let (loaded, stamp) = session.media.get(&path);
+        let source = match loaded {
             Loaded::Memory(data, rate) => {
                 file_rate = f64::from(rate);
                 ClipSource::Memory(data)
             }
-            Loaded::Stream(rate) if handle.has_stream(c.id, &path) => {
+            Loaded::Stream(rate) if handle.has_stream(c.id, &path, stamp) => {
                 file_rate = f64::from(rate);
                 ClipSource::Stream(None)
             }
@@ -1139,6 +1136,7 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         let file_rate = file_rate.max(1.0);
         let mut clip = PlayClip {
             id: c.id,
+            stamp,
             start,
             end,
             // The model keeps the offset in the file's own frames.
@@ -1162,6 +1160,14 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         set.clips.push(clip);
     }
     set
+}
+
+/// Keeps which of a track's files `set` could not read.
+pub(crate) fn note_unread(unread: &mut HashMap<TrackId, Vec<Seen>>, track: TrackId, set: &ClipSet) {
+    match set.unread() {
+        files if files.is_empty() => unread.remove(&track),
+        files => unread.insert(track, files),
+    };
 }
 
 /// A clip that continues an earlier one (the two halves of a split: same

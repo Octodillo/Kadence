@@ -60,7 +60,7 @@ impl Default for HostConfig {
             sample_rate: 48_000,
             buffer_size: 256,
             use_server: true,
-            client_name: "Kadence".into(),
+            client_name: daw_core::plugin::HOST_NAME.into(),
             auto_connect: true,
         }
     }
