@@ -21,7 +21,7 @@ use lv2_sys::{
 use rtrb::{Consumer, Producer};
 
 use crate::atom::Urids;
-use crate::{ring, uri_to_path};
+use crate::{atom, ring, uri_to_path};
 
 const X11_UI: &str = "http://lv2plug.in/ns/extensions/ui#X11UI";
 const KX_WIDGET: &str = "http://kxstudio.sf.net/ns/lv2ext/external-ui#Widget";
@@ -181,8 +181,9 @@ fn ui_library(path: &Path) -> Result<&'static libloading::Library, String> {
 /// What the UI's callbacks reach through their handle. Lives in a Box whose
 /// address the UI keeps until cleanup.
 struct Controller {
-    to_dsp: Producer<u8>,
-    event_transfer: u32,
+    /// Taken when the editor closes; see [`Editor::close`].
+    to_dsp: Option<Producer<u8>>,
+    urids: Urids,
     closed: bool,
     x11: Option<X11>,
     /// The control values last given to the UI, so a UI that writes back what it was given
@@ -190,6 +191,16 @@ struct Controller {
     last_sent: Vec<(u32, f32)>,
     /// The UI wrote something new since `take_state_changed`.
     changed: bool,
+}
+
+impl Controller {
+    /// Queues a message for the audio thread. Returns false if it was dropped
+    /// because the ring is full.
+    fn send(&mut self, port: u32, kind: u8, body: &[u8]) -> bool {
+        self.to_dsp
+            .as_mut()
+            .is_some_and(|to_dsp| ring::write(to_dsp, port, kind, body))
+    }
 }
 
 unsafe extern "C" fn write_function(
@@ -213,13 +224,9 @@ unsafe extern "C" fn write_function(
             .last_sent
             .iter()
             .any(|&(p, v)| p == port && v.to_bits() == value.to_bits());
-        if !echo {
-            c.changed = true;
-        }
-        ring::write(&mut c.to_dsp, port, ring::CONTROL, bytes);
-    } else if protocol == c.event_transfer {
-        c.changed = true;
-        ring::write(&mut c.to_dsp, port, ring::ATOM, bytes);
+        c.changed |= c.send(port, ring::CONTROL, bytes) && !echo;
+    } else if protocol == c.urids.event_transfer {
+        c.changed |= c.send(port, ring::ATOM, bytes) && atom::may_change_state(&c.urids, bytes);
     }
 }
 
@@ -245,7 +252,8 @@ pub(crate) struct Editor {
     descriptor: *const LV2UI_Descriptor,
     handle: LV2UI_Handle,
     controller: *mut Controller,
-    from_dsp: Consumer<u8>,
+    /// Taken when the editor closes; see [`Editor::close`].
+    from_dsp: Option<Consumer<u8>>,
     idle: Option<*const LV2UI_Idle_Interface>,
     ui_resize: Option<*const LV2UI_Resize>,
     external: Option<*mut ExternalWidget>,
@@ -273,12 +281,12 @@ impl Editor {
         info: &UiInfo,
         host: HostRefs<'_>,
         ends: UiEnds,
-    ) -> Result<Editor, (PluginError, UiEnds)> {
+    ) -> Result<Editor, (PluginError, Option<UiEnds>)> {
         let UiEnds { to_dsp, from_dsp } = ends;
         let from_dsp_capacity = from_dsp.buffer().capacity();
         let controller = Box::into_raw(Box::new(Controller {
-            to_dsp,
-            event_transfer: host.urids.event_transfer,
+            to_dsp: Some(to_dsp),
+            urids: *host.urids,
             closed: false,
             x11: None,
             last_sent: Vec::new(),
@@ -290,7 +298,7 @@ impl Editor {
                     descriptor,
                     handle,
                     controller,
-                    from_dsp,
+                    from_dsp: Some(from_dsp),
                     idle: None,
                     ui_resize: None,
                     external,
@@ -306,13 +314,8 @@ impl Editor {
                 // SAFETY: the UI was not created (or was cleaned up), so
                 // nothing refers to the controller any more.
                 let c = unsafe { Box::from_raw(controller) };
-                Err((
-                    e,
-                    UiEnds {
-                        to_dsp: c.to_dsp,
-                        from_dsp,
-                    },
-                ))
+                let ends = c.to_dsp.map(|to_dsp| UiEnds { to_dsp, from_dsp });
+                Err((e, ends))
             }
         }
     }
@@ -551,7 +554,7 @@ impl Editor {
     /// Queues a message for the audio thread as if the UI wrote it.
     pub(crate) fn queue(&mut self, port: u32, kind: u8, body: &[u8]) -> bool {
         // SAFETY: the controller is ours; the UI is not running right now.
-        ring::write(unsafe { &mut (*self.controller).to_dsp }, port, kind, body)
+        unsafe { (*self.controller).send(port, kind, body) }
     }
 
     /// Feeds the UI and lets it run. Returns false once the user closed it.
@@ -559,7 +562,11 @@ impl Editor {
         // SAFETY: `descriptor` and `handle` are live.
         let port_event = unsafe { (*self.descriptor).port_event };
         if let Some(port_event) = port_event {
-            while let Some(m) = ring::read(&mut self.from_dsp, &mut self.atom_buf) {
+            while let Some(m) = self
+                .from_dsp
+                .as_mut()
+                .and_then(|from_dsp| ring::read(from_dsp, &mut self.atom_buf))
+            {
                 if let (ring::ATOM, Some(len)) = (m.kind, m.len) {
                     // SAFETY: a whole atom of `len` bytes for an atom port.
                     unsafe {
@@ -655,24 +662,14 @@ impl Editor {
         true
     }
 
-    /// Destroys the UI and its window, handing back the ring ends.
-    pub(crate) fn close(self) -> UiEnds {
-        let mut this = std::mem::ManuallyDrop::new(self);
-        this.destroy();
+    /// Destroys the UI and its window, handing back the ring ends. Everything
+    /// else is freed by `Drop`, the one teardown path.
+    pub(crate) fn close(mut self) -> Option<UiEnds> {
+        self.destroy();
         // SAFETY: the UI is gone, so the controller is no longer shared.
-        let c = unsafe { Box::from_raw(this.controller) };
-        // SAFETY: each field is moved out exactly once; `this` is never
-        // dropped, so nothing is dropped twice.
-        unsafe {
-            let from_dsp = std::ptr::read(&this.from_dsp);
-            drop(std::ptr::read(&this.atom_buf));
-            drop(std::ptr::read(&this._features));
-            drop(std::ptr::read(&this._host_features));
-            UiEnds {
-                to_dsp: c.to_dsp,
-                from_dsp,
-            }
-        }
+        let to_dsp = unsafe { (*self.controller).to_dsp.take() }?;
+        let from_dsp = self.from_dsp.take()?;
+        Some(UiEnds { to_dsp, from_dsp })
     }
 
     fn destroy(&mut self) {

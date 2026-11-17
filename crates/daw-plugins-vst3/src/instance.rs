@@ -25,7 +25,7 @@ use vst3::Steinberg::Vst::{
     SymbolicSampleSizes_, kNoParamId,
 };
 use vst3::Steinberg::{
-    IBStream, IPluginBaseTrait, IPluginFactoryTrait, TUID, kResultOk, kResultTrue,
+    IBStream, IPluginBaseTrait, IPluginFactoryTrait, TUID, kNotImplemented, kResultOk, kResultTrue,
 };
 use vst3::{ComPtr, ComWrapper, Interface};
 
@@ -300,15 +300,19 @@ impl Audio {
     }
 
     /// Runs on the audio thread, so only cycles `setProcessing`, which the spec allows there
-    /// and plugins treat as a state reset. `setActive` and the latency
-    /// re-read stay on the main thread, in `prepare` (and `handle_restart` for a changed
-    /// layout).
+    /// and most plugins treat as a state reset. One that does not implement it (the SDK's
+    /// base class answers `kNotImplemented`) clears its state in `setActive`, which belongs
+    /// to the main thread: that is asked to cycle it, in `on_main_thread`.
     fn reset_processing(&mut self) {
         if self.processing {
-            in_process(|| unsafe {
-                self.processor.setProcessing(0);
+            let answer = in_process(|| unsafe {
+                let answer = self.processor.setProcessing(0);
                 self.processor.setProcessing(1);
+                answer
             });
+            if answer == kNotImplemented {
+                self.reset_by_reactivating.store(true, Ordering::Release);
+            }
         }
     }
 
@@ -569,6 +573,10 @@ pub struct Vst3Instance {
 
     /// What `process` runs on, shared with the processor half that `split` hands out.
     audio: SharedAudio<Audio>,
+    /// See [`Audio::reset_by_reactivating`].
+    reset_by_reactivating: Arc<AtomicBool>,
+    /// How many parameters the controller had when the list was last read.
+    param_count: i32,
 
     connection: Option<Connection>,
     controller: ComPtr<IEditController>,
@@ -606,6 +614,9 @@ struct Audio {
     /// Edits from the plugin's editor.
     edits_rx: rtrb::Consumer<Edit>,
     unknown_tx: rtrb::Producer<Edit>,
+    /// Set when a reset found the plugin does not implement `setProcessing`: the main thread
+    /// then resets it the slow way. Shared with the instance.
+    reset_by_reactivating: Arc<AtomicBool>,
 }
 
 // SAFETY: the raw pointers in `Rt` only point at buffers owned by the same `Audio`, and the
@@ -818,7 +829,9 @@ impl Vst3Instance {
             let (unknown_tx, unknown_rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
             let params = Params::new(Vec::new());
             let buses = read_buses(&component);
+            let reset_by_reactivating = Arc::new(AtomicBool::new(false));
             let audio = Audio {
+                reset_by_reactivating: Arc::clone(&reset_by_reactivating),
                 processor,
                 rt: None,
                 io_stale: false,
@@ -851,6 +864,8 @@ impl Vst3Instance {
                 component,
                 handler,
                 _module: module,
+                reset_by_reactivating,
+                param_count: 0,
             };
             instance.sync_controller_to_component();
             instance.read_params();
@@ -893,6 +908,7 @@ impl Vst3Instance {
         let mut list = Vec::new();
         unsafe {
             let count = self.controller.getParameterCount();
+            self.param_count = count;
             for i in 0..count {
                 let mut info: ParameterInfo = std::mem::zeroed();
                 if self.controller.getParameterInfo(i, &mut info) != kResultOk {
@@ -1131,6 +1147,24 @@ impl Vst3Instance {
         a.sample_rate = sample_rate;
         a.rt = Some(Rt::new(&self.buses, self.max_frames, sample_rate));
         self.activate(a);
+        // Whatever the plugin asked for before or from inside these calls (JUCE posts
+        // kLatencyChanged from `setActive`), this prepare has just answered: the buses and
+        // the latency were read after it. Acting on it later would prepare the plugin twice.
+        self.handler.discard_restart_flags(
+            RestartFlags_::kIoChanged as i32 | RestartFlags_::kLatencyChanged as i32,
+        );
+        a.reset_by_reactivating.store(false, Ordering::Release);
+    }
+
+    /// Resets a plugin that ignores `setProcessing` by deactivating and activating it, while
+    /// the audio thread is kept out.
+    fn reset_by_reactivating(&mut self) {
+        if self.reset_by_reactivating.swap(false, Ordering::AcqRel) && self.active {
+            self.with_audio(|p, a| {
+                p.deactivate(a);
+                p.activate(a);
+            });
+        }
     }
 
     fn handle_restart(&mut self) {
@@ -1155,11 +1189,18 @@ impl Vst3Instance {
                 | RestartFlags_::kParamTitlesChanged as i32)
             != 0
         {
+            let values_only = flags & (RestartFlags_::kParamTitlesChanged as i32) == 0;
             if flags & (RestartFlags_::kParamValuesChanged as i32) != 0 {
                 // A preset the plugin loaded itself, say.
                 self.handler.mark_state_changed();
             }
-            self.read_params();
+            // Values are read live, so new ones alone need no new list, which costs a call
+            // per parameter and more per curve. Some plugin frameworks announce a changed
+            // list with the values flag only; a different count gives those away.
+            let count = unsafe { self.controller.getParameterCount() };
+            if !values_only || count != self.param_count {
+                self.read_params();
+            }
             // Gaining the first parameter or losing the last changes the event ports.
             if self.params.list.is_empty() == self.has_params {
                 self.layout_changed = true;
@@ -1290,12 +1331,14 @@ impl PluginInstance for Vst3Instance {
             let s = stream
                 .to_com_ptr::<IBStream>()
                 .ok_or_else(|| PluginError::State("stream".into()))?;
-            if get(s.as_ptr()) != kResultOk {
-                return Err(PluginError::State(
+            match get(s.as_ptr()) {
+                r if r == kResultOk => Ok(stream.take()),
+                // A plugin with no state to save: an empty blob, which `load_state` skips.
+                r if r == kNotImplemented => Ok(Vec::new()),
+                _ => Err(PluginError::State(
                     "plugin refused to save its state".into(),
-                ));
+                )),
             }
-            Ok(stream.take())
         };
         let component = read(&|s| unsafe { self.component.getState(s) })?;
         // A single-component plugin has one state; asking again would just duplicate it.
@@ -1347,6 +1390,10 @@ impl PluginInstance for Vst3Instance {
         // clear below, so drop them first.
         self.handler.discard_overflow();
         self.with_audio(|_, a| while a.edits_rx.pop().is_ok() {});
+        // Empty means the component had no state to save (see `save_state`).
+        if component.is_empty() {
+            return Ok(());
+        }
         write(component.clone(), &|s| unsafe {
             self.component.setState(s)
         })?;
@@ -1429,6 +1476,7 @@ impl PluginInstance for Vst3Instance {
         self.handler.retry_overflow();
         self.flush_to_controller();
         self.handle_restart();
+        self.reset_by_reactivating();
         if let Some(editor) = &mut self.editor
             && !editor.pump()
         {
@@ -2055,6 +2103,99 @@ mod tests {
         assert_eq!(skipped, 0.0);
         assert_eq!(heard_through(&mut |ctx| half.process(ctx), &[]), 0.25);
         p.join(half);
+    }
+
+    /// Makes the test plugin behave like one of the kinds `QUIRK_*` in `testgain` names.
+    fn set_quirks(p: &Vst3Instance, bits: i64) {
+        tell_component(p, c"quirks", &[(c"bits", bits)]);
+    }
+
+    fn activations(p: &mut Vst3Instance) -> f64 {
+        gain_heard(p);
+        main_thread(p);
+        (p.param_value(ACTIVATIONS) * 100.0).round()
+    }
+
+    #[test]
+    fn a_plugin_without_set_processing_is_reset_by_reactivating_it() {
+        let mut p = instance();
+        // One that implements `setProcessing` is reset there, with no reactivation.
+        p.reset();
+        assert_eq!(activations(&mut p), 1.0);
+
+        set_quirks(&p, 1);
+        p.reset();
+        // The main thread does it at its next turn; the block after that reports it.
+        main_thread(&mut p);
+        assert_eq!(activations(&mut p), 2.0, "not reactivated after the reset");
+        assert_eq!(
+            activations(&mut p),
+            2.0,
+            "reactivated again without a reset"
+        );
+        assert!(!p.take_layout_changed(), "a reset is not a layout change");
+    }
+
+    #[test]
+    fn a_component_with_no_state_to_save_saves_and_loads_without_an_error() {
+        let mut p = instance();
+        gain_heard_with(
+            &mut p,
+            &[EventKind::ParamValue {
+                param: GAIN,
+                value: 0.5,
+            }],
+        );
+        set_quirks(&p, 2);
+        let state = p.save_state().expect("kNotImplemented is not a failure");
+        // Nothing of the component's is in it, so loading it leaves the component alone.
+        set_quirks(&p, 0);
+        p.load_state(&state).unwrap();
+        assert_eq!(gain_heard(&mut p), 0.5);
+    }
+
+    #[test]
+    fn restart_requests_a_prepare_has_answered_do_not_ask_for_another() {
+        let mut p = instance();
+        unsafe {
+            p.handler.restartComponent(
+                RestartFlags_::kLatencyChanged as i32 | RestartFlags_::kIoChanged as i32,
+            );
+        }
+        p.prepare(48_000.0, FRAMES);
+        main_thread(&mut p);
+        assert!(!p.take_layout_changed(), "prepared again for nothing");
+        // One that comes after the prepare still counts.
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kLatencyChanged as i32)
+        };
+        main_thread(&mut p);
+        assert!(p.take_layout_changed());
+    }
+
+    #[test]
+    fn new_parameter_values_alone_do_not_rebuild_the_parameter_list() {
+        let mut p = instance();
+        let before = Arc::as_ptr(&p.params);
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kParamValuesChanged as i32)
+        };
+        main_thread(&mut p);
+        assert_eq!(Arc::as_ptr(&p.params), before, "list rebuilt");
+        assert!(p.take_state_changed(), "new values are a state change");
+        unsafe {
+            p.handler
+                .restartComponent(RestartFlags_::kParamTitlesChanged as i32)
+        };
+        main_thread(&mut p);
+        assert_ne!(Arc::as_ptr(&p.params), before, "new titles need a new list");
+    }
+
+    #[test]
+    fn the_host_gives_plugins_its_real_name() {
+        assert_eq!(crate::host::HOST_NAME, "Kadence");
     }
 
     #[test]

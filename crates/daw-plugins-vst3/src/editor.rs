@@ -158,7 +158,6 @@ impl Editor {
                 }
             }
         }
-        host().run_loop.pump();
         open
     }
 }

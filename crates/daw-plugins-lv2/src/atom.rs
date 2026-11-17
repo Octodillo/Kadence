@@ -14,6 +14,7 @@ pub(crate) struct Urids {
     pub atom_int: u32,
     pub atom_float: u32,
     pub event_transfer: u32,
+    pub patch_get: u32,
     pub time_position: u32,
     pub time_frame: u32,
     pub time_speed: u32,
@@ -35,6 +36,7 @@ impl Urids {
             atom_int: m(c"http://lv2plug.in/ns/ext/atom#Int"),
             atom_float: m(c"http://lv2plug.in/ns/ext/atom#Float"),
             event_transfer: m(c"http://lv2plug.in/ns/ext/atom#eventTransfer"),
+            patch_get: m(c"http://lv2plug.in/ns/ext/patch#Get"),
             time_position: m(c"http://lv2plug.in/ns/ext/time#Position"),
             time_frame: m(c"http://lv2plug.in/ns/ext/time#frame"),
             time_speed: m(c"http://lv2plug.in/ns/ext/time#speed"),
@@ -45,6 +47,19 @@ impl Urids {
             time_beat_unit: m(c"http://lv2plug.in/ns/ext/time#beatUnit"),
         }
     }
+}
+
+/// Whether a whole atom (header and body) that a UI sent may change what the
+/// plugin saves. Plugins use message types of their own to edit their state,
+/// so everything counts except the one standard request that only reads:
+/// `patch:Get`, which UIs send when they open to learn the current values.
+pub(crate) fn may_change_state(urids: &Urids, atom: &[u8]) -> bool {
+    let word = |at: usize| {
+        atom.get(at..at + 4)
+            .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+    };
+    // Atom header: size, type. Object body: id, object type.
+    !(word(4) == Some(urids.atom_object) && word(12) == Some(urids.patch_get))
 }
 
 /// Event header: time (8), size (4), type (4).
@@ -309,9 +324,8 @@ mod tests {
         assert!(collect(&[0; 6], 5).is_empty());
     }
 
-    #[test]
-    fn a_full_position_fits_its_buffer() {
-        let u = Urids {
+    fn urids() -> Urids {
+        Urids {
             midi_event: 1,
             atom_object: 2,
             atom_sequence: 3,
@@ -327,7 +341,31 @@ mod tests {
             time_bar_beat: 13,
             time_beats_per_bar: 14,
             time_beat_unit: 15,
+            patch_get: 16,
+        }
+    }
+
+    #[test]
+    fn only_a_patch_get_leaves_the_state_alone() {
+        let u = urids();
+        // Header (size, type), then an object's id and type.
+        let atom = |ty: u32, object_type: u32| -> Vec<u8> {
+            [8, ty, 0, object_type]
+                .iter()
+                .flat_map(|w| w.to_ne_bytes())
+                .collect()
         };
+        assert!(!may_change_state(&u, &atom(u.atom_object, u.patch_get)));
+        // patch:Set and the like, or a message type of the plugin's own.
+        assert!(may_change_state(&u, &atom(u.atom_object, 99)));
+        // Not an object, whatever its body says.
+        assert!(may_change_state(&u, &atom(u.atom_int, u.patch_get)));
+        assert!(may_change_state(&u, &atom(u.atom_object, 0)[..8]));
+    }
+
+    #[test]
+    fn a_full_position_fits_its_buffer() {
+        let u = urids();
         let mut buf = [0; 192];
         // 2 bars and 1 beat at 120 bpm, 48 kHz: 9 beats = 4.5 s.
         let t = TransportState::at(&Timeline::default(), true, SampleTime(216_000), 48_000.0);
@@ -359,23 +397,7 @@ mod tests {
 
     #[test]
     fn position_follows_the_time_signature() {
-        let u = Urids {
-            midi_event: 1,
-            atom_object: 2,
-            atom_sequence: 3,
-            atom_long: 4,
-            atom_int: 5,
-            atom_float: 6,
-            event_transfer: 7,
-            time_position: 8,
-            time_frame: 9,
-            time_speed: 10,
-            time_bpm: 11,
-            time_bar: 12,
-            time_bar_beat: 13,
-            time_beats_per_bar: 14,
-            time_beat_unit: 15,
-        };
+        let u = urids();
         // 6/8 at 120: quarter 12.5 is bar 4 (0-based), three eighths in.
         let t = TransportState::at(
             &Timeline::constant(120.0, 6, 8),
