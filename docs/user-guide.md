@@ -30,16 +30,34 @@ channel (see [Recording](#recording)).
 
 ### Plugins
 
-Kadence finds CLAP, VST3 and LV2 plugins in their usual folders
-(`~/.clap`, `/usr/lib/clap`, `~/.vst3`, `/usr/lib/vst3`, `~/.lv2`,
-`/usr/lib/lv2` and the like). The plugin section of the **Audio** settings
-page shows what was found, lets you add other folders with **Add Folder…**,
-and **Rescan** looks again. Each plugin
+Kadence looks for CLAP, VST3 and LV2 plugins in these folders and the
+folders inside them, in this order:
+
+| Format | Folders |
+|---|---|
+| CLAP | the folders in `$CLAP_PATH`, `~/.clap`, `/usr/lib/clap` |
+| VST3 | the folders in `$VST3_PATH`, `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` |
+| LV2 | `~/.lv2`, `/usr/local/lib/lv2`, `/usr/local/lib64/lv2`, `/usr/lib/lv2`, `/usr/lib64/lv2`, `/usr/lib/x86_64-linux-gnu/lv2`, `/usr/lib/aarch64-linux-gnu/lv2` |
+
+`CLAP_PATH`, `VST3_PATH` and `LV2_PATH` are optional environment variables
+that each hold a list of folders separated by colons. The folders in
+`CLAP_PATH` and `VST3_PATH` are searched before the others; `LV2_PATH`, if
+set, replaces the LV2 folders above.
+
+The plugin section of the **Audio** settings page lists the folders Kadence
+searches on your system and shows what was found. **Add Folder…** adds
+another folder, which is searched after these for all three formats, and
+**Rescan** looks again. Each plugin
 runs in a process of its own, so a plugin that crashes is switched off and
 reported instead of closing Kadence.
 
 In the Flatpak, install plugins from Flathub (their IDs start with
-`org.freedesktop.LinuxAudio.Plugins.`) or put them in your home folder.
+`org.freedesktop.LinuxAudio.Plugins.`) or put them in `~/.clap`, `~/.vst3`
+or `~/.lv2`, which the Flatpak may read. The Flathub plugins are found in
+`/app/extensions/Plugins/clap`, `/app/extensions/Plugins/vst3` and
+`/app/extensions/Plugins/lv2`. The system folders above are then the
+Flatpak runtime's, not your system's, so plugins installed with your
+distribution's packages are not found.
 
 ## Projects
 

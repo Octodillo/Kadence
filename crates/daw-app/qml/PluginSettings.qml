@@ -48,15 +48,44 @@ Kirigami.FormLayout {
     }
 
     ColumnLayout {
+        Kirigami.FormData.label: i18nc("@label folders searched for plugins", "Searched folders:")
+        Kirigami.FormData.labelAlignment: Qt.AlignTop
+        spacing: Kirigami.Units.smallSpacing
+
+        Repeater {
+            // Order matches Plugins.formatFolders. CLAP, VST3 and LV2 are names.
+            model: ["CLAP", "VST3", "LV2"]
+            delegate: ColumnLayout {
+                id: formatFolders
+                required property int index
+                required property string modelData
+                spacing: 0
+                QQC2.Label {
+                    text: formatFolders.modelData
+                }
+                Repeater {
+                    model: Plugins.formatFolders(formatFolders.index + 1)
+                    delegate: QQC2.Label {
+                        required property string modelData
+                        text: modelData
+                        font: Kirigami.Theme.smallFont
+                        elide: Text.ElideMiddle
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 16
+                        opacity: 0.7
+                    }
+                }
+            }
+        }
+    }
+
+    ColumnLayout {
         Kirigami.FormData.label: i18nc("@label", "Other folders:")
         Kirigami.FormData.labelAlignment: Qt.AlignTop
         spacing: 0
 
         QQC2.Label {
             visible: Plugins.extraFolders.length === 0
-            text: i18nc("@info", "None. CLAP, VST3 and LV2 plugins are found in their usual folders.")
-            wrapMode: Text.Wrap
-            Layout.maximumWidth: Kirigami.Units.gridUnit * 16
+            text: i18nc("@info no folders were added to the plugin search", "None")
             opacity: 0.7
         }
         Repeater {

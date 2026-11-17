@@ -165,7 +165,7 @@ Kirigami.Dialog {
                         : i18nc("@info:placeholder", "No matching plugins")
                     explanation: Plugins.hasScanned && Plugins.installedCount === 0
                         ? i18nc("@info:placeholder",
-                                 "Kadence looks for CLAP, VST3 and LV2 plugins in their usual folders. Add other folders in the plugin settings.")
+                                 "Kadence found no CLAP, VST3 or LV2 plugins. The plugin settings list the folders it searches, and you can add others there.")
                         : ""
                     helpfulAction: Plugins.hasScanned && Plugins.installedCount === 0 ? foldersAction : null
                 }

@@ -6,7 +6,7 @@
 //! results. Plugin names, vendors and scan failures are the plugins' own
 //! text; the format names (CLAP, VST3, LV2) are not translated.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
@@ -88,6 +88,12 @@ pub mod qobject {
 
         #[qinvokable]
         fn remove_folder(self: Pin<&mut Plugins>, index: i32);
+
+        /// The folders searched for a format (numbered as in `setFilter`,
+        /// from 1) before the added ones, in search order, with the home
+        /// folder written `~`. Fixed while the app runs.
+        #[qinvokable]
+        fn format_folders(self: &Plugins, format: i32) -> QStringList;
 
         /// Row `row` as [formatId, pluginId, name], or empty.
         #[qinvokable]
@@ -173,14 +179,28 @@ pub fn format_label(format: &PluginFormatKind) -> &'static str {
     }
 }
 
-/// The filter for the browser's choices: `format` and `kind` as in
-/// `Plugins.setFilter`, out-of-range values meaning any.
-pub fn filter_for(text: &str, format: i32, kind: i32) -> Filter {
-    let format = usize::try_from(format)
+/// The format `Plugins.setFilter` numbers `format`: [`FORMATS`] from 1.
+fn format_at(format: i32) -> Option<PluginFormatKind> {
+    usize::try_from(format)
         .ok()
         .and_then(|i| i.checked_sub(1))
         .and_then(|i| FORMATS.get(i))
-        .cloned();
+        .cloned()
+}
+
+/// `path` for showing, with `home` shortened to `~` as users write it.
+fn display_folder(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// The filter for the browser's choices: `format` and `kind` as in
+/// `Plugins.setFilter`, out-of-range values meaning any.
+pub fn filter_for(text: &str, format: i32, kind: i32) -> Filter {
+    let format = format_at(format);
     let kind = match kind {
         1 => Some(PluginKind::Instrument),
         2 => Some(PluginKind::Effect),
@@ -312,6 +332,17 @@ impl qobject::Plugins {
         self.set_folders(folders);
     }
 
+    fn format_folders(&self, format: i32) -> QStringList {
+        let Some(format) = format_at(format) else {
+            return QStringList::default();
+        };
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from);
+        let folders = state::with(|s| s.plugins.format_folders(&format));
+        string_list(folders.iter().map(|f| display_folder(f, home.as_deref())))
+    }
+
     fn plugin_at(&self, row: i32) -> QStringList {
         let Some(p) = usize::try_from(row).ok().and_then(|r| self.rows.get(r)) else {
             return QStringList::default();
@@ -370,5 +401,24 @@ mod tests {
         assert_eq!(filter_for("", 2, 1).kind, Some(PluginKind::Instrument));
         let odd = filter_for("", 9, -1);
         assert_eq!((odd.format, odd.kind), (None, None));
+    }
+
+    #[test]
+    fn folders_show_the_home_folder_as_a_tilde() {
+        let home = Some(Path::new("/home/me"));
+        assert_eq!(display_folder(Path::new("/home/me/.clap"), home), "~/.clap");
+        assert_eq!(display_folder(Path::new("/home/me"), home), "~");
+        assert_eq!(
+            display_folder(Path::new("/home/meg/.clap"), home),
+            "/home/meg/.clap"
+        );
+        assert_eq!(
+            display_folder(Path::new("/usr/lib/clap"), home),
+            "/usr/lib/clap"
+        );
+        assert_eq!(
+            display_folder(Path::new("/home/me/.clap"), None),
+            "/home/me/.clap"
+        );
     }
 }
