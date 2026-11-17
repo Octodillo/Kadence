@@ -736,21 +736,25 @@ fn live_params_hold_over_syncs_and_suspended_lanes_are_skipped() {
 /// An instrument track with the built-in synth and one MIDI clip of a
 /// held note over beats 1 to 3.
 fn synth_rig() -> (Rig, TrackId, ClipId) {
+    instrument_rig("daw.synth")
+}
+
+/// An instrument track with the built-in instrument `kind` and one MIDI
+/// clip of a held middle C over beats 1 to 3.
+fn instrument_rig(kind: &str) -> (Rig, TrackId, ClipId) {
     let mut rig = Rig::new(f64::INFINITY);
-    let track = Track::new(TrackKind::Instrument, "Synth");
+    let track = Track::new(TrackKind::Instrument, "Keys");
     let tid = track.id;
     rig.doc.execute(AddTrack::new(1, track)).unwrap();
-    let synth = daw_model::Device::new(
-        "Synth",
-        daw_model::DeviceSource::Builtin {
-            kind: "daw.synth".into(),
-        },
+    let instrument = daw_model::Device::new(
+        "Instrument",
+        daw_model::DeviceSource::Builtin { kind: kind.into() },
     );
     rig.doc
         .execute(daw_model::commands::AddDevice {
             track: tid,
             index: 0,
-            device: synth,
+            device: instrument,
         })
         .unwrap();
     let note = daw_model::Note {
@@ -809,6 +813,65 @@ fn note_edits_reach_the_player_without_a_rebuild() {
     );
     assert!(peak(&out[..70_000]) < 1e-4, "the note moved later");
     assert!(peak(&out[74_000..]) > 1e-3, "and plays there");
+}
+
+/// Issue #178: a sampler is given its sample through its saved state, as
+/// the device panel does, with the file relative to the project. The
+/// running session picks the change up, and undo takes it back.
+#[test]
+fn a_sampler_given_a_sample_plays_it_and_undo_takes_it_back() {
+    use daw_model::commands::{DeviceField, SetDevice};
+    let (mut rig, track, _) = instrument_rig("daw.sampler");
+    dc_file(rig.dir(), "hit.wav", 2 * BEAT as usize, 0.5);
+    let device = rig.doc.project().track(track).unwrap().devices[0].id;
+    let play = |rig: &mut Rig| {
+        rig.session.locate(TickTime(0)).unwrap();
+        rig.session.play().unwrap();
+        let out = rig.run(4 * BEAT as usize);
+        rig.session.stop().unwrap();
+        out
+    };
+    let empty = play(&mut rig);
+    assert!(peak(&empty) < 1e-6, "an empty sampler is silent");
+
+    let state = daw_devices::Sampler::state_with_sample("hit.wav");
+    rig.doc
+        .execute(SetDevice {
+            id: device,
+            field: DeviceField::State(Some(state.into())),
+        })
+        .unwrap();
+    rig.doc.seal();
+    rig.sync();
+    assert_eq!(rig.session.warnings(), &[]);
+    let loaded = play(&mut rig);
+    assert!(peak(&loaded[..20_000]) < 1e-6, "silent before the note");
+    // Middle C is the zone's root, so the file plays as recorded, at the
+    // note's velocity of 0.8.
+    assert!(
+        loaded[30_000..70_000]
+            .iter()
+            .all(|v| (v - 0.4).abs() < 1e-3),
+        "the note plays the sample"
+    );
+
+    // A parameter edit keeps the node and its decoded sample.
+    let swaps = rig.session.controller().graphs_swapped();
+    rig.doc
+        .execute(daw_model::commands::SetParam {
+            device,
+            param: daw_devices::devices::sampler::GAIN,
+            value: Some(-6.0),
+        })
+        .unwrap();
+    rig.sync();
+    assert_eq!(rig.session.controller().graphs_swapped(), swaps);
+    rig.doc.undo().unwrap();
+
+    rig.doc.undo().unwrap();
+    rig.sync();
+    let undone = play(&mut rig);
+    assert!(peak(&undone) < 1e-6, "undo empties the sampler again");
 }
 
 #[test]

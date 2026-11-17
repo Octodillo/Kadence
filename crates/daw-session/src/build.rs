@@ -17,7 +17,7 @@ use daw_engine::nodes::Strip;
 use daw_engine::{GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter};
 use daw_model::{
     AutomationTarget, ClipContent, Device, DeviceId, DeviceSource, LaneId, Project,
-    ProjectSnapshot, SendId, Track, TrackId, TrackKind, TrackOutput,
+    ProjectSnapshot, SendId, StateBlob, Track, TrackId, TrackKind, TrackOutput,
 };
 
 use daw_midi::model::compile_track;
@@ -108,12 +108,45 @@ struct TrackShape {
     id: TrackId,
     kind: TrackKind,
     output: TrackOutput,
-    devices: Vec<(DeviceId, DeviceSource, bool)>,
+    devices: Vec<DeviceShape>,
     sends: Vec<(SendId, TrackId, bool)>,
     /// Automation is compiled into the graph, so a lane edit rebuilds it.
     lanes: Vec<daw_model::AutomationLane>,
     /// Where an instrument track's live MIDI comes from.
     live: LiveInput,
+}
+
+/// What of a device decides its node in the graph.
+#[derive(Clone, Debug, PartialEq)]
+struct DeviceShape {
+    id: DeviceId,
+    source: DeviceSource,
+    enabled: bool,
+    /// A built-in device's saved state (a sampler's samples, say), which it
+    /// takes only as its node is made: changed state needs a new node. A
+    /// plugin takes changed state in place (`Session::sync_plugin_states`),
+    /// so its state is left out.
+    builtin_state: Option<StateBlob>,
+}
+
+impl DeviceShape {
+    fn of(d: &Device) -> Self {
+        Self {
+            id: d.id,
+            source: d.source.clone(),
+            enabled: d.enabled,
+            builtin_state: match d.source {
+                DeviceSource::Builtin { .. } => d.state.clone(),
+                DeviceSource::Plugin { .. } => None,
+            },
+        }
+    }
+
+    /// Whether a node made for this device can play `d`: switching a
+    /// device on or off keeps its node, a new source or state does not.
+    fn same_node(&self, d: &DeviceShape) -> bool {
+        self.source == d.source && self.builtin_state == d.builtin_state
+    }
 }
 
 /// Which external event sources reach an instrument track's MIDI player.
@@ -145,11 +178,7 @@ impl Structure {
                     id: t.id,
                     kind: t.kind,
                     output: t.output,
-                    devices: t
-                        .devices
-                        .iter()
-                        .map(|d| (d.id, d.source.clone(), d.enabled))
-                        .collect(),
+                    devices: t.devices.iter().map(DeviceShape::of).collect(),
                     sends: t
                         .sends
                         .iter()
@@ -173,12 +202,11 @@ impl Structure {
         }
     }
 
-    fn device_source(&self, id: DeviceId) -> Option<&DeviceSource> {
+    fn device(&self, id: DeviceId) -> Option<&DeviceShape> {
         self.tracks
             .iter()
             .flat_map(|t| t.devices.iter())
-            .find(|d| d.0 == id)
-            .map(|d| &d.1)
+            .find(|d| d.id == id)
     }
 
     pub(crate) fn live_input(&self, track: TrackId) -> LiveInput {
@@ -194,7 +222,7 @@ impl Structure {
 
     pub fn has_sampler(&self) -> bool {
         let mut devices = self.tracks.iter().flat_map(|t| t.devices.iter());
-        devices.any(|d| matches!(&d.1, DeviceSource::Builtin { kind } if is_sampler(kind)))
+        devices.any(|d| matches!(&d.source, DeviceSource::Builtin { kind } if is_sampler(kind)))
     }
 }
 
@@ -666,10 +694,12 @@ impl<'a> Builder<'a> {
             // fresh node of it, with its current ports and latency.
             DeviceSource::Plugin { .. } => self.plugin(d),
             DeviceSource::Builtin { kind } => {
-                let same_source = self.old.structure.device_source(d.id) == Some(&d.source);
+                let shape = DeviceShape::of(d);
+                let same =
+                    (self.old.structure.device(d.id)).is_some_and(|old| old.same_node(&shape));
                 // A sampler finds relative sample paths in the project
                 // bundle: when that moved, it loads its state again.
-                let keep = same_source && !(self.session.root_moved && is_sampler(kind));
+                let keep = same && !(self.session.root_moved && is_sampler(kind));
                 match keep.then(|| self.reuse_with_params(key)).flatten() {
                     Some(id) => {
                         self.g.rename(id, &d.name);

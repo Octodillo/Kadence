@@ -6,7 +6,10 @@
 //! engine match:
 //!
 //! * Routing, device chains or the track list changed: build a new
-//!   [`GraphDesc`] and swap it in.
+//!   [`GraphDesc`] and swap it in. Running nodes are kept; a built-in
+//!   device whose saved state changed (a sampler given a new sample) gets
+//!   a new node, its samples decoded here before the swap, so the audio
+//!   thread is only handed the finished node.
 //! * Only fader, pan, mute, solo, send level or device parameters changed:
 //!   send parameter changes to the running graph.
 //! * Only clips (or the tempo) changed: send each affected track's player a
