@@ -1,7 +1,6 @@
 //! The application side of a sandbox: [`SandboxedInstance`] is a [`PluginInstance`] whose plugin
 //! runs in a host process.
 
-use std::any::Any;
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
@@ -16,9 +15,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use daw_core::event::{Event, EventKind, EventList, ParamId};
-use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor};
+use daw_core::split::{SharedAudio, SplitAudio, survives_reset};
 use daw_plugins::Scanner;
 
 use crate::child::HOST_ARG;
@@ -173,8 +172,6 @@ struct Shared {
     on_crash: Option<CrashHook>,
     /// The last generation the crash hook was called for.
     notified: AtomicU64,
-    /// The engine asked for a reset, which goes out with the next cycle.
-    reset: AtomicBool,
 }
 
 impl Shared {
@@ -710,14 +707,12 @@ pub struct SandboxedInstance {
     max_frames: u32,
     /// The last state saved from or loaded into the plugin.
     state: Option<Vec<u8>>,
-    /// What `process` works on, shared with the [`SandboxProcessor`] that `split` hands out.
-    audio: Arc<Exclusive<Audio>>,
-    /// The processor half is out, so this object's own `process` and `reset` do nothing.
-    lent: bool,
+    /// What `process` works on, shared with the processor half that `split` hands out.
+    audio: SharedAudio<Audio>,
 }
 
-/// What the audio path works on. The instance and its [`SandboxProcessor`] share it through
-/// an [`Exclusive`]: the audio thread takes it for one cycle, the main thread only to swap the
+/// What the audio path works on. The instance and its processor half share it through a
+/// [`SharedAudio`]: the audio thread takes it for one cycle, the main thread only to swap the
 /// block or update the tracked parameters, never across a call to the host. So a slow
 /// main-thread call (saving state, opening the editor) does not hold the audio up. The other
 /// way round, a cycle holds it while it waits for the host, so a main-thread caller can wait
@@ -731,43 +726,17 @@ struct Audio {
     sample_rate: f64,
 }
 
-/// The audio-thread half of a [`SandboxedInstance`], from [`PluginInstance::split`].
-///
-/// A cycle that comes while the main thread updates the shared state waits a few
-/// microseconds for it, then is silent and carries its events to the next cycle.
-pub struct SandboxProcessor {
-    audio: Arc<Exclusive<Audio>>,
-    shared: Arc<Shared>,
-}
-
-/// How many times a [`SandboxProcessor`] cycle retries the state the main thread holds.
-const AUDIO_RETRIES: u32 = 100;
-
-impl PluginProcessor for SandboxProcessor {
+impl SplitAudio for Audio {
     fn process(&mut self, ctx: &mut ProcessContext) {
-        for _ in 0..AUDIO_RETRIES {
-            if self.audio.try_audio(|a| a.process(ctx)).is_some() {
-                return;
-            }
-            std::hint::spin_loop();
-        }
-        skip(ctx);
+        self.process_block(ctx);
     }
 
+    /// Goes out to the host with the next cycle. Notes still waiting for the host would
+    /// start after the reset there, so they go, as they do for any late event.
     fn reset(&mut self) {
-        // Through the shared flag, so a reset is never lost to a busy state.
-        self.shared.reset.store(true, Ordering::Release);
+        self.rt.reset_pending = true;
+        self.rt.carry.retain(survives_reset);
     }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
-        self
-    }
-}
-
-/// A cycle the audio state could not be had for: silence. Its events are lost, as they are for
-/// any node the engine cannot run in time.
-fn skip(ctx: &mut ProcessContext) {
-    SandboxedInstance::silence(ctx, 0);
 }
 
 impl SandboxedInstance {
@@ -788,7 +757,6 @@ impl SandboxedInstance {
             late_cycles: AtomicU64::new(0),
             on_crash: config.on_crash.clone(),
             notified: AtomicU64::new(0),
-            reset: AtomicBool::new(false),
         });
         let (link, info, latency) = Link::start(&config, &shared, 1, sample_rate, max_frames)?;
         let audio = Audio {
@@ -816,8 +784,7 @@ impl SandboxedInstance {
             sample_rate,
             max_frames,
             state: None,
-            audio: Arc::new(Exclusive::new(audio)),
-            lent: false,
+            audio: SharedAudio::new(audio),
         };
         instance.adopt(&info);
         Ok(instance)
@@ -1112,12 +1079,13 @@ impl SandboxedInstance {
             }
         });
     }
+}
 
-    fn silence(ctx: &mut ProcessContext, from: usize) {
-        for out in ctx.audio_out.iter_mut() {
-            let from = from.min(out.len());
-            out[from..].fill(0.0);
-        }
+/// Silences the outputs from frame `from` on.
+fn silence_from(ctx: &mut ProcessContext, from: usize) {
+    for out in ctx.audio_out.iter_mut() {
+        let from = from.min(out.len());
+        out[from..].fill(0.0);
     }
 }
 
@@ -1305,15 +1273,12 @@ fn run_cycle(
 impl Audio {
     /// Runs one engine block through the host, in cycles of at most the block's frames.
     /// Real-time safe.
-    fn process(&mut self, ctx: &mut ProcessContext) {
+    fn process_block(&mut self, ctx: &mut ProcessContext) {
         let total = ctx.frames as usize;
         for e in ctx.events_in.iter() {
             if let EventKind::ParamValue { param, value } = e.kind {
                 self.rt.track(param, value);
             }
-        }
-        if self.shared.reset.swap(false, Ordering::AcqRel) {
-            self.rt.reset_pending = true;
         }
         let Some(shm) = self.shm.as_ref() else {
             // Between hosts, during a reload. Note-offs wait for the new host, which may get
@@ -1323,11 +1288,11 @@ impl Audio {
                     self.rt.carry(*e);
                 }
             }
-            SandboxedInstance::silence(ctx, 0);
+            ctx.silence_outputs();
             return;
         };
         if self.shared.crashed.load(Ordering::Acquire) {
-            SandboxedInstance::silence(ctx, 0);
+            ctx.silence_outputs();
             return;
         }
         let max = shm.layout().max_frames as usize;
@@ -1354,7 +1319,7 @@ impl Audio {
                 Cycle::Done => offset += n,
                 Cycle::Late => {
                     self.shared.late_cycles.fetch_add(1, Ordering::Relaxed);
-                    SandboxedInstance::silence(ctx, offset);
+                    silence_from(ctx, offset);
                     for e in events.by_ref() {
                         self.rt.carry(e);
                     }
@@ -1425,9 +1390,7 @@ impl Node for SandboxedInstance {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        if self.lent || self.audio.try_audio(|a| a.process(ctx)).is_none() {
-            skip(ctx);
-        }
+        self.audio.process(ctx);
     }
 
     fn latency(&self) -> u32 {
@@ -1435,9 +1398,7 @@ impl Node for SandboxedInstance {
     }
 
     fn reset(&mut self) {
-        if !self.lent {
-            self.shared.reset.store(true, Ordering::Release);
-        }
+        self.audio.reset();
     }
 }
 
@@ -1603,30 +1564,22 @@ impl PluginInstance for SandboxedInstance {
     /// The audio half never waits on a call to the host: those use the control socket, the
     /// half the audio block.
     fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
-        if self.lent {
-            return None;
-        }
-        self.lent = true;
-        Some(Box::new(SandboxProcessor {
-            audio: Arc::clone(&self.audio),
-            shared: Arc::clone(&self.shared),
-        }))
+        self.audio.lend()
     }
 
     fn join(&mut self, processor: Box<dyn PluginProcessor>) {
-        match processor.into_any().downcast::<SandboxProcessor>() {
-            Ok(half) if Arc::ptr_eq(&half.audio, &self.audio) => self.lent = false,
-            _ => log::warn!(
+        if !self.audio.take_back(processor) {
+            log::warn!(
                 "sandbox {}: asked to join a processor that is not its own",
                 self.shared.descriptor.name
-            ),
+            );
         }
     }
 }
 
 impl Drop for SandboxedInstance {
     fn drop(&mut self) {
-        if self.lent {
+        if self.audio.is_lent() {
             log::warn!(
                 "sandbox {}: dropped with its processor half still out",
                 self.shared.descriptor.name
@@ -1665,7 +1618,6 @@ mod tests {
             late_cycles: AtomicU64::new(0),
             on_crash: None,
             notified: AtomicU64::new(0),
-            reset: AtomicBool::new(false),
         })
     }
 
