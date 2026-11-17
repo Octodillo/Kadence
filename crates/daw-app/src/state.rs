@@ -713,21 +713,15 @@ impl AppState {
         let Some(session) = self.engine.session_mut() else {
             return;
         };
+        let states = session.plugin_states();
         let mut stored = false;
-        for s in session.plugin_states() {
+        for s in states {
             match s.state {
                 // The device was synced moments ago; if it is gone anyway, there is nothing
                 // to keep its state for.
                 Ok(state) => stored |= self.doc.store_plugin_state(s.device, Some(state)).is_ok(),
                 Err(detail) => {
-                    let device = self
-                        .doc
-                        .project()
-                        .all_tracks()
-                        .flat_map(|t| t.devices.iter())
-                        .find(|d| d.id == s.device)
-                        .map(|d| d.name.clone())
-                        .unwrap_or_default();
+                    let device = self.device_name(s.device);
                     self.report(Message::Warning(
                         daw_session::Warning::PluginStateNotSaved { device, detail },
                     ));
@@ -955,8 +949,19 @@ impl AppState {
         Ok(())
     }
 
-    /// Saves into a new bundle at `dir`.
+    /// Saves to the project's bundle, with each plugin's current state. A
+    /// take in progress goes on and is an unsaved change once it stops.
+    pub fn save(&mut self) -> Result<(), FormatError> {
+        self.store_plugin_states();
+        self.doc.save()
+    }
+
+    /// Saves into a new bundle at `dir`. A take in progress ends first and
+    /// is saved with the rest: its files belong with the project it was
+    /// started in.
     pub fn save_as(&mut self, dir: &Path) -> Result<(), FormatError> {
+        self.stop_recording();
+        self.store_plugin_states();
         let was_untitled = self.doc.bundle().is_none();
         self.doc.save_as(dir)?;
         if was_untitled && let Some(s) = &self.scratch {
@@ -969,7 +974,8 @@ impl AppState {
     }
 
     /// Replaces the open document. The old one's unsaved changes are
-    /// dropped, with their autosave: callers ask the user first.
+    /// dropped, with their autosave and any take still being recorded:
+    /// callers end the take and ask the user first.
     pub fn replace_document(&mut self, doc: Document) {
         // A take belongs to the document it was recorded for.
         self.discard_recording();
@@ -1092,3 +1098,6 @@ impl AppState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

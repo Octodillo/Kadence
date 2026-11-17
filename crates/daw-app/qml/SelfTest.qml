@@ -671,6 +671,25 @@ Item {
             check(window.unsavedDialog.visible, "Open Recent asks about unsaved changes");
             window.unsavedDialog.discarded();
             check(Project.name === "Files" && Project.trackCount === 1, "open recent");
+            // A take in progress is unsaved work too, though the project
+            // itself has no changes yet.
+            Project.setTrackArmed(0, true);
+            check(Project.save().context === undefined && !Project.modified, "save with the track armed");
+            Project.toggleRecord();
+            check(Project.recording && !Project.modified, "a take in progress is not in the project yet");
+        },
+        () => {
+            // Until the take holds some audio.
+            if (Project.timeText === "0:00.0" && test.waits < 75) {
+                return false;
+            }
+            window.fileActions[0].trigger();
+            check(!Project.recording && Project.undoText === "Record Audio", "New ends the take and keeps it");
+            check(window.unsavedDialog.visible, "New asks about the take");
+            window.unsavedDialog.reject();
+            check(Project.name === "Files" && Project.trackCount === 1, "cancel keeps the project and the take");
+            Project.undo();
+            check(!Project.modified, "without the take nothing is unsaved");
         },
         () => {
             settingsPage = window.openSettings();
