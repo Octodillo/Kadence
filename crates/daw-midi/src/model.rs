@@ -14,7 +14,6 @@ use daw_model::{ClipContent, ClipId, Command, MidiClip, Note, NoteUid, Project, 
 use crate::edit;
 use crate::grid::{Meter, MeterPoint};
 use crate::note::{EditNote, NoteData};
-use crate::record::TakePlan;
 use crate::sequence::{ClipNotes, Sequence, compile, uid_from_u128};
 
 impl EditNote for Note {
@@ -338,16 +337,11 @@ pub fn duplicate_selection(
     e.into_command().map(|c| (c, ids))
 }
 
-/// Applies a recorded take to a clip, as planned by
-/// [`merge_take`](crate::record::merge_take) against `existing`.
-pub fn take_command(
-    clip_id: ClipId,
-    existing: &[Note],
-    plan: TakePlan,
-) -> Option<Box<dyn Command>> {
+/// Adds a recorded take (see [`to_clip_notes`](crate::record::to_clip_notes))
+/// to a clip, beside the notes it already has.
+pub fn take_command(clip_id: ClipId, take: Vec<NoteData>) -> Option<Box<dyn Command>> {
     NoteEdit::new(clip_id, "Record Notes")
-        .remove_notes(plan.remove.iter().map(|&i| existing[i].id))
-        .add_notes(plan.add)
+        .add_notes(take)
         .into_command()
 }
 
@@ -360,7 +354,6 @@ mod tests {
 
     use crate::edit::{Quantize, Snap};
     use crate::grid::Grid;
-    use crate::record::{TakeMode, merge_take};
 
     fn doc_with_clip(mut notes: Vec<Note>) -> (Document, ClipId) {
         notes.sort_by_key(|n| (n.start, n.key, n.id));
@@ -482,7 +475,7 @@ mod tests {
         for _ in 0..3 {
             let before = midi_clip(doc.project(), cid).unwrap().notes.clone();
             let mut after = before.clone();
-            edit::add_velocity(&mut after, 0.1);
+            edit::scale_velocity(&mut after, 1.2);
             let cmd = NoteEdit::new(cid, "Velocity")
                 .drag()
                 .changed(&before, &after)
@@ -547,20 +540,14 @@ mod tests {
                 .all(|n| n.end().0 <= 100 || n.start.0 >= 100)
         );
 
-        let clip = midi_clip(doc.project(), cid).unwrap().clone();
+        // A take is added to what the clip has, in one undo step.
         let take = vec![NoteData::new(120, 30, 64, 0.5)];
-        let plan = merge_take(
-            &clip.notes,
-            take,
-            TakeMode::Replace,
-            TickTime(50)..TickTime(400),
-        );
-        doc.execute_boxed(take_command(cid, &clip.notes, plan).unwrap())
-            .unwrap();
+        doc.execute_boxed(take_command(cid, take).unwrap()).unwrap();
         let keys: Vec<u8> = notes(&doc, cid).iter().map(|n| n.key).collect();
-        assert_eq!(keys, [60, 64]);
+        assert_eq!(keys, [60, 60, 64]);
         doc.undo().unwrap();
         assert_eq!(notes(&doc, cid).len(), 2);
+        assert!(take_command(cid, Vec::new()).is_none());
     }
 
     #[test]

@@ -193,32 +193,6 @@ pub fn resize_start<N: EditNote>(notes: &mut [N], delta: i64) {
     });
 }
 
-/// Gives every note the same length.
-pub fn set_length<N: EditNote>(notes: &mut [N], length: i64) {
-    let length = length.max(MIN_LENGTH);
-    update(notes, |d| d.length = TickTime(length));
-}
-
-/// Stretches starts and lengths around `anchor` by `factor` (2 is half
-/// speed, 0.5 double speed).
-pub fn scale_time<N: EditNote>(notes: &mut [N], anchor: TickTime, factor: f64) {
-    if !factor.is_finite() || factor <= 0.0 {
-        return;
-    }
-    let scale = |t: i64| (anchor.0 as f64 + (t - anchor.0) as f64 * factor).round() as i64;
-    // Shift the whole result if it would start before 0, keeping its shape.
-    let Some(first) = notes.iter().map(|n| scale(n.data().start.0)).min() else {
-        return;
-    };
-    let shift = (-first).max(0);
-    update(notes, |d| {
-        let start = scale(d.start.0) + shift;
-        let end = scale(d.end().0) + shift;
-        d.start = TickTime(start);
-        d.length = TickTime((end - start).max(MIN_LENGTH));
-    });
-}
-
 /// Extends each note to the start of the next later note in the selection.
 /// The notes of the last chord keep their length.
 pub fn legato<N: EditNote>(notes: &mut [N]) {
@@ -355,37 +329,6 @@ pub fn reverse<N: EditNote>(notes: &mut [N]) {
     update(notes, |d| d.start = TickTime(start.0 + end.0 - d.end().0));
 }
 
-/// Mirrors keys around `axis` (inversion). When that would leave the key
-/// range, the whole result moves by octaves until it fits, so the
-/// intervals survive.
-pub fn invert<N: EditNote>(notes: &mut [N], axis: u8) {
-    let mirrored = |k: u8| 2 * axis as i32 - k as i32;
-    let Some(lo) = notes.iter().map(|n| mirrored(n.data().key)).min() else {
-        return;
-    };
-    let hi = notes
-        .iter()
-        .map(|n| mirrored(n.data().key))
-        .max()
-        .unwrap_or(lo);
-    let mut shift = 0;
-    while lo + shift < 0 && hi + shift + 12 <= 127 {
-        shift += 12;
-    }
-    while hi + shift > 127 && lo + shift - 12 >= 0 {
-        shift -= 12;
-    }
-    // Wider than the range allows in octave steps: shift exactly to fit.
-    if lo + shift < 0 {
-        shift = -lo;
-    } else if hi + shift > 127 {
-        shift = 127 - hi;
-    }
-    update(notes, |d| {
-        d.key = (mirrored(d.key) + shift).clamp(0, 127) as u8
-    });
-}
-
 // ---------------------------------------------------------------------------
 // Velocity
 
@@ -411,32 +354,6 @@ pub fn set_velocity<N: EditNote>(notes: &mut [N], velocity: f64) {
 
 pub fn scale_velocity<N: EditNote>(notes: &mut [N], factor: f64) {
     update(notes, |d| d.velocity = clamp_velocity(d.velocity * factor));
-}
-
-pub fn add_velocity<N: EditNote>(notes: &mut [N], delta: f64) {
-    update(notes, |d| d.velocity = clamp_velocity(d.velocity + delta));
-}
-
-/// Sets velocities along a straight line from `from` at the first start to
-/// `to` at the last start (a crescendo or a fade).
-pub fn ramp_velocity<N: EditNote>(notes: &mut [N], from: f64, to: f64) {
-    let Some(first) = notes.iter().map(|n| n.data().start.0).min() else {
-        return;
-    };
-    let last = notes
-        .iter()
-        .map(|n| n.data().start.0)
-        .max()
-        .unwrap_or(first);
-    let span = (last - first) as f64;
-    update(notes, |d| {
-        let x = if span > 0.0 {
-            (d.start.0 - first) as f64 / span
-        } else {
-            0.0
-        };
-        d.velocity = clamp_velocity(from + (to - from) * x);
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -575,16 +492,6 @@ mod tests {
         assert_eq!((notes[0].start.0, notes[0].end().0), (0, 150));
         resize_start(&mut notes, 1000);
         assert_eq!((notes[0].start.0, notes[0].length.0), (149, 1));
-        set_length(&mut notes, 0);
-        assert_eq!(notes[0].length.0, MIN_LENGTH);
-    }
-
-    #[test]
-    fn scale_time_around_anchor() {
-        let mut notes = [n(Q, Q, 60), n(2 * Q, Q / 2, 62)];
-        scale_time(&mut notes, TickTime(Q), 2.0);
-        assert_eq!(starts(&notes), [Q, 3 * Q]);
-        assert_eq!((notes[0].length.0, notes[1].length.0), (2 * Q, Q));
     }
 
     #[test]
@@ -646,12 +553,10 @@ mod tests {
     }
 
     #[test]
-    fn reverse_and_invert() {
+    fn reverse_mirrors_the_span() {
         let mut notes = [n(0, 100, 60), n(300, 100, 64)];
         reverse(&mut notes);
         assert_eq!(starts(&notes), [300, 0]);
-        invert(&mut notes, 62);
-        assert_eq!((notes[0].key, notes[1].key), (64, 60));
     }
 
     #[test]
@@ -659,11 +564,8 @@ mod tests {
         let mut notes = [n(0, 10, 60), n(100, 10, 60), n(200, 10, 60)];
         scale_velocity(&mut notes, 2.0);
         assert!(notes.iter().all(|x| x.velocity == 1.0));
-        add_velocity(&mut notes, -0.25);
+        scale_velocity(&mut notes, 0.75);
         assert!(notes.iter().all(|x| x.velocity == 0.75));
-        ramp_velocity(&mut notes, 0.2, 1.0);
-        let v: Vec<f64> = notes.iter().map(|x| x.velocity).collect();
-        assert!((v[0] - 0.2).abs() < 1e-9 && (v[1] - 0.6).abs() < 1e-9 && v[2] == 1.0);
         set_velocity(&mut notes, f64::NAN);
         assert!(notes.iter().all(|x| x.velocity == MIN_VELOCITY));
     }
@@ -700,21 +602,5 @@ mod tests {
             assert!((x.start.0 - y.start.0).abs() <= 20);
             assert!((x.velocity - y.velocity).abs() <= 0.1 + 1e-12);
         }
-    }
-
-    #[test]
-    fn invert_and_scale_keep_the_group_shape() {
-        let mut notes = [n(0, 10, 10), n(0, 10, 20), n(0, 10, 30)];
-        invert(&mut notes, 120);
-        let keys: Vec<u8> = notes.iter().map(|x| x.key).collect();
-        assert_eq!(keys, [122, 112, 102]);
-        let mut notes = [n(0, 10, 120), n(0, 10, 0)];
-        invert(&mut notes, 60);
-        assert_eq!((notes[0].key, notes[1].key), (0, 120));
-
-        let mut notes = [n(0, 50, 60), n(100, 50, 62)];
-        scale_time(&mut notes, TickTime(200), 2.0);
-        assert_eq!(starts(&notes), [0, 200]);
-        assert!(notes.iter().all(|x| x.length.0 == 100));
     }
 }
