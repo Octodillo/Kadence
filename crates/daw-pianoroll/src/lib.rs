@@ -20,8 +20,8 @@
 //! - drag on empty space for a rubber band (Shift or Ctrl adds to the
 //!   selection);
 //! - double-click empty space to add a note, and keep the button down to
-//!   hear it; drag before letting go to set its length; double-click a note
-//!   to delete it;
+//!   hear it; drag past its end before letting go to set its length;
+//!   double-click a note to delete it;
 //! - click a key to select every note on it (Shift adds, Ctrl toggles);
 //! - drag in the velocity lane to draw velocities;
 //! - edit the clip's track's automation lanes under it, as in the arrange
@@ -90,8 +90,8 @@ enum Gesture {
         area: Area,
         hit: Option<(NoteUid, NotePart)>,
     },
-    /// Still holding the double-click at `press` that added note `id`.
-    Drawn { press: Pointer, id: NoteUid },
+    /// Still holding the double-click that added note `id`.
+    Drawn { id: NoteUid },
     /// Moving or resizing the selection by `grabbed`.
     Notes {
         drag: Drag,
@@ -185,11 +185,6 @@ fn outcome_document() -> Outcome {
         view: true,
         ..Outcome::default()
     }
-}
-
-/// Whether the pointer has moved far enough from `press` to be dragging.
-fn past_threshold(press: Pointer, p: Pointer) -> bool {
-    (p.x - press.x).hypot(p.y - press.y) >= DRAG_THRESHOLD
 }
 
 fn outcome_error(e: Refusal) -> Outcome {
@@ -610,13 +605,18 @@ impl PianoRoll {
         };
         match g {
             Gesture::Pending { press, area, hit } => {
-                if !past_threshold(press, p) || area != Area::Notes {
+                let moved = (p.x - press.x).hypot(p.y - press.y);
+                if moved < DRAG_THRESHOLD || area != Area::Notes {
                     return Outcome::default();
                 }
                 match hit {
                     Some((id, part)) => {
-                        let anchor = self.local(press.x, press.y);
-                        if !self.begin_note_drag(doc.project(), id, part.into(), anchor) {
+                        let (lx, ly) = self.local(press.x, press.y);
+                        let begun =
+                            self.begin_note_drag(doc.project(), id, |view, grabbed, sel| {
+                                Drag::begin(part.into(), view, lx, ly, grabbed, sel)
+                            });
+                        if !begun {
                             return Outcome::default();
                         }
                     }
@@ -632,10 +632,7 @@ impl PianoRoll {
                 }
                 self.motion(doc, p)
             }
-            Gesture::Drawn { press, id } => {
-                if !past_threshold(press, p) {
-                    return Outcome::default();
-                }
+            Gesture::Drawn { id } => {
                 let project = doc.project();
                 let Some((c, m)) = self.clip(project) else {
                     return Outcome::default();
@@ -643,11 +640,18 @@ impl PianoRoll {
                 let Some(note) = m.notes.iter().find(|n| n.id == id) else {
                     return Outcome::default();
                 };
-                // Anchored at the note's end, so the end follows the pointer
-                // from wherever in the note the double-click was.
-                let r = self.grid_view(c.start).note_rect(&note.data());
-                let anchor = (r.x + r.w, self.local(press.x, press.y).1);
-                if !self.begin_note_drag(project, id, DragKind::ResizeEnd, anchor) {
+                // The note keeps its length while the pointer is inside it,
+                // however the hand wobbles; past its end, the end follows
+                // the pointer.
+                let end = TickTime(c.start.0 + note.data().end().0);
+                let view = self.grid_view(c.start);
+                if view.x_to_tick(self.local(p.x, p.y).0) <= end {
+                    return Outcome::default();
+                }
+                let begun = self.begin_note_drag(project, id, |_, grabbed, sel| {
+                    Drag::begin_at(DragKind::ResizeEnd, end, grabbed.key, grabbed, sel)
+                });
+                if !begun {
                     return Outcome::default();
                 }
                 self.motion(doc, p)
@@ -794,15 +798,14 @@ impl PianoRoll {
         out
     }
 
-    /// Turns the gesture into a drag of the selection by note `id`, anchored
-    /// at `anchor` in note-grid coordinates. `false` if `id` is not a
-    /// selected note of the open clip.
+    /// Turns the gesture into a drag of the selection by note `id`, which
+    /// `begin` starts from the view, that note and the selected notes.
+    /// `false` if `id` is not a selected note of the open clip.
     fn begin_note_drag(
         &mut self,
         project: &Project,
         id: NoteUid,
-        kind: DragKind,
-        anchor: (f64, f64),
+        begin: impl FnOnce(&PianoRollView, &Note, &[Note]) -> Drag,
     ) -> bool {
         let Some((c, m)) = self.clip(project) else {
             return false;
@@ -816,9 +819,8 @@ impl PianoRoll {
         let Some(grabbed) = sel.iter().find(|n| n.id == id) else {
             return false;
         };
-        let view = self.grid_view(c.start);
         self.gesture = Some(Gesture::Notes {
-            drag: Drag::begin(kind, &view, anchor.0, anchor.1, grabbed, &sel),
+            drag: begin(&self.grid_view(c.start), grabbed, &sel),
             ids: sel.iter().map(|n| n.id).collect(),
             grabbed: id,
         });
@@ -898,10 +900,7 @@ impl PianoRoll {
         if out.error.is_none() {
             self.selection = BTreeSet::from([note.id]);
             self.audition = Some(Self::audition_note(&note));
-            self.gesture = Some(Gesture::Drawn {
-                press: p,
-                id: note.id,
-            });
+            self.gesture = Some(Gesture::Drawn { id: note.id });
         }
         out
     }

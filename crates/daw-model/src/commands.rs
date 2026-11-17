@@ -843,6 +843,10 @@ impl Command for AddNotes {
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         let ids: HashSet<NoteUid> = self.notes.iter().map(|n| n.id).collect();
         let m = midi_mut(project, self.clip)?;
+        let present: HashSet<NoteUid> = m.notes.iter().map(|n| n.id).collect();
+        if let Some(missing) = ids.iter().find(|id| !present.contains(id)) {
+            return Err(ModelError::NoteNotFound(*missing));
+        }
         // Taken as they are now, which is how redo adds them again: merged
         // edits changed them since they were added.
         let (mine, others) = mem::take(&mut m.notes)

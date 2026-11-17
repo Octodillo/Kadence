@@ -385,7 +385,11 @@ Kirigami.Page {
                 }
             }
             onReleased: (m) => roll.release(m.x, m.y, m.modifiers)
-            onDoubleClicked: (m) => roll.doubleClick(m.x, m.y, m.modifiers)
+            onDoubleClicked: (m) => {
+                if (m.button === Qt.LeftButton) {
+                    roll.doubleClick(m.x, m.y, m.modifiers);
+                }
+            }
             onCanceled: roll.cancelDrag()
             onWheel: (w) => {
                 // Mice report angles (120 per notch), touchpads pixels.

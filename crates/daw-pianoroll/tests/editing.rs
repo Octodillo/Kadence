@@ -225,6 +225,63 @@ fn alt_sets_a_held_new_notes_length_off_the_grid() {
 }
 
 #[test]
+fn a_wobble_inside_a_held_new_note_keeps_its_length() {
+    let mut r = Rig::new(vec![]);
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    // Off the grid the note starts under the pointer, a sixteenth long.
+    let mut p = Pointer::left(x, y);
+    p.alt = true;
+    r.press_with(p);
+    r.pr.double_click(&mut r.doc, p);
+    let drawn = r.notes();
+    assert_eq!(drawn[0].length.0, Q / 4);
+    for (dx, dy) in [(0.0, 5.0), (4.0, -3.0), (-6.0, 0.0), (10.0, 40.0)] {
+        let mut wobble = Pointer::left(x + dx, y + dy);
+        wobble.alt = true;
+        r.pr.motion(&mut r.doc, wobble);
+        assert_eq!(r.notes(), drawn, "moved by {dx}, {dy}");
+    }
+    assert!(r.pr.audition().is_some());
+}
+
+#[test]
+fn escape_ends_a_held_new_note_and_closes_its_undo_step() {
+    let mut r = Rig::new(vec![]);
+    let steps = r.doc.history().undo_len();
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    r.press(x, y);
+    r.pr.double_click(&mut r.doc, Pointer::left(x, y));
+    r.pr.cancel(&mut r.doc);
+    assert_eq!(r.pr.audition(), None);
+    // The pointer is still down, but no longer sets the length.
+    let far = Pointer::left(r.x(2 * Q), y);
+    r.pr.motion(&mut r.doc, far);
+    r.pr.release(&mut r.doc, far);
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+    // Resizing it afterwards is a step of its own.
+    r.drag((r.x(Q / 2 - 2), y), (r.x(Q), y));
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q - Q / 4, 64, 0.8)]);
+    assert_eq!(r.doc.history().undo_len(), steps + 2);
+    r.doc.undo().unwrap();
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+}
+
+#[test]
+fn releasing_a_note_that_sounded_redraws_the_keyboard() {
+    let mut r = Rig::new(vec![n(0, Q, 60)]);
+    let (x, y) = (r.x(Q / 2), r.y(60));
+    r.press(x, y);
+    assert!(r.pr.audition().is_some());
+    let out = r.pr.release(&mut r.doc, Pointer::left(x, y));
+    assert!(out.view);
+    assert_eq!(r.pr.audition(), None);
+    // Nothing sounded on empty space, so nothing to redraw.
+    let (x, y) = (r.x(3 * Q), r.y(70));
+    r.press(x, y);
+    assert!(!r.pr.release(&mut r.doc, Pointer::left(x, y)).view);
+}
+
+#[test]
 fn a_press_after_a_lost_release_leaves_the_new_note_alone() {
     let mut r = Rig::new(vec![]);
     let (x, y) = (r.x(Q / 4 + 30), r.y(64));
