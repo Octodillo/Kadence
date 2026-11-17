@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 
 use daw_arrange::automation::{lane_scale, static_value};
+use daw_arrange::rows::{LaneRow, track_rows};
 use daw_model::{AutomationLane, AutomationTarget, LaneId, Project, Track};
 
 use crate::device_panel::{BuiltinParams, ParamDesc};
@@ -148,6 +149,23 @@ impl AppState {
         self.target_control(track, self.lane_target(track, lane)?)
     }
 
+    /// The rows track `track` shows under it when expanded, as the
+    /// timeline lays them out.
+    pub fn track_rows(&self, track: i32) -> Vec<LaneRow> {
+        self.track_at_index(track)
+            .map_or_else(Vec::new, |t| track_rows(t))
+    }
+
+    /// The index among the track's lanes of the lane in row `row`.
+    pub fn row_lane(&self, track: i32, row: i32) -> Option<usize> {
+        let t = self.track_at_index(track)?;
+        let id = self
+            .track_rows(track)
+            .get(usize::try_from(row).ok()?)?
+            .lane?;
+        t.automation.iter().position(|l| l.id == id)
+    }
+
     /// See [`begin_control`](Self::begin_control).
     pub fn begin_lane_control(&mut self, track: i32, lane: i32) {
         if let Some(target) = self.lane_target(track, lane) {
@@ -169,8 +187,8 @@ impl AppState {
         }
     }
 
-    /// How a device-parameter lane's parameter is described; see
-    /// [`target_param`](Self::target_param).
+    /// How a device-parameter lane's parameter is described (its unit,
+    /// control and choices); `None` for other lanes and unknown devices.
     pub fn lane_param(&self, track: i32, lane: i32) -> Option<ParamDesc> {
         self.target_param(track, self.lane_target(track, lane)?)
     }
@@ -180,10 +198,14 @@ impl AppState {
     // automates it, so these take the target and look for its lane.
 
     /// `target` on track `track` as it is now: what it is set to, or what
-    /// its lane plays at the playhead.
+    /// its lane plays at the playhead. `None` if the track has no such
+    /// control.
     pub fn target_control(&self, track: i32, target: AutomationTarget) -> Option<LaneControl> {
-        let t = self.track_at_index(track)?;
-        let lane = t.automation.iter().find(|l| l.target == target);
+        let t = self.track_at_index(track)?.as_ref();
+        if !t.has_target(target) {
+            return None;
+        }
+        let lane = t.lane_for(target);
         let scale = lane_scale(self.arrange.params.as_ref(), t, target);
         let following = lane.is_some_and(|l| l.enabled && !l.points.is_empty());
         let value = lane
@@ -264,8 +286,8 @@ impl AppState {
         });
     }
 
-    /// Moves a control to height `norm` on its lane's scale. Like the
-    /// mixer's controls, it records while a take runs and otherwise sets
+    /// Moves a control to height `norm` on its scale (the one its lane is
+    /// drawn on). Like the mixer's controls, it records while a take runs and otherwise sets
     /// the static value; a control whose lane plays its points ignores it
     /// unless the lane writes. Moves until
     /// [`end_control`](Self::end_control) are one undo step.
@@ -505,6 +527,63 @@ mod tests {
                 assert_eq!(p.scale(&d, spec.id), Some(desc.scale()));
             }
         }
+    }
+
+    /// A control answers by target whether or not a lane automates it, and
+    /// not at all for something the track doesn't have.
+    #[test]
+    fn controls_work_without_a_lane() {
+        use crate::engine::StubEngine;
+        let mut s = AppState::with_engine(Box::new(StubEngine::default()));
+        let mut t = Track::new(TrackKind::Audio, "A");
+        let d = eq_device();
+        // A slider's parameter; a switch would round the position.
+        let param = BuiltinParams
+            .automatable(&d)
+            .into_iter()
+            .find(|&p| BuiltinParams.param(&d, p).is_some_and(|p| p.records()))
+            .unwrap();
+        let eq = AutomationTarget::DeviceParam {
+            device: d.id,
+            param,
+        };
+        t.devices.push(d);
+        s.doc
+            .execute(daw_model::commands::AddTrack::new(0, t))
+            .unwrap();
+        assert!(s.doc.project().tracks[0].automation.is_empty());
+
+        for target in [AutomationTarget::Volume, eq] {
+            let before = s.target_control(0, target).expect("a control");
+            assert!(!before.following && !before.writes);
+            let to = if before.norm < 0.5 { 0.75 } else { 0.25 };
+            s.begin_control(0, target);
+            s.set_control(0, target, to);
+            s.end_control(0, target);
+            let after = s.target_control(0, target).unwrap();
+            assert!((after.norm - to).abs() < 1e-6, "{target:?}");
+            // Moving a control makes no lane.
+            assert!(s.doc.project().tracks[0].automation.is_empty());
+        }
+        assert_eq!(s.track_rows(0).len(), 1);
+        assert_eq!(s.row_lane(0, 0), None);
+
+        // Not on the track: no control, and nothing moves.
+        let gone = AutomationTarget::DeviceParam {
+            device: Device::new(
+                "x",
+                DeviceSource::Builtin {
+                    kind: "daw.eq".into(),
+                },
+            )
+            .id,
+            param,
+        };
+        assert!(s.target_control(0, gone).is_none());
+        assert!(s.target_control(1, AutomationTarget::Volume).is_none());
+        let revision = s.doc.revision();
+        s.set_control(0, gone, 0.5);
+        assert_eq!(s.doc.revision(), revision);
     }
 
     #[test]

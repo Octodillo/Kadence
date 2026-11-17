@@ -463,7 +463,10 @@ impl Arrange {
     }
 
     /// The rows track row `row` shows under it, as last laid out: none
-    /// while it is collapsed.
+    /// while it is collapsed. [`hit`](Self::hit) and
+    /// [`lane_frame`](Self::lane_frame) read these too, so whoever changes
+    /// the document or [`expanded`](Self::expanded) from outside calls
+    /// [`relayout`](Self::relayout) before asking.
     pub fn lane_rows(&self, row: usize) -> &[LaneRow] {
         self.rows.get(row).map_or(&[], Vec::as_slice)
     }

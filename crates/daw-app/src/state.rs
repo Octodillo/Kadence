@@ -230,6 +230,9 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        // The timeline's rows follow the document, also when it changed
+        // somewhere else (undo, a recorded take, the piano roll).
+        self.arrange.relayout(self.doc.project());
         self.prune_lane_modes();
         self.apply_click();
         self.view_revision += 1;
@@ -997,6 +1000,7 @@ impl AppState {
         self.arrange.hovered = None;
         self.arrange.lanes.clear_selection();
         self.arrange.expanded.clear();
+        self.arrange.relayout(self.doc.project());
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;
         self.arrange.scroll_y = 0.0;

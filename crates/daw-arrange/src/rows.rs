@@ -2,8 +2,8 @@
 //!
 //! [`track_rows`] is the one place that decides which rows a track has and
 //! in what order. [`Arrange::relayout`](crate::Arrange::relayout) keeps its
-//! answer for every track, and geometry, hit tests, drawing and the track
-//! headers all read rows from there, so they agree on what row `n` is.
+//! answer for every track for geometry, hit tests and drawing, and a front
+//! end's track headers ask it for theirs, so all agree on what row `n` is.
 
 use daw_model::{AutomationLane, AutomationTarget, LaneId, Track};
 

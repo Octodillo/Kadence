@@ -33,6 +33,14 @@ pub mod qobject {
         /// Lanes on track `track`.
         #[qinvokable]
         fn lane_count(self: &Automation, track: i32) -> i32;
+        /// Rows track `track` shows under it when expanded, as the timeline
+        /// lays them out.
+        #[qinvokable]
+        fn row_count(self: &Automation, track: i32) -> i32;
+        /// The lane in row `row` of the track, as an index for the lane
+        /// getters; -1 for a row without one.
+        #[qinvokable]
+        fn row_lane(self: &Automation, track: i32, row: i32) -> i32;
         /// Whether the track shows its lanes.
         #[qinvokable]
         fn expanded(self: &Automation, track: i32) -> bool;
@@ -163,6 +171,14 @@ impl qobject::Automation {
         state::with(|s| s.lane_count(track) as i32)
     }
 
+    fn row_count(&self, track: i32) -> i32 {
+        state::with(|s| s.track_rows(track).len() as i32)
+    }
+
+    fn row_lane(&self, track: i32, row: i32) -> i32 {
+        state::with(|s| s.row_lane(track, row).map_or(-1, |i| i as i32))
+    }
+
     fn expanded(&self, track: i32) -> bool {
         state::with(|s| s.lanes_expanded(track))
     }
@@ -212,7 +228,8 @@ impl qobject::Automation {
     }
 
     // These play the change and bump the view's revision themselves (see
-    // `AppState::run_control`); the lanes' own revision doesn't change.
+    // `AppState::begin_control` and its fellows); the lanes' own revision
+    // doesn't change.
     fn begin_lane_control(self: Pin<&mut Self>, track: i32, lane: i32) {
         state::with(|s| s.begin_lane_control(track, lane));
     }

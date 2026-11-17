@@ -718,11 +718,9 @@ impl AppDevicePanel {
                 };
                 p.writable = p.desc.records()
                     && (s.mixer.write()
-                        || track.is_some_and(|t| {
-                            t.automation
-                                .iter()
-                                .any(|l| l.target == target && s.lanes.write.contains(&l.id))
-                        }));
+                        || track
+                            .and_then(|t| t.lane_for(target))
+                            .is_some_and(|l| s.lanes.write.contains(&l.id)));
             }
             Some(view)
         })

@@ -28,7 +28,8 @@ Column {
     readonly property int revision: Project.revision + Automation.revision
 
     readonly property bool expanded: revision >= 0 ? Automation.expanded(index) : false
-    readonly property int laneCount: revision >= 0 ? Automation.laneCount(index) : 0
+    // The rows under the track while it is expanded (see Automation).
+    readonly property int rowCount: revision >= 0 ? Automation.rowCount(index) : 0
 
     // How much each of `r` sizes in this row (the track, or the lanes down
     // to a dragged edge) changes so the edge moves `delta` with the pointer.
@@ -451,13 +452,13 @@ Column {
     // The lanes' headers, one per lane row the timeline shows.
     Repeater {
         id: lanes
-        model: row.expanded ? Math.max(1, row.laneCount) : 0
+        model: row.expanded ? row.rowCount : 0
         delegate: LaneHeader {
             required property int index
             width: row.width
             height: row.arrange.laneHeight
             track: row.index
-            lane: index < row.laneCount ? index : -1
+            lane: row.revision >= 0 ? Automation.rowLane(row.index, index) : -1
             revision: row.revision
 
             // Drag the lower edge to resize every automation lane,
