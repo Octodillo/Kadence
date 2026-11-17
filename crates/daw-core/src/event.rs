@@ -86,6 +86,11 @@ impl EventList {
         self.events.clear();
     }
 
+    /// Keeps the events `keep` returns true for, in order. Never allocates.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Event) -> bool) {
+        self.events.retain(|e| keep(e));
+    }
+
     /// Iterates the events sorted by frame.
     pub fn iter(&self) -> impl Iterator<Item = &Event> {
         self.events.iter()
@@ -178,6 +183,18 @@ mod tests {
         list.clear();
         assert!(list.is_empty());
         list.push(ev(2, 2)).unwrap();
+    }
+
+    #[test]
+    fn retain_keeps_order_and_capacity() {
+        let mut list = EventList::with_capacity(3);
+        for (f, t) in [(0, 0), (1, 1), (2, 2)] {
+            list.push(ev(f, t)).unwrap();
+        }
+        list.retain(|e| e.frame != 1);
+        assert_eq!(tags(&list), [(0, 0), (2, 2)]);
+        list.push(ev(3, 3)).unwrap();
+        assert!(list.is_full());
     }
 
     #[test]

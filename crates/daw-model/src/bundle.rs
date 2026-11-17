@@ -11,6 +11,7 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -287,13 +288,22 @@ impl Bundle {
 
     /// Writes the project file atomically, first copying the previous version
     /// into `backups/`. Removes any autosave, since it is now older.
-    pub fn save(&self, project: &Project) -> Result<(), FormatError> {
+    ///
+    /// `link` says what happens if the project file is a symlink. Pass
+    /// [`Link::Follow`] only when `project` was loaded through it with
+    /// [`Bundle::load`].
+    pub fn save(&self, project: &Project, link: Link) -> Result<(), FormatError> {
         self.make_dirs()?;
         let file = self.project_file();
-        if file.exists() {
+        let previous = match link {
+            Link::Follow => fs::metadata(&file),
+            // What a link points to is not a previous version of this project.
+            Link::Replace => fs::symlink_metadata(&file),
+        };
+        if previous.is_ok_and(|m| m.is_file()) {
             self.backup(&file)?;
         }
-        write_atomic(&file, &file, project)?;
+        write_atomic(&file, &file, link, project)?;
         self.discard_autosave()
     }
 
@@ -304,13 +314,30 @@ impl Bundle {
             .map_or(0, |d| d.as_millis() as u64);
         // Always after the newest backup, even when two saves share a
         // millisecond or the clock was set back.
-        let stamp = backups
+        let mut stamp = backups
             .last()
-            .map_or(now, |&(newest, _)| now.max(newest + 1));
-        let dest = self
-            .backups_dir()
-            .join(format!("{}-{stamp:016}.{EXTENSION}", self.stem));
-        fs::copy(file, &dest).map_err(FormatError::io(&dest))?;
+            .map_or(now, |&(newest, _)| now.max(newest + 1))
+            .min(MAX_STAMP);
+        let dest = loop {
+            let dest = self
+                .backups_dir()
+                .join(format!("{}-{stamp:016}.{EXTENSION}", self.stem));
+            match copy_new(file, &dest) {
+                // Taken by something the listing leaves out, such as a
+                // dangling link: never written through, the next name is used.
+                Err(FormatError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    // No later name exists. Saving without a backup is not
+                    // an option, so the save fails and names the file.
+                    if stamp == MAX_STAMP {
+                        return Err(FormatError::Io { path: dest, source });
+                    }
+                    stamp += 1;
+                }
+                result => break result.map(|()| dest)?,
+            }
+        };
         backups.push((stamp, dest));
         // Only this project's backups rotate; ones left by a project file of
         // another name (before a rename) are kept.
@@ -358,7 +385,12 @@ impl Bundle {
     pub fn write_autosave(&self, project: &Project) -> Result<(), FormatError> {
         self.make_dirs()?;
         // The autosave holds the same data, so it gets the same permissions.
-        write_atomic(&self.autosave_file(), &self.project_file(), project)
+        write_atomic(
+            &self.autosave_file(),
+            &self.project_file(),
+            Link::Replace,
+            project,
+        )
     }
 
     /// Whether an autosave exists that is newer than the project file, which
@@ -495,30 +527,70 @@ pub fn read_project(path: &Path) -> Result<Project, FormatError> {
 /// Writes a project file on its own, atomically, such as the autosave of a
 /// project that has no bundle yet. Read it back with [`read_project`].
 pub fn write_project(path: &Path, project: &Project) -> Result<(), FormatError> {
-    write_atomic(path, path, project)
+    write_atomic(path, path, Link::Replace, project)
+}
+
+/// The largest time stamp a backup's 16-digit name holds.
+const MAX_STAMP: u64 = 9_999_999_999_999_999;
+
+/// Copies the file `src` to `dest`, which must not exist yet: a link put at
+/// `dest` beforehand is refused, not written through. A failed copy leaves
+/// nothing at `dest`.
+fn copy_new(src: &Path, dest: &Path) -> Result<(), FormatError> {
+    let mut from = File::open(src).map_err(FormatError::io(src))?;
+    let meta = from.metadata().map_err(FormatError::io(src))?;
+    let mut to = File::create_new(dest).map_err(FormatError::io(dest))?;
+    let copied = (|| {
+        #[cfg(unix)]
+        to.set_permissions(meta.permissions())
+            .map_err(FormatError::io(dest))?;
+        std::io::copy(&mut from, &mut to).map_err(FormatError::io(src))?;
+        Ok(())
+    })();
+    if copied.is_err() {
+        let _ = fs::remove_file(dest);
+    }
+    copied
+}
+
+/// What a write does with a symlink at the path it writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// Write the file the link points to and keep the link. Only for a file
+    /// whose contents were read through the same link, which makes it the
+    /// project file of a user who keeps it elsewhere and links it into the
+    /// bundle.
+    Follow,
+    /// Replace the link with the new file. For files only Kadence creates,
+    /// where a link can only have come with a bundle from somewhere else and
+    /// would direct the write to a file of its maker's choosing.
+    Replace,
 }
 
 /// Writes to a temporary file next to `path`, syncs it, then renames it over
 /// `path`, so a crash never leaves a half-written project. The new file keeps
-/// the permissions of `path`, or of `like` if `path` doesn't exist yet. A
-/// symlink at `path` is written through, not replaced.
-fn write_atomic(path: &Path, like: &Path, project: &Project) -> Result<(), FormatError> {
+/// the permissions of `path`, or of `like` if `path` doesn't exist yet.
+fn write_atomic(
+    path: &Path,
+    like: &Path,
+    link: Link,
+    project: &Project,
+) -> Result<(), FormatError> {
     let path = match fs::symlink_metadata(path) {
-        // A dangling link is replaced, as before.
-        Ok(m) if m.file_type().is_symlink() => {
+        // A dangling link is replaced either way.
+        Ok(m) if link == Link::Follow && m.file_type().is_symlink() => {
             fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
         }
         _ => path.to_path_buf(),
     };
     let path = path.as_path();
-    let perms = fs::metadata(path)
-        .or_else(|_| fs::metadata(like))
+    let perms = fs::symlink_metadata(path)
         .ok()
+        .filter(|m| m.is_file())
+        .or_else(|| fs::metadata(like).ok())
         .map(|m| m.permissions());
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    let result = write_synced(&tmp, perms, project)
+    let (file, tmp) = create_temp(path)?;
+    let result = write_synced(file, &tmp, perms, project)
         .and_then(|()| fs::rename(&tmp, path).map_err(FormatError::io(path)));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -531,12 +603,34 @@ fn write_atomic(path: &Path, like: &Path, project: &Project) -> Result<(), Forma
     Ok(())
 }
 
+/// Creates a new, empty temporary file next to `path`. Never opens a file
+/// that already exists, so nothing put at a guessable name beforehand (a
+/// symlink in a bundle from somewhere else, say) can receive the write.
+fn create_temp(path: &Path) -> Result<(File, PathBuf), FormatError> {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        let tmp = PathBuf::from(name);
+        match File::create_new(&tmp) {
+            Ok(file) => return Ok((file, tmp)),
+            // Left by an earlier process with this id, or planted: try the next.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(FormatError::io(tmp)(e)),
+        }
+    }
+}
+
 fn write_synced(
+    file: File,
     path: &Path,
     perms: Option<fs::Permissions>,
     project: &Project,
 ) -> Result<(), FormatError> {
-    let file = File::create(path).map_err(FormatError::io(path))?;
     // Narrowed before any data goes in. Elsewhere permissions are only a
     // read-only flag, which would stop the write.
     #[cfg(unix)]
