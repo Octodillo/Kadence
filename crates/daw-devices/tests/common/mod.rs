@@ -200,6 +200,11 @@ pub fn peak(x: &[f32]) -> f32 {
     x.iter().fold(0.0f32, |m, s| m.max(s.abs()))
 }
 
+/// Largest change between neighbouring samples.
+pub fn steepest(x: &[f32]) -> f32 {
+    x.windows(2).fold(0.0, |m, w| m.max((w[1] - w[0]).abs()))
+}
+
 pub fn rms(x: &[f32]) -> f32 {
     (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt()
 }

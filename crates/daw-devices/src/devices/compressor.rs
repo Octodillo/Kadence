@@ -181,7 +181,9 @@ impl Segmented for Compressor {
             };
             self.envelope = flush(reduction + (self.envelope - reduction) * coef);
             most = most.max(self.envelope);
-            let gain = db_to_gain(-self.envelope as f64) as f32 * self.makeup.tick();
+            // No silence floor on the reduction alone: with makeup a deep
+            // reduction is still audible, and a floor would cut it to nothing.
+            let gain = 10f32.powf(-self.envelope / 20.0) * self.makeup.tick();
             let mix = self.mix.tick();
             let g = 1.0 - mix + mix * gain;
             output(ctx, i, l * g, r * g);

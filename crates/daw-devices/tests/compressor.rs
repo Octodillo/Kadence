@@ -84,11 +84,6 @@ fn recovers_from_non_finite_input() {
     check_recovers_from_non_finite(&mut Compressor::new());
 }
 
-/// Largest change between neighbouring samples.
-fn steepest(x: &[f32]) -> f32 {
-    x.windows(2).fold(0.0, |m, w| m.max((w[1] - w[0]).abs()))
-}
-
 /// Issue #178: makeup and mix were applied unsmoothed, so a knob move or an
 /// automation step changed the output level in one sample.
 #[test]

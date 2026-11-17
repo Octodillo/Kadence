@@ -89,7 +89,6 @@ fn pre_delay_changes_glide() {
     let change_at = 2 * 48000 + 2400;
     let events = [(change_at, param(PRE_DELAY, 100.0))];
     let out = render(&mut r, frames, &[input], &events, s);
-    let steepest = |x: &[f32]| x.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
     let settled = steepest(&out.channels[0][48000..change_at]);
     let changing = steepest(&out.channels[0][change_at..]);
     assert!(changing < 2.0 * settled, "{changing} vs {settled}");

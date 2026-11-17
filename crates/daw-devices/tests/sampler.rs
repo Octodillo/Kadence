@@ -479,9 +479,7 @@ fn gain_changes_reach_sounding_voices_smoothly() {
     assert_eq!(out[999], 0.5);
     assert!(out[10000..].iter().all(|&x| x == 0.0));
     // A glide, not a step.
-    let steepest = out[1..]
-        .windows(2)
-        .fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+    let steepest = steepest(&out[1..]);
     assert!(steepest < 0.005, "{steepest}");
 }
 

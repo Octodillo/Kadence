@@ -115,11 +115,6 @@ fn recovers_from_non_finite_input() {
     check_recovers_from_non_finite(&mut Delay::new());
 }
 
-/// Largest change between neighbouring samples.
-fn steepest(x: &[f32]) -> f32 {
-    x.windows(2).fold(0.0, |m, w| m.max((w[1] - w[0]).abs()))
-}
-
 /// Issue #178: the time smoother stalled 37.5 samples short of this target
 /// and then jumped the read tap there, clicking in the wet signal.
 #[test]
@@ -138,9 +133,10 @@ fn time_glide_ends_without_a_click() {
     let glide_at = 2 * 96000;
     let events = [(glide_at, param(TIME, 2000.0))];
     let r = render(&mut d, frames, std::slice::from_ref(&input), &events, s);
-    // Well into the glide the tap has all but stopped, so the echo is no
-    // steeper than the tone itself.
-    let settling = &r.channels[0][glide_at + 9600..];
+    // Six time constants in, the tap moves a twentieth of a sample per
+    // sample, so the echo is no steeper than the tone itself. The old jump
+    // came later than that.
+    let settling = &r.channels[0][glide_at + 28800..];
     assert!(
         steepest(settling) < 1.5 * steepest(&input),
         "{} vs {}",
