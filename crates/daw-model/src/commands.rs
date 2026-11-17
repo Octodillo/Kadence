@@ -260,8 +260,22 @@ impl Command for AddTrack {
 struct RemovedTrack {
     index: usize,
     track: Arc<Track>,
-    /// Other tracks as they were before their routing to this one was cut.
-    touched: Vec<Arc<Track>>,
+    /// What was cut from the other tracks that routed to this one.
+    cut: Vec<CutRouting>,
+}
+
+/// The routing of one track into a removed track, for putting it back. Only what was cut:
+/// the rest of the track (its devices' plugin states, say) may change without an undo step
+/// while the removal can still be undone.
+#[derive(Debug)]
+struct CutRouting {
+    track: TrackId,
+    /// The track's output was the removed track.
+    output: bool,
+    /// The sends to the removed track, with their former indices.
+    sends: Vec<(usize, Send)>,
+    /// The automation of those sends.
+    lanes: TakenLanes,
 }
 
 /// Removes a track. Tracks that output to it are rerouted to the master, and
@@ -293,45 +307,51 @@ impl Command for RemoveTrack {
             }
         })?;
         let mut changes = ChangeSet::one(Change::TrackList);
-        let mut touched = Vec::new();
+        let mut cut = Vec::new();
         for arc in project
             .tracks
             .iter_mut()
             .chain(std::iter::once(&mut project.master))
         {
-            let routes_here =
-                arc.output == TrackOutput::Bus(id) || arc.sends.iter().any(|s| s.target == id);
-            if arc.id == id || !routes_here {
+            let output = arc.output == TrackOutput::Bus(id);
+            let sends_here = arc.sends.iter().any(|s| s.target == id);
+            if arc.id == id || !(output || sends_here) {
                 continue;
             }
-            touched.push(arc.clone());
             let t = Arc::make_mut(arc);
-            if t.output == TrackOutput::Bus(id) {
+            if output {
                 t.output = TrackOutput::Master;
                 changes.push(Change::Track(t.id));
             }
-            let dropped: Vec<SendId> = t
-                .sends
-                .iter()
-                .filter(|s| s.target == id)
-                .map(|s| s.id)
-                .collect();
-            if !dropped.is_empty() {
-                t.sends.retain(|s| s.target != id);
-                changes.push(Change::SendList(t.id));
-                let before = t.automation.len();
-                t.automation.retain(|l| !matches!(l.target, AutomationTarget::SendLevel { send } if dropped.contains(&send)));
-                if t.automation.len() != before {
-                    changes.push(Change::LaneList(t.id));
+            let mut sends = Vec::new();
+            let mut kept = Vec::with_capacity(t.sends.len());
+            for (i, send) in mem::take(&mut t.sends).into_iter().enumerate() {
+                if send.target == id {
+                    sends.push((i, send));
+                } else {
+                    kept.push(send);
                 }
             }
+            t.sends = kept;
+            let lanes = take_lanes(t, |target| {
+                matches!(target, AutomationTarget::SendLevel { send }
+                    if sends.iter().any(|(_, s)| s.id == *send))
+            });
+            if !sends.is_empty() {
+                changes.push(Change::SendList(t.id));
+            }
+            if !lanes.is_empty() {
+                changes.push(Change::LaneList(t.id));
+            }
+            cut.push(CutRouting {
+                track: t.id,
+                output,
+                sends,
+                lanes,
+            });
         }
         let track = project.tracks.remove(index);
-        self.saved = Some(RemovedTrack {
-            index,
-            track,
-            touched,
-        });
+        self.saved = Some(RemovedTrack { index, track, cut });
         Ok(changes)
     }
 
@@ -341,12 +361,24 @@ impl Command for RemoveTrack {
             .take()
             .ok_or_else(|| invalid("RemoveTrack reverted before apply"))?;
         let mut changes = ChangeSet::one(Change::TrackList);
+        let id = saved.track.id;
         project.tracks.insert(saved.index, saved.track);
-        for t in saved.touched {
-            changes.push(Change::Track(t.id));
-            changes.push(Change::SendList(t.id));
-            changes.push(Change::LaneList(t.id));
-            project.replace_track(t)?;
+        for c in saved.cut {
+            let t = project.track_mut(c.track)?;
+            if c.output {
+                t.output = TrackOutput::Bus(id);
+                changes.push(Change::Track(t.id));
+            }
+            if !c.sends.is_empty() {
+                changes.push(Change::SendList(t.id));
+            }
+            for (i, send) in c.sends {
+                t.sends.insert(i, send);
+            }
+            if !c.lanes.is_empty() {
+                changes.push(Change::LaneList(t.id));
+            }
+            restore_lanes(t, c.lanes);
         }
         Ok(changes)
     }
@@ -585,7 +617,11 @@ impl Command for RemoveClip {
 }
 
 /// Moves a clip in time and optionally to another track of the same kind.
-/// Consecutive moves of the same clip (a drag) merge.
+/// Consecutive moves of the same clip merge. Undo puts the clip back at the
+/// place it had in its track's list, which is exact as long as nothing else
+/// changed the list in between: true of one command, merged or not, but not
+/// of several clips' moves merged pairwise (move them as a [`Batch`] that is
+/// run once instead).
 #[derive(Debug)]
 pub struct MoveClip {
     pub id: ClipId,

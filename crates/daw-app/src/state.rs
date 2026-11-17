@@ -723,21 +723,15 @@ impl AppState {
         let Some(session) = self.engine.session_mut() else {
             return;
         };
+        let states = session.plugin_states();
         let mut stored = false;
-        for s in session.plugin_states() {
+        for s in states {
             match s.state {
                 // The device was synced moments ago; if it is gone anyway, there is nothing
                 // to keep its state for.
                 Ok(state) => stored |= self.doc.store_plugin_state(s.device, Some(state)).is_ok(),
                 Err(detail) => {
-                    let device = self
-                        .doc
-                        .project()
-                        .all_tracks()
-                        .flat_map(|t| t.devices.iter())
-                        .find(|d| d.id == s.device)
-                        .map(|d| d.name.clone())
-                        .unwrap_or_default();
+                    let device = self.device_name(s.device);
                     self.report(Message::Warning(
                         daw_session::Warning::PluginStateNotSaved { device, detail },
                     ));
