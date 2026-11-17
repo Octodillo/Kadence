@@ -1,94 +1,329 @@
-//! Undo of merged edit groups restores the project exactly.
+//! A drag is one undo step that restores the project exactly, a drag that
+//! changes nothing is no step, and a cancelled one leaves nothing behind.
 
-use daw_arrange::commands::{Group, PlaceClip, TrimClip};
-use daw_core::time::{PPQ, SampleTime, TickTime};
-use daw_model::commands::{AddClip, AddTrack};
-use daw_model::{AudioClip, Clip, ClipContent, Command, Document, Project, Track, TrackKind};
+use daw_arrange::commands::TrimClip;
+use daw_arrange::{Arrange, Env, Pointer, Snap};
+use daw_core::time::{PPQ, SampleTime, SegmentTempoMap, TickTime};
+use daw_model::commands::{AddClip, AddTrack, SetTrack, TrackField};
+use daw_model::{
+    AudioClip, Clip, ClipContent, ClipId, Document, Project, Track, TrackId, TrackKind,
+};
 
-fn aclip(start: i64) -> Clip {
-    Clip::new(
-        "a",
-        TickTime(start),
-        TickTime(PPQ),
-        ClipContent::Audio(AudioClip::new("x.wav", SampleTime(0))),
-    )
+const BAR: i64 = 4 * PPQ;
+
+struct Rig {
+    doc: Document,
+    arrange: Arrange,
+    tempo: SegmentTempoMap,
+    tracks: Vec<TrackId>,
 }
 
-#[test]
-fn merged_group_move_undo_restores_order() {
-    let mut doc = Document::new(Project::new("t"));
-    let t = Track::new(TrackKind::Audio, "T");
-    let tid = t.id;
-    doc.execute(AddTrack::new(0, t)).unwrap();
-    // clips A@0, X@10PPQ, B@20PPQ ; move A and B together
-    let a = aclip(0);
-    let x = aclip(10 * PPQ);
-    let b = aclip(20 * PPQ);
-    let (ia, ix, ib) = (a.id, x.id, b.id);
-    for c in [a, x, b] {
-        doc.execute(AddClip::new(tid, c)).unwrap();
+impl Rig {
+    /// Two audio tracks; 32 px per beat, 64 px tracks under a 24 px ruler.
+    fn new() -> Self {
+        let mut doc = Document::new(Project::new("t"));
+        let mut tracks = Vec::new();
+        for i in 0..2 {
+            let t = Track::new(TrackKind::Audio, format!("T{i}"));
+            tracks.push(t.id);
+            doc.execute(AddTrack::new(i, t)).unwrap();
+        }
+        doc.seal();
+        let mut arrange = Arrange::new();
+        arrange.resize(doc.project(), 4000.0, 400.0);
+        Self {
+            doc,
+            arrange,
+            tempo: SegmentTempoMap::new(120.0),
+            tracks,
+        }
     }
-    doc.seal();
-    let before: Vec<_> = doc.project().tracks[0]
-        .clips
-        .iter()
-        .map(|c| (c.id, c.start))
-        .collect();
-    let mk = |d: i64| -> Group {
-        let items: Vec<Box<dyn Command>> = vec![
-            Box::new(PlaceClip::new(ia, tid, TickTime(d))),
-            Box::new(PlaceClip::new(ib, tid, TickTime(20 * PPQ + d))),
-        ];
-        Group::new("Move Clips", vec![ia, ib], items)
-    };
-    doc.execute(mk(5 * PPQ)).unwrap(); // A@5, X@10, B@25
-    doc.execute(mk(15 * PPQ)).unwrap(); // A@15 (after X), B@35 -> merges
-    doc.seal();
-    doc.undo().unwrap();
-    let after: Vec<_> = doc.project().tracks[0]
-        .clips
-        .iter()
-        .map(|c| (c.id, c.start))
-        .collect();
-    let _ = ix;
-    assert_eq!(before, after, "order after undo");
+
+    fn clip(&mut self, row: usize, start: i64, len: i64) -> ClipId {
+        let c = Clip::new(
+            "a",
+            TickTime(start),
+            TickTime(len),
+            ClipContent::Audio(AudioClip::new("missing.wav", SampleTime(0))),
+        );
+        let id = c.id;
+        self.doc.execute(AddClip::new(self.tracks[row], c)).unwrap();
+        self.doc.seal();
+        id
+    }
+
+    fn x(&self, tick: i64) -> f64 {
+        self.arrange.view.tick_to_x(TickTime(tick))
+    }
+
+    fn y(&self, row: usize) -> f64 {
+        self.arrange.row_y(row) + self.arrange.track_height / 2.0
+    }
+
+    fn press(&mut self, x: f64, y: f64) {
+        self.arrange.press(&mut self.doc, Pointer::left(x, y));
+    }
+
+    fn motion(&mut self, x: f64, y: f64) {
+        let env = Env {
+            tempo: &self.tempo,
+            sample_rate: 48_000.0,
+            root: None,
+            playhead: TickTime(0),
+            loop_range: None,
+        };
+        self.arrange
+            .motion(&mut self.doc, &env, Pointer::left(x, y));
+    }
+
+    fn release(&mut self, x: f64, y: f64) {
+        self.arrange.release(&mut self.doc, Pointer::left(x, y));
+    }
+
+    fn start(&self, id: ClipId) -> i64 {
+        self.doc.project().clip(id).unwrap().start.0
+    }
+
+    /// The ids of a track's clips, in list order (later ones are on top).
+    fn order(&self, row: usize) -> Vec<ClipId> {
+        self.doc.project().tracks[row]
+            .clips
+            .iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// Three undoable renames, undone again: three steps to redo.
+    fn leave_three_redo_steps(&mut self) {
+        for n in ["x", "y", "z"] {
+            self.doc
+                .execute(SetTrack::new(self.tracks[0], TrackField::Name(n.into())))
+                .unwrap();
+            self.doc.seal();
+        }
+        for _ in 0..3 {
+            self.doc.undo().unwrap();
+        }
+        assert_eq!(self.doc.history().redo_len(), 3);
+    }
+}
+
+/// Issue #204 item 1.
+#[test]
+fn a_slip_on_a_clip_body_is_not_an_edit() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR, BAR);
+    r.leave_three_redo_steps();
+    let steps = r.doc.history().undo_len();
+    let position = r.doc.history().position();
+    let revision = r.doc.revision();
+
+    // 4 px is past the drag threshold but snaps back to where the clip is.
+    let (x, y) = (r.x(BAR + BAR / 2), r.y(0));
+    r.press(x, y);
+    r.motion(x + 4.0, y);
+    r.release(x + 4.0, y);
+
+    assert_eq!(r.start(id), BAR);
+    assert_eq!(r.doc.history().undo_len(), steps);
+    assert_eq!(r.doc.history().redo_len(), 3, "redo history was wiped");
+    assert_eq!(r.doc.history().position(), position, "marked modified");
+    assert_eq!(r.doc.revision(), revision, "the engine was resynced");
+}
+
+/// Issue #204 item 1, for the edges.
+#[test]
+fn a_slip_on_a_clip_edge_is_not_an_edit() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR, BAR);
+    r.leave_three_redo_steps();
+    let steps = r.doc.history().undo_len();
+    for edge in [BAR, 2 * BAR] {
+        let inward = if edge == BAR { 1.0 } else { -1.0 };
+        let (x, y) = (r.x(edge) + inward, r.y(0));
+        r.press(x, y);
+        r.motion(x + 4.0, y);
+        r.release(x + 4.0, y);
+    }
+    let c = r.doc.project().clip(id).unwrap();
+    assert_eq!((c.start.0, c.length.0), (BAR, BAR));
+    assert_eq!(r.doc.history().undo_len(), steps);
+    assert_eq!(r.doc.history().redo_len(), 3);
 }
 
 #[test]
-fn trim_merge_redo() {
+fn dragging_away_and_back_leaves_no_step() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR, BAR);
+    r.leave_three_redo_steps();
+    let steps = r.doc.history().undo_len();
+    let position = r.doc.history().position();
+    let (x, y) = (r.x(BAR + BAR / 2), r.y(0));
+    r.press(x, y);
+    r.motion(x + 128.0, y);
+    assert_eq!(r.start(id), 2 * BAR);
+    assert_eq!(r.doc.history().undo_len(), steps + 1);
+    // More moves inside the same grid step are nothing new: no edit, no
+    // resync of the engine.
+    let revision = r.doc.revision();
+    r.motion(x + 126.0, y);
+    r.motion(x + 126.0, y);
+    assert_eq!(r.doc.revision(), revision);
+    r.motion(x + 1.0, y);
+    assert_eq!(r.start(id), BAR);
+    r.release(x + 1.0, y);
+    assert_eq!(r.doc.history().undo_len(), steps);
+    assert_eq!(r.doc.history().position(), position);
+    assert_eq!(r.doc.history().redo_len(), 3, "redo history was wiped");
+}
+
+/// Issue #204 item 8.
+#[test]
+fn a_cancelled_drag_cannot_be_redone() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR, BAR);
+    r.leave_three_redo_steps();
+    let redo = r.doc.history().redo_label();
+    let steps = r.doc.history().undo_len();
+    let position = r.doc.history().position();
+    let (x, y) = (r.x(BAR + BAR / 2), r.y(0));
+    r.press(x, y);
+    r.motion(x + 128.0, y);
+    r.motion(x + 256.0, y);
+    assert_eq!(r.start(id), 3 * BAR);
+    let o = r.arrange.cancel(&mut r.doc);
+    assert!(o.document && o.error.is_none());
+    assert_eq!(r.start(id), BAR);
+    // What there was to redo before the drag is there again, and no more.
+    assert_eq!(r.doc.history().redo_len(), 3, "Redo re-applies the drag");
+    assert_eq!(r.doc.history().redo_label(), redo);
+    assert_eq!(r.doc.history().undo_len(), steps);
+    assert_eq!(r.doc.history().position(), position);
+}
+
+/// Issue #204 item 4.
+#[test]
+fn each_nudge_is_its_own_undo_step() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR, BAR);
+    r.arrange.selection = [id].into();
+    let steps = r.doc.history().undo_len();
+    for _ in 0..3 {
+        assert!(r.arrange.nudge(&mut r.doc, 1).document);
+    }
+    let end = r.start(id);
+    assert!(end > BAR);
+    assert_eq!(r.doc.history().undo_len(), steps + 3);
+    r.doc.undo().unwrap();
+    let step = end - r.start(id);
+    assert!(step > 0 && r.start(id) == BAR + 2 * step);
+    // Right then left are two steps, not one that does nothing.
+    r.arrange.nudge(&mut r.doc, -1);
+    assert_eq!(r.doc.history().undo_len(), steps + 3);
+}
+
+/// Something else edits the document while a button is held (a take ends):
+/// the drag neither takes that edit back nor is lost itself.
+#[test]
+fn a_drag_leaves_edits_made_under_it_alone() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR, BAR);
+    let (x, y) = (r.x(BAR + BAR / 2), r.y(0));
+    r.press(x, y);
+    r.motion(x + 128.0, y);
+    r.doc
+        .execute(SetTrack::new(r.tracks[1], TrackField::Name("take".into())))
+        .unwrap();
+    r.motion(x + 256.0, y);
+    r.arrange.cancel(&mut r.doc);
+    assert_eq!(r.doc.project().tracks[1].name, "take");
+    // The first part of the drag is a step of its own, below the rename.
+    assert_eq!(r.start(id), 2 * BAR);
+    r.doc.undo().unwrap();
+    assert_eq!(r.doc.project().tracks[1].name, "T1");
+    r.doc.undo().unwrap();
+    assert_eq!(r.start(id), BAR);
+}
+
+/// Issue #204 item 7: which of two clips with the same start is on top is
+/// part of the project, and undo restores it.
+#[test]
+fn undoing_a_move_restores_the_order_of_clips_that_start_together() {
+    let mut r = Rig::new();
+    // B lies over the first bar of A.
+    let a = r.clip(0, BAR, 2 * BAR);
+    let b = r.clip(0, BAR, BAR);
+    let before = r.doc.project().clone();
+    assert_eq!(r.order(0), [a, b]);
+
+    // Grab A where only it reaches and move it a bar, in a few moves.
+    let (x, y) = (r.x(2 * BAR + BAR / 2), r.y(0));
+    r.press(x, y);
+    for dx in [40.0, 90.0, 128.0] {
+        r.motion(x + dx, y);
+    }
+    r.release(x + 128.0, y);
+    assert_eq!(r.start(a), 2 * BAR);
+    assert_eq!(r.order(0), [b, a]);
+
+    r.doc.undo().unwrap();
+    assert_eq!(r.order(0), [a, b], "A is now painted over B");
+    assert_eq!(*r.doc.project(), before);
+}
+
+#[test]
+fn undoing_a_trim_restores_the_order_of_clips_that_start_together() {
     let mut doc = Document::new(Project::new("t"));
     let t = Track::new(TrackKind::Audio, "T");
     let tid = t.id;
     doc.execute(AddTrack::new(0, t)).unwrap();
-    let a = aclip(4 * PPQ);
-    let ia = a.id;
+    let mk = || {
+        Clip::new(
+            "a",
+            TickTime(BAR),
+            TickTime(BAR),
+            ClipContent::Audio(AudioClip::new("x.wav", SampleTime(0))),
+        )
+    };
+    let (a, b) = (mk(), mk());
+    let (ia, ib) = (a.id, b.id);
     doc.execute(AddClip::new(tid, a)).unwrap();
+    doc.execute(AddClip::new(tid, b)).unwrap();
     doc.seal();
+    let before = doc.project().clone();
+    let order = |d: &Document| -> Vec<ClipId> {
+        d.project().tracks[0].clips.iter().map(|c| c.id).collect()
+    };
+
+    // The end: the start stays, so A stays below B.
+    doc.execute(TrimClip::new(ia, TickTime(BAR), TickTime(BAR / 2), None))
+        .unwrap();
+    doc.seal();
+    assert_eq!(order(&doc), [ia, ib]);
+    doc.undo().unwrap();
+    assert_eq!(*doc.project(), before);
+
+    // The start: A moves (on top of what starts where it lands) and back.
     doc.execute(TrimClip::new(
         ia,
-        TickTime(5 * PPQ),
-        TickTime(3 * PPQ),
+        TickTime(BAR + PPQ),
+        TickTime(BAR - PPQ),
         Some(SampleTime(100)),
     ))
     .unwrap();
-    doc.execute(TrimClip::new(
-        ia,
-        TickTime(6 * PPQ),
-        TickTime(2 * PPQ),
-        Some(SampleTime(200)),
-    ))
-    .unwrap();
     doc.seal();
+    assert_eq!(order(&doc), [ib, ia]);
     doc.undo().unwrap();
-    let c = &doc.project().tracks[0].clips[0];
-    assert_eq!((c.start, c.length), (TickTime(4 * PPQ), TickTime(PPQ)));
+    assert_eq!(*doc.project(), before);
     doc.redo().unwrap();
-    let c = &doc.project().tracks[0].clips[0];
-    assert_eq!((c.start, c.length), (TickTime(6 * PPQ), TickTime(2 * PPQ)));
+    let c = doc.project().clip(ia).unwrap();
+    assert_eq!((c.start.0, c.length.0), (BAR + PPQ, BAR - PPQ));
 }
 
+/// Drags of several clips over several pointer moves, between tracks and
+/// onto each other, undo to exactly the project before, order included.
 #[test]
-fn merged_multi_clip_moves_undo_exactly() {
+fn multi_clip_drags_undo_exactly() {
     let mut seed: u64 = 12345;
     let mut rnd = |n: u64| {
         seed ^= seed << 13;
@@ -96,62 +331,55 @@ fn merged_multi_clip_moves_undo_exactly() {
         seed ^= seed << 17;
         seed % n
     };
-    for iter in 0..3000 {
-        let mut doc = Document::new(Project::new("t"));
-        let mut tids = vec![];
-        for i in 0..2 {
-            let t = Track::new(TrackKind::Audio, "T");
-            tids.push(t.id);
-            doc.execute(AddTrack::new(i, t)).unwrap();
-        }
+    let mut edited = 0;
+    for iter in 0..500 {
+        let mut r = Rig::new();
+        r.arrange.snap = Snap::Off;
+        // Clips on few distinct starts, so many start together.
         let n = 2 + rnd(5) as usize;
-        let mut clips = vec![];
-        for _ in 0..n {
-            let tr = rnd(2) as usize;
-            let c = aclip(rnd(20) as i64 * PPQ);
-            clips.push((c.id, tr, c.start));
-            doc.execute(AddClip::new(tids[tr], c)).unwrap();
-        }
-        doc.seal();
-        // Each track's clips, which must stay sorted by start. The order of
-        // clips with the same start isn't part of the model.
-        let snap = |d: &Document| -> Vec<Vec<(TickTime, daw_model::ClipId)>> {
-            d.project()
-                .tracks
-                .iter()
-                .map(|t| {
-                    let mut v: Vec<_> = t.clips.iter().map(|c| (c.start, c.id)).collect();
-                    assert!(v.is_sorted_by_key(|c| c.0), "clips out of order");
-                    v.sort();
-                    v
-                })
-                .collect()
+        let ids: Vec<ClipId> = (0..n)
+            .map(|_| r.clip(rnd(2) as usize, (2 + rnd(4) as i64) * BAR, BAR))
+            .collect();
+        let before = r.doc.project().clone();
+        let steps = r.doc.history().undo_len();
+
+        r.arrange.selection = ids.iter().copied().filter(|_| rnd(2) == 0).collect();
+        let Some(&lead) = r.arrange.selection.iter().next() else {
+            continue;
         };
-        let before = snap(&doc);
-        let sel: Vec<_> = clips.iter().filter(|_| rnd(2) == 0).cloned().collect();
-        if sel.is_empty() {
+        let row = (0..2).find(|&i| r.order(i).contains(&lead)).unwrap();
+        // Shift keeps the selection when the press lands on a clip lying
+        // over the lead; the press may grab that one instead, which is as
+        // good a drag.
+        let (x, y) = (r.x(r.start(lead) + BAR / 2), r.y(row));
+        r.arrange.press(
+            &mut r.doc,
+            Pointer {
+                shift: true,
+                ..Pointer::left(x, y)
+            },
+        );
+        let (mut tx, mut ty) = (x, y);
+        for _ in 0..1 + rnd(4) {
+            tx = x + rnd(600) as f64 - 300.0;
+            ty = r.y(rnd(2) as usize);
+            r.motion(tx, ty);
+        }
+        r.release(tx, ty);
+
+        let len = r.doc.history().undo_len();
+        assert!(len == steps || len == steps + 1, "iter {iter}: {len}");
+        if len == steps {
+            assert_eq!(*r.doc.project(), before, "iter {iter}: no step, but moved");
             continue;
         }
-        let steps = 1 + rnd(4);
-        for _ in 0..steps {
-            let d = rnd(30) as i64 * PPQ;
-            let drow = rnd(2) as usize;
-            let items: Vec<Box<dyn Command>> = sel
-                .iter()
-                .map(|&(id, r, s)| {
-                    Box::new(PlaceClip::new(id, tids[(r + drow) % 2], TickTime(s.0 + d)))
-                        as Box<dyn Command>
-                })
-                .collect();
-            let _ = doc.execute(Group::new(
-                "Move Clips",
-                sel.iter().map(|c| c.0).collect(),
-                items,
-            ));
-        }
-        doc.seal();
-        doc.undo().unwrap();
-        let after = snap(&doc);
-        assert_eq!(before, after, "iter {iter}");
+        edited += 1;
+        let after = r.doc.project().clone();
+        assert_ne!(after, before, "iter {iter}: a step that does nothing");
+        r.doc.undo().unwrap();
+        assert_eq!(*r.doc.project(), before, "iter {iter}: undo");
+        r.doc.redo().unwrap();
+        assert_eq!(*r.doc.project(), after, "iter {iter}: redo");
     }
+    assert!(edited > 200, "only {edited} drags edited anything");
 }

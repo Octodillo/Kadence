@@ -5,7 +5,7 @@ use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use clack_extensions::audio_ports::{AudioPortFlags, AudioPortInfoBuffer, PluginAudioPorts};
+use clack_extensions::audio_ports::PluginAudioPorts;
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui, Window};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
@@ -22,6 +22,7 @@ use daw_plugin_window::{HostWindow, WindowEvent};
 
 use crate::events;
 use crate::host::{AudioThreadScope, DawHost, HostShared};
+use crate::ports::PortSet;
 
 /// Events the host can hand a plugin per block, and accept back from it. Extra events are dropped
 /// instead of allocating on the audio thread.
@@ -43,14 +44,8 @@ struct Extensions {
 /// The plugin's port layout, read while it is inactive.
 #[derive(Clone, Debug, Default)]
 struct Layout {
-    /// Channel count of each input port, in port order.
-    audio_in: Vec<usize>,
-    /// Channel count of each output port, in port order.
-    audio_out: Vec<usize>,
-    /// The ports the graph connects to; other ports (sidechains, extra outputs) get silence
-    /// and are discarded.
-    main_in: Option<usize>,
-    main_out: Option<usize>,
+    audio_in: PortSet,
+    audio_out: PortSet,
     note_in: bool,
     note_out: bool,
     /// The note input port only takes MIDI, so notes are converted.
@@ -60,13 +55,9 @@ struct Layout {
 
 impl Layout {
     fn ports(&self) -> PortLayout {
-        let channels = |ports: &[usize], main: Option<usize>| {
-            main.and_then(|i| ports.get(i))
-                .map_or(0, |&c| u16::try_from(c).unwrap_or(u16::MAX))
-        };
         PortLayout {
-            audio_in: channels(&self.audio_in, self.main_in),
-            audio_out: channels(&self.audio_out, self.main_out),
+            audio_in: self.audio_in.main_channels(),
+            audio_out: self.audio_out.main_channels(),
             event_in: self.note_in || self.has_params,
             event_out: self.note_out || self.has_params,
         }
@@ -89,18 +80,13 @@ impl Buffers {
         let alloc = |ports: &[usize]| -> Vec<Vec<f32>> {
             ports.iter().map(|c| vec![0.0; c * max_frames]).collect()
         };
+        let ports = |ports: &[usize]| AudioPorts::with_capacity(ports.iter().sum(), ports.len());
         Self {
             max_frames,
-            audio_in: alloc(&layout.audio_in),
-            audio_out: alloc(&layout.audio_out),
-            in_ports: AudioPorts::with_capacity(
-                layout.audio_in.iter().sum(),
-                layout.audio_in.len(),
-            ),
-            out_ports: AudioPorts::with_capacity(
-                layout.audio_out.iter().sum(),
-                layout.audio_out.len(),
-            ),
+            audio_in: alloc(&layout.audio_in.channels),
+            audio_out: alloc(&layout.audio_out.channels),
+            in_ports: ports(&layout.audio_in.channels),
+            out_ports: ports(&layout.audio_out.channels),
             events_in: EventBuffer::with_capacity(EVENT_CAPACITY),
         }
     }
@@ -238,25 +224,8 @@ impl ClapInstance {
         let handle = self.inst().plugin_handle();
         let mut layout = Layout::default();
         if let Some(ports) = ext.audio_ports {
-            let mut buf = AudioPortInfoBuffer::new();
-            for is_input in [true, false] {
-                let infos: Vec<(AudioPortFlags, u32)> = (0..ports.count(&handle, is_input))
-                    .map(|i| {
-                        ports
-                            .get(&handle, i, is_input, &mut buf)
-                            .map_or((AudioPortFlags::empty(), 0), |p| (p.flags, p.channel_count))
-                    })
-                    .collect();
-                let channels = infos.iter().map(|&(_, c)| c as usize).collect();
-                let main = crate::main_port(&infos, is_input, is_instrument);
-                if is_input {
-                    layout.audio_in = channels;
-                    layout.main_in = main;
-                } else {
-                    layout.audio_out = channels;
-                    layout.main_out = main;
-                }
-            }
+            layout.audio_in = PortSet::read(ports, &handle, true, is_instrument);
+            layout.audio_out = PortSet::read(ports, &handle, false, is_instrument);
         }
         if let Some(notes) = ext.note_ports {
             let mut buf = NotePortInfoBuffer::new();
@@ -358,8 +327,8 @@ impl ClapInstance {
         self.audio = Some(AudioHalf {
             processor: PluginAudioProcessor::Stopped(stopped),
             buffers: Buffers::new(&self.layout, self.max_frames as usize),
-            main_in: self.layout.main_in,
-            main_out: self.layout.main_out,
+            main_in: self.layout.audio_in.main,
+            main_out: self.layout.audio_out.main,
             notes_as_midi: self.layout.notes_as_midi,
             steady_time: 0,
         });
@@ -514,6 +483,7 @@ impl AudioHalf {
             let mut sink = events::Sink {
                 out: &mut *ctx.events_out,
                 frame_offset,
+                frames: u32::try_from(n).unwrap_or(u32::MAX),
             };
             let result = processor.process(
                 &inputs,

@@ -765,20 +765,21 @@ fn iter_ports_impl<'a>(
             (IOType::Output, DataType::CV) => PortType::CVOutput,
         };
         let range = p.range();
+        // Broken metadata must not panic: one plugin's missing lv2:name
+        // would take every plugin of its bundle with it. The symbol stands
+        // in for the name.
+        let symbol = p.symbol().map_or_else(
+            || format!("port_{}", p.index()),
+            |s| s.as_str().unwrap_or("BAD_SYMBOL").to_string(),
+        );
+        let name = p.name().map_or_else(
+            || symbol.clone(),
+            |n| n.as_str().unwrap_or("BAD_NAME").to_string(),
+        );
         Port {
             port_type,
-            name: p
-                .name()
-                .expect("port has no name")
-                .as_str()
-                .unwrap_or("BAD_NAME")
-                .to_string(),
-            symbol: p
-                .symbol()
-                .expect("port has no symbol")
-                .as_str()
-                .unwrap_or("BAD_SYMBOL")
-                .to_string(),
+            name,
+            symbol,
             default_value: node_to_value(&range.default),
             min_value: range.minimum.map(|n| node_to_value(&Some(n))),
             max_value: range.maximum.map(|n| node_to_value(&Some(n))),
