@@ -3,12 +3,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_core::event::EventList;
-use daw_core::plugin::PluginFormatKind;
+use daw_core::node::{Node, PortLayout, ProcessContext};
+use daw_core::plugin::{
+    ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
+};
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
 use daw_media::{AudioData, WavFormat, write_wav};
@@ -21,7 +25,9 @@ use daw_model::{
 };
 use daw_plugin_host::{HostLauncher, SandboxConfig};
 use daw_session::catalog::{Filter, PluginCatalog, PluginKind};
-use daw_session::{PluginStatus, SandboxLoader, Session, SessionConfig, Warning};
+use daw_session::{
+    LoadedPlugin, PluginLoader, PluginStatus, SandboxLoader, Session, SessionConfig, Warning,
+};
 
 #[global_allocator]
 static ALLOC: AllocDisabler = AllocDisabler;
@@ -197,9 +203,19 @@ impl Rig {
     }
 
     fn with_doc(doc: Document, track: TrackId, device: DeviceId, dir: tempfile::TempDir) -> Self {
+        Self::with_loader(doc, track, device, dir, Box::new(loader()))
+    }
+
+    fn with_loader(
+        doc: Document,
+        track: TrackId,
+        device: DeviceId,
+        dir: tempfile::TempDir,
+        loader: Box<dyn PluginLoader>,
+    ) -> Self {
         let (mut session, proc) = Session::new(config());
         session.media_mut().set_memory_limit(60.0);
-        session.set_plugin_loader(Some(Box::new(loader())));
+        session.set_plugin_loader(Some(loader));
         let mut rig = Self {
             doc,
             session,
@@ -288,6 +304,44 @@ impl Rig {
                 "output stayed at {} instead of {level}",
                 tail[BLOCK - 1]
             );
+        }
+    }
+
+    /// Moves the plugins to a new session, as the audio host does when audio restarts.
+    fn restart_audio(&mut self) {
+        let plugins = self.session.take_plugins();
+        let (mut session, proc) = Session::new(config());
+        session.media_mut().set_memory_limit(60.0);
+        session.set_plugins(plugins);
+        self.session = session;
+        self.proc = proc;
+        self.sync();
+        self.session.play().unwrap();
+    }
+
+    /// Kills the plugin's sandbox host and runs until the session notices.
+    fn crash(&mut self) {
+        let monitor = self.session.plugin_monitor(self.device).unwrap();
+        // SAFETY: plain syscall on a process this test started.
+        assert_eq!(
+            unsafe { libc::kill(monitor.pid() as libc::pid_t, libc::SIGKILL) },
+            0
+        );
+        let start = Instant::now();
+        while self.status() != Some(PluginStatus::Crashed) {
+            assert!(start.elapsed() < Duration::from_secs(20), "crash unnoticed");
+            self.run(BLOCK);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Reloads the crashed plugin and runs until it is back.
+    fn reload(&mut self) {
+        assert!(self.session.reload_plugin(self.device));
+        let start = Instant::now();
+        while self.status() != Some(PluginStatus::Running) {
+            assert!(start.elapsed() < Duration::from_secs(20), "no reload");
+            self.run(BLOCK);
         }
     }
 
@@ -448,17 +502,202 @@ fn plugins_carry_over_to_a_new_session() {
         .with_plugin(rig.device, |p| p.load_state(&gain_state(1.5)));
     set.unwrap().unwrap();
     rig.settles_at(LEVEL * 1.5);
-    // What the audio host does when audio restarts.
-    let plugins = rig.session.take_plugins();
-    let (mut session, proc) = Session::new(config());
-    session.media_mut().set_memory_limit(60.0);
-    session.set_plugins(plugins);
-    rig.session = session;
-    rig.proc = proc;
-    rig.sync();
-    rig.session.play().unwrap();
+    rig.restart_audio();
     assert_eq!(rig.status(), Some(PluginStatus::Running));
     rig.settles_at(LEVEL * 1.5);
+}
+
+/// A state the test plugin refuses: not its magic.
+fn foreign_state() -> Vec<u8> {
+    b"another version's state".to_vec()
+}
+
+fn is_rejection(w: &Warning) -> bool {
+    matches!(w, Warning::DeviceStateRejected { device, .. } if device == "Gain")
+}
+
+/// A project whose plugin state the installed plugin refuses (another version's, say) keeps
+/// that state through saves, exports and audio restarts: the plugin's defaults are not the
+/// user's work.
+#[test]
+fn a_state_the_plugin_refuses_stays_in_the_document() {
+    let rig = Rig::new();
+    let (mut doc, track, device) = (rig.doc, rig.track, rig.device);
+    doc.store_plugin_state(device, Some(foreign_state().into()))
+        .unwrap();
+    let mut rig = Rig::with_doc(doc, track, device, rig.dir);
+    let state = |rig: &Rig| {
+        let mut devices = rig.doc.project().all_tracks().flat_map(|t| &t.devices);
+        devices.find(|d| d.id == device).unwrap().state.clone()
+    };
+    assert!(rig.session.warnings().iter().any(is_rejection));
+    assert_eq!(rig.status(), Some(PluginStatus::Running));
+    rig.settles_at(LEVEL);
+    assert_eq!(rig.store_states(), 0, "nothing to store on save");
+    assert!(rig.session.plugin_state(device).is_none(), "nor as an edit");
+
+    // Audio restarts: the document's state is tried again, not the plugin's defaults.
+    rig.restart_audio();
+    assert!(rig.session.warnings().iter().any(is_rejection));
+    assert_eq!(rig.store_states(), 0);
+    assert_eq!(state(&rig), Some(foreign_state().into()));
+
+    // Removed and brought back by undo: the same.
+    rig.doc.execute(RemoveDevice::new(device)).unwrap();
+    rig.sync();
+    rig.doc.undo().unwrap();
+    rig.sync();
+    assert!(rig.session.warnings().iter().any(is_rejection));
+    assert_eq!(rig.store_states(), 0);
+    assert_eq!(state(&rig), Some(foreign_state().into()));
+
+    // A change made in the plugin's editor is the user's, and is recorded as an edit. (Not
+    // one reported in the tick after the refusal, which may be of the refused load.)
+    rig.run(BLOCK);
+    rig.session.open_plugin_editor(device, "Gain").unwrap();
+    rig.reports_change();
+    rig.record_state();
+    assert_ne!(state(&rig), Some(foreign_state().into()));
+    // Undoing it goes back to the refused state, which again stays.
+    rig.doc.undo().unwrap();
+    rig.sync();
+    assert!(rig.session.warnings().iter().any(is_rejection));
+    assert_eq!(rig.store_states(), 0);
+    assert_eq!(state(&rig), Some(foreign_state().into()));
+
+    // A state it takes ends that.
+    rig.doc
+        .execute(SetDevice {
+            id: device,
+            field: DeviceField::State(Some(gain_state(0.5).into())),
+        })
+        .unwrap();
+    rig.sync();
+    assert!(rig.session.warnings().is_empty());
+    rig.settles_at(LEVEL * 0.5);
+    let set = rig
+        .session
+        .with_plugin(device, |p| p.load_state(&gain_state(0.75)));
+    set.unwrap().unwrap();
+    assert_eq!(rig.store_states(), 1);
+}
+
+/// The test plugin, unable to save its state while the flag is set.
+struct NoSave {
+    inner: Box<dyn PluginInstance>,
+    fail: Arc<AtomicBool>,
+}
+
+impl Node for NoSave {
+    fn ports(&self) -> PortLayout {
+        self.inner.ports()
+    }
+    fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
+        self.inner.prepare(sample_rate, max_frames);
+    }
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        self.inner.process(ctx);
+    }
+    fn latency(&self) -> u32 {
+        self.inner.latency()
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+impl PluginInstance for NoSave {
+    fn descriptor(&self) -> &PluginDescriptor {
+        self.inner.descriptor()
+    }
+    fn params(&self) -> Vec<ParamInfo> {
+        self.inner.params()
+    }
+    fn param_value(&self, id: u32) -> f64 {
+        self.inner.param_value(id)
+    }
+    fn save_state(&mut self) -> Result<Vec<u8>, PluginError> {
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(PluginError::State("no".into()));
+        }
+        self.inner.save_state()
+    }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), PluginError> {
+        self.inner.load_state(data)
+    }
+    fn has_editor(&self) -> bool {
+        false
+    }
+    fn open_editor(&mut self) -> Result<(), PluginError> {
+        Err(PluginError::Editor("none".into()))
+    }
+    fn close_editor(&mut self) {}
+    fn on_main_thread(&mut self) {
+        self.inner.on_main_thread();
+    }
+}
+
+struct NoSaveLoader(SandboxLoader, Arc<AtomicBool>);
+
+impl PluginLoader for NoSaveLoader {
+    fn load(
+        &mut self,
+        format: &PluginFormatKind,
+        id: &str,
+        sample_rate: f64,
+        max_frames: u32,
+    ) -> Result<LoadedPlugin, daw_session::LoadError> {
+        let loaded = self.0.load(format, id, sample_rate, max_frames)?;
+        Ok(LoadedPlugin {
+            instance: Box::new(NoSave {
+                inner: loaded.instance,
+                fail: self.1.clone(),
+            }),
+            monitor: loaded.monitor,
+        })
+    }
+}
+
+/// A plugin that will not hand over its state when audio restarts or its device is removed
+/// comes back from the document's state: the user is told what was lost.
+#[test]
+fn a_state_lost_to_a_restart_or_removal_is_reported() {
+    let fail = Arc::new(AtomicBool::new(false));
+    let rig = Rig::new();
+    let (doc, track, device) = (rig.doc, rig.track, rig.device);
+    let loader = NoSaveLoader(loader(), fail.clone());
+    let mut rig = Rig::with_loader(doc, track, device, rig.dir, Box::new(loader));
+    let set = rig
+        .session
+        .with_plugin(device, |p| p.load_state(&gain_state(0.75)));
+    set.unwrap().unwrap();
+    rig.settles_at(LEVEL * 0.75);
+    let not_saved = [Warning::PluginStateNotSaved {
+        device: "Gain".into(),
+        detail: "state: no".into(),
+    }];
+
+    fail.store(true, Ordering::Relaxed);
+    rig.restart_audio();
+    assert_eq!(rig.session.warnings(), &not_saved);
+    rig.settles_at(LEVEL);
+    rig.sync();
+    assert!(rig.session.warnings().is_empty(), "said once");
+
+    let set = rig
+        .session
+        .with_plugin(device, |p| p.load_state(&gain_state(0.75)));
+    set.unwrap().unwrap();
+    rig.settles_at(LEVEL * 0.75);
+    rig.doc.execute(RemoveDevice::new(device)).unwrap();
+    rig.sync();
+    assert_eq!(rig.session.warnings(), &not_saved);
+    fail.store(false, Ordering::Relaxed);
+    rig.doc.undo().unwrap();
+    rig.sync();
+    assert!(rig.session.warnings().is_empty());
+    // Back from the document's state, as the warning said.
+    rig.settles_at(LEVEL);
 }
 
 #[test]
@@ -474,18 +713,7 @@ fn a_crashed_plugin_is_reported_bypassed_and_reloaded() {
     rig.sync();
     rig.settles_at(LEVEL * 0.5);
 
-    let monitor = rig.session.plugin_monitor(rig.device).unwrap();
-    // SAFETY: plain syscall on a process this test started.
-    assert_eq!(
-        unsafe { libc::kill(monitor.pid() as libc::pid_t, libc::SIGKILL) },
-        0
-    );
-    let start = Instant::now();
-    while rig.status() != Some(PluginStatus::Crashed) {
-        assert!(start.elapsed() < Duration::from_secs(20), "crash unnoticed");
-        rig.run(BLOCK);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    rig.crash();
     assert!(
         rig.news
             .iter()
@@ -497,13 +725,53 @@ fn a_crashed_plugin_is_reported_bypassed_and_reloaded() {
     rig.settles_at(LEVEL);
     assert_eq!(rig.session.with_plugin(rig.device, |_| ()), None);
 
-    assert!(rig.session.reload_plugin(rig.device));
-    let start = Instant::now();
-    while rig.status() != Some(PluginStatus::Running) {
-        assert!(start.elapsed() < Duration::from_secs(20), "no reload");
-        rig.run(BLOCK);
-    }
+    rig.reload();
     rig.settles_at(LEVEL * 0.5);
+}
+
+/// A crashed plugin's sandbox remembers the state it last saved or loaded; an audio restart
+/// carries that over like a running plugin's.
+#[test]
+fn a_crashed_plugins_state_carries_over_to_a_new_session() {
+    let mut rig = Rig::new();
+    let set = rig
+        .session
+        .with_plugin(rig.device, |p| p.load_state(&gain_state(0.75)));
+    set.unwrap().unwrap();
+    rig.settles_at(LEVEL * 0.75);
+    rig.crash();
+    rig.restart_audio();
+    assert!(rig.session.warnings().is_empty());
+    rig.settles_at(LEVEL * 0.75);
+    assert_eq!(rig.store_states(), 1, "newer than the document's");
+}
+
+/// A state the document gets while the plugin's host is down is only remembered for the
+/// reload. If the reloaded plugin then refuses it, that is found out and the state stays.
+#[test]
+fn a_state_refused_after_a_reload_stays_in_the_document() {
+    let mut rig = Rig::new();
+    rig.crash();
+    rig.doc
+        .execute(SetDevice {
+            id: rig.device,
+            field: DeviceField::State(Some(foreign_state().into())),
+        })
+        .unwrap();
+    rig.sync();
+    assert!(rig.session.warnings().is_empty(), "not known yet");
+    rig.reload();
+    rig.news.clear();
+    let start = Instant::now();
+    while !rig.news.iter().any(is_rejection) {
+        assert!(start.elapsed() < Duration::from_secs(20), "{:?}", rig.news);
+        rig.run(BLOCK);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(rig.store_states(), 0);
+    let mut devices = rig.doc.project().all_tracks().flat_map(|t| &t.devices);
+    let device = devices.find(|d| d.id == rig.device).unwrap();
+    assert_eq!(device.state, Some(foreign_state().into()));
 }
 
 #[test]

@@ -82,21 +82,6 @@ impl Project {
         Ok(Arc::make_mut(arc))
     }
 
-    /// Replaces a whole track by ID. Used to restore saved versions on undo.
-    pub(crate) fn replace_track(&mut self, track: Arc<Track>) -> Result<(), ModelError> {
-        let id = track.id;
-        let slot = if self.master.id == id {
-            &mut self.master
-        } else {
-            self.tracks
-                .iter_mut()
-                .find(|t| t.id == id)
-                .ok_or(ModelError::TrackNotFound(id))?
-        };
-        *slot = track;
-        Ok(())
-    }
-
     /// Finds the track holding a clip.
     pub fn clip_location(&self, id: ClipId) -> Option<(TrackId, usize)> {
         self.all_tracks()

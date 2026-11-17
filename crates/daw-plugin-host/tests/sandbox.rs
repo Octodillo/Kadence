@@ -379,7 +379,7 @@ fn killing_the_host_mid_playback_keeps_us_running_and_reload_restores_it() {
         config.on_crash = Some(Arc::new(move |m| {
             assert!(m.is_crashed());
             // Never on the thread that drives the instance.
-            assert_eq!(std::thread::current().name(), Some("plugin-watchdog"));
+            assert_eq!(std::thread::current().name(), Some("plugin-crash-report"));
             crashes.fetch_add(1, Ordering::SeqCst);
         }));
     }
@@ -628,7 +628,7 @@ fn a_reload_that_fails_calls_the_crash_hook() {
         let crashes = crashes.clone();
         config.on_crash = Some(Arc::new(move |m| {
             assert!(m.is_crashed());
-            assert_eq!(std::thread::current().name(), Some("plugin-watchdog"));
+            assert_eq!(std::thread::current().name(), Some("plugin-crash-report"));
             crashes.fetch_add(1, Ordering::SeqCst);
         }));
     }
@@ -753,6 +753,40 @@ fn a_modal_dialog_in_the_editor_is_busy_not_a_crash() {
     assert!(l.iter().all(|&s| s == 0.5));
     plugin.load_state(&gain_state(0.25)).unwrap();
     assert!(plays_at(&mut plugin, 0.25));
+}
+
+/// Closing the editor while its dialog keeps the host busy is not forgotten: the host closes
+/// it once the dialog is gone.
+#[test]
+fn an_editor_closed_during_its_modal_dialog_closes_once_the_host_is_free() {
+    let mut config = config();
+    config.call_timeout = Duration::from_millis(500);
+    let mut plugin = instance_with(config);
+    let monitor = plugin.monitor();
+    plugin.open_editor().unwrap();
+    plugin.load_state(&command_state(b"DAWD", 1500)).unwrap();
+    // This call gives up in the dialog's pump, so the calls after it fail at once.
+    wait_for("the dialog to open", Duration::from_secs(5), || {
+        matches!(plugin.save_state(), Err(PluginError::Busy(_)))
+    });
+    plugin.close_editor();
+    plugin.set_editor_title("Renamed");
+    assert!(!plugin.is_editor_open());
+
+    wait_for("the dialog to close", Duration::from_secs(30), || {
+        plugin.on_main_thread();
+        plugin.save_state().is_ok()
+    });
+    plugin.on_main_thread();
+    // The host has closed the editor too: a main thread that sticks now is hung, not busy
+    // with the user.
+    plugin.load_state(&command_state(b"DAWD", 20_000)).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(plugin.open_editor().is_err());
+    assert!(matches!(
+        monitor.status(),
+        SandboxStatus::Crashed(CrashReason::Lost(_))
+    ));
 }
 
 /// Without its editor open, a plugin that keeps the host's main thread is hung: the next

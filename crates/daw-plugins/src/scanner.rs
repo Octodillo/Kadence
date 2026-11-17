@@ -127,9 +127,9 @@ impl Scanner {
             .arg(bundle)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // Its own process group, so a timeout also kills any helpers the plugin started.
-            .process_group(0);
+            .stderr(Stdio::null());
+        // Any helpers the plugin starts are killed with the scanner, however it ends.
+        crate::process::in_own_group(&mut command);
         // Out of the terminal's process group the scanner no longer sees Ctrl-C, so tie its
         // life to this thread instead, which always outlives it.
         #[cfg(target_os = "linux")]
@@ -160,21 +160,21 @@ impl Scanner {
         }
 
         let start = Instant::now();
-        let status = loop {
-            match child.try_wait().map_err(ScanError::Spawn)? {
-                Some(status) => break status,
-                None if start.elapsed() >= self.timeout => {
-                    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-                        // SAFETY: plain syscall; the child is unreaped, so its group id is ours.
-                        unsafe { libc::kill(-pid, libc::SIGKILL) };
-                    }
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(ScanError::TimedOut(self.timeout));
-                }
-                None => std::thread::sleep(Duration::from_millis(5)),
+        let timed_out = loop {
+            if crate::process::has_exited(&child).map_err(ScanError::Spawn)? {
+                break false;
             }
+            if start.elapsed() >= self.timeout {
+                break true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         };
+        // Before the wait, while the group's id cannot have been reused.
+        crate::process::kill_group(&child);
+        let status = child.wait().map_err(ScanError::Spawn)?;
+        if timed_out {
+            return Err(ScanError::TimedOut(self.timeout));
+        }
         if status.code() == Some(i32::from(EXIT_UNSUPPORTED)) {
             return Err(ScanError::Unsupported);
         }
