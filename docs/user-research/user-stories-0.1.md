@@ -21,17 +21,20 @@ would hit each one.
 - Outcomes of the 78 stories: 7 work, 29 work awkwardly, 22 are partly missing, 18 are missing, 2 break.
 - The widest gaps are everyday editing basics rather than big features:
   **copy and paste** (all seven personas), a **grid chooser and snap toggle**
-  (all seven), **transport keys**, and four small things the model already
-  supports but the interface does not offer (**clip mute, clip rename, track
-  colour, Duplicate Track**).
+  (all seven), **transport keys**, and things the model already has fields for
+  but the interface does not offer (**clip mute, clip rename, choosing a
+  track colour**), plus **Duplicate Track**.
 - A recurring pattern: the engine or model already does it and only the
   interface is missing. That holds for the grid, tempo changes and ramps, clip
   mute and rename, track colour, the Sampler's samples, velocity tools,
-  metronome options and the demo song. These are the cheapest wins.
+  the metronome device's accent, pitch and click-during-playback parameters
+  (see T16) and the demo song. These are the cheapest wins.
 - Three personas cannot finish their core job today: the **podcaster** (no
-  time ruler, ripple editing, loudness or MP3), the **film composer** (no
+  time ruler, only a minutes:seconds readout for the playhead; no ripple
+  editing, loudness or MP3), the **film composer** (no
   tempo changes, markers, controllers or stems) and the **touch user** (no
-  two-finger pan, no piano roll touch handling, no way to play notes).
+  two-finger pan, no piano roll pan or long-press menus, no way to play
+  notes).
 
 ## How to read the priority table
 
@@ -49,12 +52,12 @@ podcaster, FC film composer, LM Linux switcher, SD Steam Deck / touch.
 
 | Rank | Theme | Impact | Reach | Effort | Score | Issue |
 | ---: | --- | :---: | --- | :---: | ---: | --- |
-| 1 | T04 Clip mute, clip rename, track colour, Duplicate Track | 4 | 6: BP SS BM POD FC LM | S | 24 | #189 |
-| 2 | T05 Transport navigation and track shortcuts | 4 | 6: BP SS POD FC LM SD | S | 24 | #191 |
-| 3 | T02 Cut, copy and paste for clips, notes and automation | 5 | 7: BP SS BM POD FC LM SD | M | 17.5 | #185 |
-| 4 | T08 MP3 / Ogg export with metadata tags | 5 | 6: BP SS BM POD FC LM | M | 15 | #194 |
-| 5 | T03 Grid chooser, triplets, swing and a snap toggle | 4 | 7: BP SS BM POD FC LM SD | M | 14 | #188 |
-| 6 | T10 Markers for sections, hit points and chapters | 5 | 5: BP BM POD FC LM | M | 12.5 | #197 |
+| 1 | T05 Transport navigation and track shortcuts | 4 | 6: BP SS POD FC LM SD | S | 24 | #191 |
+| 2 | T02 Cut, copy and paste for clips, notes and automation | 5 | 7: BP SS BM POD FC LM SD | M | 17.5 | #185 |
+| 3 | T08 MP3 / Ogg export with metadata tags | 5 | 6: BP SS BM POD FC LM | M | 15 | #194 |
+| 4 | T03 Grid chooser, triplets, swing and a snap toggle | 4 | 7: BP SS BM POD FC LM SD | M | 14 | #188 |
+| 5 | T10 Markers for sections, hit points and chapters | 5 | 5: BP BM POD FC LM | M | 12.5 | #197 |
+| 6 | T04 Clip mute, clip rename, track colour, Duplicate Track | 4 | 6: BP SS BM POD FC LM | M | 12 | #189 |
 | 7 | T42 Export dialog conveniences | 3 | 4: SS POD FC SD | S | 12 |  |
 | 8 | T12 Standard MIDI File import and export | 5 | 4: BP BM FC LM | M | 10 | #200 |
 | 9 | T27 Keyboard shortcut list and editor | 4 | 5: BP BM POD LM SD | M | 10 |  |
@@ -140,27 +143,27 @@ The grid is always adaptive and never shown; Quantize depends on zoom; triplets 
 
 ### T04 Clip mute, clip rename, track colour, Duplicate Track
 
-Impact 4, effort S, score 24. Issue #189. Hit by: Bedroom producer, Singer-songwriter, Beatmaker, Podcaster, Film composer, Linux switcher.
+Impact 4, effort M, score 12. Issue #189. Hit by: Bedroom producer, Singer-songwriter, Beatmaker, Podcaster, Film composer, Linux switcher.
 
-All four have model support and no UI (Duplicate Track is medium because ids must be regenerated).
+Clip mute, clip rename and a chosen track colour have model fields and undoable commands with no UI; each of those is small. Tracks do get an automatic colour today, but there is no way to choose one. Duplicate Track can reuse `AddTrack` but needs new cloning code that regenerates ids, which makes the theme medium overall.
 
 ### T05 Transport navigation and track shortcuts
 
 Impact 4, effort S, score 24. Issue #191. Hit by: Bedroom producer, Singer-songwriter, Podcaster, Film composer, Linux switcher, Steam Deck / touch.
 
-Home is the only locate key; Stop does not return; no go to end, bar stepping, or keys for mute/solo/arm/metronome (the guide wrongly implies M and S work); follow-playhead cannot be turned off; the loop range is discarded when Loop is switched off.
+Home is the only locate key; Stop does not return; no go to end, bar stepping, or keys for mute/solo/arm/metronome (the guide wrongly implies M and S work); follow-playhead cannot be turned off; the loop range is discarded when Loop is switched off and is not saved with the project (keeping and saving it is part of the proposal, and saving it changes the project format).
 
 ### T06 Input level meter, visible monitoring, named inputs
 
 Impact 5, effort M, score 7.5. Issue #192. Hit by: Singer-songwriter, Podcaster, Steam Deck / touch.
 
-An armed track shows no input level unless software monitoring is on, and then only on the Mix page. The monitoring switch is buried in a menu with no visible state.
+An armed track shows no input level unless software monitoring is on, and then only on the Mix page. The monitoring switch is buried in a menu with no visible state. Issue #192 covers this and T07 together.
 
 ### T07 Growing clip and elapsed time while recording
 
 Impact 4, effort M, score 4. Issue #192. Hit by: Singer-songwriter, Podcaster.
 
-The lane stays empty during an audio take; only the playhead colour changes. No elapsed-take or free-disk readout.
+The lane stays empty during an audio take; only the playhead colour changes. No elapsed-take or free-disk readout. Shares issue #192 with T06.
 
 ### T08 MP3 / Ogg export with metadata tags
 
@@ -172,7 +175,7 @@ Export is WAV and FLAC only, with no tags. The streaming writer abstraction take
 
 Impact 5, effort M, score 7.5. Issue #195. Hit by: Bedroom producer, Singer-songwriter, Podcaster.
 
-Peak bar only on the master, no limiter among built-ins, no loudness target, and no peak or clipping report after export.
+Peak bar only on the master, no limiter among built-ins, no loudness target, and no peak or clipping report after export. Steps: (1) report peak and integrated loudness when an export finishes and warn on clipping, which is small; (2) normalise to a loudness target on export; (3) a built-in limiter; (4) LUFS on the master strip; (5) Normalize on clips.
 
 ### T10 Markers for sections, hit points and chapters
 
@@ -202,19 +205,19 @@ The transport fields edit the single existing point, so typing a tempo at bar 33
 
 Impact 5, effort M, score 5. Issue #202. Hit by: Podcaster, Film composer.
 
-Ruler and grid are bars and beats only; an hour of audio cannot fit the window because of the minimum zoom; the tempo field is easy to nudge by accident, which moves audio.
+Ruler and grid are bars and beats only (the transport bar does show the playhead in minutes:seconds); an hour of audio cannot fit the window because of the minimum zoom; the tempo field is easy to nudge by accident, which moves audio.
 
 ### T15 Open a project from the command line and Dolphin
 
 Impact 4, effort S, score 4. Issue #203. Hit by: Linux switcher.
 
-No positional argument, no MIME type on the desktop entry, no drop of a project on the window.
+No positional argument, no `MimeType=` or `%F` on the desktop entry, no drop of a project on the window. The MIME type itself (`application/x-kadence-project`) already ships, so only the argument handling and the desktop entry lines are missing.
 
 ### T16 Takes: loop recording, punch in/out, record-over
 
 Impact 5, effort L, score 6.25. Issue #205. Hit by: Bedroom producer, Singer-songwriter, Podcaster, Film composer, Linux switcher.
 
-Loop recording gives one run-on clip; recording over a clip plays both at once; no punch or pre-roll.
+Loop recording gives one run-on clip; recording over a clip plays both at once; no punch or pre-roll. Steps: (1) mute the clips a new take covers, in the same undo step; (2) cut a loop recording into one clip per pass; (3) punch in/out with pre-roll; (4) take rows under the track. Steps 1 and 2 are medium and give most of the value. The metronome device already has accent, pitch and click-during-playback parameters (`daw-devices/src/devices/metronome.rs`) that the transport bar and metronome strip do not offer, so a click only during count-in or recording is close.
 
 ### T17 Time-range selection and ripple editing
 
@@ -244,7 +247,7 @@ Loops do not follow the project tempo; only fixed-ratio resampling exists. A str
 
 Impact 5, effort M, score 2.5. Issue #209. Hit by: Steam Deck / touch.
 
-Two fingers only zoom; the piano roll has no touch handling; handles are 6 to 8 px; several actions need Shift, right-click or double-tap.
+Two fingers only zoom, on both pages; the piano roll has no one-finger pan and no long-press menus, so a one-finger drag edits notes and its menus need a right click; handles are 6 to 8 px; several actions need Shift, right-click or double-tap.
 
 ### T22 Play notes without MIDI hardware
 
@@ -310,7 +313,7 @@ No CPU or xrun readout during playback; xruns are reported once per take while r
 
 Impact 4, effort S, score 8. No issue filed yet. Hit by: Singer-songwriter, Podcaster.
 
-Takes recorded into an untitled project stay in the scratch recordings folder after Save As, so the project folder is not self-contained until the user finds Collect Audio Files. Move them on first save. Check against #181 (orphaned takes) before filing.
+Takes recorded into an untitled project stay in the shared `kadence/recordings` data folder after Save As, so the project folder is not self-contained until the user finds Collect Audio Files. Move them on first save. Check against #181 (orphaned takes) before filing.
 
 ### T33 Video playback and timecode
 
@@ -394,7 +397,7 @@ Hardware knobs, faders and transport buttons cannot be bound to anything.
 
 Impact 3, effort M, score 3. No issue filed yet. Hit by: Linux switcher, Singer-songwriter.
 
-The release notes say a take lands one period late through a PipeWire loopback; there is no calibration or manual offset, and the latency readout shows one buffer, not the round trip.
+Take placement trusts the latencies the ports report, which works well when they are right. Where a device or loopback under-reports (the release notes' test loopback adds one unreported period), there is no calibration or manual offset to correct it, and the latency readout in Audio settings shows one buffer, not the round trip.
 
 ### T47 Mixer on touch and small screens
 
@@ -424,7 +427,7 @@ Things the walkthroughs singled out as good, worth keeping as they are:
 
 - Piano-roll note preview through the track's own instrument, including glissando along the keys and re-audition while dragging to a new pitch (crates/daw-pianoroll/src/lib.rs:391-411; EditPage.qml:206).
 - Loop recording overdubs every pass into one take, held notes carry across the loop seam, and pressing R with nothing armed records into the open clip (crates/daw-midi/src/record.rs:11-13; crates/daw-app/src/recording.rs:1-14).
-- A solid set of note operations with single-key shortcuts: Quantize (Q, Shift+Q, 50%), Legato, Glue, Fix Overlaps, Reverse, Humanize, Split at Playhead, Duplicate, arrow-key transpose and nudge (EditPage.qml:50-170).
+- A solid set of note operations, several with shortcuts (Q, Shift+Q, arrows, Ctrl+E, Ctrl+D): Quantize (also 50%), Legato, Glue, Fix Overlaps, Reverse, Humanize, Split at Playhead, Duplicate, arrow-key transpose and nudge (EditPage.qml:50-170).
 - Velocity lane that edits chord stems together and limits drawing to the selection when there is one (crates/daw-pianoroll/src/lib.rs:499-547).
 
 **Podcaster / voice-over editor**
@@ -446,13 +449,13 @@ Things the walkthroughs singled out as good, worth keeping as they are:
 - Every plugin runs in its own process: a crash bypasses the device, shows an inline 'Reload Plugin' action in the device panel and the session keeps running (DevicePanelDrawer.qml:239-271); missing plugins keep their state and the project still opens.
 - CLAP, VST3 and LV2 are all first-class in one searchable browser, scanned out of process in the background with progress, per-bundle failure reasons, extra folders, and $CLAP_PATH/$VST3_PATH/$LV2_PATH honoured (so yabridge folders and custom layouts work).
 - PipeWire/JACK-native behaviour a Linux user expects: each MIDI device gets its own named input port with hot-plug reconnect and per-track device/channel selection (host.rs:217-330, MidiInputButton.qml), and programs' MIDI outputs are listed as sources too.
-- Recording is latency-compensated using the measured round-trip latency (recording.rs:191, 358), with input monitoring per track, count-in, and xruns during a take reported afterwards.
+- Recording is latency-compensated using the round-trip latency the ports report (recording.rs:191, 358), with input monitoring per track, count-in, and xruns during a take reported afterwards.
 
 **Steam Deck / touch / small-screen user**
 
 - Long-press context menus already exist on track headers, automation lane headers, clips, empty lanes and automation points on the Arrange page (TrackHeader.qml:416-423, LaneHeader.qml long-press TapHandler, ArrangePage.qml:426-434, 519-524), and the menus are built lazily so scrolling stays smooth.
 - Arrange page touch basics are in place: one-finger pan on empty lanes and on the header column, two-finger pinch zoom of time, and a deliberate hand-over so a second finger can start a pinch (ArrangePage.qml:324-336, 416-476, 542-550).
-- Every clip and note command is also a Kirigami.Action in the page toolbar's overflow menu (Split, Duplicate, Delete, Select All, Zoom, Quantize, Transpose, Legato...), so nothing depends solely on right-click (ArrangePage.qml:127-205, EditPage.qml:50-261).
+- Most clip and note commands (Split, Duplicate, Delete, Select All, Zoom, Quantize, Transpose, Legato...) are also Kirigami.Actions in the page toolbar's overflow menu; fade shape, Remove Fades and Reset Clip Gain are only in the clip context menu, which opens on long-press on the Arrange page (ArrangePage.qml:127-205, EditPage.qml:50-261).
 - Track reordering has a no-drag path: Move Up / Move Down in the track menu (TrackHeader.qml:378-389).
 
 ## The personas and their stories
@@ -497,7 +500,7 @@ Records acoustic guitar and vocals at home through a 2-in/2-out USB interface on
 
 ### Electronic / hip-hop beatmaker
 
-Builds beats from one-shot samples and loops, lives in the piano roll and a drum grid, plays pads and a small MIDI keyboard, and leans on sidechain compression, automation and many plugin instruments and effects. Comes from FL Studio, Ableton Live or Bitwig, so expects a sample browser with audition, a drum sampler, copy/paste everywhere, a selectable grid with swing, and warping of loops to project tempo. Success is going from an empty project to a looped 8-bar beat in minutes, arranging it into a song, and exporting a master plus stems. All file references below are relative to /home/user/kadence.
+Builds beats from one-shot samples and loops, lives in the piano roll and a drum grid, plays pads and a small MIDI keyboard, and leans on sidechain compression, automation and many plugin instruments and effects. Comes from FL Studio, Ableton Live or Bitwig, so expects a sample browser with audition, a drum sampler, copy/paste everywhere, a selectable grid with swing, and warping of loops to project tempo. Success is going from an empty project to a looped 8-bar beat in minutes, arranging it into a song, and exporting a master plus stems.
 
 | Story | Outcome | As this user, I want… |
 | --- | --- | --- |
