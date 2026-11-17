@@ -342,6 +342,9 @@ impl AudioBackend for JackBackend {
             panicked: false,
         };
         self.shared.callback_panicked.store(false, Relaxed);
+        // Notifications start with activation, before the graph can be
+        // read: the log must be empty by then, not emptied after.
+        self.log.clear();
         let notifications = Notifications {
             shared: self.shared.clone(),
             log: self.log.clone(),
@@ -381,9 +384,11 @@ impl AudioBackend for JackBackend {
                 )));
             }
         };
-        // Notifications start now. Links already there (none on jackd, which
-        // won't link an inactive client) come from the server's graph.
-        self.log.reset(self.live_links(active.as_client(), &cfg));
+        // Links already there (none on jackd, which won't link an inactive
+        // client) come from the server's graph. A change since activation
+        // may or may not show in it, but its notification is in the log.
+        self.log
+            .add_snapshot(self.live_links(active.as_client(), &cfg));
         if cfg.auto_connect && !self.auto_connected {
             self.auto_connect(active.as_client(), &cfg);
             self.auto_connected = true;
