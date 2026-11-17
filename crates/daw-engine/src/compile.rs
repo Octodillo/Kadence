@@ -8,7 +8,7 @@ use daw_core::event::{Event, EventKind, EventList, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::time::SampleTime;
 
-use crate::automation::{AutomationLane, RAMP_INTERVAL};
+use crate::automation::{AutomationLane, RAMP_INTERVAL, next_grid};
 use crate::delay::DelayLine;
 use crate::graph::{EdgeEnd, EdgeKey, GraphDesc, LiveNode, LiveNodes, NodeId, NodeKey, NodeKind};
 use crate::meter::NodeMeter;
@@ -23,13 +23,24 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// Parameter changes queued for one node between two cycles.
 const PARAM_QUEUE: usize = 64;
 
-/// Room a node's event list gets for each automation lane, on top of
+/// Changes inside one block that every automation lane has room for in its
+/// node's event list, on top of the value at the start of the block and of
 /// [`EngineConfig::event_capacity`](crate::EngineConfig::event_capacity):
-/// the value at the start of a block, every ramp update inside the longest
-/// block, and three breakpoints. So however many parameters of a node are
-/// automated, their ramps always fit, whatever the block size.
-fn lane_room(max_frames: usize) -> usize {
-    1 + max_frames.div_ceil(RAMP_INTERVAL as usize) + 3
+/// every ramp update inside the longest block, and three breakpoints. So
+/// however many parameters of a node are automated, their ramps always
+/// fit, whatever the block size. A lane with more breakpoints than that in
+/// one block draws on what the event capacity has to spare, and loses
+/// (counted) what does not fit.
+fn lane_changes(max_frames: usize) -> usize {
+    max_frames.div_ceil(RAMP_INTERVAL as usize) + 3
+}
+
+/// One automated parameter of a step.
+struct Lane {
+    param: ParamId,
+    points: Arc<AutomationLane>,
+    /// Changes sent so far in the block being processed.
+    sent: usize,
 }
 
 fn param_event(param: ParamId, frame: usize, value: f64) -> Event {
@@ -134,9 +145,7 @@ pub(crate) struct Step {
     key: Option<NodeKey>,
     ports: PortLayout,
     meter: Option<Arc<NodeMeter>>,
-    automation: Vec<(ParamId, Arc<AutomationLane>)>,
-    /// Slots of `events_in` set aside for `automation`; see [`lane_room`].
-    automation_room: usize,
+    automation: Vec<Lane>,
     /// Reset by [`CompiledGraph::silence`].
     tail: bool,
     node: Box<dyn Node>,
@@ -303,7 +312,17 @@ impl CompiledGraph {
                 if let Some(old) = entry.reuse {
                     transfers.push((old, index[i]));
                 }
-                let automation_room = entry.automation.len() * lane_room(mf);
+                let automation: Vec<Lane> = entry
+                    .automation
+                    .into_iter()
+                    .map(|(param, points)| Lane {
+                        param,
+                        points,
+                        sent: 0,
+                    })
+                    .collect();
+                // Each lane's start value and changes; see `lane_changes`.
+                let automation_room = automation.len() * (1 + lane_changes(mf));
                 Step {
                     id: NodeId(i as u32),
                     kind: entry.kind,
@@ -311,8 +330,7 @@ impl CompiledGraph {
                     key: entry.key,
                     ports: ports.clone(),
                     meter: entry.meter,
-                    automation: entry.automation,
-                    automation_room,
+                    automation,
                     tail: entry.tail,
                     latency: entry.node.latency(),
                     node: entry.node,
@@ -500,8 +518,7 @@ impl CompiledGraph {
         if step.kind == NodeKind::Input || !step.ports.event_in {
             return false;
         }
-        let kind = daw_core::event::EventKind::ParamValue { param, value };
-        step.params.push(Event { frame: 0, kind }).is_ok()
+        step.params.push(param_event(param, 0, value)).is_ok()
     }
 
     /// The master's output for the last processed block.
@@ -581,36 +598,18 @@ impl CompiledGraph {
                 for &src in &step.event_sources {
                     reserve += done[src].events_out.len();
                 }
-                // The notes never eat into the room set aside for the lanes.
-                let limit = (step.events_in.capacity().saturating_sub(reserve))
-                    .max(step.events_in.len() + step.automation_room);
                 // The audio in this step's input left the timeline
                 // `in_latency` samples ago; before project start the lane
                 // holds its first value.
                 let now = transport.position.0 - i64::from(step.in_latency);
-                // Every lane's value at the start of the block goes first:
-                // whatever is dropped below, no parameter is left behind
-                // for longer than a block.
-                for (param, lane) in &step.automation {
-                    if let Some(value) = lane.value_at(SampleTime(now))
-                        && step.events_in.push(param_event(*param, 0, value)).is_err()
-                    {
-                        dropped += 1;
-                    }
-                }
-                // Then the changes inside the block. A lane may use an equal
-                // share of the room left, plus what the lanes before it left
-                // over, so one dense lane cannot starve the others.
-                for (i, (param, lane)) in step.automation.iter().enumerate() {
-                    let room = limit.saturating_sub(step.events_in.len());
-                    let end = step.events_in.len() + room / (step.automation.len() - i);
-                    for (t, value) in lane.changes(now, frames) {
-                        let event = param_event(*param, (t - now) as usize, value);
-                        if step.events_in.len() >= end || step.events_in.push(event).is_err() {
-                            dropped += 1;
-                        }
-                    }
-                }
+                dropped += emit_automation(
+                    &mut step.automation,
+                    now,
+                    frames,
+                    &mut step.events_in,
+                    reserve,
+                    lane_changes(mf),
+                );
             }
             for list in step.external_events.lists(external) {
                 for e in list.iter() {
@@ -651,6 +650,61 @@ impl CompiledGraph {
         }
         dropped
     }
+}
+
+/// Pushes what `lanes` do in the block of `frames` samples starting at `now`
+/// and returns how many events did not fit. `reserve` slots of `out` are
+/// left free for the notes still to come, as far as that leaves every lane
+/// its own `own` changes. RT-safe.
+fn emit_automation(
+    lanes: &mut [Lane],
+    now: i64,
+    frames: usize,
+    out: &mut EventList,
+    reserve: usize,
+    own: usize,
+) -> usize {
+    let mut dropped = 0;
+    // Every lane's value at the start of the block goes first: whatever is
+    // dropped below, no parameter is left behind for longer than a block.
+    for lane in lanes.iter_mut() {
+        lane.sent = 0;
+        if let Some(value) = lane.points.value_at(SampleTime(now))
+            && out.push(param_event(lane.param, 0, value)).is_err()
+        {
+            dropped += 1;
+        }
+    }
+    // What the lanes may use between them beyond their own changes.
+    let mut spare = out
+        .capacity()
+        .saturating_sub(reserve)
+        .saturating_sub(out.len() + lanes.len() * own);
+    // Then the changes inside the block, one stretch of the ramp grid at a
+    // time, so that events are pushed (nearly) in time order: the list
+    // keeps itself sorted, and appending is the cheap way to fill it.
+    let end = now + frames as i64;
+    let mut from = now;
+    while from + 1 < end {
+        // Up to and without the next grid time, which starts a stretch.
+        let to = next_grid(from + 1).min(end);
+        for lane in lanes.iter_mut() {
+            for (t, value) in lane.points.changes(from, (to - from) as usize) {
+                let fits = lane.sent < own || spare > 0;
+                let event = param_event(lane.param, (t - now) as usize, value);
+                if fits && out.push(event).is_ok() {
+                    if lane.sent >= own {
+                        spare -= 1;
+                    }
+                    lane.sent += 1;
+                } else {
+                    dropped += 1;
+                }
+            }
+        }
+        from = to - 1;
+    }
+    dropped
 }
 
 /// The keyed nodes of `steps` and the delay lines between them.

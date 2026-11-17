@@ -101,7 +101,6 @@ impl AutomationLane {
         Changes {
             points: &self.points,
             seg,
-            start,
             end: start + frames as i64,
             grid: next_grid(from),
         }
@@ -109,7 +108,7 @@ impl AutomationLane {
 }
 
 /// The first time on the ramp grid after `t`.
-fn next_grid(t: i64) -> i64 {
+pub(crate) fn next_grid(t: i64) -> i64 {
     (t.div_euclid(RAMP_INTERVAL) + 1) * RAMP_INTERVAL
 }
 
@@ -118,7 +117,6 @@ pub(crate) struct Changes<'a> {
     points: &'a [AutomationPoint],
     /// The point whose segment is being walked.
     seg: usize,
-    start: i64,
     end: i64,
     /// The next grid time in the segment, if it is a ramp.
     grid: i64,
@@ -128,24 +126,21 @@ impl Iterator for Changes<'_> {
     type Item = (i64, f64);
 
     fn next(&mut self) -> Option<(i64, f64)> {
-        loop {
-            let p = self.points.get(self.seg)?;
-            // After the last point nothing changes any more.
-            let next = self.points.get(self.seg + 1)?;
-            if p.curve == Curve::Linear && self.grid < self.end.min(next.time.0) {
-                let t = self.grid;
-                self.grid += RAMP_INTERVAL;
-                return Some((t, interpolate(p, next, t)));
-            }
-            if next.time.0 >= self.end {
-                return None;
-            }
-            self.seg += 1;
-            self.grid = next_grid(next.time.0.max(self.start));
-            if next.time.0 > self.start {
-                return Some((next.time.0, next.value));
-            }
+        let p = self.points.get(self.seg)?;
+        // After the last point nothing changes any more.
+        let next = self.points.get(self.seg + 1)?;
+        if p.curve == Curve::Linear && self.grid < self.end.min(next.time.0) {
+            let t = self.grid;
+            self.grid += RAMP_INTERVAL;
+            return Some((t, interpolate(p, next, t)));
         }
+        if next.time.0 >= self.end {
+            return None;
+        }
+        // Every point after the first segment lies after `start`.
+        self.seg += 1;
+        self.grid = next_grid(next.time.0);
+        Some((next.time.0, next.value))
     }
 }
 

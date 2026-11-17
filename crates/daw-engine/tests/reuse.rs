@@ -450,13 +450,14 @@ fn a_lane_too_dense_to_fit_cannot_starve_the_others() {
     };
     let (ctl, mut proc) = automated_probe(config, [dense, ramp]);
     let out = run(&mut proc, 64);
-    // Both start values, then the dense lane's share of the room and no
-    // more, which leaves the ramp its update at frame 32.
+    // Both start values, then the dense lane's own five changes and the
+    // eight the event capacity has to spare, and no more: the ramp still
+    // gets its update at frame 32.
     assert_eq!(out[0], 2.0);
-    assert_eq!(out[1..10], [1.0; 9]);
-    assert_eq!(out[10..32], [0.0; 22]);
+    assert_eq!(out[1..14], [1.0; 13]);
+    assert_eq!(out[14..32], [0.0; 18]);
     assert_eq!(out[32], 1.0);
-    assert_eq!(ctl.dropped_params(), 63 - 9);
+    assert_eq!(ctl.dropped_params(), 63 - 13);
     // The next block starts both parameters at their true values again.
     assert_eq!(run(&mut proc, 64)[0], 2.0);
 }

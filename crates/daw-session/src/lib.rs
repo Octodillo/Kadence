@@ -1222,23 +1222,24 @@ impl Session {
             .position(self.controller.position(), self.sample_rate())
     }
 
-    /// Loops `[start, end)` while playing. `None`, or a range the engine
-    /// does not loop (empty, or shorter than
-    /// [`MIN_LOOP_SECONDS`](daw_engine::MIN_LOOP_SECONDS)), turns looping
-    /// off.
+    /// Loops `[start, end)` while playing. `None` turns looping off, and
+    /// so does a range the engine does not loop: empty, or shorter than
+    /// [`MIN_LOOP_SECONDS`](daw_engine::MIN_LOOP_SECONDS) at the current
+    /// tempo. Check [`loop_range`](Self::loop_range) to see which it was.
     pub fn set_loop(&mut self, range: Option<(TickTime, TickTime)>) -> Result<(), SessionError> {
         self.loop_ticks = range;
         self.apply_loop()
     }
 
-    /// The loop being played, if any.
+    /// The loop being played, if any. A loop that a tempo change made too
+    /// short to play is not reported until the tempo makes it playable
+    /// again.
     pub fn loop_range(&self) -> Option<(TickTime, TickTime)> {
-        self.loop_ticks
+        self.loop_ticks.filter(|_| self.loop_points.get().is_some())
     }
 
-    /// Sends the loop to the engine in samples at the current tempo. A loop
-    /// the engine would not play is dropped here too, so `loop_range` never
-    /// reports one that is not heard.
+    /// Sends the loop to the engine in samples at the current tempo, unless
+    /// the engine would not play it.
     fn apply_loop(&mut self) -> Result<(), SessionError> {
         let range = self
             .loop_ticks
@@ -1247,9 +1248,6 @@ impl Session {
                 end: self.ticks_to_samples(e),
             })
             .filter(|r| r.is_playable(self.sample_rate()));
-        if range.is_none() {
-            self.loop_ticks = None;
-        }
         self.loop_points.set(range.map(|r| (r.start, r.end)));
         self.controller.set_loop(range)?;
         Ok(())
