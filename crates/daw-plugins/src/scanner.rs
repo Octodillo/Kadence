@@ -230,8 +230,12 @@ pub fn run_scan_child(
 ) -> Option<ExitCode> {
     let args: Vec<OsString> = args.into_iter().collect();
     let pos = args.iter().position(|a| a == SCAN_ARG)?;
+    // This process is a scanner, whatever binary it was started from. The
+    // application starts scans with stderr closed (plugins print a lot while
+    // loading), so these lines are for a scan run by hand.
+    daw_core::logging::init("kadence-plugin-scan");
     let (Some(kind), Some(bundle)) = (args.get(pos + 1), args.get(pos + 2)) else {
-        eprintln!("usage: {SCAN_ARG} <clap|lv2|vst3> <bundle>");
+        log::error!("usage: {SCAN_ARG} <clap|lv2|vst3> <bundle>");
         return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
     let Some(format) = kind
@@ -239,7 +243,7 @@ pub fn run_scan_child(
         .and_then(kind_from_name)
         .and_then(|k| registry.format(&k))
     else {
-        eprintln!("unsupported plugin format {kind:?}");
+        log::error!("unsupported plugin format {kind:?}");
         return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
     // Plugins may print to stdout while loading. Point file descriptor 1 at stderr for the

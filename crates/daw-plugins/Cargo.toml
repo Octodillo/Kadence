@@ -21,7 +21,7 @@ daw-plugins-clap = { path = "../daw-plugins-clap", optional = true }
 daw-plugins-lv2 = { path = "../daw-plugins-lv2", optional = true }
 daw-plugins-vst3 = { path = "../daw-plugins-vst3", optional = true }
 libc = "0.2"
-log = "0.4"
+log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

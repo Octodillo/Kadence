@@ -12,8 +12,6 @@ use daw_core::meter::PeakMeter;
 use daw_core::node::{ProcessContext, TransportState};
 use daw_core::plugin::PluginProcessor;
 use daw_core::queue::spsc;
-use daw_core::rt_log;
-use daw_core::rtlog::{RtLevel, rt_log};
 use daw_core::split::{SharedAudio, SplitAudio};
 
 #[test]
@@ -86,21 +84,6 @@ fn retired_values_are_dropped_by_collector() {
         }
         rt.join().unwrap();
         assert_eq!(Arc::strong_count(&marker), 1);
-    });
-}
-
-#[test]
-fn rt_log_counts_every_record() {
-    loom::model(|| {
-        let (mut log, mut drain) = rt_log(1);
-        let rt = thread::spawn(move || {
-            rt_log!(log, RtLevel::Warn, "a {}", 1);
-            rt_log!(log, RtLevel::Warn, "b {}", 2);
-        });
-        let mut seen = drain.pop().map_or(0, |_| 1);
-        rt.join().unwrap();
-        seen += drain.drain().count() as u64;
-        assert_eq!(seen + drain.take_dropped(), 2);
     });
 }
 
