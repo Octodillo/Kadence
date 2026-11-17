@@ -394,6 +394,13 @@ impl AppState {
         !self.plugin_changes.is_empty()
     }
 
+    /// Whether closing or replacing the project now would lose something:
+    /// unsaved edits, a plugin change not yet recorded, or a take still
+    /// being recorded (which only becomes an edit when it stops).
+    pub fn has_unsaved_work(&self) -> bool {
+        self.doc.is_modified() || self.has_pending_plugin_changes() || self.is_recording()
+    }
+
     /// Records a plugin device's state, if it changed, as an undo step.
     fn record_plugin_state(&mut self, device: daw_model::DeviceId) {
         // The plugin's state is compared with the document's as the engine
@@ -955,8 +962,19 @@ impl AppState {
         Ok(())
     }
 
-    /// Saves into a new bundle at `dir`.
+    /// Saves to the project's bundle, with each plugin's current state. A
+    /// take in progress goes on and is an unsaved change once it stops.
+    pub fn save(&mut self) -> Result<(), FormatError> {
+        self.store_plugin_states();
+        self.doc.save()
+    }
+
+    /// Saves into a new bundle at `dir`. A take in progress ends first and
+    /// is saved with the rest: its files belong with the project it was
+    /// started in.
     pub fn save_as(&mut self, dir: &Path) -> Result<(), FormatError> {
+        self.stop_recording();
+        self.store_plugin_states();
         let was_untitled = self.doc.bundle().is_none();
         self.doc.save_as(dir)?;
         if was_untitled && let Some(s) = &self.scratch {
@@ -969,7 +987,8 @@ impl AppState {
     }
 
     /// Replaces the open document. The old one's unsaved changes are
-    /// dropped, with their autosave: callers ask the user first.
+    /// dropped, with their autosave and any take still being recorded:
+    /// callers ask the user first (see [`AppState::has_unsaved_work`]).
     pub fn replace_document(&mut self, doc: Document) {
         // A take belongs to the document it was recorded for.
         self.discard_recording();
@@ -1092,3 +1111,6 @@ impl AppState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

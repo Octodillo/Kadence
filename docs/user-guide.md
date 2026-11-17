@@ -103,6 +103,10 @@ Right-click a track header to rename, move, delete or show its automation.
 MIDI recorded over an open MIDI clip goes into that clip; otherwise a new
 clip is made. A recorded take can be undone like any edit.
 
+Closing Kadence, or starting or opening another project, while recording
+ends the take, keeps it, and asks whether to save. **Save As…** ends the
+take too; **Save** lets it run on.
+
 ## Arranging
 
 - **Import Audio…** (Ctrl+I) adds audio files at the playhead, or drop

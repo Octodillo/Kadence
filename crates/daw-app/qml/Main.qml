@@ -236,7 +236,8 @@ Kirigami.ApplicationWindow {
         id: openFolderDialog
         title: i18nc("@title:window", "Open Project Folder")
         onAccepted: {
-            root.notify(Project.openProject(selectedFolder));
+            const url = selectedFolder;
+            root.whenChangesHandled(() => root.opened(Project.openProject(url), url));
         }
     }
 
@@ -262,8 +263,14 @@ Kirigami.ApplicationWindow {
     }
 
     // Runs `proceed` once the project's unsaved changes are saved or the
-    // user chose to discard them; not at all if they cancel.
+    // user chose to discard them; not at all if they cancel. Everything
+    // that closes or replaces the project goes through here.
     function whenChangesHandled(proceed: var): void {
+        // A take in progress is unsaved work too: end it, so it is part of
+        // the project the question is about.
+        if (Project.recording) {
+            Project.stop();
+        }
         if (!Project.modified) {
             proceed();
             return;

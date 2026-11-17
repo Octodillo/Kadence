@@ -643,7 +643,7 @@ impl qobject::Project {
                 playhead.0,
                 p.tracks.len() as i32,
                 shown_name(p, s.doc.bundle()),
-                s.doc.is_modified() || s.has_pending_plugin_changes(),
+                s.has_unsaved_work(),
                 s.doc.bundle().is_some(),
                 h.can_undo(),
                 h.can_redo(),
@@ -1028,8 +1028,7 @@ impl qobject::Project {
     fn save(self: Pin<&mut Self>) -> QMap<QMapPair_QString_QVariant> {
         let mut result = None;
         self.edit(|s| {
-            s.store_plugin_states();
-            if let Err(e) = s.doc.save() {
+            if let Err(e) = s.save() {
                 result = Some(Message::File(Context::Save, e).fields());
             }
         });
@@ -1048,7 +1047,6 @@ impl qobject::Project {
         }
         let mut result = None;
         self.as_mut().edit(|s| {
-            s.store_plugin_states();
             if let Err(e) = s.save_as(&dir) {
                 result = Some(Message::File(Context::Save, e).fields());
             }
