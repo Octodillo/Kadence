@@ -75,7 +75,9 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 ### Units and conventions
 
 - Musical time is in ticks at 960 PPQ (`daw_core::time::PPQ`), as a JSON
-  integer. Sample offsets are integers in samples.
+  integer. Sample offsets are integers in samples. No position or length
+  may be past tick 2^40 (`MAX_PROJECT_TICK`, about 18 years at 120 BPM), and no
+  audio offset past sample 2^48; a file that says otherwise does not load.
 - Gains are in dB, pan is -1 (left) to 1 (right), velocity is 0 to 1.
 - Floating-point values are written with the shortest representation that
   reads back to the same `f64`, so save→load is bit-exact. NaN and infinity are
@@ -98,8 +100,8 @@ UTF-8 JSON, pretty-printed so that projects diff well in version control.
 
 ### TempoData
 
-`tempos`: `[{tick, bpm, ramp}]`, strictly increasing, first at tick 0. `ramp`
-means a linear change to the next point. `meters`:
+`tempos`: `[{tick, bpm, ramp}]`, strictly increasing, first at tick 0, `bpm`
+from 1 to 100000. `ramp` means a linear change to the next point. `meters`:
 `[{tick, numerator, denominator}]`, strictly increasing, first at tick 0,
 denominator a power of two.
 

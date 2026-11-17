@@ -76,7 +76,7 @@ audio it uses, so it can be copied or backed up as one. **New Project**
   to **Recover** it the next time you open the project.
 - If audio files were moved, **Find Missing Audio Files…** relinks them.
   **Collect Audio Files** copies audio from outside the project folder into
-  it.
+  it. Only files that open as audio are copied.
 
 Every edit can be undone with Ctrl+Z and redone with Ctrl+Shift+Z.
 
@@ -215,3 +215,10 @@ the Mix page and move the controls while the song plays.
 Report problems and ideas at <https://github.com/Octodillo/Kadence/issues>.
 Include the Kadence version (**About Kadence** in the main menu) and how you
 installed it.
+
+When something goes wrong without a message on screen, Kadence writes what
+it knows to its standard error, which a Plasma session keeps in the journal
+(`journalctl --user -e`). Warnings and errors are written by default; start
+Kadence with `KADENCE_LOG=debug` for more, or `KADENCE_LOG=off` for none.
+Lines start with `kadence:`, or `kadence-plugin-host:` when they come from
+the separate process a plugin runs in.

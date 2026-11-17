@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 daw-arrange = { path = "../daw-arrange" }
 daw-core.workspace = true
+log.workspace = true
 daw-media = { path = "../daw-media" }
 daw-model = { path = "../daw-model" }
 daw-midi = { path = "../daw-midi" }

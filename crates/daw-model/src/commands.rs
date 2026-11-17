@@ -22,7 +22,7 @@ use crate::command::Command;
 use crate::error::ModelError;
 use crate::id::{ClipId, DeviceId, LaneId, NoteUid, SendId, TrackId};
 use crate::model::*;
-use crate::model::{check_finite, check_points, invalid};
+use crate::model::{check_finite, check_points, check_tick, invalid};
 
 /// Fails if any of `ids` is already used anywhere in the project.
 fn check_ids_free(project: &Project, ids: &[Uuid]) -> Result<(), ModelError> {
@@ -499,9 +499,7 @@ impl Command for SetTrack {
             }) if c > 15 => {
                 return Err(invalid("MIDI channel must be within 0..15"));
             }
-            TrackField::Armed(true)
-                if !matches!(track.kind, TrackKind::Audio | TrackKind::Instrument) =>
-            {
+            TrackField::Armed(true) if !track.kind.records() => {
                 return Err(invalid("only audio and instrument tracks can record"));
             }
             TrackField::Output(TrackOutput::Bus(b)) => {
@@ -652,9 +650,7 @@ impl Command for MoveClip {
             .clip_location(self.id)
             .ok_or(ModelError::ClipNotFound(self.id))?;
         let dest = track_of(project, self.track)?;
-        if self.start.0 < 0 {
-            return Err(invalid("clips can't start before 0"));
-        }
+        check_tick(self.start, "clip start")?;
         if !dest
             .kind
             .accepts(&project.track(from).expect("found above").clips[i].content)
@@ -781,22 +777,6 @@ impl Command for SetClip {
         let clip = project
             .clip(self.id)
             .ok_or(ModelError::ClipNotFound(self.id))?;
-        match self.field {
-            ClipField::Length(l) if l.0 <= 0 => {
-                return Err(invalid("clip length must be positive"));
-            }
-            ClipField::AudioOffset(o) if o.0 < 0 => {
-                return Err(invalid("audio offset must not be negative"));
-            }
-            ClipField::AudioGainDb(g) => check_finite(g, "clip gain")?,
-            ClipField::AudioSource(ref p) if p.as_os_str().is_empty() => {
-                return Err(invalid("audio clip needs a source file"));
-            }
-            ClipField::FadeIn(f) | ClipField::FadeOut(f) if f.length.0 < 0 => {
-                return Err(invalid("fade length must not be negative"));
-            }
-            _ => {}
-        }
         let audio_only = matches!(
             self.field,
             ClipField::AudioOffset(_)
@@ -808,7 +788,14 @@ impl Command for SetClip {
         if audio_only && !matches!(clip.content, ClipContent::Audio(_)) {
             return Err(invalid("that property only applies to audio clips"));
         }
-        self.swap(project)
+        // The clip with the new value must pass the checks a loaded one
+        // does; if it doesn't, the old value goes back.
+        let changes = self.swap(project)?;
+        if let Err(e) = project.clip(self.id).expect("found above").check() {
+            self.swap(project)?;
+            return Err(e);
+        }
+        Ok(changes)
     }
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
@@ -86,6 +86,57 @@ fn kf6_prefix() -> PathBuf {
         .unwrap_or_else(|| qmake_query("QT_INSTALL_PREFIX"))
 }
 
+/// The directory holding the KF6 libraries. `KF6_LIBDIR` names it outright.
+/// Without `KF6_PREFIX`, distros put KF6 next to Qt's libraries. With it,
+/// it is the first of the prefix's `lib64` (on 64-bit targets), `lib` and
+/// the multiarch directories under `lib` (such as `lib/x86_64-linux-gnu`,
+/// the target's own first) that has them. If none does, the libraries
+/// come from elsewhere on the linker's path, and `lib` is added as before.
+fn kf6_lib_dir(prefix: &Path) -> PathBuf {
+    println!("cargo:rerun-if-env-changed=KF6_LIBDIR");
+    if let Some(dir) = std::env::var_os("KF6_LIBDIR").filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    if std::env::var_os("KF6_PREFIX").is_none() {
+        return qmake_query("QT_INSTALL_LIBS");
+    }
+    let target = |key: &str| std::env::var(format!("CARGO_CFG_TARGET_{key}")).unwrap_or_default();
+    let lib = prefix.join("lib");
+    let mut candidates = Vec::new();
+    if target("POINTER_WIDTH") == "64" {
+        candidates.push(prefix.join("lib64"));
+    }
+    candidates.push(lib.clone());
+    let mut multiarch: Vec<PathBuf> = std::fs::read_dir(&lib)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.is_dir())
+        .collect();
+    // In name order, so the choice doesn't depend on how the directory
+    // happens to list them; the target's own triple (`x86_64-…`) first.
+    let own = format!("{}-", target("ARCH"));
+    multiarch.sort();
+    multiarch.sort_by_key(|dir| {
+        !dir.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(&own))
+    });
+    candidates.extend(multiarch);
+    let name = KF6[0].1;
+    let has_kf6 = |dir: &PathBuf| {
+        ["so", "a"]
+            .iter()
+            .any(|ext| dir.join(format!("lib{name}.{ext}")).exists())
+    };
+    candidates.into_iter().find(has_kf6).unwrap_or_else(|| {
+        println!(
+            "cargo:warning=lib{name} not found under {}; set KF6_LIBDIR if linking fails",
+            prefix.display()
+        );
+        lib
+    })
+}
+
 fn main() {
     let prefix = kf6_prefix();
     let include = prefix.join("include/KF6");
@@ -94,6 +145,8 @@ fn main() {
         "KDE Frameworks 6 headers not found in {}; set KF6_PREFIX",
         include.display()
     );
+    // Before the long C++ build, so a wrong prefix is reported at once.
+    let lib_dir = kf6_lib_dir(&prefix);
 
     let mut builder = CxxQtBuilder::new_qml_module(
         QmlModule::new("io.github.octodillo.daw")
@@ -138,11 +191,6 @@ fn main() {
     };
     builder.build();
 
-    // Distros put KF6 next to Qt's libraries (/usr/lib or a multiarch dir).
-    let lib_dir = match std::env::var_os("KF6_PREFIX") {
-        Some(_) => prefix.join("lib"),
-        None => qmake_query("QT_INSTALL_LIBS"),
-    };
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     for (_, lib) in KF6 {
         println!("cargo:rustc-link-lib=dylib={lib}");

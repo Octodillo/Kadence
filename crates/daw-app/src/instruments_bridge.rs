@@ -9,9 +9,11 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
+use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 
 use crate::instrument::InstrumentChoice;
+use crate::model_roles;
+use crate::qt_lists::{ModelRole, row};
 use crate::state;
 
 #[cxx_qt::bridge]
@@ -81,10 +83,13 @@ pub mod qobject {
     impl cxx_qt::Initialize for Instruments {}
 }
 
-/// Model roles, after Qt::UserRole: the display name, and whether it is
-/// one of ours rather than a plugin.
-const ROLES: &[&str] = &["name", "builtin"];
-const USER_ROLE: i32 = 0x0100;
+model_roles!(
+    /// The display name, and whether it is one of ours rather than a plugin.
+    enum Role {
+        Name => "name",
+        Builtin => "builtin",
+    }
+);
 
 #[derive(Default)]
 pub struct InstrumentsRust {
@@ -154,25 +159,20 @@ impl qobject::Instruments {
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let Some(c) = usize::try_from(index.row())
-            .ok()
-            .and_then(|r| self.choices.get(r))
-        else {
+        let Some(c) = row(&self.choices, index) else {
             return QVariant::default();
         };
-        match ROLES.get((role - USER_ROLE) as usize).copied() {
-            Some("name") => QVariant::from(&QString::from(c.name.as_str())),
-            Some("builtin") => QVariant::from(&c.is_builtin()),
-            _ => QVariant::default(),
+        let Some(role) = Role::from_qt(role) else {
+            return QVariant::default();
+        };
+        match role {
+            Role::Name => QVariant::from(&QString::from(c.name.as_str())),
+            Role::Builtin => QVariant::from(&c.is_builtin()),
         }
     }
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
-        let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
-        for (i, name) in ROLES.iter().enumerate() {
-            roles.insert(USER_ROLE + i as i32, QByteArray::from(*name));
-        }
-        roles
+        Role::names()
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {

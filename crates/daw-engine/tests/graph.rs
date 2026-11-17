@@ -7,7 +7,7 @@ use daw_engine::{
     CompileError, CompiledGraph, EngineConfig, EngineController, GraphDesc, LoopRange, NodeId,
     RenderOptions, render,
 };
-use support::{Delay, EventProbe, NoteSource, Position, Sine};
+use support::{Delay, EventProbe, NoteBurst, NoteSource, Position, Sine};
 
 fn config(max_frames: u32) -> EngineConfig {
     EngineConfig {
@@ -181,6 +181,59 @@ fn set_param_without_event_input_is_counted_as_dropped() {
         &EventList::with_capacity(0),
     );
     assert_eq!(ctl.dropped_params(), 2);
+}
+
+/// More events for one node in a block than the engine has room for: the
+/// extra ones are dropped, and the controller can see how many.
+#[test]
+fn events_that_do_not_fit_are_counted() {
+    let mut g = GraphDesc::new(0, 1);
+    let probe = g.add_device("probe", Box::new(EventProbe));
+    g.connect(probe, g.master());
+    g.route_external_events(probe);
+    let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+        event_capacity: 4,
+        ..config(64)
+    });
+    ctl.set_graph(g).unwrap();
+    let mut events = EventList::with_capacity(8);
+    for frame in 0..6 {
+        let kind = EventKind::Midi([0x90, 60, 100]);
+        events.push(Event { frame, kind }).unwrap();
+    }
+    let mut out = vec![0.0; 32];
+    proc.process(32, &[], &mut [&mut out], &events);
+    assert_eq!(out.iter().sum::<f32>(), 4.0, "four events fit");
+    assert_eq!(ctl.dropped_events(), 2);
+
+    // A queued parameter change shares the node's list with the four
+    // external events that fit the engine's, so one more is dropped there.
+    ctl.set_param(probe, 0, 1.0).unwrap();
+    proc.process(32, &[], &mut [&mut out], &events);
+    assert_eq!(ctl.dropped_events(), 2 + 2 + 1);
+    assert_eq!(ctl.dropped_params(), 0, "the change itself was delivered");
+}
+
+/// A node that makes more events than its output list holds (a dense clip, a
+/// plugin's MIDI output) drops them itself, where only the list can count.
+#[test]
+fn events_a_node_cannot_send_on_are_counted() {
+    let mut g = GraphDesc::new(0, 1);
+    let burst = g.add_device("burst", Box::new(NoteBurst { notes: 7 }));
+    let probe = g.add_device("probe", Box::new(EventProbe));
+    g.connect_events(burst, probe);
+    g.connect(probe, g.master());
+    let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+        event_capacity: 4,
+        ..config(64)
+    });
+    ctl.set_graph(g).unwrap();
+    let out = run(&mut proc, 32, &EventList::default());
+    assert_eq!(out[0], 4.0, "four notes fit the burst's list");
+    assert_eq!(ctl.dropped_events(), 3);
+    run(&mut proc, 32, &EventList::default());
+    assert_eq!(ctl.dropped_events(), 6);
+    assert_eq!(ctl.dropped_params(), 0);
 }
 
 #[test]

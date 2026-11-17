@@ -11,13 +11,11 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QString};
-use daw_arrange::Scene;
 use daw_midi::edit::{Quantize, QuantizeEnds};
 use daw_pianoroll::Accidentals;
 
-use crate::arrange_view::{cursor_shape, pointer, to_qcolor, to_rgba};
 use crate::automation_bridge::{shape, shape_index};
-use crate::paint::{self, PaintOp};
+use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
 use crate::session_mixer::strip_row;
 use crate::state;
 
@@ -150,9 +148,6 @@ pub mod qobject {
         /// point or between points.
         #[qsignal]
         fn lane_menu_requested(self: Pin<&mut PianoRoll>, x: f64, y: f64, on_point: bool);
-        /// The document or view changed through this item.
-        #[qsignal]
-        fn edited(self: Pin<&mut PianoRoll>);
     }
 
     unsafe extern "RustQt" {
@@ -193,9 +188,7 @@ pub struct PianoRollRust {
     has_selection: bool,
     has_points: bool,
     cursor_shape: i32,
-    ops: Vec<PaintOp>,
-    texts: Vec<String>,
-    waves: Vec<f32>,
+    scene: DisplayList,
     last_press: (f64, f64),
 }
 
@@ -229,9 +222,7 @@ impl Default for PianoRollRust {
             has_selection: false,
             has_points: false,
             cursor_shape: 0,
-            ops: Vec::new(),
-            texts: Vec::new(),
-            waves: Vec::new(),
+            scene: DisplayList::default(),
             last_press: (0.0, 0.0),
         }
     }
@@ -256,24 +247,7 @@ impl qobject::PianoRoll {
     /// Called by Qt with a valid painter for the duration of the call.
     unsafe fn paint(self: Pin<&mut Self>, painter: *mut cxx_qt_lib::QPainter) {
         // SAFETY: Qt passes a live, active painter.
-        let Some(painter) = (unsafe { painter.as_mut() }) else {
-            return;
-        };
-        // SAFETY: QPainter is not moved while we hold it.
-        let painter = unsafe { Pin::new_unchecked(painter) };
-        paint::paint_scene(painter, &self.ops, &self.texts, &self.waves);
-    }
-
-    fn palette(&self) -> daw_arrange::Palette {
-        daw_arrange::Palette {
-            background: to_rgba(&self.background_color),
-            alternate_background: to_rgba(&self.alternate_background_color),
-            text: to_rgba(&self.text_color),
-            disabled_text: to_rgba(&self.disabled_text_color),
-            highlight: to_rgba(&self.highlight_color),
-            highlighted_text: to_rgba(&self.highlighted_text_color),
-            negative: to_rgba(&self.negative_color),
-        }
+        unsafe { self.scene.paint(painter) };
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
@@ -292,7 +266,7 @@ impl qobject::PianoRoll {
             lane_count: i32,
         }
         let (w, h) = (self.width(), self.height());
-        let palette = self.palette();
+        let palette = paint::theme_palette!(self);
         let (rh, kw, vh) = (self.ruler_height, self.keyboard_width, self.velocity_height);
         let (lanes_shown, lh) = (self.lanes_shown, self.lane_height);
         let accidentals = if self.flat_note_names {
@@ -332,7 +306,7 @@ impl qobject::PianoRoll {
             };
             (scene, shown)
         });
-        self.as_mut().store(scene);
+        self.as_mut().rust_mut().scene.store(scene);
         self.as_mut().set_scroll_x(shown.scroll_x);
         self.as_mut().set_scroll_y(shown.scroll_y);
         self.as_mut().set_content_height(shown.content_height);
@@ -348,17 +322,6 @@ impl qobject::PianoRoll {
         self.update();
     }
 
-    fn store(self: Pin<&mut Self>, scene: Scene) {
-        let mut r = self.rust_mut();
-        let r = &mut *r;
-        r.ops.clear();
-        r.texts.clear();
-        r.waves.clear();
-        for p in scene.prims {
-            r.ops.push(paint::op(p, &mut r.texts, &mut r.waves));
-        }
-    }
-
     /// Applies an outcome, then redraws and tells QML.
     fn after(mut self: Pin<&mut Self>, out: daw_arrange::Outcome) {
         let any = out.document || out.view || out.locate.is_some() || out.set_loop.is_some();
@@ -372,7 +335,6 @@ impl qobject::PianoRoll {
         });
         if any {
             self.as_mut().refresh();
-            self.as_mut().edited();
         }
         let (px, py) = self.rust().last_press;
         if menu {
