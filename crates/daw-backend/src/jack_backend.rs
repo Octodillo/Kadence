@@ -753,6 +753,8 @@ struct Processor {
 
 impl ProcessHandler for Processor {
     fn process(&mut self, _: &Client, ps: &ProcessScope) -> Control {
+        // Every cycle, as JACK owns the thread and may replace it; it costs a few nanoseconds.
+        daw_core::denormals::flush_to_zero();
         if !self.panicked {
             let shared = self.shared.clone();
             // Catch the panic here: the jack crate's own handler prints, leaks
