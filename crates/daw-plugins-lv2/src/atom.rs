@@ -52,7 +52,9 @@ impl Urids {
 /// Whether a whole atom (header and body) that a UI sent may change what the
 /// plugin saves. Plugins use message types of their own to edit their state,
 /// so everything counts except the one standard request that only reads:
-/// `patch:Get`, which UIs send when they open to learn the current values.
+/// `patch:Get`, which UIs send when they open to learn the current values. A UI
+/// that sends a message of its own kind when it opens, or keeps sending one,
+/// still marks the state as changed: nothing tells such a message from an edit.
 pub(crate) fn may_change_state(urids: &Urids, atom: &[u8]) -> bool {
     let word = |at: usize| {
         atom.get(at..at + 4)

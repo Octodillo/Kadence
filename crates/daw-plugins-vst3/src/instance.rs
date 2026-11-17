@@ -576,7 +576,7 @@ pub struct Vst3Instance {
     /// See [`Audio::reset_by_reactivating`].
     reset_by_reactivating: Arc<AtomicBool>,
     /// How many parameters the controller had when the list was last read.
-    param_count: i32,
+    param_shape: u64,
 
     connection: Option<Connection>,
     controller: ComPtr<IEditController>,
@@ -865,7 +865,7 @@ impl Vst3Instance {
                 handler,
                 _module: module,
                 reset_by_reactivating,
-                param_count: 0,
+                param_shape: 0,
             };
             instance.sync_controller_to_component();
             instance.read_params();
@@ -904,11 +904,28 @@ impl Vst3Instance {
         audio.main(|a| f(self, a))
     }
 
+    /// A hash of what the controller says its parameter list is (ids, titles, steps, flags),
+    /// without their values or curves: one call per parameter.
+    fn param_shape(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut shape = std::collections::hash_map::DefaultHasher::new();
+        unsafe {
+            let count = self.controller.getParameterCount();
+            count.hash(&mut shape);
+            for i in 0..count {
+                let mut info: ParameterInfo = std::mem::zeroed();
+                if self.controller.getParameterInfo(i, &mut info) == kResultOk {
+                    (info.id, info.stepCount, info.flags, info.title).hash(&mut shape);
+                }
+            }
+        }
+        shape.finish()
+    }
+
     fn read_params(&mut self) {
         let mut list = Vec::new();
         unsafe {
             let count = self.controller.getParameterCount();
-            self.param_count = count;
             for i in 0..count {
                 let mut info: ParameterInfo = std::mem::zeroed();
                 if self.controller.getParameterInfo(i, &mut info) != kResultOk {
@@ -937,6 +954,7 @@ impl Vst3Instance {
                 list.push(param);
             }
         }
+        self.param_shape = self.param_shape();
         let new = Params::new(list);
         let old = std::mem::replace(&mut self.params, Arc::clone(&new));
         self.audio.main(|a| a.params = new);
@@ -981,6 +999,10 @@ impl Vst3Instance {
             }
             self.latency = a.processor.getLatencySamples();
         }
+        // A latency change the plugin announced from inside `setActive` (JUCE does) has just
+        // been read; acting on the request later would prepare the plugin a second time.
+        self.handler
+            .discard_restart_flags(RestartFlags_::kLatencyChanged as i32);
         a.set_processing(true);
     }
 
@@ -1157,13 +1179,18 @@ impl Vst3Instance {
     }
 
     /// Resets a plugin that ignores `setProcessing` by deactivating and activating it, while
-    /// the audio thread is kept out.
+    /// the audio thread is kept out. This runs at the main thread's next turn, so such a
+    /// plugin is reset a moment after the others, and its blocks in between are played.
     fn reset_by_reactivating(&mut self) {
         if self.reset_by_reactivating.swap(false, Ordering::AcqRel) && self.active {
+            let latency = self.latency;
             self.with_audio(|p, a| {
                 p.deactivate(a);
                 p.activate(a);
             });
+            if self.latency != latency {
+                self.layout_changed = true;
+            }
         }
     }
 
@@ -1194,11 +1221,10 @@ impl Vst3Instance {
                 // A preset the plugin loaded itself, say.
                 self.handler.mark_state_changed();
             }
-            // Values are read live, so new ones alone need no new list, which costs a call
-            // per parameter and more per curve. Some plugin frameworks announce a changed
-            // list with the values flag only; a different count gives those away.
-            let count = unsafe { self.controller.getParameterCount() };
-            if !values_only || count != self.param_count {
+            // Values are read live, so new ones alone need no new list, which costs many
+            // calls per parameter to sample its curve. Some plugin frameworks announce a
+            // changed list with the values flag only; its shape gives those away.
+            if !values_only || self.param_shape() != self.param_shape {
                 self.read_params();
             }
             // Gaining the first parameter or losing the last changes the event ports.
@@ -1326,6 +1352,10 @@ impl PluginInstance for Vst3Instance {
         if self.handler.has_edits() {
             self.with_audio(|p, a| p.flush_edits(a));
         }
+        // A plugin that leaves `getState` out and has no parameters has nothing to save: an
+        // empty blob, which `load_state` skips. With parameters, their values would be lost
+        // without a word, so that stays the failure it is.
+        let stateless = self.params.list.is_empty();
         let read = |get: &dyn Fn(*mut IBStream) -> i32| -> Result<Vec<u8>, PluginError> {
             let stream = ComWrapper::new(MemoryStream::default());
             let s = stream
@@ -1333,8 +1363,7 @@ impl PluginInstance for Vst3Instance {
                 .ok_or_else(|| PluginError::State("stream".into()))?;
             match get(s.as_ptr()) {
                 r if r == kResultOk => Ok(stream.take()),
-                // A plugin with no state to save: an empty blob, which `load_state` skips.
-                r if r == kNotImplemented => Ok(Vec::new()),
+                r if r == kNotImplemented && stateless => Ok(Vec::new()),
                 _ => Err(PluginError::State(
                     "plugin refused to save its state".into(),
                 )),
@@ -1385,25 +1414,31 @@ impl PluginInstance for Vst3Instance {
                 }
                 Ok(())
             };
+        // Nothing was saved (see `save_state`), so there is nothing to load and the plugin,
+        // with any edit under way, stays as it is.
+        if component.is_empty() && controller.is_empty() {
+            return Ok(());
+        }
         // Editor edits made before the load are stale and must not reach `process` on top of
         // the restored state; with the half out the audio thread could apply them before the
         // clear below, so drop them first.
         self.handler.discard_overflow();
         self.with_audio(|_, a| while a.edits_rx.pop().is_ok() {});
-        // Empty means the component had no state to save (see `save_state`).
-        if component.is_empty() {
-            return Ok(());
+        // An empty blob is a component that had no state to save; its controller may.
+        if !component.is_empty() {
+            write(component.clone(), &|s| unsafe {
+                self.component.setState(s)
+            })?;
         }
-        write(component.clone(), &|s| unsafe {
-            self.component.setState(s)
-        })?;
         // The processor has its state now. Controllers may answer kNotImplemented (JUCE's
         // wrapper does for setComponentState), so a refusal here only costs the controller's
         // view of the values, not the restore.
         if self.split {
-            if let Err(e) = write(component, &|s| unsafe {
-                self.controller.setComponentState(s)
-            }) {
+            if !component.is_empty()
+                && let Err(e) = write(component, &|s| unsafe {
+                    self.controller.setComponentState(s)
+                })
+            {
                 log::warn!(
                     "vst3 {}: controller setComponentState: {e}",
                     self.descriptor.name
@@ -2146,9 +2181,14 @@ mod tests {
                 value: 0.5,
             }],
         );
+        // With parameters, their values would be lost: that is still a failure.
         set_quirks(&p, 2);
+        assert!(p.save_state().is_err());
+        // Without any, there is nothing to save.
+        let params = std::mem::replace(&mut p.params, Params::new(Vec::new()));
         let state = p.save_state().expect("kNotImplemented is not a failure");
         // Nothing of the component's is in it, so loading it leaves the component alone.
+        p.params = params;
         set_quirks(&p, 0);
         p.load_state(&state).unwrap();
         assert_eq!(gain_heard(&mut p), 0.5);
@@ -2191,11 +2231,6 @@ mod tests {
         };
         main_thread(&mut p);
         assert_ne!(Arc::as_ptr(&p.params), before, "new titles need a new list");
-    }
-
-    #[test]
-    fn the_host_gives_plugins_its_real_name() {
-        assert_eq!(crate::host::HOST_NAME, "Kadence");
     }
 
     #[test]

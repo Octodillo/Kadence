@@ -672,8 +672,8 @@ impl Audio {
                     let bytes = &bytes[..len];
                     if !self.push_midi(i, f.saturating_sub(seg_start), bytes) {
                         // The atom input is full: run what it holds up to this
-                        // event (at least one frame), which empties it. Only an
-                        // overflow at the very last frame still loses events.
+                        // event (at least one frame), which empties it.
+                        // `seg_start < end` here, so `at <= end`.
                         let at = f.max(seg_start + 1);
                         self.run_segment(
                             ctx.audio_in,
@@ -683,6 +683,14 @@ impl Audio {
                             at,
                         );
                         seg_start = at;
+                        if at == end {
+                            // No frame of this range is left to run it in: this
+                            // event and the rest wait for the next range. At the
+                            // end of the block they are lost, as more arrived
+                            // for one frame than the plugin's input holds.
+                            next -= 1;
+                            break;
+                        }
                         self.push_midi(i, 0, bytes);
                     }
                     last_midi = Some(f);
@@ -763,7 +771,7 @@ impl Node for Lv2Instance {
             // Wrong pitch and timing can be heard and undone; settings
             // replaced by defaults would be saved with the project.
             log::error!(
-                "{}: stays at {} Hz, as moving it to {sample_rate} Hz would lose its state: {e}",
+                "{}: stays at {} Hz, could not be moved to {sample_rate} Hz with its state: {e}",
                 self.descriptor.id,
                 self.sample_rate
             );
@@ -872,15 +880,18 @@ impl PluginInstance for Lv2Instance {
             handle,
             extension_data,
         };
+        // Before the UI exists: the audio thread plays on meanwhile, and what the plugin
+        // answers to a request the UI makes while it is being built must be kept for it.
+        self.published.ui_active.store(true, Ordering::Relaxed);
         match ui::Editor::open(info, host, ends) {
             Ok(editor) => {
                 self.editor = Some(editor);
-                self.published.ui_active.store(true, Ordering::Relaxed);
                 // Give the UI every current value right away.
                 self.on_main_thread();
                 Ok(())
             }
             Err((e, ends)) => {
+                self.published.ui_active.store(false, Ordering::Relaxed);
                 self.ui_ends = ends;
                 Err(e)
             }
@@ -911,7 +922,12 @@ impl PluginInstance for Lv2Instance {
     }
 
     fn join(&mut self, processor: Box<dyn PluginProcessor>) {
-        self.audio.take_back(processor);
+        if !self.audio.take_back(processor) {
+            log::warn!(
+                "{}: asked to join a processor that is not its own",
+                self.descriptor.id
+            );
+        }
     }
 
     fn take_state_changed(&mut self) -> bool {
@@ -1049,23 +1065,20 @@ mod tests {
     /// test) where the bundle is not installed and not required.
     fn installed(bundle: &str, id: &str) -> Option<Lv2Instance> {
         let format = crate::Lv2Format::new();
-        let Some(dir) = format
+        let found = format
             .default_search_paths()
             .into_iter()
             .find(|d| d.join(bundle).is_dir())
-        else {
+            .and_then(|dir| format.scan(&dir.join(bundle)).ok())
+            .and_then(|plugins| plugins.into_iter().find(|d| d.id == id));
+        let Some(d) = found else {
             assert!(
                 std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
-                "{bundle} must be installed"
+                "{id} of {bundle} must be installed"
             );
-            eprintln!("skipped: {bundle} not installed");
+            eprintln!("skipped: {id} of {bundle} not installed");
             return None;
         };
-        let d = format
-            .scan(&dir.join(bundle))
-            .ok()?
-            .into_iter()
-            .find(|d| d.id == id)?;
         Some(format.instantiate_lv2(&d, 48_000.0).unwrap())
     }
 
@@ -1143,6 +1156,36 @@ mod tests {
         assert_eq!(p.param_value(fb), 0.25);
         // An edit not yet reported to the host survives the move.
         assert!(p.take_state_changed());
+    }
+
+    /// More MIDI for one frame than the atom input holds, several times over,
+    /// at the last frame of a block and in a block of one frame: there is no
+    /// frame left to run the surplus in, which must cost only those events.
+    #[test]
+    fn a_flood_of_midi_with_no_frame_left_for_it_is_survived() {
+        let id = "http://gareus.org/oss/lv2/midifilter#channelfilter";
+        for (frames, flood) in [(1u32, 1500), (crate::HOST_MAX_BLOCK as u32, 2200)] {
+            let Some(mut p) = installed("midifilter.lv2", id) else {
+                return;
+            };
+            let mut events_in = EventList::with_capacity(flood);
+            for i in 0..flood {
+                let kind = EventKind::Midi([0xb0, 1, (i % 128) as u8]);
+                let frame = frames - 1;
+                events_in.push(Event { frame, kind }).unwrap();
+            }
+            let mut events_out = EventList::with_capacity(4096);
+            p.process(&mut ProcessContext {
+                frames,
+                transport: &TransportState::default(),
+                audio_in: &[],
+                audio_out: &mut [],
+                events_in: &events_in,
+                events_out: &mut events_out,
+            });
+            // What one run of the plugin can take in and give back arrived.
+            assert!(events_out.len() >= 300, "{} events", events_out.len());
+        }
     }
 
     /// More MIDI than the atom input holds is delivered by running the block
