@@ -6,7 +6,6 @@
 //! [`RAMP_INTERVAL`] samples counted from project start. Because the grid is
 //! absolute, a render is identical whatever block size drives it.
 
-use daw_core::event::{Event, EventKind, EventList, ParamId};
 use daw_core::time::SampleTime;
 
 /// Spacing of the value updates inside a linear ramp, in samples.
@@ -92,58 +91,56 @@ impl AutomationLane {
         )
     }
 
-    /// Pushes events for the block starting at `start` that is `frames` long:
-    /// the current value at frame 0, then every change inside the block.
-    /// Stops once `out` holds `limit` events. RT-safe; events that don't fit
-    /// are dropped.
-    pub(crate) fn emit(
-        &self,
-        param: ParamId,
-        start: i64,
-        frames: usize,
-        out: &mut EventList,
-        limit: usize,
-    ) {
-        let Some(mut seg) = self.segment(start) else {
-            return;
-        };
-        let end = start + frames as i64;
-        let push = |out: &mut EventList, t: i64, value: f64| {
-            if out.len() >= limit {
-                return;
-            }
-            let kind = EventKind::ParamValue { param, value };
-            let _ = out.push(Event {
-                frame: (t - start) as u32,
-                kind,
-            });
-        };
-        push(out, start, self.value_in(seg, start));
-        loop {
-            let p = &self.points[seg];
-            let next = self.points.get(seg + 1);
-            // Grid updates inside a ramp, after `start` and before the next point.
-            if let (Curve::Linear, Some(n)) = (p.curve, next) {
-                let from = (start + 1).max(p.time.0 + 1);
-                let mut t = from.div_euclid(RAMP_INTERVAL) * RAMP_INTERVAL;
-                if t < from {
-                    t += RAMP_INTERVAL;
-                }
-                while t < end.min(n.time.0) {
-                    push(out, t, interpolate(p, n, t));
-                    t += RAMP_INTERVAL;
-                }
-            }
-            match next {
-                Some(n) if n.time.0 < end => {
-                    if n.time.0 > start {
-                        push(out, n.time.0, n.value);
-                    }
-                    seg += 1;
-                }
-                _ => break,
-            }
+    /// Every change of value after `start` and before `start + frames`, in
+    /// time order: the grid updates inside ramps and the points themselves.
+    /// With [`value_at`](Self::value_at) for `start` this is all a node
+    /// needs to follow the lane through the block. RT-safe.
+    pub(crate) fn changes(&self, start: i64, frames: usize) -> Changes<'_> {
+        let seg = self.segment(start).unwrap_or(0);
+        let from = self.points.get(seg).map_or(start, |p| p.time.0.max(start));
+        Changes {
+            points: &self.points,
+            seg,
+            end: start + frames as i64,
+            grid: next_grid(from),
         }
+    }
+}
+
+/// The first time on the ramp grid after `t`.
+pub(crate) fn next_grid(t: i64) -> i64 {
+    (t.div_euclid(RAMP_INTERVAL) + 1) * RAMP_INTERVAL
+}
+
+/// See [`AutomationLane::changes`].
+pub(crate) struct Changes<'a> {
+    points: &'a [AutomationPoint],
+    /// The point whose segment is being walked.
+    seg: usize,
+    end: i64,
+    /// The next grid time in the segment, if it is a ramp.
+    grid: i64,
+}
+
+impl Iterator for Changes<'_> {
+    type Item = (i64, f64);
+
+    fn next(&mut self) -> Option<(i64, f64)> {
+        let p = self.points.get(self.seg)?;
+        // After the last point nothing changes any more.
+        let next = self.points.get(self.seg + 1)?;
+        if p.curve == Curve::Linear && self.grid < self.end.min(next.time.0) {
+            let t = self.grid;
+            self.grid += RAMP_INTERVAL;
+            return Some((t, interpolate(p, next, t)));
+        }
+        if next.time.0 >= self.end {
+            return None;
+        }
+        // Every point after the first segment lies after `start`.
+        self.seg += 1;
+        self.grid = next_grid(next.time.0);
+        Some((next.time.0, next.value))
     }
 }
 
@@ -298,14 +295,13 @@ mod tests {
         }
     }
 
-    fn events(lane: &AutomationLane, start: i64, frames: usize) -> Vec<(u32, f64)> {
-        let mut out = EventList::with_capacity(256);
-        lane.emit(7, start, frames, &mut out, usize::MAX);
-        out.iter()
-            .map(|e| match e.kind {
-                EventKind::ParamValue { param: 7, value } => (e.frame, value),
-                k => panic!("unexpected {k:?}"),
-            })
+    /// What a node is sent for the block: frame and value.
+    fn events(lane: &AutomationLane, start: i64, frames: usize) -> Vec<(i64, f64)> {
+        let first = lane.value_at(SampleTime(start)).map(|v| (start, v));
+        first
+            .into_iter()
+            .chain(lane.changes(start, frames))
+            .map(|(t, v)| (t - start, v))
             .collect()
     }
 

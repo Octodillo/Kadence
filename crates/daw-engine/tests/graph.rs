@@ -192,17 +192,17 @@ fn transport_loops_inside_a_block() {
     ctl.set_graph(g).unwrap();
     ctl.set_loop(Some(LoopRange {
         start: SampleTime(10),
-        end: SampleTime(100),
+        end: SampleTime(500),
     }))
     .unwrap();
     ctl.locate(SampleTime(10)).unwrap();
     ctl.play().unwrap();
 
     let none = EventList::with_capacity(0);
-    let out: Vec<f32> = (0..4).flat_map(|_| run(&mut proc, 64, &none)).collect();
-    let expected: Vec<f32> = (0..256).map(|i| (10 + i % 90) as f32).collect();
+    let out: Vec<f32> = (0..20).flat_map(|_| run(&mut proc, 64, &none)).collect();
+    let expected: Vec<f32> = (0..1280).map(|i| (10 + i % 490) as f32).collect();
     assert_eq!(out, expected);
-    assert_eq!(ctl.position(), SampleTime(10 + 256 % 90));
+    assert_eq!(ctl.position(), SampleTime(10 + 1280 % 490));
     assert!(ctl.is_playing());
 
     ctl.stop().unwrap();
