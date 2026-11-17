@@ -10,6 +10,10 @@ use std::any::Any;
 use crate::event::ParamId;
 use crate::node::{Node, ProcessContext};
 
+mod search;
+
+pub use search::default_search_paths;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PluginFormatKind {
     Clap,
@@ -30,6 +34,33 @@ pub struct PluginDescriptor {
     pub is_instrument: bool,
     /// Main audio (inputs, outputs) channel counts.
     pub ports: (u16, u16),
+}
+
+/// What a scan of one bundle found.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BundleScan {
+    pub plugins: Vec<PluginDescriptor>,
+    /// Plugins the bundle holds that could not be described, each with its name and the reason
+    /// (in English, often the plugin's own words). The host lists them as failures and scans
+    /// the bundle again when asked to retry.
+    #[serde(default)]
+    pub skipped: Vec<String>,
+}
+
+impl BundleScan {
+    /// A scan that described every plugin it found.
+    pub fn complete(plugins: Vec<PluginDescriptor>) -> Self {
+        Self {
+            plugins,
+            skipped: Vec::new(),
+        }
+    }
+
+    /// Adds another scan's findings, for a path that holds several bundles.
+    pub fn merge(&mut self, other: BundleScan) {
+        self.plugins.extend(other.plugins);
+        self.skipped.extend(other.skipped);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -138,11 +169,16 @@ pub trait PluginProcessor: Send {
 /// to instantiate one.
 pub trait PluginFormat: Send + Sync {
     fn kind(&self) -> PluginFormatKind;
-    fn default_search_paths(&self) -> Vec<PathBuf>;
+    /// Where this format's bundles are installed: the standard locations of its kind (see
+    /// [`default_search_paths`]) unless the format has its own.
+    fn default_search_paths(&self) -> Vec<PathBuf> {
+        default_search_paths(&self.kind())
+    }
     /// Describes the plugins at `path`. A bundle that holds no plugins gives an empty list; one
     /// that cannot be loaded (a missing library, no entry point, a factory that fails) gives
-    /// [`PluginError::Load`] saying why, so the host can show the user.
-    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError>;
+    /// [`PluginError::Load`] saying why, so the host can show the user. When only some of a
+    /// bundle's plugins can be described, the rest are named in [`BundleScan::skipped`].
+    fn scan(&self, path: &Path) -> Result<BundleScan, PluginError>;
     /// Called once before the process exits, after every instance of this format is gone.
     /// A format that keeps plugin code loaded (VST3) lets the plugins clean up here.
     fn shutdown(&self) {}

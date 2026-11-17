@@ -13,7 +13,8 @@ use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off};
 use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
-    ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance, PluginProcessor,
+    BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
+    PluginProcessor,
 };
 use vst3::Steinberg::Vst::{
     AudioBusBuffers, AudioBusBuffers__type0, BusDirections_, BusInfo, ControllerNumbers_,
@@ -710,10 +711,10 @@ fn channel_total(channels: &[i32]) -> u16 {
 
 /// Lists the processor classes of one module as descriptors. Classes whose component cannot be
 /// created are left out; when that is every class, the scan fails, naming the first.
-pub fn scan_module(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+pub fn scan_module(path: &Path) -> Result<BundleScan, PluginError> {
     let module = Module::load(path).map_err(PluginError::Load)?;
     let factory_vendor = module.factory_vendor();
-    let mut found = Vec::new();
+    let mut scan = BundleScan::default();
     let mut first_error = None;
     for class in module
         .classes()
@@ -721,21 +722,24 @@ pub fn scan_module(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
         .filter(|c| c.category == AUDIO_EFFECT_CLASS)
     {
         match probe_ports(&module, &class) {
-            Some(ports) => found.push(descriptor_for(path, &class, &factory_vendor, ports)),
+            Some(ports) => {
+                scan.plugins
+                    .push(descriptor_for(path, &class, &factory_vendor, ports));
+            }
             None => {
                 let e = format!(
                     "{}: {} could not be created and initialized",
                     path.display(),
                     class.name
                 );
-                log::warn!("vst3 scan: {e}");
+                scan.skipped.push(e.clone());
                 first_error.get_or_insert(e);
             }
         }
     }
     match first_error {
-        Some(e) if found.is_empty() => Err(PluginError::Load(e)),
-        _ => Ok(found),
+        Some(e) if scan.plugins.is_empty() => Err(PluginError::Load(e)),
+        _ => Ok(scan),
     }
 }
 
@@ -1632,7 +1636,7 @@ mod tests {
         static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
         let bundle = BUNDLE
             .get_or_init(|| crate::test_support::example_bundle("testgain", "TestGain", "unit").0);
-        scan_module(bundle).unwrap().pop().unwrap()
+        scan_module(bundle).unwrap().plugins.pop().unwrap()
     }
 
     fn instance() -> Vst3Instance {

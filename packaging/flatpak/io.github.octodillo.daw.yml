@@ -37,11 +37,8 @@ finish-args:
   - --filesystem=~/.clap:ro
   - --filesystem=~/.lv2:ro
   - --filesystem=~/.vst3:ro
-  # The CLAP and VST3 hosts search these before the standard locations.
-  # LV2_PATH would replace lilv's defaults instead, so it is left unset: the
-  # LV2 host adds /app/extensions/Plugins/lv2 itself inside Flatpak.
-  - --env=CLAP_PATH=/app/extensions/Plugins/clap
-  - --env=VST3_PATH=/app/extensions/Plugins/vst3
+  # No CLAP_PATH, LV2_PATH or VST3_PATH: inside Flatpak the plugin hosts search
+  # /app/extensions/Plugins/<format> themselves, after the standard locations.
 
 # Plugins packaged for Flatpak (org.freedesktop.LinuxAudio.Plugins.*), the
 # same extension point Ardour, Zrythm and Bitwig use.

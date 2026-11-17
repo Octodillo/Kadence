@@ -913,6 +913,7 @@ mod tests {
         let d = format
             .scan(&dir.join("mda.lv2"))
             .ok()?
+            .plugins
             .into_iter()
             .find(|d| d.id == id)?;
         Some(format.instantiate_lv2(&d, 48_000.0).unwrap())

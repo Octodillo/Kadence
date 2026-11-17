@@ -24,7 +24,7 @@ mod test_support;
 use std::path::{Path, PathBuf};
 
 use daw_core::plugin::{
-    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 
 pub use instance::{Vst3Instance, Vst3Processor};
@@ -43,45 +43,33 @@ impl PluginFormat for Vst3Format {
         PluginFormatKind::Vst3
     }
 
-    /// `$VST3_PATH` (colon separated) first, then the locations from the VST 3 spec for Linux.
-    fn default_search_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = std::env::var_os("VST3_PATH")
-            .map(|v| std::env::split_paths(&v).collect())
-            .unwrap_or_default();
-        if let Some(home) = std::env::var_os("HOME") {
-            paths.push(PathBuf::from(home).join(".vst3"));
-        }
-        paths.push("/usr/lib/vst3".into());
-        paths.push("/usr/local/lib/vst3".into());
-        paths
-    }
-
     /// Scans one `.vst3` module, or every module found under a directory.
     ///
     /// This loads plugin code, so the registry runs it in a separate process.
     ///
     /// A module that does not load fails the scan. Under a directory, modules that load still
-    /// count; the scan fails only when every module failed, with the first one's error.
-    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+    /// count and the others are reported as skipped; the scan fails only when every module
+    /// failed, with the first one's error.
+    fn scan(&self, path: &Path) -> Result<BundleScan, PluginError> {
         if is_module(path) {
             return instance::scan_module(path);
         }
-        let mut out = Vec::new();
+        let mut scan = BundleScan::default();
         let mut first_error = None;
         if path.is_dir() {
             for module in find_modules(path) {
                 match instance::scan_module(&module) {
-                    Ok(found) => out.extend(found),
+                    Ok(found) => scan.merge(found),
                     Err(e) => {
-                        log::warn!("vst3 scan: {e}");
+                        scan.skipped.push(load_reason(&e));
                         first_error.get_or_insert(e);
                     }
                 }
             }
         }
         match first_error {
-            Some(e) if out.is_empty() => Err(e),
-            _ => Ok(out),
+            Some(e) if scan.plugins.is_empty() => Err(e),
+            _ => Ok(scan),
         }
     }
 
@@ -105,6 +93,14 @@ impl PluginFormat for Vst3Format {
         let mut instance = Vst3Instance::new(d)?;
         daw_core::node::Node::prepare(&mut instance, sample_rate, max_frames);
         Ok(Box::new(instance))
+    }
+}
+
+/// Why a module did not load, without the error's own prefix: the text already names the module.
+fn load_reason(e: &PluginError) -> String {
+    match e {
+        PluginError::Load(why) => why.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -168,6 +164,6 @@ mod tests {
         }
         // A directory with no modules is just empty.
         let empty = tempfile::tempdir().unwrap();
-        assert!(Vst3Format.scan(empty.path()).unwrap().is_empty());
+        assert!(Vst3Format.scan(empty.path()).unwrap().plugins.is_empty());
     }
 }

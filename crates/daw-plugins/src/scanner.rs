@@ -9,7 +9,7 @@ use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use daw_core::plugin::{PluginDescriptor, PluginError, PluginFormatKind};
+use daw_core::plugin::{BundleScan, PluginError, PluginFormatKind};
 use serde::{Deserialize, Serialize};
 
 use crate::registry::PluginRegistry;
@@ -118,11 +118,7 @@ impl Scanner {
     }
 
     /// Scans one bundle in a child process.
-    pub fn scan(
-        &self,
-        kind: &PluginFormatKind,
-        bundle: &Path,
-    ) -> Result<Vec<PluginDescriptor>, ScanError> {
+    pub fn scan(&self, kind: &PluginFormatKind, bundle: &Path) -> Result<BundleScan, ScanError> {
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
@@ -211,17 +207,17 @@ struct LoadFailure {
     load_failed: String,
 }
 
-/// What the scanner writes: the descriptors, or why the bundle did not load.
+/// What the scanner writes: what it found, or why the bundle did not load.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ScanOutput {
-    Found(Vec<PluginDescriptor>),
+    Found(BundleScan),
     Failed(LoadFailure),
 }
 
 /// The child side of a scan. If `args` (without the program name) are
-/// `--scan <format> <bundle>`, scans the bundle with `registry`'s format, prints the descriptors
-/// as JSON to stdout and returns `Some` exit code. A bundle that does not load prints
+/// `--scan <format> <bundle>`, scans the bundle with `registry`'s format, prints the
+/// [`BundleScan`] as JSON to stdout and returns `Some` exit code. A bundle that does not load prints
 /// `{"load_failed": <reason>}` instead and exits with code 65. Otherwise returns `None`, so an application
 /// can call this first thing in `main` and carry on normally when it is not a scan.
 pub fn run_scan_child(
@@ -249,7 +245,7 @@ pub fn run_scan_child(
     };
     let (json, code) = match format.scan(Path::new(bundle)) {
         Ok(found) => (
-            serde_json::to_vec(&found).expect("descriptors serialize"),
+            serde_json::to_vec(&found).expect("a scan serializes"),
             ExitCode::SUCCESS,
         ),
         Err(e) => {
