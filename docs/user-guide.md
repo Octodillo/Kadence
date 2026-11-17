@@ -74,6 +74,10 @@ audio it uses, so it can be copied or backed up as one. **New Project**
 - While a project has unsaved changes, Kadence keeps a recovery copy (you
   can turn this off in **General** settings). After a crash, Kadence offers
   to **Recover** it the next time you open the project.
+- Audio recorded before a project's first save is kept with its recovery
+  copy and moves into the project folder when you save. If Kadence crashes
+  before there is a recovery copy, the recordings are kept in
+  `~/.local/share/kadence/recordings`.
 - If audio files were moved, **Find Missing Audio Files…** relinks them.
   **Collect Audio Files** copies audio from outside the project folder into
   it. Only files that open as audio are copied.

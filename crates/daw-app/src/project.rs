@@ -943,51 +943,31 @@ impl qobject::Project {
             .map_or(0.0, |d| d.as_millis() as f64)
     }
 
-    /// Takes candidate `index` off the list.
-    fn take_candidate(self: Pin<&mut Self>, index: i32) -> Option<Candidate> {
-        let i = usize::try_from(index).ok()?;
-        let mut c = None;
-        self.edit(|s| c = s.take_recovery(i));
-        c
-    }
-
     fn recover_session(mut self: Pin<&mut Self>, index: i32) -> QMap<QMapPair_QString_QVariant> {
-        let Some(c) = self.as_mut().take_candidate(index) else {
+        let Ok(index) = usize::try_from(index) else {
             return QMap::default();
         };
-        match &c.bundle {
-            Some(root) => self.open_with(root, AppState::recover),
-            None => {
-                let mut result = None;
-                self.as_mut().edit(|s| {
-                    if let Err(e) = s.recover_untitled(&c) {
-                        result = Some(e.fields());
-                    }
-                });
-                message_or_empty(result.as_ref())
+        let mut result = None;
+        self.as_mut().edit(|s| {
+            if let Err(e) = s.recover_offered(index) {
+                result = Some(e.fields());
             }
-        }
+        });
+        // Recheck the files on disk even for the same document.
+        self.as_mut().rust_mut().files_seen = None;
+        self.refresh_files();
+        message_or_empty(result.as_ref())
     }
 
-    fn discard_session(mut self: Pin<&mut Self>, index: i32) {
-        let Some(c) = self.as_mut().take_candidate(index) else {
+    fn discard_session(self: Pin<&mut Self>, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
             return;
         };
-        // Another Kadence may have recovered it since it was offered.
-        if let Some(root) = c.bundle.as_ref().filter(|r| crate::recovery::is_locked(r)) {
-            let root = root.clone();
-            self.edit(|s| s.report(Message::AlreadyOpen(root)));
-            return;
-        }
-        if let Err(e) = c.discard() {
-            let path = c.autosave.clone();
-            self.edit(|s| {
-                s.report(Message::File(
-                    Context::Recover,
-                    daw_model::FormatError::Io { path, source: e },
-                ));
-            });
-        }
+        self.edit(|s| {
+            if let Err(e) = s.discard_offered(index) {
+                s.report(e);
+            }
+        });
     }
 
     fn missing_entry(&self, index: i32) -> Option<&daw_model::files::AudioFile> {
@@ -1054,7 +1034,6 @@ impl qobject::Project {
             if let Err(e) = s.save_as(&dir) {
                 result = Some(Message::File(Context::Save, e).fields());
             }
-            s.resync();
         });
         // Files now resolve against the bundle, and may be outside it.
         self.as_mut().rust_mut().files_seen = None;
