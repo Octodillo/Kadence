@@ -88,14 +88,6 @@ impl Snap {
         }
     }
 
-    /// The grid line at or before `t`.
-    pub fn floor(&self, t: TickTime, px_per_tick: f64, meter: &Meter) -> TickTime {
-        match self.grid(px_per_tick) {
-            Some(g) => g.floor(t, meter),
-            None => t,
-        }
-    }
-
     /// One grid step after `t` (for nudging); a beat with snapping off.
     pub fn next(&self, t: TickTime, px_per_tick: f64, meter: &Meter) -> TickTime {
         match self.grid(px_per_tick) {

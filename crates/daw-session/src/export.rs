@@ -355,6 +355,8 @@ impl ExportJob {
             std::thread::Builder::new()
                 .name("daw-export".into())
                 .spawn(move || {
+                    // As on the audio thread, so an export sounds and costs the same.
+                    daw_core::denormals::flush_to_zero();
                     let loader = loader.and_then(|make| make());
                     export(&snapshot, root, loader, &path, &settings, &progress)
                 })?

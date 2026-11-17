@@ -105,7 +105,8 @@ pub enum SessionError {
 /// language; [`Display`](std::fmt::Display) is English, for logs.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Warning {
-    /// A built-in device refused its saved state; it runs with defaults.
+    /// A device refused its saved state; it runs with its defaults. A plugin's refused
+    /// state stays in the project until the plugin takes another or is changed in its editor.
     #[error("{device}: {detail}")]
     DeviceStateRejected { device: String, detail: String },
     /// The project names a built-in device this build does not have.
@@ -129,8 +130,10 @@ pub enum Warning {
     /// is reloaded.
     #[error("plugin {plugin} of {device} crashed; it is bypassed")]
     PluginCrashed { device: String, plugin: String },
-    /// A plugin would not hand over its state, so the project keeps the
-    /// one it had. `detail` is the plugin's or the format's own message.
+    /// A plugin would not hand over its state (or take back the one it
+    /// handed over before audio restarted or its device was removed), so
+    /// the project keeps the one it had and what was changed in the plugin
+    /// since is lost. `detail` is the plugin's or the format's own message.
     #[error("{device} did not save its plugin state ({detail})")]
     PluginStateNotSaved { device: String, detail: String },
     /// A plugin's own editor would not open. `detail` is the plugin's or
@@ -518,6 +521,11 @@ impl Session {
         self.send_params(snapshot)?;
         self.send_clips(snapshot, tempo_changed);
         self.apply_inputs(snapshot);
+        // Plugin state that was lost, first: said once, and only by a sync
+        // whose warnings are shown.
+        let mut warnings = std::mem::take(&mut self.plugins.unsaved);
+        warnings.append(&mut self.warnings);
+        self.warnings = warnings;
         Ok(())
     }
 
@@ -554,7 +562,10 @@ impl Session {
             // editor is no report of its own: the state then also holds what the host set
             // (parameters, automation), which is no change of the plugin's.
             let was_open = std::mem::replace(&mut l.editor_open, open);
+            let changed = !std::mem::take(&mut l.ignore_report) && changed;
             if changed && (was_open || open) && !l.crashed {
+                // The user's work from here on, whatever state it started from.
+                l.given = plugins::Given::Taken;
                 state_changed.push(device);
             }
             let crashed = l.monitor.as_ref().is_some_and(|m| m.is_crashed());
@@ -564,12 +575,31 @@ impl Session {
                 // Back from a reload: it missed what was sent to the bypass meanwhile.
                 l.fresh = !crashed;
                 if crashed {
+                    l.host_lost();
                     news.push(Warning::PluginCrashed {
                         device: l.name.clone(),
                         plugin: plugin_id(&l.source),
                     });
                 }
             }
+        }
+        // States a plugin could not be asked about before (busy, or its host
+        // down): now that it runs, it takes or refuses them.
+        let due: Vec<(DeviceId, daw_model::StateBlob)> = self
+            .plugins
+            .slots
+            .iter()
+            .filter_map(|(&device, slot)| match slot {
+                plugins::Slot::Live(l) => Some((device, l.due()?)),
+                plugins::Slot::Failed { .. } => None,
+            })
+            .collect();
+        for (device, state) in due {
+            if let Some(refusal) = self.give_plugin_state(device, state) {
+                news.push(refusal);
+            }
+            // The state set the plugin's parameters: the document's go on top.
+            rebuild = true;
         }
         let mut error = None;
         if rebuild && let Some(snapshot) = self.last.clone() {
@@ -736,7 +766,8 @@ impl Session {
     }
 
     /// Saves one device's plugin state, if it differs from the document's, for the app to
-    /// record as an edit (`SetDevice` with `DeviceField::State`). Like
+    /// record as an edit (`SetDevice` with `DeviceField::State`). Nothing for a plugin that
+    /// refused the document's state: what it holds instead is not the user's work. Like
     /// [`plugin_states`](Self::plugin_states), the plugin is not given the state back when
     /// the document comes back with it.
     pub fn plugin_state(
@@ -755,7 +786,9 @@ impl Session {
     /// from the document's, for the app to store (`DeviceField::State`)
     /// before saving the document (`Document::store_plugin_state`). Once
     /// stored and synced, they count as the document's, and are not loaded
-    /// back into the plugin. Only devices of the last synced snapshot.
+    /// back into the plugin. Only devices of the last synced snapshot, and
+    /// not those whose plugin refused the document's state: what such a
+    /// plugin holds instead (its defaults) must not replace it.
     pub fn plugin_states(&mut self) -> Vec<PluginState> {
         let Some(snapshot) = &self.last else {
             return Vec::new();
@@ -803,37 +836,52 @@ impl Session {
             let own = l.saved.is_some() && same(&l.saved);
             l.saved = None;
             l.state = d.state.clone();
+            if own {
+                continue;
+            }
             // A state taken away (undone back to none) leaves the plugin as it is: there is
-            // nothing to go back to.
-            let Some(state) = d.state.as_ref().filter(|_| !own) else {
+            // nothing to go back to, and nothing of the document's to protect.
+            let Some(state) = d.state.clone() else {
+                l.given = plugins::Given::Taken;
                 continue;
             };
-            // A crashed sandbox keeps the state for its reload.
-            match l.handle.with(|p| p.load_state(&state.0)) {
-                Ok(()) => {
-                    // The state set the plugin's parameters; the document's go on top
-                    // again, as when it loads, and again after a rebuild in case the
-                    // load changed its ports and the values went to a retired node.
-                    l.fresh = true;
-                    let key = build::device_key(d.id);
-                    if let Some(b) = &mut self.built {
-                        b.params.retain(|(k, _), _| *k != key);
-                        // The loaded state is what a lane now goes back to.
-                        b.restore.retain(|(k, _), _| *k != key);
-                        for (&(_, p), v) in b.rest.iter_mut().filter(|((k, _), _)| *k == key) {
-                            let now = l.handle.with(|i| i.param_value(p));
-                            if now.is_finite() {
-                                *v = now;
-                            }
-                        }
-                    }
-                }
-                Err(e) => self.warnings.push(Warning::DeviceStateRejected {
-                    device: d.name.clone(),
-                    detail: e.to_string(),
-                }),
+            if let Some(refusal) = self.give_plugin_state(d.id, state) {
+                self.warnings.push(refusal);
             }
         }
+    }
+
+    /// Loads `state` into a device's plugin, returning the warning if the plugin refuses
+    /// it. A plugin that cannot be asked now is offered it again by [`tick`](Self::tick).
+    fn give_plugin_state(
+        &mut self,
+        device: DeviceId,
+        state: daw_model::StateBlob,
+    ) -> Option<Warning> {
+        let l = self.plugins.live_mut(device)?;
+        if let Err(e) = l.give(state) {
+            return Some(Warning::DeviceStateRejected {
+                device: l.label(),
+                detail: e.to_string(),
+            });
+        }
+        // The state set the plugin's parameters; the document's go on top again, as when
+        // it loads, and again after a rebuild in case the load changed its ports and the
+        // values went to a retired node.
+        l.fresh = true;
+        let key = build::device_key(device);
+        if let Some(b) = &mut self.built {
+            b.params.retain(|(k, _), _| *k != key);
+            // The loaded state is what a lane now goes back to.
+            b.restore.retain(|(k, _), _| *k != key);
+            for (&(_, p), v) in b.rest.iter_mut().filter(|((k, _), _)| *k == key) {
+                let now = l.handle.with(|i| i.param_value(p));
+                if now.is_finite() {
+                    *v = now;
+                }
+            }
+        }
+        None
     }
 
     /// Gives every input tap its track's channels and works out which

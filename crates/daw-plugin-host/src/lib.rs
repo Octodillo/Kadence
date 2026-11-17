@@ -10,7 +10,8 @@
 //!   the host processes on its own audio thread.
 //! - A plugin whose main thread waits on the user in its own editor (a modal file dialog, say)
 //!   is busy, not hung: calls give up on it with [`PluginError::Busy`] and leave it running.
-//! - A watchdog thread notices when the host exits or an audio cycle stalls. The instance then
+//! - One supervisor thread for all hosts notices when a host exits or an audio cycle stalls,
+//!   and a host is killed together with any helper process it started. The instance then
 //!   outputs silence, its [`SandboxMonitor`] reports [`SandboxStatus::Crashed`], and the
 //!   [`SandboxConfig::on_crash`] hook is called, so the UI can offer a reload.
 //! - [`SandboxedInstance::reload`] (or [`SandboxMonitor::request_reload`], performed on the next
@@ -28,6 +29,12 @@ mod control;
 mod format;
 mod protocol;
 mod shm;
+mod supervisor;
+
+/// Locks a mutex whose data stays usable after a panic elsewhere.
+fn locked<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 pub use child::{HOST_ARG, run_host_child};
 pub use client::{
