@@ -282,6 +282,10 @@ impl Document {
 /// a file of the same name is already there, since clips may use it. Returns
 /// the files it made. On failure it removes them again, so a retry into the
 /// same folder isn't refused over a half-finished copy.
+///
+/// A symbolic link is made again as a link to the same file, never copied
+/// as the file's content: a bundle from someone else can hold a link to any
+/// file on this machine, and the copy may be shared back.
 fn copy_dir_files(from: &Path, to: &Path) -> Result<Vec<PathBuf>, FormatError> {
     if !from.is_dir() {
         return Ok(Vec::new());
@@ -289,28 +293,51 @@ fn copy_dir_files(from: &Path, to: &Path) -> Result<Vec<PathBuf>, FormatError> {
     std::fs::create_dir_all(to).map_err(FormatError::io(to))?;
     let mut copies = Vec::new();
     for entry in std::fs::read_dir(from).map_err(FormatError::io(from))? {
-        let path = entry.map_err(FormatError::io(from))?.path();
-        if path.is_file() {
-            let dest = to.join(path.file_name().expect("files have names"));
-            if dest.exists() {
+        let entry = entry.map_err(FormatError::io(from))?;
+        let path = entry.path();
+        // Of the entry itself: a link is not followed.
+        let kind = entry.file_type().map_err(FormatError::io(&path))?;
+        if kind.is_file() || kind.is_symlink() {
+            let dest = to.join(entry.file_name());
+            if dest.symlink_metadata().is_ok() {
                 return Err(FormatError::io(dest)(
                     std::io::ErrorKind::AlreadyExists.into(),
                 ));
             }
-            copies.push((path, dest));
+            copies.push((path, dest, kind.is_symlink()));
         }
     }
     let mut made = Vec::with_capacity(copies.len());
-    for (path, dest) in copies {
+    for (path, dest, is_link) in copies {
         // Pushed first: a failed copy can leave part of the file behind.
         made.push(dest);
         let dest = made.last().expect("just pushed");
-        if let Err(e) = std::fs::copy(&path, dest) {
+        let copied = if is_link {
+            link_again(&path, dest)
+        } else {
+            std::fs::copy(&path, dest).map(drop)
+        };
+        if let Err(e) = copied {
             remove_files(&made);
             return Err(FormatError::io(dest)(e));
         }
     }
     Ok(made)
+}
+
+/// Makes `dest` a symbolic link to what the link at `path` points to. A
+/// relative target is counted from the folder `path` is in, so the new link
+/// finds the same file from another folder.
+fn link_again(path: &Path, dest: &Path) -> std::io::Result<()> {
+    let target = std::fs::read_link(path)?;
+    let target = match path.parent() {
+        Some(dir) if target.is_relative() => dir.join(target),
+        _ => target,
+    };
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, dest);
+    #[cfg(not(unix))]
+    return std::fs::copy(target, dest).map(drop);
 }
 
 /// Removes files [`copy_dir_files`] made. Each was checked not to exist

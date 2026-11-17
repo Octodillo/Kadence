@@ -98,10 +98,7 @@ pub fn input_focus(state: &AppState) -> Option<TrackId> {
 
 /// Whether any audio or instrument track is armed.
 fn anything_armed(project: &Project) -> bool {
-    project
-        .tracks
-        .iter()
-        .any(|t| t.armed && matches!(t.kind, TrackKind::Audio | TrackKind::Instrument))
+    project.tracks.iter().any(|t| t.armed && t.kind.records())
 }
 
 /// The track to record MIDI on. When anything is armed, the first armed

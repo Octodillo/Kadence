@@ -1045,14 +1045,15 @@ impl AppState {
         Ok(changes.len())
     }
 
-    /// Copies every file clips play from outside the bundle into it.
-    /// Returns how many files were copied.
+    /// Copies every file clips play from outside the bundle into it, if it
+    /// opens as audio. Returns how many files were copied.
     pub fn collect_files(&mut self) -> Result<usize, Message> {
         let bundle = self
             .doc
             .bundle()
             .ok_or(Message::File(Context::Collect, FormatError::NoBundle))?;
-        let Some(collected) = daw_model::files::collect_files(self.doc.project(), bundle)
+        let is_audio = |file: &Path| Decoder::open(file).is_ok();
+        let Some(collected) = daw_model::files::collect_files(self.doc.project(), bundle, is_audio)
             .map_err(|e| Message::File(Context::Collect, e))?
         else {
             return Ok(0);

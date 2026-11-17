@@ -283,7 +283,37 @@ pub(crate) fn check_finite(v: f64, what: &str) -> Result<(), ModelError> {
     }
 }
 
+/// The last tick anything in a project may be at or last for: about 18
+/// years at 120 BPM. A project file can hold any 64-bit number; held to
+/// this, positions and lengths add up, and convert to samples, far inside
+/// an `i64`.
+pub const MAX_TICK: TickTime = TickTime(1 << 40);
+
+/// The furthest into its file an audio clip may start, in samples.
+pub const MAX_AUDIO_OFFSET: SampleTime = SampleTime(1 << 48);
+
+/// Checks `t` is within `0..=`[`MAX_TICK`].
+pub(crate) fn check_tick(t: TickTime, what: &str) -> Result<(), ModelError> {
+    if (0..=MAX_TICK.0).contains(&t.0) {
+        Ok(())
+    } else {
+        Err(invalid(format!("{what} is out of range")))
+    }
+}
+
+/// Checks a length in ticks: positive and no more than [`MAX_TICK`].
+pub(crate) fn check_length(t: TickTime, what: &str) -> Result<(), ModelError> {
+    if t.0 > 0 {
+        check_tick(t, what)
+    } else {
+        Err(invalid(format!("{what} must be positive")))
+    }
+}
+
 pub(crate) fn check_points(points: &[AutomationPoint]) -> Result<(), ModelError> {
+    if points.iter().any(|p| p.tick.0.abs() > MAX_TICK.0) {
+        return Err(invalid("automation point is out of range"));
+    }
     if points.windows(2).any(|w| w[0].tick >= w[1].tick) {
         return Err(invalid(
             "automation points must be strictly increasing in time",
@@ -338,6 +368,14 @@ impl TempoData {
             || self.meters.windows(2).any(|w| w[0].tick >= w[1].tick)
         {
             return bad("tempo and meter points must be strictly increasing");
+        }
+        // Increasing from 0, so the last ones are the furthest.
+        let last = [
+            self.tempos.last().map(|p| p.tick),
+            self.meters.last().map(|m| m.tick),
+        ];
+        if last.into_iter().flatten().any(|t| t > MAX_TICK) {
+            return bad("tempo or meter point is out of range");
         }
         if self
             .tempos
@@ -459,6 +497,11 @@ impl TrackKind {
             (TrackKind::Audio, ClipContent::Audio(_))
                 | (TrackKind::Instrument, ClipContent::Midi(_))
         )
+    }
+
+    /// Whether a track of this kind can be armed and recorded onto.
+    pub fn records(self) -> bool {
+        matches!(self, TrackKind::Audio | TrackKind::Instrument)
     }
 }
 
@@ -615,6 +658,9 @@ impl Track {
         if self.midi_input.channel.is_some_and(|c| c > 15) {
             return bad(format!("track {} MIDI channel out of range", self.id));
         }
+        if self.armed && !self.kind.records() {
+            return bad(format!("track {} can't record", self.id));
+        }
         if !self.clips.is_sorted_by_key(|c| c.start) {
             return bad(format!("clips on track {} are not sorted", self.id));
         }
@@ -687,22 +733,23 @@ pub struct Clip {
 }
 
 impl Clip {
-    /// Checks the clip's own values: positive length, sorted valid notes.
+    /// Checks the clip's own values: a position and a length in range, and
+    /// then a source and sound values for audio, sorted valid notes for
+    /// MIDI.
     pub fn check(&self) -> Result<(), ModelError> {
-        if self.length.0 <= 0 || self.start.0 < 0 {
-            return Err(invalid(
-                "clip must start at or after 0 and have a positive length",
-            ));
-        }
+        check_tick(self.start, "clip start")?;
+        check_length(self.length, "clip length")?;
         match &self.content {
             ClipContent::Audio(a) => {
+                if a.source.as_os_str().is_empty() {
+                    return Err(invalid("audio clip needs a source file"));
+                }
                 check_finite(a.gain_db, "clip gain")?;
-                if a.offset.0 < 0 {
-                    return Err(invalid("audio offset must not be negative"));
+                if !(0..=MAX_AUDIO_OFFSET.0).contains(&a.offset.0) {
+                    return Err(invalid("audio offset is out of range"));
                 }
-                if a.fade_in.length.0 < 0 || a.fade_out.length.0 < 0 {
-                    return Err(invalid("fade length must not be negative"));
-                }
+                check_tick(a.fade_in.length, "fade length")?;
+                check_tick(a.fade_out.length, "fade length")?;
             }
             ClipContent::Midi(m) => {
                 for n in &m.notes {
@@ -860,11 +907,8 @@ impl Note {
         if self.key > 127 || self.channel > 15 {
             return Err(invalid("note key or channel out of range"));
         }
-        if self.length.0 <= 0 || self.start.0 < 0 {
-            return Err(invalid(
-                "note must start at or after 0 and have a positive length",
-            ));
-        }
+        check_tick(self.start, "note start")?;
+        check_length(self.length, "note length")?;
         if !(0.0..=1.0).contains(&self.velocity) {
             return Err(invalid("velocity must be within 0..1"));
         }

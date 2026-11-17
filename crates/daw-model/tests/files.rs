@@ -234,7 +234,7 @@ fn collect_copies_external_files_into_the_bundle() {
     );
     write(&fx.root.join("audio/inside.wav"), b"inside");
 
-    let collected = files::collect_files(doc.project(), doc.bundle().unwrap())
+    let collected = files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true)
         .unwrap()
         .unwrap();
     assert_eq!(collected.copies.len(), 3);
@@ -270,7 +270,7 @@ fn collect_copies_external_files_into_the_bundle() {
 
     // Nothing left outside.
     assert!(
-        files::collect_files(doc.project(), doc.bundle().unwrap())
+        files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true)
             .unwrap()
             .is_none()
     );
@@ -296,7 +296,7 @@ fn failed_collect_removes_the_copies_it_made() {
             // Running as root: permissions don't stop the read.
             return;
         }
-        let err = files::collect_files(doc.project(), doc.bundle().unwrap());
+        let err = files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true);
         assert!(matches!(err, Err(FormatError::Io { .. })));
         let left: Vec<_> = fs::read_dir(fx.root.join("audio")).unwrap().collect();
         assert!(left.is_empty(), "copies left behind: {left:?}");
@@ -333,4 +333,50 @@ fn recovered_document_rewrites_its_own_autosave() {
     assert!(untitled.is_modified());
     // No bundle to autosave into; the app keeps that one itself.
     assert!(!untitled.autosave().unwrap());
+}
+
+#[test]
+fn collect_leaves_out_what_is_not_audio() {
+    let fx = fixture();
+    let kick = fx.outside.join("kick.wav");
+    let secret = fx.outside.join("id_ed25519");
+    write(&kick, b"kick");
+    write(&secret, b"secret");
+    let mut doc = saved(&fx, project_with(&[kick, secret.clone()]));
+    let is_audio = |p: &Path| p.extension().is_some();
+    let collected = files::collect_files(doc.project(), doc.bundle().unwrap(), is_audio)
+        .unwrap()
+        .unwrap();
+    assert_eq!(collected.copies, [fx.root.join("audio/kick.wav")]);
+    doc.execute(collected.command).unwrap();
+    // The clip still names the file; nothing of it is in the bundle.
+    assert_eq!(sources(doc.project())[1], secret);
+    assert!(!fx.root.join("audio/id_ed25519").exists());
+    assert!(
+        files::collect_files(doc.project(), doc.bundle().unwrap(), is_audio)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_as_keeps_a_link_in_the_audio_folder_a_link() {
+    let fx = fixture();
+    let secret = fx.outside.join("id_ed25519");
+    write(&secret, b"secret");
+    let mut doc = saved(&fx, project_with(&["audio/tone.wav".into()]));
+    write(&fx.root.join("audio/real.wav"), b"real");
+    std::os::unix::fs::symlink(&secret, fx.root.join("audio/tone.wav")).unwrap();
+    std::os::unix::fs::symlink("../../Samples/id_ed25519", fx.root.join("audio/near.wav")).unwrap();
+
+    let new = fx.outside.join("deeper/Copy");
+    doc.save_as(&new).unwrap();
+    assert_eq!(fs::read(new.join("audio/real.wav")).unwrap(), b"real");
+    for name in ["tone.wav", "near.wav"] {
+        let copy = new.join("audio").join(name);
+        // Still a link to the same file, not a copy of what is in it.
+        assert!(copy.symlink_metadata().unwrap().is_symlink(), "{name}");
+        assert_eq!(fs::read(&copy).unwrap(), b"secret", "{name}");
+    }
 }

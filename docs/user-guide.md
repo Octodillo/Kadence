@@ -76,7 +76,7 @@ audio it uses, so it can be copied or backed up as one. **New Project**
   to **Recover** it the next time you open the project.
 - If audio files were moved, **Find Missing Audio Files…** relinks them.
   **Collect Audio Files** copies audio from outside the project folder into
-  it.
+  it. Only files that open as audio are copied.
 
 Every edit can be undone with Ctrl+Z and redone with Ctrl+Shift+Z.
 
