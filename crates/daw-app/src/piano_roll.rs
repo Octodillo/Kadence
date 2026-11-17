@@ -10,7 +10,7 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QString};
+use cxx_qt_lib::{QColor, QList, QString, QVariant};
 use daw_midi::edit::{Quantize, QuantizeEnds};
 use daw_pianoroll::Accidentals;
 
@@ -18,6 +18,8 @@ use crate::automation_bridge::{shape, shape_index};
 use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
 use crate::session_mixer::strip_row;
 use crate::state;
+use crate::tracks::LaneRow;
+use crate::tracks_bridge::lane_list;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -30,6 +32,8 @@ pub mod qobject {
         type QColor = cxx_qt_lib::QColor;
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qlist.h");
+        type QList_QVariant = cxx_qt_lib::QList<cxx_qt_lib::QVariant>;
     }
 
     #[auto_cxx_name]
@@ -58,6 +62,9 @@ pub mod qobject {
         #[qproperty(f64, lanes_height)]
         #[qproperty(i32, track_index)]
         #[qproperty(i32, lane_count)]
+        /// Those lanes as the `lanes` role of `Tracks` describes them, for
+        /// their labels.
+        #[qproperty(QList_QVariant, lanes)]
         /// Scroll offsets and content size, for the scroll bars.
         #[qproperty(f64, scroll_x)]
         #[qproperty(f64, scroll_y)]
@@ -131,10 +138,11 @@ pub mod qobject {
         fn select_all(self: Pin<&mut PianoRoll>);
         #[qinvokable]
         fn zoom(self: Pin<&mut PianoRoll>, factor: f64);
-        /// The selected automation points' shape (see
-        /// `Automation.pointShape`), or -1.
+        /// The selected automation points' shape, an
+        /// `Automation.PointShape`, or -1.
         #[qinvokable]
         fn point_shape(self: &PianoRoll) -> i32;
+        /// Gives the selected automation points an `Automation.PointShape`.
         #[qinvokable]
         fn set_point_shape(self: Pin<&mut PianoRoll>, shape: i32);
         /// Deletes the selected automation points (never notes).
@@ -179,6 +187,9 @@ pub struct PianoRollRust {
     lanes_height: f64,
     track_index: i32,
     lane_count: i32,
+    lanes: QList<QVariant>,
+    /// What `lanes` was made from.
+    lane_rows: Vec<LaneRow>,
     scroll_x: f64,
     scroll_y: f64,
     content_height: f64,
@@ -213,6 +224,8 @@ impl Default for PianoRollRust {
             lanes_height: 0.0,
             track_index: -1,
             lane_count: 0,
+            lanes: QList::default(),
+            lane_rows: Vec::new(),
             scroll_x: 0.0,
             scroll_y: 0.0,
             content_height: 0.0,
@@ -264,6 +277,7 @@ impl qobject::PianoRoll {
             lanes_height: f64,
             track_index: i32,
             lane_count: i32,
+            lanes: Vec<LaneRow>,
         }
         let (w, h) = (self.width(), self.height());
         let palette = paint::theme_palette!(self);
@@ -303,6 +317,10 @@ impl qobject::PianoRoll {
                 lanes_height: p.lanes_height(),
                 track_index: p.track_row(project).map_or(-1, |i| i as i32),
                 lane_count: p.lane_count() as i32,
+                lanes: p
+                    .track_row(project)
+                    .map(|row| s.lane_rows(row))
+                    .unwrap_or_default(),
             };
             (scene, shown)
         });
@@ -319,6 +337,10 @@ impl qobject::PianoRoll {
         self.as_mut().set_lanes_height(shown.lanes_height);
         self.as_mut().set_track_index(shown.track_index);
         self.as_mut().set_lane_count(shown.lane_count);
+        if shown.lanes != self.lane_rows {
+            self.as_mut().set_lanes(lane_list(&shown.lanes));
+            self.as_mut().rust_mut().lane_rows = shown.lanes;
+        }
         self.update();
     }
 

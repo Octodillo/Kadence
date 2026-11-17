@@ -2,7 +2,7 @@
 //! the app's [`InstrumentChoices`](crate::instrument::InstrumentChoices).
 //!
 //! The instrument menus on the track header and the channel strip show its
-//! rows and pass a row to `Project.setTrackInstrument` or
+//! rows and pass a row to `Tracks.setInstrument` or
 //! `Mixer.setInstrument`. Call `refresh` before showing it: plugin
 //! instruments join the list as plugins are scanned.
 

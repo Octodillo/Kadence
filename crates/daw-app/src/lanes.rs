@@ -22,27 +22,17 @@ use crate::state::AppState;
 /// What a lane automates, as the header words it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LaneKind {
-    Volume = 0,
-    Pan = 1,
-    Send = 2,
-    DeviceParam = 3,
+    Volume,
+    Pan,
+    Send,
+    DeviceParam,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LaneMode {
-    Off = 0,
-    Read = 1,
-    Write = 2,
-}
-
-impl LaneMode {
-    pub fn from_index(i: i32) -> Self {
-        match i {
-            0 => Self::Off,
-            2 => Self::Write,
-            _ => Self::Read,
-        }
-    }
+    Off,
+    Read,
+    Write,
 }
 
 /// A target's name in parts: the kind, the send's target track or the
