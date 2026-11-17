@@ -11,8 +11,8 @@ use daw_core::queue::{Consumer, Producer, spsc};
 use crate::cycle::{PortBuffers, push_or_count};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback, midi,
+    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendHealth, BackendStats, Latency,
+    PortDirection, PortFilter, PortInfo, PortKind, ProcessCallback, midi,
 };
 use crate::{MAX_MIDI_INPUTS, MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
@@ -86,16 +86,43 @@ struct World {
     connections: BTreeSet<(String, String)>,
 }
 
+/// Failures a test asked the pretend system for. The worker reads them
+/// between cycles.
+#[derive(Debug, Default)]
+struct Faults {
+    server_gone: AtomicBool,
+    callback_panic: AtomicBool,
+}
+
 /// The pretend system around a [`DummyBackend`]: other clients' ports, to
-/// add and remove the way devices are plugged in and out.
+/// add and remove the way devices are plugged in and out, and the failures
+/// of a real audio system, to bring about on demand.
 #[derive(Clone, Debug)]
-pub struct DummySystem(Arc<Mutex<World>>);
+pub struct DummySystem {
+    world: Arc<Mutex<World>>,
+    faults: Arc<Faults>,
+}
 
 impl DummySystem {
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
-        self.0
+        self.world
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The pretend server shuts down, as when `jackd` exits or PipeWire
+    /// restarts: a running backend ends its cycles before the next one and
+    /// reports [`BackendHealth::ServerGone`], and so does every later
+    /// `start`, until the backend is closed and opened again.
+    pub fn shut_down(&self) {
+        self.faults.server_gone.store(true, Relaxed);
+    }
+
+    /// The next cycle panics in place of calling the process callback, for
+    /// a callback the test cannot reach to make it panic itself. The
+    /// backend then reports [`BackendHealth::CallbackPanicked`].
+    pub fn panic_callback(&self) {
+        self.faults.callback_panic.store(true, Relaxed);
     }
 
     /// Another client's port appears. `name` is the full `client:port`.
@@ -145,6 +172,8 @@ pub struct DummyBackend {
     /// Other clients' ports and every connection, shared with
     /// [`DummySystem`] handles.
     world: Arc<Mutex<World>>,
+    /// Shared with [`DummySystem`] handles and the worker.
+    faults: Arc<Faults>,
     midi_in_rx: Option<Consumer<RawMessage>>,
     midi_out_tx: Option<Producer<RawMessage>>,
     running: Option<Running>,
@@ -175,6 +204,7 @@ impl DummyBackend {
                 others: Self::system_ports(),
                 connections: BTreeSet::new(),
             })),
+            faults: Arc::default(),
             midi_in_rx: None,
             midi_out_tx: None,
             running: None,
@@ -206,10 +236,13 @@ impl DummyBackend {
         v
     }
 
-    /// A handle on the pretend system's other ports, for tests to plug
-    /// devices in and out while the backend is in use elsewhere.
+    /// A handle on the pretend system, for tests to plug devices in and
+    /// out, or make it fail, while the backend is in use elsewhere.
     pub fn system(&self) -> DummySystem {
-        DummySystem(self.world.clone())
+        DummySystem {
+            world: self.world.clone(),
+            faults: self.faults.clone(),
+        }
     }
 
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
@@ -380,6 +413,9 @@ impl AudioBackend for DummyBackend {
         self.shared = Arc::new(SharedStats::new());
         self.shared.sample_rate.store(rate, Relaxed);
         self.shared.buffer_size.store(frames, Relaxed);
+        // A new connection, to a server that is there again.
+        self.faults.server_gone.store(false, Relaxed);
+        self.faults.callback_panic.store(false, Relaxed);
         self.world().connections.clear();
         let (extra, control) = midi_inputs(cfg.midi_capacity);
         self.extra = Some(extra);
@@ -395,9 +431,11 @@ impl AudioBackend for DummyBackend {
         }
         let cfg = self.cfg()?.clone();
         let frames = self.shared.buffer_size.load(Relaxed);
+        self.shared.callback_panicked.store(false, Relaxed);
         let mut worker = Worker {
             cb,
             shared: self.shared.clone(),
+            faults: self.faults.clone(),
             pacing: self.pacing,
             max_cycles: self.max_cycles,
             frames,
@@ -433,6 +471,7 @@ impl AudioBackend for DummyBackend {
                 daw_core::denormals::flush_to_zero();
                 // Catch a panic so `stop` gets the worker, and its queues, back.
                 let panicked = catch_unwind(AssertUnwindSafe(|| worker.run(&stop2))).is_err();
+                worker.shared.callback_panicked.store(panicked, Relaxed);
                 (worker, panicked)
             })
             .map_err(|e| BackendError::Other(e.to_string()))?;
@@ -474,13 +513,14 @@ impl AudioBackend for DummyBackend {
     }
 
     fn close(&mut self) -> Result<(), BackendError> {
-        self.stop()?;
+        // Close even if the run ended badly, then say that it did.
+        let result = self.stop();
         self.cfg = None;
         self.world().connections.clear();
         self.extra = None;
         self.extra_control = None;
         self.extra_tx.iter_mut().for_each(|tx| *tx = None);
-        Ok(())
+        result
     }
 
     fn is_running(&self) -> bool {
@@ -540,6 +580,10 @@ impl AudioBackend for DummyBackend {
 
     fn stats(&self) -> BackendStats {
         self.shared.snapshot()
+    }
+
+    fn health(&self) -> BackendHealth {
+        self.shared.health()
     }
 
     fn add_midi_input(&mut self, name: &str) -> Result<MidiInputPort, BackendError> {
@@ -665,6 +709,7 @@ impl Drop for DummyBackend {
 struct Worker {
     cb: ProcessCallback,
     shared: Arc<SharedStats>,
+    faults: Arc<Faults>,
     pacing: Pacing,
     max_cycles: Option<u64>,
     frames: u32,
@@ -689,6 +734,13 @@ impl Worker {
         let mut deadline = Instant::now() + period;
         let mut cycles = 0u64;
         while !stop.load(Relaxed) && self.max_cycles.is_none_or(|m| cycles < m) {
+            if self.faults.server_gone.load(Relaxed) {
+                shared.server_gone.store(true, Relaxed);
+                break;
+            }
+            if self.faults.callback_panic.swap(false, Relaxed) {
+                panic!("DummySystem::panic_callback");
+            }
             let started = Instant::now();
             crate::rt_guard(&shared, || self.cycle());
             cycles += 1;

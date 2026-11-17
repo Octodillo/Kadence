@@ -2,8 +2,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, DummyBackend, Latency, Pacing, PortDirection,
-    PortFilter, PortKind,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, DummyBackend, Latency, Pacing,
+    PortDirection, PortFilter, PortKind,
 };
 use daw_core::event::{Event, EventKind};
 
@@ -520,6 +520,90 @@ fn other_clients_ports_come_and_go() {
     system.remove_port("keys:out");
     assert!(b.connections().is_empty(), "unplugging drops the link");
     assert!(b.connect("keys:out", &port.name).is_err());
+}
+
+/// Waits for `b` to report `health`, which the audio thread sets.
+fn wait_for_health(b: &DummyBackend, health: BackendHealth) {
+    let end = Instant::now() + WAIT;
+    while b.health() != health {
+        assert!(Instant::now() < end, "health is {:?}", b.health());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn health_reports_a_server_that_went_away() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    let system = b.system();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+    system.shut_down();
+    wait_for_health(&b, BackendHealth::ServerGone);
+    assert!(b.stats().server_gone);
+    // No cycle runs any more, though nobody stopped the backend.
+    let cycles = b.stats().cycles;
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(b.stats().cycles, cycles);
+    assert!(b.is_running());
+    // Stopping and starting does not bring the server back.
+    b.stop().unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    wait_for_health(&b, BackendHealth::ServerGone);
+    assert_eq!(b.stats().cycles, cycles);
+
+    // Reopening connects to a server that is there again.
+    b.close().unwrap();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+}
+
+#[test]
+fn health_reports_a_panicked_callback_until_the_next_start() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| panic!("callback bug"))).unwrap();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    assert!(b.stats().callback_panicked);
+    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
+    assert_eq!(b.health(), BackendHealth::CallbackPanicked);
+
+    // A callback that works clears it; the system can make that one panic.
+    let system = b.system();
+    b.start(Box::new(|_| {})).unwrap();
+    let cycles = b.stats().cycles;
+    assert!(b.wait_for_cycles(cycles + 10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+    system.panic_callback();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
+
+    // A lost server outranks it.
+    system.shut_down();
+    b.start(Box::new(|_| {})).unwrap();
+    wait_for_health(&b, BackendHealth::ServerGone);
+    b.stop().unwrap();
+}
+
+#[test]
+fn close_after_a_panicked_callback_still_closes() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    b.add_midi_input("pads").unwrap();
+    b.start(Box::new(|_| panic!("callback bug"))).unwrap();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    assert!(matches!(b.close(), Err(BackendError::Other(_))));
+    assert!(!b.is_running());
+    assert!(b.midi_inputs().is_empty());
+    assert!(matches!(
+        b.list_ports(&PortFilter::default()),
+        Err(BackendError::NotOpen)
+    ));
+    b.open(cfg(32)).unwrap();
+    b.close().unwrap();
 }
 
 #[test]

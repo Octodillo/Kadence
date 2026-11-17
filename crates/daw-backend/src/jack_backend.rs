@@ -13,8 +13,8 @@ use crate::cycle::{PortBuffers, push_or_count};
 use crate::link_log::{Link, LinkLog, OwnChange};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback, midi,
+    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendHealth, BackendStats, Latency,
+    PortDirection, PortFilter, PortInfo, PortKind, ProcessCallback, midi,
 };
 use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
@@ -654,6 +654,10 @@ impl AudioBackend for JackBackend {
             s.dsp_load = Some(a.as_client().cpu_load());
         }
         s
+    }
+
+    fn health(&self) -> BackendHealth {
+        self.shared.health()
     }
 
     fn latency(&self) -> Latency {

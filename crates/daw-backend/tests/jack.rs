@@ -30,8 +30,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendStats, JackBackend, PortDirection, PortFilter, PortKind,
-    RtAllocCounter,
+    AudioBackend, BackendConfig, BackendHealth, BackendStats, JackBackend, PortDirection,
+    PortFilter, PortKind, RtAllocCounter,
 };
 use daw_core::event::{Event, EventKind};
 
@@ -501,11 +501,13 @@ fn a_panicking_callback_is_contained() {
         }
     }))
     .unwrap();
+    assert_eq!(b.health(), BackendHealth::Ok);
     let out = format!("{me}:audio_out_1");
     wait_visible(&ear, &out);
     ear.connect(&out, &format!("{listener}:audio_in_1"))
         .unwrap();
     wait(&b, |s| s.callback_panicked);
+    assert_eq!(b.health(), BackendHealth::CallbackPanicked);
     // The backend keeps running (silently) and no longer calls the callback.
     let after = b.stats().cycles;
     wait(&b, |s| s.cycles >= after + 2);
@@ -522,6 +524,7 @@ fn a_panicking_callback_is_contained() {
     b.start(Box::new(|_| {})).unwrap();
     wait(&b, |s| s.cycles >= before + 5);
     assert!(!b.stats().callback_panicked);
+    assert_eq!(b.health(), BackendHealth::Ok);
     b.close().unwrap();
 }
 
