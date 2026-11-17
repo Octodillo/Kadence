@@ -621,6 +621,32 @@ fn a_note_cut_short_by_a_retrigger_is_not_chased() {
 }
 
 #[test]
+fn a_note_added_behind_the_play_position_cuts_the_one_it_would_have() {
+    let long = note(0, 1000, 60, 1);
+    let mut rig = Rig::with(vec![long]);
+    assert_eq!(simple(&rig.play(0, 128, &[64])), [(0, 60, true)]);
+    // Played from the start, the short note ends the long one at 50.
+    let edited = Sequence::new(vec![long, note(50, 60, 60, 2)]);
+    rig.handle.set_sequence(edited).unwrap();
+    assert_eq!(simple(&rig.play(128, 1100, &[64])), [(128, 60, false)]);
+}
+
+#[test]
+fn chased_notes_that_do_not_fit_start_in_the_next_block() {
+    let mut rig = Rig::with(vec![
+        note(0, 1000, 60, 1),
+        note(0, 1000, 62, 2),
+        note(0, 1000, 64, 3),
+    ]);
+    rig.limit_output(2);
+    let out = rig.block(500, 64, true, &[]);
+    assert_eq!(simple(&out), [(500, 60, true), (500, 62, true)]);
+    let out = rig.block(564, 64, true, &[]);
+    assert_eq!(simple(&out), [(564, 64, true)]);
+    assert!(rig.block(628, 64, true, &[]).is_empty());
+}
+
+#[test]
 fn sequence_note_offs_that_do_not_fit_go_out_in_the_next_block() {
     let mut rig = Rig::with(vec![note(0, 1000, 60, 1), note(0, 1000, 62, 2)]);
     rig.play(0, 64, &[64]);
@@ -631,7 +657,7 @@ fn sequence_note_offs_that_do_not_fit_go_out_in_the_next_block() {
     let out = rig.block(64, 64, false, &[]);
     assert_eq!(simple(&out), [(64, 60, false), (64, 62, false)]);
     assert!(rig.block(64, 64, false, &[]).is_empty());
-    // The session can tell that the list was too small.
+    // The overflow is counted, like the engine's dropped parameter changes.
     assert_eq!(rig.handle.take_event_overflows(), 2);
     assert_eq!(rig.handle.take_event_overflows(), 0);
 }

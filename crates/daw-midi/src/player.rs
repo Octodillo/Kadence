@@ -28,7 +28,8 @@
 //! - **Full output.** An event that does not fit in the output list is
 //!   counted ([`PlayerHandle::take_event_overflows`]) and the player's
 //!   state follows what went out: a note-off or sustain-pedal lift is sent
-//!   first thing in the next block, and a sequence note starts then.
+//!   first thing in the next block, and a sequence note starts then, a
+//!   chased one included.
 //!   Nothing is left sounding for good.
 //!
 //! `process` never allocates, locks or blocks.
@@ -164,6 +165,7 @@ pub fn midi_player(capture_capacity: usize) -> (MidiPlayer, PlayerHandle) {
         pedal: 0,
         captured: [0; 16],
         owed: Owed::default(),
+        chase_again: false,
         preview_seen: 0,
         previewing: None,
         shared: shared.clone(),
@@ -300,6 +302,9 @@ pub struct MidiPlayer {
     /// Live notes captured and not yet ended, like `live`.
     captured: [u128; 16],
     owed: Owed,
+    /// The last chase ran out of room in the output list: the next block
+    /// chases again at its own position.
+    chase_again: bool,
     /// The last preview request acted on.
     preview_seen: u32,
     /// The preview note sounding: channel, key and note id.
@@ -402,6 +407,10 @@ fn push(out: &mut EventList, shared: &Shared, frame: u32, kind: EventKind) -> bo
 /// Note-offs and sustain-pedal lifts that found the output list full. They
 /// go out first thing in the next block, so a full list delays the end of
 /// a note but never leaves it sounding.
+///
+/// Only the key is kept, so the late note-off ends whatever sounds on it:
+/// when a preview and a sequence note share a key and the preview's end
+/// was owed, the sequence note ends with it.
 #[derive(Debug, Default)]
 struct Owed {
     /// One bit per key, per channel, like `MidiPlayer::live`.
@@ -663,8 +672,13 @@ impl MidiPlayer {
     /// and that are not sounding already. A note retriggers its key, so
     /// per channel and key only the last note to start before `pos` can
     /// sound, and only while it has not ended: an earlier note that still
-    /// spans `pos` was cut off when the later one started.
+    /// spans `pos` was cut off when the later one started, and is stopped
+    /// here if it sounds (a note added behind the play position can make
+    /// it so).
+    ///
+    /// When `out` fills up, the rest is chased in the next block.
     fn chase(&mut self, out: &mut EventList, pos: i64) {
+        self.chase_again = false;
         let slot = |n: &SeqNote| (usize::from(n.channel & 0x0F), usize::from(n.key & 0x7F));
         let range = self.seq.sounding_range(pos);
         // How many notes of each channel and key are still to come: the
@@ -678,15 +692,17 @@ impl MidiPlayer {
             let n = self.seq.notes()[i];
             let (channel, key) = slot(&n);
             left[channel][key] -= 1;
-            let sounds = left[channel][key] == 0 && n.end.0 > pos;
-            if sounds
-                && !self
-                    .active
-                    .iter()
-                    .any(|a| a.uid == n.uid && a.start == n.start)
-                && !self.start_note(out, 0, &n)
-            {
-                // No room for more: the rest is not chased.
+            let sounding = self
+                .active
+                .iter()
+                .position(|a| a.uid == n.uid && a.start == n.start);
+            if left[channel][key] != 0 {
+                if let Some(at) = sounding {
+                    let cut = self.active.swap_remove(at);
+                    self.note_off(out, 0, cut);
+                }
+            } else if n.end.0 > pos && sounding.is_none() && !self.start_note(out, 0, &n) {
+                self.chase_again = true;
                 break;
             }
         }
@@ -752,6 +768,8 @@ impl Node for MidiPlayer {
                 self.chase(out, pos);
             }
             self.cursor = self.seq.first_at_or_after(pos);
+        } else if self.chase_again {
+            self.chase(out, pos);
         }
         if self.capturing && !armed {
             self.capture(Captured::Stop {
@@ -824,6 +842,7 @@ impl Node for MidiPlayer {
     fn reset(&mut self) {
         self.active.clear();
         self.owed = Owed::default();
+        self.chase_again = false;
         // The instrument is reset too; a later request starts afresh.
         self.previewing = None;
         if let Some(at) = self.expected.take()

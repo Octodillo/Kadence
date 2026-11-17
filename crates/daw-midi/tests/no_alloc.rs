@@ -26,15 +26,17 @@ fn process_never_allocates() {
                 .collect(),
         )
     };
-    let mut total = 0;
     // A roomy output list, and one that overflows and owes note-offs.
-    for capacity in [1024, 8] {
-        total += violations_playing(capacity, &seq);
+    for (capacity, overflows) in [(1024, false), (8, true)] {
+        let (violations, overflowed) = violations_playing(capacity, &seq);
+        assert_eq!(violations, 0, "with room for {capacity} events");
+        assert_eq!(overflowed > 0, overflows, "with room for {capacity} events");
     }
-    assert_eq!(total, 0);
 }
 
-fn violations_playing(capacity: usize, seq: &impl Fn(i64) -> Sequence) -> u32 {
+/// Allocations seen, and events that did not fit, while playing into an
+/// output list with room for `capacity` events.
+fn violations_playing(capacity: usize, seq: &impl Fn(i64) -> Sequence) -> (u32, u64) {
     let mut rig = Rig::new();
     rig.limit_output(capacity);
     rig.handle.set_sequence(seq(0)).unwrap();
@@ -73,5 +75,5 @@ fn violations_playing(capacity: usize, seq: &impl Fn(i64) -> Sequence) -> u32 {
         total += allocations_in(|| rig.block_into(pos, 128, playing, &input));
         pos += 128;
     }
-    total
+    (total, rig.handle.take_event_overflows())
 }
