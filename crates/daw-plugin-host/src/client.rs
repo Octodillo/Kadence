@@ -4,14 +4,13 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use daw_core::event::{Event, EventKind, EventList, ParamId};
@@ -27,6 +26,7 @@ use crate::shm::{
     self, DONE, EVENT_CAPACITY, FLAG_RESET, Header, Layout, REQUEST, Shm, decode_event,
     encode_event, futex_wait, futex_wake, shm_dir,
 };
+use crate::supervisor::{HostProcess, Limits, Reports};
 
 /// How to start a host process: `<program> <args>... --plugin-host <socket>`.
 #[derive(Clone, Debug)]
@@ -69,7 +69,8 @@ impl HostLauncher {
     }
 }
 
-/// Called on a watchdog thread when a sandboxed plugin crashes or hangs.
+/// Called when a sandboxed plugin crashes or hangs, on the thread that supervises every
+/// host: keep it short, and never wait in it for a plugin instance.
 pub type CrashHook = Arc<dyn Fn(SandboxMonitor) + Send + Sync>;
 
 /// Settings for sandboxed instances.
@@ -158,7 +159,7 @@ pub enum SandboxStatus {
     Crashed(CrashReason),
 }
 
-/// State shared between an instance, its watchdog and any [`SandboxMonitor`]s.
+/// State shared between an instance, the supervisor and any [`SandboxMonitor`]s.
 struct Shared {
     descriptor: PluginDescriptor,
     /// Read on the audio thread; the details are in `reason`.
@@ -181,7 +182,7 @@ impl Shared {
 
     /// Marks host `generation` as crashed, unless a newer host has replaced it or it already
     /// crashed. Returns whether this call marked it. Whoever marks a crash also kills the
-    /// host, so the watchdog sees it exit and calls the hook.
+    /// host, so the supervisor sees it exit and calls the hook.
     fn crash(&self, generation: u64, reason: CrashReason) -> bool {
         let mut current = self.reason();
         if self.generation.load(Ordering::Acquire) != generation || current.is_some() {
@@ -193,7 +194,7 @@ impl Shared {
     }
 
     /// Calls the crash hook once for `generation`, if it crashed and is still current. Only
-    /// watchdog threads call this, so the hook never runs on a thread that holds the instance.
+    /// the supervisor calls this, so the hook never runs on a thread that holds the instance.
     fn notify(self: &Arc<Self>, generation: u64) {
         let current = self.generation.load(Ordering::Acquire) == generation;
         if current
@@ -261,18 +262,31 @@ impl fmt::Debug for SandboxMonitor {
 /// One running host process.
 struct Link {
     generation: u64,
-    child: Arc<Mutex<Child>>,
+    host: HostProcess,
     control: Control,
     /// The block the audio path uses.
     shm: Arc<Shm>,
-    /// The same block, for the watchdog; swapped when `prepare` needs a bigger one.
-    watched: Arc<Mutex<Arc<Shm>>>,
-    stop: Arc<AtomicBool>,
-    watchdog: Option<JoinHandle<()>>,
 }
 
-fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
+/// Tells an instance's [`Shared`] what the supervisor saw of one of its hosts.
+struct Reporter {
+    shared: Arc<Shared>,
+    generation: u64,
+}
+
+impl Reports for Reporter {
+    fn exited(&self, status: io::Result<std::process::ExitStatus>) {
+        let reason = match status {
+            Ok(status) => CrashReason::Exited(status.to_string()),
+            Err(e) => CrashReason::Lost(e.to_string()),
+        };
+        self.shared.crash(self.generation, reason);
+        self.shared.notify(self.generation);
+    }
+
+    fn hung(&self) -> bool {
+        self.shared.crash(self.generation, CrashReason::Hung)
+    }
 }
 
 /// Removes a file when dropped.
@@ -325,12 +339,6 @@ fn create_socket_dir(parent: &Path) -> io::Result<PathBuf> {
     ))
 }
 
-fn kill(child: &Mutex<Child>) {
-    let mut child = locked(child);
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 impl Link {
     /// Starts a host, loads the plugin and maps its audio block.
     fn start(
@@ -361,39 +369,50 @@ impl Link {
             .try_clone_to_owned()
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
-        let child = Command::new(&config.launcher.program)
+        let mut command = Command::new(&config.launcher.program);
+        command
             .args(&config.launcher.args)
             .arg(HOST_ARG)
             .arg(&socket.0)
             .stdin(Stdio::null())
-            .stdout(stdout)
-            .spawn()
-            .map_err(|e| {
-                load(format!(
-                    "cannot start the plugin host {:?}: {e}",
-                    config.launcher.program
-                ))
-            })?;
-        let pid = child.id();
-        let child = Arc::new(Mutex::new(child));
+            .stdout(stdout);
+        let reporter = Reporter {
+            shared: shared.clone(),
+            generation,
+        };
+        let limits = Limits {
+            hang: config.hang_timeout,
+            call: config.call_timeout,
+        };
+        let host = HostProcess::spawn(&mut command, Box::new(reporter), limits).map_err(|e| {
+            load(format!(
+                "cannot start the plugin host {:?}: {e}",
+                config.launcher.program
+            ))
+        })?;
 
         let started = (|| {
             let deadline = Instant::now() + config.load_timeout;
             let control = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        if let Ok(Some(status)) = locked(&child).try_wait() {
-                            return Err(load(format!(
-                                "the plugin host exited at start ({status})"
-                            )));
-                        }
-                        if Instant::now() >= deadline {
-                            return Err(load("the plugin host did not start in time".into()));
-                        }
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                     Err(e) => return Err(load(format!("plugin host connection failed: {e}"))),
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(load("the plugin host did not start in time".into()));
+                }
+                if wait_readable(listener.as_fd(), host.pidfd(), left) == Readable::Second {
+                    // It may have connected just before it exited.
+                    if let Ok((stream, _)) = listener.accept() {
+                        break stream;
+                    }
+                    let status = match host.wait(Duration::from_secs(1)) {
+                        Ok(Some(status)) => status.to_string(),
+                        _ => "status unknown".into(),
+                    };
+                    return Err(load(format!("the plugin host exited at start ({status})")));
                 }
             };
             drop(socket);
@@ -440,52 +459,18 @@ impl Link {
             )?;
             Ok((control, info, shm, latency))
         })();
-        let (control, info, shm, latency) = match started {
-            Ok(v) => v,
-            Err(e) => {
-                kill(&child);
-                return Err(e);
-            }
-        };
+        // On an error, dropping the host kills it.
+        let (control, info, shm, latency) = started?;
 
         let shm = Arc::new(shm);
-        let watched = Arc::new(Mutex::new(shm.clone()));
-        let stop = Arc::new(AtomicBool::new(false));
-        shared.pid.store(pid, Ordering::Relaxed);
-        let spawned = {
-            let (child, watched, stop, shared) =
-                (child.clone(), watched.clone(), stop.clone(), shared.clone());
-            let (hang_timeout, call_timeout) = (config.hang_timeout, config.call_timeout);
-            std::thread::Builder::new()
-                .name("plugin-watchdog".into())
-                .spawn(move || {
-                    watchdog(
-                        &child,
-                        &watched,
-                        &stop,
-                        &shared,
-                        generation,
-                        hang_timeout,
-                        call_timeout,
-                    )
-                })
-        };
-        let watchdog = match spawned {
-            Ok(handle) => handle,
-            Err(e) => {
-                kill(&child);
-                return Err(load(format!("cannot start the plugin watchdog: {e}")));
-            }
-        };
+        shared.pid.store(host.pid(), Ordering::Relaxed);
+        host.arm(shm.clone());
         Ok((
             Self {
                 generation,
-                child,
+                host,
                 control,
                 shm,
-                watched,
-                stop,
-                watchdog: Some(watchdog),
             },
             info,
             latency,
@@ -493,22 +478,46 @@ impl Link {
     }
 
     /// Stops the host: politely if `graceful`, then by force.
-    fn close(mut self, graceful: bool, timeout: Duration) {
-        self.stop.store(true, Ordering::Release);
+    fn close(self, graceful: bool, timeout: Duration) {
+        self.host.expect_exit();
         if graceful {
             let _ = self.control.call(&Request::Shutdown, &[], timeout, None);
-            let deadline = Instant::now() + timeout;
-            while Instant::now() < deadline {
-                if matches!(locked(&self.child).try_wait(), Ok(Some(_))) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
+            let _ = self.host.wait(timeout);
         }
-        kill(&self.child);
-        if let Some(watchdog) = self.watchdog.take() {
-            let _ = watchdog.join();
-        }
+        self.host.kill_and_wait();
+    }
+}
+
+/// Which of two descriptors [`wait_readable`] found readable.
+#[derive(PartialEq)]
+enum Readable {
+    First,
+    Second,
+    Neither,
+}
+
+/// Waits up to `timeout` for either descriptor to become readable; the first wins a tie.
+fn wait_readable(first: BorrowedFd, second: BorrowedFd, timeout: Duration) -> Readable {
+    let pollfd = |fd: BorrowedFd| libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut fds = [pollfd(first), pollfd(second)];
+    let ms = i32::try_from(timeout.as_millis())
+        .unwrap_or(i32::MAX)
+        .max(1);
+    // SAFETY: `fds` is a valid array of two entries. An error (EINTR) reads as a timeout,
+    // and the caller tries again.
+    if unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) } <= 0 {
+        return Readable::Neither;
+    }
+    if fds[0].revents != 0 {
+        Readable::First
+    } else if fds[1].revents != 0 {
+        Readable::Second
+    } else {
+        Readable::Neither
     }
 }
 
@@ -555,81 +564,6 @@ fn call_error(e: &CallError) -> PluginError {
     match e {
         CallError::Busy => PluginError::Busy(e.to_string()),
         CallError::Io(_) => PluginError::Load(format!("plugin host: {e}")),
-    }
-}
-
-/// How long an audio cycle may stall before the host counts as hung, or `None` while the
-/// stall is not a hang: the host's main thread is in a slow call (state, editor), or the cycle
-/// waits for a main thread that is busy in the plugin's open editor, which a modal dialog
-/// there keeps busy for as long as the user takes.
-fn stall_limit(h: &Header, hang_timeout: Duration, call_timeout: Duration) -> Option<Duration> {
-    if h.main_busy.load(Ordering::SeqCst) != 0 {
-        return None;
-    }
-    if h.main_in_plugin.load(Ordering::SeqCst) == 0 {
-        return Some(hang_timeout);
-    }
-    if h.pumping_editor().is_some() {
-        return None;
-    }
-    // The cycle may be waiting for the host's main thread, which is busy in the plugin (its
-    // main-thread pump, say): that is as slow as a main-thread call may be.
-    Some(call_timeout.max(hang_timeout))
-}
-
-fn watchdog(
-    child: &Mutex<Child>,
-    watched: &Mutex<Arc<Shm>>,
-    stop: &AtomicBool,
-    shared: &Arc<Shared>,
-    generation: u64,
-    hang_timeout: Duration,
-    call_timeout: Duration,
-) {
-    let mut block: Option<Arc<Shm>> = None;
-    let mut last_completed = 0;
-    let mut stalled_since: Option<Instant> = None;
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-        match locked(child).try_wait() {
-            Ok(None) => {}
-            Ok(Some(status)) => {
-                if !stop.load(Ordering::Acquire) {
-                    shared.crash(generation, CrashReason::Exited(status.to_string()));
-                    shared.notify(generation);
-                }
-                return;
-            }
-            Err(e) => {
-                shared.crash(generation, CrashReason::Lost(e.to_string()));
-                shared.notify(generation);
-                return;
-            }
-        }
-
-        let current = locked(watched).clone();
-        if !block.as_ref().is_some_and(|b| Arc::ptr_eq(b, &current)) {
-            last_completed = current.header().completed.load(Ordering::Relaxed);
-            stalled_since = None;
-            block = Some(current);
-            continue;
-        }
-        let h = block.as_ref().expect("set above").header();
-        let completed = h.completed.load(Ordering::Relaxed);
-        let limit = stall_limit(h, hang_timeout, call_timeout);
-        let stalled = h.state.load(Ordering::Acquire) == REQUEST && completed == last_completed;
-        if let Some(limit) = limit.filter(|_| stalled) {
-            let since = *stalled_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= limit && shared.crash(generation, CrashReason::Hung) {
-                let _ = locked(child).kill();
-            }
-        } else {
-            stalled_since = None;
-            last_completed = completed;
-        }
     }
 }
 
@@ -691,6 +625,8 @@ pub struct SandboxedInstance {
     editor_open: bool,
     /// From `set_editor_title`, for this host and the ones a reload starts.
     editor_title: Option<String>,
+    /// Editor calls a busy host has not taken yet; `on_main_thread` sends them once it is free.
+    editor_owed: EditorOwed,
     /// The host reported a state change not taken yet.
     state_changed: bool,
     latency: u32,
@@ -709,6 +645,14 @@ pub struct SandboxedInstance {
     state: Option<Vec<u8>>,
     /// What `process` works on, shared with the processor half that `split` hands out.
     audio: SharedAudio<Audio>,
+}
+
+/// What `close_editor` and `set_editor_title` could not tell a host that was busy in the
+/// plugin's editor. Neither call can fail, so each is made again once the host is free.
+#[derive(Default)]
+struct EditorOwed {
+    close: bool,
+    title: bool,
 }
 
 /// What the audio path works on. The instance and its processor half share it through a
@@ -775,6 +719,7 @@ impl SandboxedInstance {
             has_editor: false,
             editor_open: false,
             editor_title: None,
+            editor_owed: EditorOwed::default(),
             state_changed: false,
             latency,
             layout_changed: false,
@@ -802,8 +747,8 @@ impl SandboxedInstance {
         // The audio path lets go of the old block first, so no cycle goes to a host that is
         // going away.
         self.audio.main(|a| a.shm = None);
-        // A new generation, so the old host's watchdog can no longer report, and a clean slate
-        // for the new one's.
+        // A new generation, so nothing can be reported for the old host any more, and a
+        // clean slate for the new one.
         let generation = {
             let mut reason = self.shared.reason();
             *reason = None;
@@ -824,11 +769,11 @@ impl SandboxedInstance {
             Err(e) => {
                 *self.shared.reason() = Some(CrashReason::Lost(e.to_string()));
                 self.shared.crashed.store(true, Ordering::Release);
-                // No watchdog runs for this generation, so tell the hook from a thread of our
-                // own: never this one, which holds the instance.
+                // No host is supervised for this generation, so tell the hook from a thread of
+                // our own: never this one, which holds the instance.
                 let shared = self.shared.clone();
                 let _ = std::thread::Builder::new()
-                    .name("plugin-watchdog".into())
+                    .name("plugin-crash-report".into())
                     .spawn(move || shared.notify(generation));
                 return Err(e);
             }
@@ -985,11 +930,11 @@ impl SandboxedInstance {
         Ok(())
     }
 
-    /// Makes `shm` the block that `process` and the watchdog use.
+    /// Makes `shm` the block that `process` and the supervisor use.
     fn install_block(&mut self, shm: Shm) {
         if let Some(link) = self.link.as_mut() {
             let shm = Arc::new(shm);
-            *locked(&link.watched) = shm.clone();
+            link.host.watch(shm.clone());
             link.shm = shm.clone();
             self.audio.main(|a| a.shm = Some(shm));
         }
@@ -1032,7 +977,7 @@ impl SandboxedInstance {
             Err(e) => {
                 let reason = CrashReason::Lost(e.to_string());
                 self.shared.crash(link.generation, reason.clone());
-                kill(&link.child);
+                link.host.kill();
                 Err(PluginError::Load(reason.to_string()))
             }
         }
@@ -1043,6 +988,29 @@ impl SandboxedInstance {
             Some(reason) => reason.to_string(),
             None => "the plugin host is not running".into(),
         }
+    }
+
+    /// Tells the host to close the editor. Returns true if a busy host did not take the call,
+    /// which then is still owed. A host that is down has no editor to close.
+    fn send_close_editor(&self) -> bool {
+        matches!(
+            self.control(Request::CloseEditor, &[]),
+            Err(PluginError::Busy(_))
+        )
+    }
+
+    /// Tells the running host the editor's title; returns as
+    /// [`send_close_editor`](Self::send_close_editor) does. A host started later is given the
+    /// title as it starts.
+    fn send_editor_title(&self) -> bool {
+        let Some(title) = self.editor_title.clone() else {
+            return false;
+        };
+        self.running().is_some()
+            && matches!(
+                self.control(Request::SetEditorTitle(title), &[]),
+                Err(PluginError::Busy(_))
+            )
     }
 
     /// Where tracked changes stand now; see [`Rt::seq`].
@@ -1383,7 +1351,7 @@ impl Node for SandboxedInstance {
                     .crash(generation, CrashReason::Lost(e.to_string()))
                     && let Some(link) = &self.link
                 {
-                    kill(&link.child);
+                    link.host.kill();
                 }
             }
         }
@@ -1501,12 +1469,13 @@ impl PluginInstance for SandboxedInstance {
                 e => e,
             })?;
         self.editor_open = true;
+        self.editor_owed.close = false;
         Ok(())
     }
 
     fn close_editor(&mut self) {
         self.editor_open = false;
-        let _ = self.control(Request::CloseEditor, &[]);
+        self.editor_owed.close = self.send_close_editor();
     }
 
     fn is_editor_open(&self) -> bool {
@@ -1518,9 +1487,7 @@ impl PluginInstance for SandboxedInstance {
             return;
         }
         self.editor_title = Some(title.to_owned());
-        if self.running().is_some() {
-            let _ = self.control(Request::SetEditorTitle(title.to_owned()), &[]);
-        }
+        self.editor_owed.title = self.send_editor_title();
     }
 
     fn take_state_changed(&mut self) -> bool {
@@ -1554,6 +1521,14 @@ impl PluginInstance for SandboxedInstance {
         self.state_changed |= state_changed;
         if closed && self.editor_open {
             self.editor_open = false;
+        }
+        if free {
+            if self.editor_owed.close {
+                self.editor_owed.close = self.send_close_editor();
+            }
+            if self.editor_owed.title {
+                self.editor_owed.title = self.send_editor_title();
+            }
         }
     }
 
@@ -1595,94 +1570,8 @@ impl Drop for SandboxedInstance {
 
 #[cfg(test)]
 mod tests {
-    use daw_core::plugin::PluginFormatKind;
 
     use super::*;
-
-    fn shared() -> Arc<Shared> {
-        Arc::new(Shared {
-            descriptor: PluginDescriptor {
-                format: PluginFormatKind::Clap,
-                id: "test".into(),
-                name: "test".into(),
-                vendor: String::new(),
-                path: "/test".into(),
-                is_instrument: false,
-                ports: (0, 0),
-            },
-            crashed: AtomicBool::new(false),
-            reason: Mutex::new(None),
-            generation: AtomicU64::new(1),
-            reload_requested: AtomicBool::new(false),
-            pid: AtomicU32::new(0),
-            late_cycles: AtomicU64::new(0),
-            on_crash: None,
-            notified: AtomicU64::new(0),
-        })
-    }
-
-    #[test]
-    fn a_stall_while_the_host_main_thread_is_in_the_plugin_gets_the_call_timeout() {
-        let child = Arc::new(Mutex::new(Command::new("sleep").arg("60").spawn().unwrap()));
-        let shm = Shm::scratch();
-        // A cycle is waiting on the plugin lock, which the host's main thread holds.
-        shm.header().state.store(REQUEST, Ordering::Release);
-        shm.header().main_in_plugin.store(1, Ordering::SeqCst);
-        let watched = Arc::new(Mutex::new(shm.clone()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let shared = shared();
-        let dog = {
-            let (child, watched, stop, shared) =
-                (child.clone(), watched.clone(), stop.clone(), shared.clone());
-            std::thread::spawn(move || {
-                let hang = Duration::from_millis(20);
-                let call = Duration::from_secs(3600);
-                watchdog(&child, &watched, &stop, &shared, 1, hang, call);
-            })
-        };
-        // Many hang timeouts pass without a kill.
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!shared.crashed.load(Ordering::Acquire));
-        // Once the main thread is out of the plugin, the stall is a hang.
-        shm.header().main_in_plugin.store(0, Ordering::SeqCst);
-        let start = Instant::now();
-        while !shared.crashed.load(Ordering::Acquire) {
-            assert!(
-                start.elapsed() < Duration::from_secs(30),
-                "hang not noticed"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(*shared.reason(), Some(CrashReason::Hung));
-        stop.store(true, Ordering::Release);
-        dog.join().unwrap();
-        kill(&child);
-    }
-
-    #[test]
-    fn a_stall_on_a_main_thread_busy_in_the_editor_is_not_a_hang() {
-        let shm = Shm::scratch();
-        let h = shm.header();
-        let (hang, call) = (Duration::from_secs(1), Duration::from_secs(10));
-        assert_eq!(stall_limit(h, hang, call), Some(hang));
-        // The cycle waits for the main thread, which is in a pump.
-        h.main_in_plugin.store(1, Ordering::SeqCst);
-        h.enter_pump();
-        assert_eq!(stall_limit(h, hang, call), Some(call));
-        // With the editor open, the user may have a dialog of the plugin's up.
-        h.editor_open.store(1, Ordering::Release);
-        assert_eq!(stall_limit(h, hang, call), None);
-        // Out of the pump, it counts again.
-        h.leave_pump();
-        assert_eq!(stall_limit(h, hang, call), Some(call));
-        // A split plugin's audio never waits for the main thread, so its stall is a hang
-        // whatever the main thread does.
-        h.enter_pump();
-        h.main_in_plugin.store(0, Ordering::SeqCst);
-        assert_eq!(stall_limit(h, hang, call), Some(hang));
-        h.main_busy.store(1, Ordering::SeqCst);
-        assert_eq!(stall_limit(h, hang, call), None);
-    }
 
     #[test]
     fn tracking_a_new_param_list_keeps_what_was_tracked_for_params_still_in_it() {

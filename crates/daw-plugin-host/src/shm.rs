@@ -9,6 +9,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -57,13 +58,13 @@ pub struct Header {
     pub events_in: AtomicU32,
     pub events_out: AtomicU32,
     /// Set by the host while its main thread is in a slow plugin call (state, editor). Audio
-    /// cycles then output silence instead of waiting for it, and the watchdog does not count
+    /// cycles then output silence instead of waiting for it, and the supervisor does not count
     /// them as a hang. Not set while the audio thread runs the plugin's split half, which
     /// never waits for the main thread.
     pub main_busy: AtomicU32,
     /// Set by the host while its main thread holds the plugin for any reason (a call or the
     /// main-thread pump), but not while it only waits for the lock. Audio cycles wait for it as
-    /// usual, but the watchdog gives a stalled cycle the call timeout rather than the hang
+    /// usual, but the supervisor gives a stalled cycle the call timeout rather than the hang
     /// timeout, so slow main-thread work in a healthy plugin is not mistaken for a hang. Not
     /// set while the audio thread runs a split half, except during a prepare, when it is
     /// stopped.
@@ -110,7 +111,7 @@ pub struct Header {
     loop_start_beats: AtomicU64,
     /// `f64` bits.
     loop_end_beats: AtomicU64,
-    /// Cycles the host has finished, for the hang watchdog.
+    /// Cycles the host has finished, for the supervisor to tell a hang.
     pub completed: AtomicU64,
     /// Which control requests the host has started, or the application has withdrawn; see
     /// [`started`] and [`withdrawn`].
@@ -343,6 +344,22 @@ unsafe impl Send for Shm {}
 // SAFETY: as above.
 unsafe impl Sync for Shm {}
 
+/// Gives `file` `size` bytes of real storage. Growing it with `set_len` alone would leave a
+/// hole, and the first write to a page of a full `/dev/shm` would then kill the process with
+/// SIGBUS, on the audio thread at that; this way a full one is an error here instead.
+fn allocate(file: &File, size: usize) -> io::Result<()> {
+    let size = libc::off_t::try_from(size).map_err(io::Error::other)?;
+    loop {
+        // SAFETY: plain syscall on a file descriptor we own.
+        match unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, size) } {
+            0 => return Ok(()),
+            libc::EINTR => {}
+            // Returned, not left in `errno`.
+            e => return Err(io::Error::from_raw_os_error(e)),
+        }
+    }
+}
+
 impl Shm {
     /// Creates a new block file in `dir` and maps it. The caller removes the file once the host
     /// has mapped it too.
@@ -355,7 +372,7 @@ impl Shm {
         }
         let (file, path) = create_unique(dir)?;
         let result = (|| {
-            file.set_len(layout.size() as u64)?;
+            allocate(&file, layout.size())?;
             let shm = Self::map(&file, layout)?;
             let h = shm.header();
             h.audio_in.store(layout.audio_in, Ordering::Relaxed);
@@ -659,6 +676,27 @@ impl Shm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_block_has_its_storage_allocated() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout {
+            audio_in: 2,
+            audio_out: 2,
+            max_frames: 4096,
+            event_capacity: EVENT_CAPACITY,
+        };
+        let (_shm, path) = Shm::create(dir.path(), layout).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), layout.size() as u64);
+        // No holes that a full disk could fail to fill later.
+        assert!(
+            meta.blocks() * 512 >= meta.len(),
+            "{} blocks",
+            meta.blocks()
+        );
+    }
 
     #[test]
     fn transport_round_trips() {

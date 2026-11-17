@@ -131,9 +131,9 @@ impl Scanner {
             .arg(bundle)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // Its own process group, so a timeout also kills any helpers the plugin started.
-            .process_group(0);
+            .stderr(Stdio::null());
+        // A timeout also kills any helpers the plugin started.
+        crate::process::in_own_group(&mut command);
         // Out of the terminal's process group the scanner no longer sees Ctrl-C, so tie its
         // life to this thread instead, which always outlives it.
         #[cfg(target_os = "linux")]
@@ -168,11 +168,7 @@ impl Scanner {
             match child.try_wait().map_err(ScanError::Spawn)? {
                 Some(status) => break status,
                 None if start.elapsed() >= self.timeout => {
-                    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-                        // SAFETY: plain syscall; the child is unreaped, so its group id is ours.
-                        unsafe { libc::kill(-pid, libc::SIGKILL) };
-                    }
-                    let _ = child.kill();
+                    crate::process::kill_group(&child);
                     let _ = child.wait();
                     return Err(ScanError::TimedOut(self.timeout));
                 }

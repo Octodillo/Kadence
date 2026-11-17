@@ -575,6 +575,8 @@ fn audio_loop(
     if let Some(p) = rt_priority {
         set_realtime(p);
     }
+    // Plugins run with whatever mode the thread has; few set it themselves.
+    daw_core::denormals::flush_to_zero();
     let layout = shm.layout();
     let h = shm.header();
     let cap = layout.event_capacity as usize;
