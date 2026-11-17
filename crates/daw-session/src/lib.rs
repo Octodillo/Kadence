@@ -105,7 +105,8 @@ pub enum SessionError {
 /// language; [`Display`](std::fmt::Display) is English, for logs.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Warning {
-    /// A built-in device refused its saved state; it runs with defaults.
+    /// A device refused its saved state; it runs with its defaults. A plugin's refused
+    /// state stays in the project until the plugin takes another or is changed in its editor.
     #[error("{device}: {detail}")]
     DeviceStateRejected { device: String, detail: String },
     /// The project names a built-in device this build does not have.
@@ -429,6 +430,8 @@ impl Session {
     pub fn sync(&mut self, snapshot: &ProjectSnapshot) -> Result<(), SessionError> {
         self.collect_garbage();
         self.warnings.clear();
+        // From plugins taken over from another session.
+        self.warnings.append(&mut self.plugins.unsaved);
         self.master = Some(snapshot.master.id);
         let tempo_changed = self.tempo_data.as_ref() != Some(&snapshot.tempo);
         if tempo_changed {
@@ -505,7 +508,8 @@ impl Session {
             // After the new graph is queued, so the nodes of removed plugins aren't
             // silenced while it is being built. Until the audio thread swaps it in (a
             // block at most), the old graph plays them as silence.
-            self.plugins.retain(|id| ids.contains(&id));
+            self.plugins
+                .retain(|id| ids.contains(&id), &mut self.warnings);
         }
         self.sync_plugin_states(snapshot);
         self.gates = snapshot
@@ -555,6 +559,8 @@ impl Session {
             // (parameters, automation), which is no change of the plugin's.
             let was_open = std::mem::replace(&mut l.editor_open, open);
             if changed && (was_open || open) && !l.crashed {
+                // The user's work from here on, whatever state it started from.
+                l.state_rejected = false;
                 state_changed.push(device);
             }
             let crashed = l.monitor.as_ref().is_some_and(|m| m.is_crashed());
@@ -803,6 +809,8 @@ impl Session {
             let own = l.saved.is_some() && same(&l.saved);
             l.saved = None;
             l.state = d.state.clone();
+            // Whatever was refused before is no longer the document's.
+            l.state_rejected = false;
             // A state taken away (undone back to none) leaves the plugin as it is: there is
             // nothing to go back to.
             let Some(state) = d.state.as_ref().filter(|_| !own) else {
@@ -828,10 +836,13 @@ impl Session {
                         }
                     }
                 }
-                Err(e) => self.warnings.push(Warning::DeviceStateRejected {
-                    device: d.name.clone(),
-                    detail: e.to_string(),
-                }),
+                Err(e) => {
+                    l.state_rejected = true;
+                    self.warnings.push(Warning::DeviceStateRejected {
+                        device: d.name.clone(),
+                        detail: e.to_string(),
+                    });
+                }
             }
         }
     }

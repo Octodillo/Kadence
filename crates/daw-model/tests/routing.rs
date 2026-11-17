@@ -53,3 +53,60 @@ fn downstream_follows_outputs_and_sends() {
     );
     assert_eq!(doc.project().validate(), Ok(()));
 }
+
+/// Removing a bus cuts the routing into it; undoing puts back the routing and nothing else.
+/// Plugin state is stored outside the undo history (on save, say), so an undo that restored
+/// the routed tracks whole would take it back to what it was when the bus was removed.
+#[test]
+fn undoing_a_track_removal_restores_only_the_routing_it_cut() {
+    let mut p = Project::new("R");
+    let mut a = Track::new(TrackKind::Audio, "A");
+    let other = Track::new(TrackKind::Bus, "Other");
+    let bus = Track::new(TrackKind::Bus, "Bus");
+    let mut device = Device::new(
+        "Plugin",
+        DeviceSource::Plugin {
+            format: daw_core::plugin::PluginFormatKind::Clap,
+            id: "x".into(),
+        },
+    );
+    device.state = Some(vec![0].into());
+    let device_id = device.id;
+    a.devices.push(device);
+    // The send to the bus sits between two others, and so does its lane.
+    let sends = [Send::new(other.id), Send::new(bus.id), Send::new(other.id)];
+    a.automation = sends
+        .iter()
+        .map(|s| AutomationLane::new(AutomationTarget::SendLevel { send: s.id }))
+        .collect();
+    a.sends = sends.to_vec();
+    a.output = TrackOutput::Bus(bus.id);
+    let (a_id, bus_id) = (a.id, bus.id);
+    p.tracks = vec![a.into(), other.into(), bus.into()];
+    let mut doc = Document::new(p);
+    assert_eq!(doc.project().validate(), Ok(()));
+    let before = doc.project().track(a_id).unwrap().clone();
+
+    doc.execute(RemoveTrack::new(bus_id)).unwrap();
+    let cut = doc.project().track(a_id).unwrap();
+    assert_eq!(cut.output, TrackOutput::Master);
+    assert_eq!(cut.sends, [sends[0].clone(), sends[2].clone()]);
+    assert_eq!(cut.automation.len(), 2);
+    assert_eq!(doc.project().validate(), Ok(()));
+
+    let newer: StateBlob = vec![1].into();
+    doc.store_plugin_state(device_id, Some(newer.clone()))
+        .unwrap();
+    doc.undo().unwrap();
+    let back = doc.project().track(a_id).unwrap();
+    assert_eq!(back.devices[0].state, Some(newer), "the stored state stays");
+    assert_eq!(back.output, before.output);
+    assert_eq!(back.sends, before.sends);
+    assert_eq!(back.automation, before.automation);
+    assert_eq!(doc.project().validate(), Ok(()));
+
+    doc.redo().unwrap();
+    assert_eq!(doc.project().track(a_id).unwrap().sends.len(), 2);
+    doc.undo().unwrap();
+    assert_eq!(doc.project().track(a_id).unwrap().sends, before.sends);
+}

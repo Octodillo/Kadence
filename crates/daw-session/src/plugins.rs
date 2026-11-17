@@ -12,7 +12,7 @@
 //!
 //! Everything here runs on the thread that created the session, as the handles require.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -173,10 +173,72 @@ pub struct Plugins {
     pub(crate) slots: HashMap<DeviceId, Slot>,
     /// Plugin states saved from an earlier session, to restore instead of the document's when
     /// the plugin is loaded again.
-    carried: HashMap<DeviceId, (DeviceSource, Vec<u8>)>,
+    carried: HashMap<DeviceId, KeptState>,
+    /// States of plugins whose device was removed, in case an undo brings it back.
+    removed: RemovedStates,
+    /// Plugins that would not hand over their state when they were [detached](Self::detach),
+    /// for the next sync to report.
+    pub(crate) unsaved: Vec<Warning>,
     /// Editors that were open in an earlier session, by their window title, to open again
     /// when the plugin is loaded again.
     reopen: HashMap<DeviceId, String>,
+}
+
+/// A freed plugin's state, with the plugin it is of: a device that comes back naming another
+/// plugin must not be given it.
+type KeptState = (DeviceSource, Vec<u8>);
+
+/// The states of plugins whose device was removed, oldest first, to restore when an undo
+/// brings the device back.
+///
+/// The session cannot tell which removals can still be undone, so the states are kept up to
+/// a total size instead; past it the oldest go, and a device that comes back after that
+/// starts from the document's state. The newest is always kept, whatever its size.
+struct RemovedStates {
+    states: VecDeque<(DeviceId, KeptState)>,
+    bytes: usize,
+    limit: usize,
+}
+
+impl Default for RemovedStates {
+    fn default() -> Self {
+        Self::with_limit(Self::LIMIT)
+    }
+}
+
+impl RemovedStates {
+    /// Total size of the states kept, in bytes.
+    const LIMIT: usize = 64 << 20;
+
+    fn with_limit(limit: usize) -> Self {
+        Self {
+            states: VecDeque::new(),
+            bytes: 0,
+            limit,
+        }
+    }
+
+    fn insert(&mut self, device: DeviceId, state: KeptState) {
+        self.take(device);
+        self.bytes += state.1.len();
+        self.states.push_back((device, state));
+        while self.bytes > self.limit && self.states.len() > 1 {
+            let (_, (_, oldest)) = self.states.pop_front().expect("more than one");
+            self.bytes -= oldest.len();
+        }
+    }
+
+    fn take(&mut self, device: DeviceId) -> Option<KeptState> {
+        let i = self.states.iter().position(|(id, _)| *id == device)?;
+        let (_, state) = self.states.remove(i)?;
+        self.bytes -= state.1.len();
+        Some(state)
+    }
+
+    fn clear(&mut self) {
+        self.states.clear();
+        self.bytes = 0;
+    }
 }
 
 pub(crate) enum Slot {
@@ -198,6 +260,11 @@ pub(crate) struct Live {
     pub crashed: bool,
     /// The document state last loaded into the plugin, or saved from it.
     pub state: Option<StateBlob>,
+    /// The plugin refused the last state it was given, so what it holds is not the user's
+    /// work: its defaults, most likely. That must not replace the document's state, which
+    /// another version of the plugin may still read. Over once the plugin takes a state, or
+    /// reports a change made in its editor.
+    pub state_rejected: bool,
     /// The state last handed out for the document to store; when the
     /// document comes back with it, the plugin needn't load it.
     pub saved: Option<StateBlob>,
@@ -290,16 +357,16 @@ impl Plugins {
             mut instance,
             monitor,
         } = loaded;
-        // State from a session this one replaced is newer than the document's.
-        let carried = self
-            .carried
-            .remove(&d.id)
-            .filter(|(source, _)| *source == d.source)
-            .map(|(_, s)| s);
-        let restore = carried.as_deref().or(d.state.as_ref().map(|s| &s.0[..]));
+        // State from a session this one replaced, or from before the device was removed, is
+        // newer than the document's.
+        let kept = self.carried.remove(&d.id).or(self.removed.take(d.id));
+        let kept = kept.filter(|(source, _)| *source == d.source).map(|k| k.1);
+        let restore = kept.as_deref().or(d.state.as_ref().map(|s| &s.0[..]));
+        let mut state_rejected = false;
         if let Some(state) = restore
             && let Err(e) = instance.load_state(state)
         {
+            state_rejected = true;
             warnings.push(Warning::DeviceStateRejected {
                 device: d.name.clone(),
                 detail: e.to_string(),
@@ -324,6 +391,7 @@ impl Plugins {
             monitor,
             crashed: false,
             state: d.state.clone(),
+            state_rejected,
             saved: None,
             fresh: true,
             params,
@@ -371,18 +439,18 @@ impl Plugins {
         })
     }
 
-    /// Frees the plugins of devices that are gone, keeping their states in
-    /// case an undo brings the device back.
-    pub(crate) fn retain(&mut self, keep: impl Fn(DeviceId) -> bool) {
+    /// Frees the plugins of devices that are gone, keeping their states in case an undo
+    /// brings the device back. `warnings` gets the plugins that would not hand theirs over.
+    pub(crate) fn retain(&mut self, keep: impl Fn(DeviceId) -> bool, warnings: &mut Vec<Warning>) {
         let gone: Vec<DeviceId> = self.slots.keys().copied().filter(|&id| !keep(id)).collect();
         for id in gone {
-            if let Some(Slot::Live(l)) = self.slots.remove(&id)
-                && !l.crashed
-            {
+            if let Some(Slot::Live(l)) = self.slots.remove(&id) {
                 // The device is gone, so is its window.
-                l.handle.with(|p| p.close_editor());
-                if let Ok(state) = l.handle.with(|p| p.save_state()) {
-                    self.carried.insert(id, (l.source.clone(), state));
+                if !l.crashed {
+                    l.handle.with(|p| p.close_editor());
+                }
+                if let Some(state) = l.state_to_keep(warnings) {
+                    self.removed.insert(id, state);
                 }
             }
         }
@@ -392,25 +460,26 @@ impl Plugins {
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
         self.carried.clear();
+        self.removed.clear();
         self.reopen.clear();
+        self.unsaved.clear();
     }
 
-    /// Saves every running plugin's state and frees the plugins, keeping the states for the
-    /// next session to restore.
+    /// Saves every plugin's state and frees the plugins, keeping the states for the next
+    /// session to restore.
     pub(crate) fn detach(&mut self) -> Plugins {
         let mut carried = std::mem::take(&mut self.carried);
         let mut reopen = std::mem::take(&mut self.reopen);
+        let mut unsaved = std::mem::take(&mut self.unsaved);
         for (id, slot) in self.slots.drain() {
             let Slot::Live(l) = slot else {
                 continue;
             };
-            if l.crashed {
-                continue;
+            if let Some(state) = l.state_to_keep(&mut unsaved) {
+                carried.insert(id, state);
             }
-            if let Ok(state) = l.handle.with(|p| p.save_state()) {
-                carried.insert(id, (l.source.clone(), state));
-            }
-            if l.handle.with(|p| p.is_editor_open())
+            if !l.crashed
+                && l.handle.with(|p| p.is_editor_open())
                 && let Some(title) = l.editor_title.clone()
             {
                 reopen.insert(id, title);
@@ -420,7 +489,9 @@ impl Plugins {
             loader: self.loader.take(),
             slots: HashMap::new(),
             carried,
+            removed: std::mem::take(&mut self.removed),
             reopen,
+            unsaved,
         }
     }
 }
@@ -437,7 +508,9 @@ pub struct PluginState {
 impl Live {
     /// The plugin's state, if it differs from the document's.
     pub(crate) fn changed_state(&self) -> Option<Result<StateBlob, String>> {
-        if self.crashed {
+        // A crashed plugin has nothing newer than the document, and what a plugin holds in
+        // place of a state it refused is not for the document.
+        if self.crashed || self.state_rejected {
             return None;
         }
         match self.handle.with(|p| p.save_state()) {
@@ -445,5 +518,55 @@ impl Live {
             Ok(s) => Some(Ok(StateBlob(Arc::from(s)))),
             Err(e) => Some(Err(e.to_string())),
         }
+    }
+
+    /// The state to restore this plugin from once it is freed, if it has one worth more than
+    /// the document's. A running plugin that would not save its state goes to `warnings`:
+    /// what the user changed in it since the document's state is lost.
+    fn state_to_keep(&self, warnings: &mut Vec<Warning>) -> Option<KeptState> {
+        // What it holds is not the state it was given: the document's is tried again.
+        if self.state_rejected {
+            return None;
+        }
+        // A crashed sandbox answers with the state it last saved or loaded, if any.
+        match self.handle.with(|p| p.save_state()) {
+            Ok(state) => Some((self.source.clone(), state)),
+            Err(_) if self.crashed => None,
+            Err(e) => {
+                warnings.push(Warning::PluginStateNotSaved {
+                    device: self.name.clone(),
+                    detail: e.to_string(),
+                });
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kept(len: usize) -> KeptState {
+        let source = DeviceSource::Builtin { kind: "x".into() };
+        (source, vec![0; len])
+    }
+
+    #[test]
+    fn removed_states_drop_the_oldest_past_the_limit() {
+        let ids: Vec<DeviceId> = (0..4).map(|_| DeviceId::new()).collect();
+        let mut removed = RemovedStates::with_limit(10);
+        removed.insert(ids[0], kept(4));
+        removed.insert(ids[1], kept(4));
+        removed.insert(ids[2], kept(4));
+        assert!(removed.take(ids[0]).is_none(), "the oldest went");
+        assert_eq!(removed.bytes, 8);
+        // Removed again: one state, the newer one.
+        removed.insert(ids[1], kept(6));
+        assert_eq!((removed.states.len(), removed.bytes), (2, 10));
+        // One state over the limit pushes the rest out and stays itself.
+        removed.insert(ids[3], kept(11));
+        assert_eq!(removed.take(ids[3]).map(|s| s.1.len()), Some(11));
+        assert_eq!((removed.states.len(), removed.bytes), (0, 0));
     }
 }
