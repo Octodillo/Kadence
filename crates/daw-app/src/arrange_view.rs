@@ -240,7 +240,9 @@ impl qobject::ArrangeView {
     unsafe fn paint(mut self: Pin<&mut Self>, painter: *mut cxx_qt_lib::QPainter) {
         let start = Instant::now();
         // SAFETY: Qt passes a live, active painter.
-        unsafe { self.scene.paint(painter) };
+        if !unsafe { self.scene.paint(painter) } {
+            return;
+        }
         let costs = &mut self.as_mut().rust_mut().costs;
         costs.paint_ms += millis_since(start);
         costs.paints += 1;

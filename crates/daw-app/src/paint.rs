@@ -160,19 +160,21 @@ impl DisplayList {
         }
     }
 
-    /// Paints the stored scene. For a `QQuickPaintedItem`'s `paint`.
+    /// Paints the stored scene, for a `QQuickPaintedItem`'s `paint`.
+    /// Returns whether there was a painter to paint with.
     ///
     /// # Safety
     /// `painter` is null or a live, active painter, as Qt passes one for
     /// the duration of `paint`.
-    pub unsafe fn paint(&self, painter: *mut cxx_qt_lib::QPainter) {
+    pub unsafe fn paint(&self, painter: *mut cxx_qt_lib::QPainter) -> bool {
         // SAFETY: the caller passes null or a live painter.
         let Some(painter) = (unsafe { painter.as_mut() }) else {
-            return;
+            return false;
         };
         // SAFETY: QPainter is not moved while we hold it.
         let painter = unsafe { Pin::new_unchecked(painter) };
         paint_scene(painter, &self.ops, &self.texts, &self.waves);
+        true
     }
 }
 

@@ -1,9 +1,10 @@
 //! Touch writing: recording a held control as automation.
 //!
-//! The part of [`SessionMixer`] that runs takes. A control grabbed while
-//! writing is armed and the transport plays starts a [`Take`]; the clock
-//! records it ([`SessionMixer::tick`]); letting go merges it into the
-//! control's lane as one undoable edit. See the parent module's docs.
+//! The part of [`SessionMixer`] that runs takes. Grabbing a control starts
+//! a [`Take`] if writing is armed for it and the transport is playing. The
+//! clock records the take ([`SessionMixer::tick`]), and letting go merges
+//! it into the control's lane as one undoable edit. See the parent
+//! module's docs.
 
 use std::collections::HashSet;
 
