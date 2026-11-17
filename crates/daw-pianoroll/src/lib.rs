@@ -19,16 +19,18 @@
 //!   disables snapping;
 //! - drag on empty space for a rubber band (Shift or Ctrl adds to the
 //!   selection);
-//! - double-click empty space to add a note, double-click a note to delete it;
+//! - double-click empty space to add a note, and keep the button down to
+//!   hear it; drag before letting go to set its length; double-click a note
+//!   to delete it;
 //! - click a key to select every note on it (Shift adds, Ctrl toggles);
 //! - drag in the velocity lane to draw velocities;
 //! - edit the clip's track's automation lanes under it, as in the arrange
 //!   view (see [`lanes`]);
 //! - click the ruler to move the playhead.
 //!
-//! Pressing a key or a note, and dragging a note up or down, auditions its
-//! pitch: [`PianoRoll::audition`] says which note should sound, and the
-//! front end plays it through the track's instrument.
+//! Pressing a key or a note, holding a new note, and dragging a note up or
+//! down, auditions its pitch: [`PianoRoll::audition`] says which note should
+//! sound, and the front end plays it through the track's instrument.
 
 mod draw;
 pub mod lanes;
@@ -43,11 +45,11 @@ use daw_arrange::{
 use daw_core::time::{PPQ, TickTime};
 use daw_midi::edit::{self, Quantize, Snap as ClipSnap};
 use daw_midi::grid::{Grid, Meter};
-use daw_midi::model::{self as glue, NoteEdit};
+use daw_midi::model as glue;
 use daw_midi::player::Preview;
 use daw_midi::view::{Drag, DragKind, NotePart, PianoRollView, VelocityLane};
 use daw_midi::{EditNote, NoteData};
-use daw_model::commands::EditNotes;
+use daw_model::commands::{AddNotes, EditNotes};
 use daw_model::{
     Clip, ClipContent, ClipId, Command, Document, MidiClip, Note, NoteUid, Project, TrackId,
 };
@@ -88,6 +90,8 @@ enum Gesture {
         area: Area,
         hit: Option<(NoteUid, NotePart)>,
     },
+    /// Still holding the double-click at `press` that added note `id`.
+    Drawn { press: Pointer, id: NoteUid },
     /// Moving or resizing the selection by `grabbed`.
     Notes {
         drag: Drag,
@@ -134,6 +138,8 @@ pub struct PianoRoll {
     /// Notes of a take being recorded into the open clip, drawn over
     /// the clip's own notes. Set by the front end.
     pub live: Vec<NoteData>,
+    /// How note names spell the black keys.
+    pub accidentals: Accidentals,
     /// Velocity of drawn notes, 0 to 1.
     pub new_velocity: f64,
     /// Length of drawn notes in ticks; `None` is one grid step.
@@ -181,6 +187,11 @@ fn outcome_document() -> Outcome {
     }
 }
 
+/// Whether the pointer has moved far enough from `press` to be dragging.
+fn past_threshold(press: Pointer, p: Pointer) -> bool {
+    (p.x - press.x).hypot(p.y - press.y) >= DRAG_THRESHOLD
+}
+
 fn outcome_error(e: Refusal) -> Outcome {
     Outcome {
         view: true,
@@ -207,6 +218,7 @@ impl PianoRoll {
             palette: Palette::default(),
             snap: Snap::Adaptive,
             selection: BTreeSet::new(),
+            accidentals: Accidentals::default(),
             new_velocity: 0.8,
             new_length: None,
             lanes_shown: true,
@@ -598,41 +610,15 @@ impl PianoRoll {
         };
         match g {
             Gesture::Pending { press, area, hit } => {
-                if (p.x - press.x).hypot(p.y - press.y) < DRAG_THRESHOLD {
+                if !past_threshold(press, p) || area != Area::Notes {
                     return Outcome::default();
                 }
-                if area != Area::Notes {
-                    return Outcome::default();
-                }
-                let project = doc.project();
                 match hit {
                     Some((id, part)) => {
-                        let Some((c, m)) = self.clip(project) else {
+                        let anchor = self.local(press.x, press.y);
+                        if !self.begin_note_drag(doc.project(), id, part.into(), anchor) {
                             return Outcome::default();
-                        };
-                        let sel: Vec<Note> = m
-                            .notes
-                            .iter()
-                            .filter(|n| self.selection.contains(&n.id))
-                            .cloned()
-                            .collect();
-                        let Some(grabbed) = sel.iter().find(|n| n.id == id) else {
-                            return Outcome::default();
-                        };
-                        let (lx, ly) = self.local(press.x, press.y);
-                        let drag = Drag::begin(
-                            DragKind::from(part),
-                            &self.grid_view(c.start),
-                            lx,
-                            ly,
-                            grabbed,
-                            &sel,
-                        );
-                        self.gesture = Some(Gesture::Notes {
-                            drag,
-                            ids: sel.iter().map(|n| n.id).collect(),
-                            grabbed: id,
-                        });
+                        }
                     }
                     None => {
                         self.gesture = Some(Gesture::Band {
@@ -643,6 +629,26 @@ impl PianoRoll {
                             base: self.selection.clone(),
                         });
                     }
+                }
+                self.motion(doc, p)
+            }
+            Gesture::Drawn { press, id } => {
+                if !past_threshold(press, p) {
+                    return Outcome::default();
+                }
+                let project = doc.project();
+                let Some((c, m)) = self.clip(project) else {
+                    return Outcome::default();
+                };
+                let Some(note) = m.notes.iter().find(|n| n.id == id) else {
+                    return Outcome::default();
+                };
+                // Anchored at the note's end, so the end follows the pointer
+                // from wherever in the note the double-click was.
+                let r = self.grid_view(c.start).note_rect(&note.data());
+                let anchor = (r.x + r.w, self.local(press.x, press.y).1);
+                if !self.begin_note_drag(project, id, DragKind::ResizeEnd, anchor) {
+                    return Outcome::default();
                 }
                 self.motion(doc, p)
             }
@@ -755,11 +761,11 @@ impl PianoRoll {
     }
 
     pub fn release(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
-        self.audition = None;
+        let sounded = self.audition.take().is_some();
         if let Some(o) = self.lanes.release(doc, p) {
             return o;
         }
-        let out = match self.gesture.take() {
+        let mut out = match self.gesture.take() {
             Some(Gesture::Band { .. }) => outcome_view(),
             // A click (no drag) on a note of a larger selection selects
             // only it, as in the arrange view.
@@ -771,9 +777,9 @@ impl PianoRoll {
                 self.selection = BTreeSet::from([id]);
                 outcome_view()
             }
-            // Redraw the key as released.
-            Some(Gesture::Keys) => outcome_view(),
-            Some(Gesture::Pending { .. }) | None => Outcome::default(),
+            Some(Gesture::Pending { .. } | Gesture::Drawn { .. } | Gesture::Keys) | None => {
+                Outcome::default()
+            }
             Some(g @ (Gesture::Notes { .. } | Gesture::Velocity { .. })) => {
                 // Apply the final position, then close the undo step.
                 self.gesture = Some(g);
@@ -782,8 +788,41 @@ impl PianoRoll {
                 out
             }
         };
+        // Redraw the key that was sounding as released.
+        out.view |= sounded;
         doc.seal();
         out
+    }
+
+    /// Turns the gesture into a drag of the selection by note `id`, anchored
+    /// at `anchor` in note-grid coordinates. `false` if `id` is not a
+    /// selected note of the open clip.
+    fn begin_note_drag(
+        &mut self,
+        project: &Project,
+        id: NoteUid,
+        kind: DragKind,
+        anchor: (f64, f64),
+    ) -> bool {
+        let Some((c, m)) = self.clip(project) else {
+            return false;
+        };
+        let sel: Vec<Note> = m
+            .notes
+            .iter()
+            .filter(|n| self.selection.contains(&n.id))
+            .cloned()
+            .collect();
+        let Some(grabbed) = sel.iter().find(|n| n.id == id) else {
+            return false;
+        };
+        let view = self.grid_view(c.start);
+        self.gesture = Some(Gesture::Notes {
+            drag: Drag::begin(kind, &view, anchor.0, anchor.1, grabbed, &sel),
+            ids: sel.iter().map(|n| n.id).collect(),
+            grabbed: id,
+        });
+        true
     }
 
     /// Ends the gesture in progress, a note drag or a lane drag, so
@@ -810,6 +849,9 @@ impl PianoRoll {
         outcome_view()
     }
 
+    /// A double-click, which the front end sends after the second press and
+    /// before its release. On empty space it adds a note that sounds, and
+    /// that [`motion`](Self::motion) sets the length of, until that release.
     pub fn double_click(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
         if self.area(p.x, p.y) == Area::Lanes {
             return self.double_click_lane(doc, p);
@@ -836,20 +878,31 @@ impl PianoRoll {
             _ => None,
         };
         let (lx, ly) = self.local(p.x, p.y);
-        let note = self.grid_view(c.start).new_note(
+        let note = glue::new_note(self.grid_view(c.start).new_note(
             lx,
             ly,
             snap.as_ref(),
             self.new_length,
             self.new_velocity,
-        );
+        ));
         if note.start >= c.length {
             return outcome_error(Refusal::NoteOutsideClip);
         }
-        let e = NoteEdit::new(clip_id, "Add Note").add_notes([note]);
-        let ids = e.added_ids();
-        let out = self.execute(doc, e.into_command());
-        self.selection = ids.into_iter().collect();
+        // A bare `AddNotes`, which takes in the resize that may follow, so
+        // the note and its length are one undo step.
+        let add = AddNotes {
+            clip: clip_id,
+            notes: vec![note.clone()],
+        };
+        let out = self.execute(doc, Some(Box::new(add)));
+        if out.error.is_none() {
+            self.selection = BTreeSet::from([note.id]);
+            self.audition = Some(Self::audition_note(&note));
+            self.gesture = Some(Gesture::Drawn {
+                press: p,
+                id: note.id,
+            });
+        }
         out
     }
 
@@ -1131,12 +1184,32 @@ impl PianoRoll {
     }
 }
 
+/// How note names spell the black keys: A♯ or B♭.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Accidentals {
+    #[default]
+    Sharps,
+    Flats,
+}
+
+impl Accidentals {
+    /// The names of the twelve pitch classes, from C.
+    fn names(self) -> [&'static str; 12] {
+        match self {
+            Self::Sharps => [
+                "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+            ],
+            Self::Flats => [
+                "C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B",
+            ],
+        }
+    }
+}
+
 /// Note names with C4 as middle C (key 60), as KDE and most DAWs show them.
-pub fn note_name(key: u8) -> String {
-    const NAMES: [&str; 12] = [
-        "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
-    ];
-    format!("{}{}", NAMES[key as usize % 12], key as i32 / 12 - 1)
+pub fn note_name(key: u8, accidentals: Accidentals) -> String {
+    let name = accidentals.names()[usize::from(key) % 12];
+    format!("{name}{}", i32::from(key) / 12 - 1)
 }
 
 /// Whether `key` is a black key.

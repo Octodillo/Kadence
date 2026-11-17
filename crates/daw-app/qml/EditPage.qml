@@ -227,6 +227,19 @@ Kirigami.Page {
                 // Toggling replaced the binding; follow the setting again.
                 checked = Qt.binding(() => page.lanesShown);
             }
+        },
+        Kirigami.Action {
+            text: i18nc("@action:button", "Flats")
+            icon.name: "music-note-16th"
+            checkable: true
+            checked: AppSettings.flatNoteNames
+            enabled: page.visible
+            tooltip: i18nc("@info:tooltip", "Name the black keys as flats (B♭) instead of sharps (A♯)")
+            onToggled: {
+                AppSettings.chooseFlatNoteNames(checked);
+                // Toggling replaced the binding; follow the setting again.
+                checked = Qt.binding(() => AppSettings.flatNoteNames);
+            }
         }
     ]
 
@@ -257,7 +270,8 @@ Kirigami.Page {
         page.editActions[20],
         page.editActions[21],
         page.editActions[22],
-        page.editActions[23]
+        page.editActions[23],
+        page.editActions[24]
     ]
 
     // The strip's row follows the project, so while the strip is on
@@ -320,6 +334,7 @@ Kirigami.Page {
             velocityHeight: Math.round(Math.min(page.velocitySize.pixels, maximumVelocityHeight))
             lanesShown: page.lanesShown
             laneHeight: Math.round(Kirigami.Units.gridUnit * 2.5)
+            flatNoteNames: AppSettings.flatNoteNames
             backgroundColor: Kirigami.Theme.backgroundColor
             alternateBackgroundColor: Kirigami.Theme.alternateBackgroundColor
             textColor: Kirigami.Theme.textColor
@@ -333,6 +348,7 @@ Kirigami.Page {
             onVelocityHeightChanged: refresh()
             onLanesShownChanged: refresh()
             onLaneHeightChanged: refresh()
+            onFlatNoteNamesChanged: refresh()
             onBackgroundColorChanged: refresh()
             onTextColorChanged: refresh()
             onHighlightColorChanged: refresh()

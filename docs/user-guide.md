@@ -129,6 +129,8 @@ to a beat. The time signature is set next to it.
 Double-click a MIDI clip to open it on the **Edit** page.
 
 - Double-click empty space to add a note; double-click a note to delete it.
+  Keep the button down after the double-click to hear the new note, and
+  drag before letting go to set its length.
 - Click a note to select it (Shift adds to the selection), drag to move,
   drag an edge to resize. Hold Alt to move without snapping.
 - Drag in empty space to select several notes; Ctrl+A selects them all.
@@ -138,6 +140,8 @@ Double-click a MIDI clip to open it on the **Edit** page.
   way. **Humanize**, **Legato** and **Fix Overlaps** are in the same menu.
 - Up and Down transpose by a semitone, Shift+Up and Shift+Down by an
   octave.
+- **Flats** on the toolbar names the black keys as flats (B♭) instead of
+  sharps (A♯).
 
 ## Mixing
 
