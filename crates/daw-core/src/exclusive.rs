@@ -9,6 +9,10 @@
 use crate::sync::{AtomicU32, UnsafeCell};
 use std::sync::atomic::Ordering;
 
+/// How many times [`Exclusive::try_audio_spin`] tries before it gives up: a few microseconds,
+/// enough for a short main-thread call to finish.
+pub const AUDIO_RETRIES: u32 = 100;
+
 const FREE: u32 = 0;
 const AUDIO: u32 = 1;
 const MAIN: u32 = 2;
@@ -40,6 +44,19 @@ impl<T> Exclusive<T> {
         let _release = Release(&self.state);
         // SAFETY: the state word is ours until `_release` drops.
         Some(self.value.with_mut(|v| f(unsafe { &mut *v })))
+    }
+
+    /// [`try_audio`](Self::try_audio), tried [`AUDIO_RETRIES`] times with a CPU pause between
+    /// tries, so a main-thread call that is about to finish does not cost the audio thread
+    /// its block. Runs `f` at most once. Real-time safe: no clock reads or system calls.
+    pub fn try_audio_spin<R>(&self, mut f: impl FnMut(&mut T) -> R) -> Option<R> {
+        for _ in 0..AUDIO_RETRIES {
+            if let Some(r) = self.try_audio(&mut f) {
+                return Some(r);
+            }
+            crate::sync::spin();
+        }
+        None
     }
 
     /// Runs `f` on the value, first waiting for the audio thread to leave it. The audio
@@ -90,6 +107,15 @@ mod tests {
         });
         assert!(!x.is_busy());
         assert_eq!(x.try_audio(|v| *v), Some(5));
+    }
+
+    #[test]
+    fn spinning_gives_up_while_the_main_side_holds_it() {
+        let x = Exclusive::new(0);
+        assert_eq!(x.try_audio_spin(|v| *v + 1), Some(1));
+        let mut calls = 0;
+        x.main(|_| assert_eq!(x.try_audio_spin(|_| calls += 1), None));
+        assert_eq!(calls, 0);
     }
 
     #[test]

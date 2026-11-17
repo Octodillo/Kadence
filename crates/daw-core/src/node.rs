@@ -241,6 +241,39 @@ pub struct ProcessContext<'a> {
     pub events_out: &'a mut EventList,
 }
 
+impl<'a> ProcessContext<'a> {
+    /// Fills every output channel with silence.
+    pub fn silence_outputs(&mut self) {
+        for out in self.audio_out.iter_mut() {
+            out.fill(0.0);
+        }
+    }
+
+    /// Runs `f` on this block with `events_in` in place of its own input events.
+    pub fn with_events_in<R>(
+        &mut self,
+        events_in: &EventList,
+        f: impl FnOnce(&mut ProcessContext<'_>) -> R,
+    ) -> R {
+        // SAFETY: this only shortens the lifetime of the channel slices behind the `&mut`,
+        // which the compiler refuses because a callee could then store a shorter-lived slice
+        // in a slot. `f` must take a context of any lifetime, so all it can store there is
+        // what it got from the context itself or something `'static`, both of which outlive
+        // `'a`. `self.audio_out` is not used while the reborrow lives.
+        let audio_out = unsafe {
+            std::mem::transmute::<&mut [&'a mut [f32]], &mut [&mut [f32]]>(&mut *self.audio_out)
+        };
+        f(&mut ProcessContext {
+            frames: self.frames,
+            transport: self.transport,
+            audio_in: self.audio_in,
+            audio_out,
+            events_in,
+            events_out: &mut *self.events_out,
+        })
+    }
+}
+
 /// A unit of audio processing: track, bus, built-in device or plugin.
 ///
 /// `ports`, `prepare` and `latency` run off the audio thread and may
