@@ -6,11 +6,15 @@ use loom::sync::Arc;
 use loom::thread;
 
 use daw_core::dispose::deferred_drop;
+use daw_core::event::{Event, EventKind, EventList};
 use daw_core::exclusive::Exclusive;
 use daw_core::meter::PeakMeter;
+use daw_core::node::{ProcessContext, TransportState};
+use daw_core::plugin::PluginProcessor;
 use daw_core::queue::spsc;
 use daw_core::rt_log;
 use daw_core::rtlog::{RtLevel, rt_log};
+use daw_core::split::{SharedAudio, SplitAudio};
 
 #[test]
 fn spsc_delivers_in_order_across_wraparound() {
@@ -143,5 +147,51 @@ fn exclusive_never_lets_both_threads_in() {
         });
         let ran = rt.join().unwrap();
         x.main(|(_, n)| assert_eq!(*n, 10 + ran));
+    });
+}
+
+/// Counts the events it is given.
+struct Counter(usize);
+
+impl SplitAudio for Counter {
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        self.0 += ctx.events_in.len();
+    }
+    fn reset(&mut self) {}
+}
+
+#[test]
+fn a_split_half_delivers_what_a_held_state_made_it_skip() {
+    loom::model(|| {
+        fn block(half: &mut dyn PluginProcessor, events: usize) {
+            let mut events_in = EventList::with_capacity(1);
+            for _ in 0..events {
+                let kind = EventKind::Midi([0x80, 60, 0]);
+                events_in.push(Event { frame: 0, kind }).unwrap();
+            }
+            half.process(&mut ProcessContext {
+                frames: 1,
+                transport: &TransportState::default(),
+                audio_in: &[],
+                audio_out: &mut [],
+                events_in: &events_in,
+                events_out: &mut EventList::with_capacity(0),
+            });
+        }
+
+        let mut shared = SharedAudio::new(Counter(0));
+        let mut half = shared.lend().unwrap();
+        let rt = thread::spawn(move || {
+            block(half.as_mut(), 1);
+            block(half.as_mut(), 1);
+            half
+        });
+        let seen = shared.main(|c| c.0);
+        assert!(seen <= 2);
+        let mut half = rt.join().unwrap();
+        // Whichever blocks the main side made it skip, their events arrive with this one.
+        block(half.as_mut(), 0);
+        assert_eq!(shared.main(|c| c.0), 2);
+        assert!(shared.take_back(half));
     });
 }
