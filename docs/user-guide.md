@@ -215,3 +215,9 @@ the Mix page and move the controls while the song plays.
 Report problems and ideas at <https://github.com/Octodillo/Kadence/issues>.
 Include the Kadence version (**About Kadence** in the main menu) and how you
 installed it.
+
+When something goes wrong without a message on screen, Kadence writes what
+it knows to its standard error, which a Plasma session keeps in the journal
+(`journalctl --user -e`). Warnings and errors are written by default; start
+Kadence with `KADENCE_LOG=debug` for more, or `KADENCE_LOG=off` for none. The
+plugin sandbox and scanner processes write there too, under their own names.

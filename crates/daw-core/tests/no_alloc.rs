@@ -7,8 +7,6 @@ use daw_core::meter::PeakMeter;
 use daw_core::node::{ProcessContext, TransportState};
 use daw_core::plugin::PluginProcessor;
 use daw_core::queue::spsc;
-use daw_core::rt_log;
-use daw_core::rtlog::{RtLevel, rt_log};
 use daw_core::split::{SharedAudio, SplitAudio};
 use daw_core::time::{
     Meter, MeterPoint, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline,
@@ -90,19 +88,6 @@ fn rt_operations_do_not_allocate() {
         "retire"
     );
     assert_eq!(collector.collect(), 1);
-
-    let (mut log, mut drain) = rt_log(8);
-    assert_eq!(
-        allocations_in(|| {
-            for i in 0..16 {
-                rt_log!(log, RtLevel::Warn, "cycle {} load {}", i, 0.5f32);
-            }
-        }),
-        0,
-        "rt_log"
-    );
-    assert_eq!(drain.drain().count(), 8);
-    assert_eq!(drain.take_dropped(), 8);
 
     let meter = PeakMeter::new();
     assert_eq!(allocations_in(|| meter.update(&[0.25; 64])), 0, "meter");

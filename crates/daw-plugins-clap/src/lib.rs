@@ -135,7 +135,7 @@ fn scan_file(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
                 found.push(d);
             }
             Err(e) => {
-                eprintln!("clap scan: {id}: {e}");
+                log::warn!("scan: {id}: {e}");
                 first_error.get_or_insert(e);
             }
         }

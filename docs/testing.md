@@ -44,6 +44,7 @@ All start with `KADENCE_`. The first four are on when set to any value, even
 | `KADENCE_TEST_PHYSICAL_PORTS=1` | Says the JACK server's physical ports reach no hardware (`jackd -d dummy`), so the auto-connect test may link them. |
 | `KADENCE_SMOKE_OUT` | Directory in which the song smoke test keeps its project and render. |
 | `KADENCE_SMOKE_TEST_CONFIG` | Directory in which `kadence --smoke-test` keeps the settings it writes, instead of a throwaway one; see `packaging/README.md`. |
+| `KADENCE_LOG` | The most detailed log level written to stderr: `off`, `error`, `warn` (default), `info`, `debug`, `trace`. Not only for tests; see `daw_core::logging`. |
 | `KADENCE_AUDIO=stub` | Run the app without an audio server (UI tests and screenshots). |
 
 The JACK tests are `#[ignore]`d; run them against a server with

@@ -4,8 +4,8 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -29,6 +29,8 @@ struct Shared {
     stop: AtomicBool,
     /// Set by the writer when it hit an error and stopped writing.
     failed: AtomicBool,
+    /// That error. Written once, by the writer thread, before `failed`.
+    error: OnceLock<Arc<MediaError>>,
     dropped_frames: AtomicU64,
 }
 
@@ -158,6 +160,7 @@ impl Recorder {
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            error: OnceLock::new(),
             dropped_frames: AtomicU64::new(0),
         });
         let thread = {
@@ -196,9 +199,11 @@ impl Recorder {
         self.shared.dropped_frames.load(Ordering::Relaxed)
     }
 
-    /// True once the writer has stopped on an error; see [`RecordInput::failed`].
-    pub fn failed(&self) -> bool {
-        self.shared.failed.load(Ordering::Relaxed)
+    /// The error the writer stopped on (disk full, drive removed), once it
+    /// has. Nothing more is recorded after it; [`finish`](Self::finish)
+    /// returns the same error with what was saved.
+    pub fn error(&self) -> Option<Arc<MediaError>> {
+        self.shared.error.get().cloned()
     }
 
     /// Stop after writing everything already queued, finalize the files and save their
@@ -365,20 +370,20 @@ impl Writer {
         Ok(())
     }
 
-    fn finish(mut self, error: Option<MediaError>, dropped_frames: u64) -> RecordingStats {
+    fn finish(mut self, error: Option<Arc<MediaError>>, dropped_frames: u64) -> RecordingStats {
         let mut error = error;
         if let Some(seg) = self.current.take() {
             let (file, finalized) = seg.close();
             self.done.push(file);
             if let Err(e) = finalized {
-                error.get_or_insert(e);
+                error.get_or_insert_with(|| Arc::new(e));
             }
         }
         RecordingStats {
             files: self.done,
             frames: self.frames,
             dropped_frames,
-            error: error.map(Arc::new),
+            error,
         }
     }
 }
@@ -415,7 +420,10 @@ fn writer_loop(mut rx: Consumer<f32>, mut w: Writer, shared: Arc<Shared>) -> Rec
             since_header = Duration::ZERO;
         }
     };
-    if error.is_some() {
+    let error = error.map(Arc::new);
+    if let Some(e) = &error {
+        // Only this thread sets it, once.
+        let _ = shared.error.set(e.clone());
         shared.failed.store(true, Ordering::Relaxed);
         // Keep the ring until the RT side lets go or we are told to stop, so it is
         // never freed on the RT thread.
@@ -460,7 +468,7 @@ mod tests {
             input.write(&[&block, &block]);
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(rec.failed());
+        assert!(rec.error().is_some());
         let dropped_before = rec.dropped_frames();
         assert_eq!(
             input.write(&[&block, &block]),

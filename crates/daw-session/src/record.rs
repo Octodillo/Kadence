@@ -233,12 +233,13 @@ impl AudioTakes {
     pub fn poll(&mut self) -> Vec<TakeProblem> {
         let mut out = Vec::new();
         for t in &mut self.takes {
-            if t.recorder.failed() && !t.failed {
+            if !t.failed
+                && let Some(error) = t.recorder.error()
+            {
                 t.failed = true;
-                // The error itself comes with `finish`.
                 out.push(TakeProblem::WriteFailed {
                     track: t.name.clone(),
-                    error: Arc::new(MediaError::Encode("the disk refused the recording".into())),
+                    error,
                 });
             }
             let dropped = t.recorder.dropped_frames();
@@ -285,7 +286,10 @@ impl AudioTakes {
                     continue;
                 }
             };
-            if let Some(error) = &stats.error {
+            // `poll` may have reported the writer's error already.
+            if let Some(error) = &stats.error
+                && !t.failed
+            {
                 problems.push(TakeProblem::WriteFailed {
                     track: t.name.clone(),
                     error: error.clone(),

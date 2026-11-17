@@ -482,16 +482,6 @@ impl CompiledGraph {
         self.steps[self.master].n_out
     }
 
-    /// Calls `reset` on every node and clears every delay line.
-    pub fn reset(&mut self) {
-        for s in &mut self.steps {
-            s.node.reset();
-        }
-        for d in &mut self.delays {
-            d.reset();
-        }
-    }
-
     /// Cuts off what is still sounding: resets every node marked with
     /// [`GraphDesc::set_tail`] and clears every delay line, so reverb and
     /// delay tails and held voices stop at once. Other nodes (players,
@@ -529,8 +519,8 @@ impl CompiledGraph {
 
     /// Runs every node once for `frames` samples (at most `max_frames`).
     /// `audio_in[ch][offset..offset + frames]` feeds the input node.
-    /// Returns how many automation events found no room in a node's event
-    /// list. RT-safe.
+    /// Returns what did not fit a node's event list and was dropped.
+    /// RT-safe.
     pub(crate) fn process(
         &mut self,
         transport: &TransportState,
@@ -538,10 +528,10 @@ impl CompiledGraph {
         audio_in: &[&[f32]],
         offset: usize,
         external: &[EventList],
-    ) -> usize {
+    ) -> Dropped {
         debug_assert!(frames <= self.max_frames);
         let mf = self.max_frames;
-        let mut dropped = 0;
+        let mut dropped = Dropped::default();
         let Self { steps, delays, .. } = self;
         for i in 0..steps.len() {
             let (done, rest) = steps.split_at_mut(i);
@@ -580,12 +570,10 @@ impl CompiledGraph {
                 }
             }
 
-            // Events that don't fit are dropped: a full list must not
-            // allocate.
+            // Events that don't fit are dropped and counted: a full list
+            // must not allocate.
             step.events_in.clear();
-            for e in step.params.iter() {
-                let _ = step.events_in.push(*e);
-            }
+            dropped.params += step.events_in.push_counting(step.params.iter().copied());
             step.params.clear();
             if transport.playing {
                 // A dense ramp must not fill the list and crowd out the notes
@@ -602,7 +590,7 @@ impl CompiledGraph {
                 // `in_latency` samples ago; before project start the lane
                 // holds its first value.
                 let now = transport.position.0 - i64::from(step.in_latency);
-                dropped += emit_automation(
+                dropped.params += emit_automation(
                     &mut step.automation,
                     now,
                     frames,
@@ -612,14 +600,12 @@ impl CompiledGraph {
                 );
             }
             for list in step.external_events.lists(external) {
-                for e in list.iter() {
-                    let _ = step.events_in.push(*e);
-                }
+                dropped.events += step.events_in.push_counting(list.iter().copied());
             }
             for &src in &step.event_sources {
-                for e in done[src].events_out.iter() {
-                    let _ = step.events_in.push(*e);
-                }
+                dropped.events += step
+                    .events_in
+                    .push_counting(done[src].events_out.iter().copied());
             }
 
             let mut ins: [&[f32]; MAX_CHANNELS] = [&[]; MAX_CHANNELS];
@@ -652,6 +638,22 @@ impl CompiledGraph {
     }
 }
 
+/// What one block could not deliver because a node's event list was full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Dropped {
+    /// Parameter changes, queued or from automation.
+    pub params: u64,
+    /// Notes and other events, from outside or from another node.
+    pub events: u64,
+}
+
+impl std::ops::AddAssign for Dropped {
+    fn add_assign(&mut self, other: Self) {
+        self.params += other.params;
+        self.events += other.events;
+    }
+}
+
 /// Pushes what `lanes` do in the block of `frames` samples starting at `now`
 /// and returns how many events did not fit. `reserve` slots of `out` are
 /// left free for the notes still to come, as far as that leaves every lane
@@ -663,7 +665,7 @@ fn emit_automation(
     out: &mut EventList,
     reserve: usize,
     own: usize,
-) -> usize {
+) -> u64 {
     let mut dropped = 0;
     // Every lane's value at the start of the block goes first: whatever is
     // dropped below, no parameter is left behind for longer than a block.

@@ -6,7 +6,7 @@ use daw_core::event::{Event, EventList, ParamId};
 use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::{SampleTime, SegmentTempoMap, Timeline};
 
-use crate::compile::{CompileError, CompiledGraph};
+use crate::compile::{CompileError, CompiledGraph, Dropped};
 use crate::graph::{GraphDesc, LiveNodes, NodeId, NodeKey};
 use crate::meter::NodeMeter;
 use crate::transport::{LoopRange, Transport, TransportCommand};
@@ -92,7 +92,8 @@ struct Shared {
     counting_in: AtomicBool,
     latency: AtomicU32,
     swaps: AtomicU64,
-    dropped: AtomicU64,
+    dropped_params: AtomicU64,
+    dropped_events: AtomicU64,
     /// Timelines a dropped controller still held. The audio thread may
     /// still swap them in, so they live until the processor is dropped.
     orphans: Mutex<Vec<Arc<Timeline>>>,
@@ -352,7 +353,15 @@ impl EngineController {
     /// was not in the running graph, it has no event input, or automation
     /// had more changes in one block than fit the node's event list.
     pub fn dropped_params(&self) -> u64 {
-        self.shared.dropped.load(Ordering::Relaxed)
+        self.shared.dropped_params.load(Ordering::Relaxed)
+    }
+
+    /// Events dropped because an event list was full: more events for one
+    /// node in a block than [`EngineConfig::event_capacity`]. A dropped
+    /// note-off leaves its note sounding, so a count that moves is worth
+    /// reporting.
+    pub fn dropped_events(&self) -> u64 {
+        self.shared.dropped_events.load(Ordering::Relaxed)
     }
 
     fn send(&mut self, cmd: Command) -> Result<(), EngineError> {
@@ -423,6 +432,7 @@ impl EngineProcessor {
     ) {
         self.drain_commands();
         let mut offset = 0;
+        let mut dropped = Dropped::default();
         while offset < frames {
             let len = self
                 .transport
@@ -434,23 +444,19 @@ impl EngineProcessor {
             let overflow = self.external.len() - 1;
             for (i, events) in sources.iter().enumerate() {
                 let list = &mut self.external[i.min(overflow)];
-                for e in events.iter() {
+                let in_block = events.iter().filter_map(|e| {
                     let f = e.frame as usize;
-                    if f >= offset && (f < offset + len || last) {
-                        let frame = (f - offset).min(len - 1) as u32;
-                        let _ = list.push(Event { frame, ..*e });
-                    }
-                }
+                    (f >= offset && (f < offset + len || last)).then(|| Event {
+                        frame: (f - offset).min(len - 1) as u32,
+                        ..*e
+                    })
+                });
+                dropped.events += list.push_counting(in_block);
             }
             let state = self.transport.state();
             match self.graph.as_deref_mut() {
                 Some(g) => {
-                    let dropped = g.process(&state, len, audio_in, offset, &self.external);
-                    if dropped > 0 {
-                        self.shared
-                            .dropped
-                            .fetch_add(dropped as u64, Ordering::Relaxed);
-                    }
+                    dropped += g.process(&state, len, audio_in, offset, &self.external);
                     let channels = g.output_channels();
                     for (ch, out) in audio_out.iter_mut().enumerate() {
                         let out = &mut out[offset..offset + len];
@@ -469,6 +475,17 @@ impl EngineProcessor {
             }
             self.transport.advance(len);
             offset += len;
+        }
+        // Only written when something was lost, to keep the cache line quiet.
+        if dropped.params > 0 {
+            self.shared
+                .dropped_params
+                .fetch_add(dropped.params, Ordering::Relaxed);
+        }
+        if dropped.events > 0 {
+            self.shared
+                .dropped_events
+                .fetch_add(dropped.events, Ordering::Relaxed);
         }
         self.shared
             .position
@@ -523,7 +540,7 @@ impl EngineProcessor {
                         .as_deref_mut()
                         .is_some_and(|g| g.queue_param(node, param, value));
                     if !queued {
-                        self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                        self.shared.dropped_params.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }

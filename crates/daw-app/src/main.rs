@@ -3,6 +3,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    daw_core::logging::init("kadence");
     // A plugin sandbox or scanner the app started: no Qt there.
     if let Some(code) = daw_app::run_plugin_child() {
         return code;

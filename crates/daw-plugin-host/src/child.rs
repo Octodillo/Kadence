@@ -50,6 +50,8 @@ pub fn run_host_child(
     };
     // A panic anywhere (the plugin's adapter, a poisoned lock) must end the process, so the
     // application sees a crash rather than a host that stopped answering.
+    // Printed rather than logged, like the default hook: a panic must be seen
+    // whatever the log level.
     std::panic::set_hook(Box::new(|info| {
         eprintln!("daw-plugin-host: {info}");
         std::process::abort();
@@ -60,7 +62,7 @@ pub fn run_host_child(
     let stream = match UnixStream::connect(Path::new(socket)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("daw-plugin-host: cannot connect to {socket:?}: {e}");
+            log::error!("cannot connect to {socket:?}: {e}");
             return Some(ExitCode::FAILURE);
         }
     };
@@ -83,7 +85,7 @@ pub fn run_host_child(
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("daw-plugin-host: {e}");
+            log::error!("{e}");
             ExitCode::FAILURE
         }
     })
@@ -560,8 +562,8 @@ fn set_realtime(priority: i32) {
     let err =
         unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) };
     if err != 0 {
-        eprintln!(
-            "daw-plugin-host: real-time priority {priority} not granted ({}); audio may glitch",
+        log::warn!(
+            "real-time priority {priority} not granted ({}); audio may glitch",
             std::io::Error::from_raw_os_error(err)
         );
     }

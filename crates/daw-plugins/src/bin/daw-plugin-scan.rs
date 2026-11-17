@@ -5,6 +5,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    daw_core::logging::init("daw-plugin-scan");
     let registry = daw_plugins::default_registry();
     match daw_plugins::run_scan_child(&registry, std::env::args_os().skip(1)) {
         // The result is written. Leave without running exit-time code, such as static

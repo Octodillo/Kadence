@@ -82,6 +82,18 @@ impl EventList {
         Ok(())
     }
 
+    /// Pushes each of `events` that fits, in order, and returns how many did
+    /// not. Never allocates.
+    pub fn push_counting(&mut self, events: impl IntoIterator<Item = Event>) -> u64 {
+        let mut dropped = 0;
+        for e in events {
+            if self.push(e).is_err() {
+                dropped += 1;
+            }
+        }
+        dropped
+    }
+
     pub fn clear(&mut self) {
         self.events.clear();
     }
@@ -183,6 +195,16 @@ mod tests {
         list.clear();
         assert!(list.is_empty());
         list.push(ev(2, 2)).unwrap();
+    }
+
+    #[test]
+    fn push_counting_keeps_what_fits_and_counts_the_rest() {
+        let mut list = EventList::with_capacity(3);
+        list.push(ev(4, 0)).unwrap();
+        let dropped = list.push_counting([ev(2, 1), ev(6, 2), ev(0, 3), ev(1, 4)]);
+        assert_eq!(dropped, 2);
+        assert_eq!(tags(&list), [(2, 1), (4, 0), (6, 2)]);
+        assert_eq!(list.push_counting([]), 0);
     }
 
     #[test]

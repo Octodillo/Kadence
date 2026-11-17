@@ -22,6 +22,7 @@
 mod build;
 pub mod capture;
 pub mod catalog;
+mod drops;
 pub mod export;
 pub mod host;
 mod media;
@@ -218,6 +219,7 @@ pub struct Session {
     loop_ticks: Option<(TickTime, TickTime)>,
     built: Option<Built>,
     warnings: Vec<Warning>,
+    drop_log: drops::DropLog,
     /// The project's master track, as of the last sync.
     master: Option<TrackId>,
     /// What the transport was last told, so the UI doesn't wait a period
@@ -297,6 +299,7 @@ impl Session {
             loop_ticks: None,
             built: None,
             warnings: Vec::new(),
+            drop_log: Default::default(),
             playing: false,
             master: None,
             suspended: HashSet::new(),
@@ -541,6 +544,7 @@ impl Session {
     /// about.
     pub fn tick(&mut self) -> TickReport {
         self.collect_garbage();
+        self.drop_log.report(&self.controller);
         let mut news = Vec::new();
         let mut rebuild = self.built.is_none()
             && self

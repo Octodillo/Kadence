@@ -5,6 +5,7 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    daw_core::logging::init("daw-plugin-host");
     let registry = daw_plugins::default_registry();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     daw_plugin_host::run_host_child(&registry, args.iter().cloned())
