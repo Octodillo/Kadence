@@ -331,6 +331,12 @@ fn zone_without_source_is_saved_as_placeholder() {
     b.load_state(&a.save_state()).unwrap();
     assert_eq!(b.zones()[0].gain_db, 0.0);
     assert_eq!(b.zones()[0].velocity_hi, 1.0);
+    // So is a gain far past what a gain factor can hold.
+    let mut z = a.zones()[0].clone();
+    z.gain_db = 1.0e6;
+    a.set_zones(vec![z]);
+    b.load_state(&a.save_state()).unwrap();
+    assert_eq!(b.zones()[0].gain_db, 24.0);
 }
 
 #[test]

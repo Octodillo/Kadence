@@ -445,6 +445,19 @@ mod tests {
     }
 
     #[test]
+    fn a_port_without_a_name_is_called_by_its_symbol() {
+        let fixture = crate::test_support::Fixture::new(
+            r#"
+            lv2:port [ a lv2:InputPort, lv2:ControlPort; lv2:index 0; lv2:symbol "gain" ]
+            "#,
+        );
+        let world = World::with_load_bundle(&fixture.bundle_uri);
+        let plugin = world.plugin_by_uri("urn:livi:test").unwrap();
+        let names: Vec<_> = plugin.ports().map(|p| (p.symbol, p.name)).collect();
+        assert_eq!(names, [("gain".to_string(), "gain".to_string())]);
+    }
+
+    #[test]
     fn bundle_loading_rejects_unsupported_ports() {
         let fixture = crate::test_support::Fixture::new(
             r#"

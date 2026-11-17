@@ -660,10 +660,18 @@ impl Arrange {
         // Keep the handles inside the clip and apart from each other.
         let in_x = fade_in_x.clamp(r.x, r.right() - 2.0 * h);
         let out_x = fade_out_x.clamp(in_x + 2.0 * h, r.right());
+        let fade_in = Rect::new(in_x, r.y, h, h);
+        let fade_out = Rect::new(out_x - h, r.y, h, h);
+        // The gain handle steps down a row where a fade ends mid-clip, so
+        // neither covers the other.
+        let mut gain = Rect::new(r.x + (r.w - h) / 2.0, r.y, h, h);
+        if gain.intersects(&fade_in) || gain.intersects(&fade_out) {
+            gain.y += h;
+        }
         Some(Handles {
-            fade_in: Rect::new(in_x, r.y, h, h),
-            fade_out: Rect::new(out_x - h, r.y, h, h),
-            gain: Rect::new(r.x + (r.w - h) / 2.0, r.y, h, h),
+            fade_in,
+            fade_out,
+            gain,
             fade_in_x,
             fade_out_x,
         })
@@ -1458,12 +1466,27 @@ impl Arrange {
             .collect()
     }
 
+    /// Whether any clip is selected. [`selection`](Self::selection) can
+    /// also hold clips that are gone (an undone duplicate, say, which
+    /// redo selects again), so its being empty doesn't tell.
+    pub fn clips_selected(&self, project: &Project) -> bool {
+        !self.selection.is_empty()
+            && project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .any(|c| self.selection.contains(&c.id))
+    }
+
     pub fn select_all(&mut self, project: &Project) -> Outcome {
         self.selection = project
             .tracks
             .iter()
             .flat_map(|t| t.clips.iter().map(|c| c.id))
             .collect();
+        // Clips and points aren't selected together: Delete takes the
+        // points first, and would leave every clip.
+        self.lanes.clear_selection();
         Outcome::view()
     }
 
@@ -1536,16 +1559,17 @@ impl Arrange {
     pub fn split_at(&mut self, doc: &mut Document, env: &Env, at: TickTime) -> Outcome {
         self.end_drag(doc);
         let project = doc.project();
+        let selected = self.clips_selected(project);
         let targets: Vec<(TrackId, Arc<Clip>)> = project
             .tracks
             .iter()
             .flat_map(|t| t.clips.iter().map(move |c| (t, c)))
             .filter(|(t, c)| {
                 let inside = c.start < at && at.0 < c.start.0 + c.length.0;
-                let chosen = if self.selection.is_empty() {
-                    self.selected_track == Some(t.id)
-                } else {
+                let chosen = if selected {
                     self.selection.contains(&c.id)
+                } else {
+                    self.selected_track == Some(t.id)
                 };
                 inside && chosen
             })

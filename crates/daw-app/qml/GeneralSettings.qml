@@ -81,6 +81,16 @@ Kirigami.FormLayout {
         }
     }
 
+    QQC2.CheckBox {
+        text: i18nc("@option:check", "Name the black keys as flats (B♭) instead of sharps (A♯)")
+        checked: AppSettings.flatNoteNames
+        onToggled: {
+            AppSettings.chooseFlatNoteNames(checked);
+            // Toggling replaced the binding; follow the setting again.
+            checked = Qt.binding(() => AppSettings.flatNoteNames);
+        }
+    }
+
     FolderDialog {
         id: folderDialog
         title: i18nc("@title:window", "Choose Project Folder")

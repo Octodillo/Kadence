@@ -30,16 +30,36 @@ channel (see [Recording](#recording)).
 
 ### Plugins
 
-Kadence finds CLAP, VST3 and LV2 plugins in their usual folders
-(`~/.clap`, `/usr/lib/clap`, `~/.vst3`, `/usr/lib/vst3`, `~/.lv2`,
-`/usr/lib/lv2` and the like). The plugin section of the **Audio** settings
-page shows what was found, lets you add other folders with **Add Folder…**,
-and **Rescan** looks again. Each plugin
+Kadence looks for CLAP, VST3 and LV2 plugins in these folders and the
+folders inside them, in this order:
+
+| Format | Folders |
+|---|---|
+| CLAP | the folders in `$CLAP_PATH`, `~/.clap`, `/usr/lib/clap` |
+| VST3 | the folders in `$VST3_PATH`, `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` |
+| LV2 | `~/.lv2`, `/usr/local/lib/lv2`, `/usr/local/lib64/lv2`, `/usr/lib/lv2`, `/usr/lib64/lv2`, `/usr/lib/x86_64-linux-gnu/lv2`, `/usr/lib/aarch64-linux-gnu/lv2` |
+
+`CLAP_PATH`, `VST3_PATH` and `LV2_PATH` are optional environment variables
+that each hold a list of folders separated by colons. The folders in
+`CLAP_PATH` and `VST3_PATH` are searched before the others; `LV2_PATH`, if
+set, replaces the LV2 folders above.
+
+The plugin section of the **Audio** settings page lists the ones of these
+folders that exist on your system, along with those in your home folder,
+and shows what was found. **Add Folder…** adds
+another folder, which is searched after these for all three formats, and
+**Rescan** looks again. Each plugin
 runs in a process of its own, so a plugin that crashes is switched off and
 reported instead of closing Kadence.
 
 In the Flatpak, install plugins from Flathub (their IDs start with
-`org.freedesktop.LinuxAudio.Plugins.`) or put them in your home folder.
+`org.freedesktop.LinuxAudio.Plugins.`) or put them in `~/.clap`, `~/.vst3`
+or `~/.lv2`, which the Flatpak may read; if you had to create the folder,
+restart Kadence so it can see it. The Flathub plugins are found in
+`/app/extensions/Plugins/clap`, `/app/extensions/Plugins/vst3` and
+`/app/extensions/Plugins/lv2`. The system folders above are then the
+Flatpak runtime's, not your system's, so plugins installed with your
+distribution's packages are not found.
 
 ## Projects
 
@@ -134,6 +154,9 @@ to a beat. The time signature is set next to it.
 Double-click a MIDI clip to open it on the **Edit** page.
 
 - Double-click empty space to add a note; double-click a note to delete it.
+  Keep the button down after the double-click to hear the new note (with
+  **Preview Notes** on), and drag past its end before letting go to set its
+  length.
 - Click a note to select it (Shift adds to the selection), drag to move,
   drag an edge to resize. Hold Alt to move without snapping.
 - Drag in empty space to select several notes; Ctrl+A selects them all.
@@ -143,6 +166,8 @@ Double-click a MIDI clip to open it on the **Edit** page.
   way. **Humanize**, **Legato** and **Fix Overlaps** are in the same menu.
 - Up and Down transpose by a semitone, Shift+Up and Shift+Down by an
   octave.
+- **Flats** on the toolbar, also in the General settings, names the black
+  keys as flats (B♭) instead of sharps (A♯).
 
 ## Mixing
 

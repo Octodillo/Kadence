@@ -10,6 +10,9 @@ use std::any::Any;
 use crate::event::ParamId;
 use crate::node::{Node, ProcessContext};
 
+/// The name every format gives plugins that ask which host they run in.
+pub const HOST_NAME: &str = "Kadence";
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PluginFormatKind {
     Clap,
@@ -108,8 +111,9 @@ pub trait PluginInstance: Node {
     /// while this object serves main-thread calls (`on_main_thread`, state, editors). Without
     /// it the host has to keep the two apart, and a slow main-thread call costs the plugin's
     /// audio. A format whose plugins allow those calls during processing (CLAP, VST3)
-    /// returns `Some` while the plugin is prepared; the default, and a format that cannot,
-    /// returns `None`.
+    /// returns `Some` while the plugin is prepared, and one whose host side keeps the
+    /// plugin's UI away from its audio (LV2) at any time; the default, and a format that
+    /// cannot, returns `None`.
     ///
     /// While the half is out, this object's own [`Node::process`] and [`Node::reset`] do
     /// nothing, and the host gives the half back with [`join`](Self::join) before it calls

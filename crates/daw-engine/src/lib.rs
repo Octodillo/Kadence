@@ -38,4 +38,4 @@ pub use graph::{AudioEdge, EventEdge, GraphDesc, NodeId, NodeKey, NodeKind};
 pub use meter::NodeMeter;
 pub use plugin::{PluginHandle, PluginNode};
 pub use render::{RenderError, RenderOptions, render, render_to_wav};
-pub use transport::{LoopRange, Transport, TransportCommand};
+pub use transport::{LoopRange, MIN_LOOP_SECONDS, Transport, TransportCommand};

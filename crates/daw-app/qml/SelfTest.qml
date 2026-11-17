@@ -439,6 +439,10 @@ Item {
             // Later steps get their own budget.
             test.waits = 0;
             check(Plugins.hasScanned, "plugin scan finished");
+            // What the plugin settings list: a group of folders per format.
+            check(Plugins.formatNames().join(" ") === "CLAP VST3 LV2", "the plugin formats are named");
+            check(Plugins.formatFolders(0).length === 0 && Plugins.formatFolders(4).length === 0,
+                  "only the three formats have folders");
             shoot(window.title, "plugin-browser");
             if (!window.smokeTest) {
                 return;
@@ -533,11 +537,26 @@ Item {
             AppSettings.setLayoutValue(velocity.key, savedVelocity);
             const notes = TestHelper.pianoNoteCount();
             check(notes === 12, "demo clip has 12 notes");
-            // Double-click empty space low in the grid: a note is added.
-            roll.doubleClick(roll.width * 0.8, roll.height - roll.lanesHeight - roll.velocityHeight - 20, 0);
+            // Double-click empty space low in the grid: a note is added,
+            // and dragging before letting go sets its length in the same
+            // undo step.
+            const newX = roll.width * 0.8;
+            const newY = roll.height - roll.lanesHeight - roll.velocityHeight - 20;
+            roll.press(newX, newY, Qt.LeftButton, 0);
+            roll.doubleClick(newX, newY, 0);
             check(TestHelper.pianoNoteCount() === notes + 1, "double-click adds a note");
+            roll.motion(newX + Kirigami.Units.gridUnit * 3, newY, 0);
+            roll.release(newX + Kirigami.Units.gridUnit * 3, newY, 0);
+            check(TestHelper.pianoNoteCount() === notes + 1, "dragging the new note keeps it");
             Project.undo();
             check(TestHelper.pianoNoteCount() === notes, "undo removes it");
+            // The toolbar spells the black keys either way.
+            const flatsToggle = edit.editActions[24];
+            const flats = AppSettings.flatNoteNames;
+            flatsToggle.trigger();
+            check(AppSettings.flatNoteNames === !flats && roll.flatNoteNames === !flats, "toggle flat note names");
+            flatsToggle.trigger();
+            check(AppSettings.flatNoteNames === flats && roll.flatNoteNames === flats, "toggle note names back");
             roll.selectAll();
             check(roll.hasSelection, "select all");
             shoot(window.title, "edit");

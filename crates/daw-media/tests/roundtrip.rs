@@ -2,8 +2,8 @@ mod common;
 
 use common::{estimate_freq, max_abs_diff, test_signal};
 use daw_media::{
-    AudioData, Decoder, FlacBits, PeakCache, WavFormat, decode_file, load_file, resample,
-    write_flac, write_wav,
+    AudioData, Decoder, FlacBits, MediaError, PeakCache, WavFormat, decode_file,
+    decode_file_within, load_file_within, resample, write_flac, write_wav,
 };
 
 fn data_dir() -> std::path::PathBuf {
@@ -185,7 +185,7 @@ fn load_file_resamples_to_engine_rate() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("r.wav");
     write_wav(&path, &test_signal(96_000, 9600, 1), WavFormat::Float32).unwrap();
-    let d = load_file(&path, 48_000).unwrap();
+    let d = load_file_within(&path, 48_000, u64::MAX).unwrap().unwrap();
     assert_eq!(d.sample_rate, 48_000);
     assert!((d.frames() as i64 - 4800).abs() <= 1);
 }
@@ -227,4 +227,140 @@ fn rewriting_a_file_drops_its_peak_cache() {
     let new = PeakCache::load_or_build(&path).unwrap();
     assert_ne!(new, old, "stale peaks served for the rewritten file");
     assert_eq!(new, PeakCache::build(&path).unwrap());
+}
+
+/// A WAV whose header states `rate`, whatever the audio in it is.
+fn wav_claiming_rate(dir: &std::path::Path, rate: u32) -> std::path::PathBuf {
+    let path = dir.join(format!("rate-{rate}.wav"));
+    write_wav(&path, &test_signal(48_000, 100, 1), WavFormat::Pcm16).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    // The sample rate of the canonical header hound writes.
+    assert_eq!(bytes[24..28], 48_000u32.to_le_bytes());
+    bytes[24..28].copy_from_slice(&rate.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn sample_rates_no_real_file_has_are_refused_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    // A prime near the top of the range sizes a resampler by the whole rate.
+    for rate in [1, 999, 768_001, 4_294_967_291] {
+        let path = wav_claiming_rate(dir.path(), rate);
+        let err = Decoder::open(&path).err().expect("refused");
+        assert!(matches!(err, MediaError::Unsupported(_)), "{rate}: {err}");
+        assert!(load_file_within(&path, 48_000, u64::MAX).is_err());
+    }
+    for rate in [1_000, 768_000] {
+        Decoder::open(wav_claiming_rate(dir.path(), rate)).unwrap();
+    }
+}
+
+#[test]
+fn resampling_refuses_rates_outside_the_supported_range() {
+    let data = test_signal(48_000, 100, 1);
+    assert!(resample(&data, 4_294_967_291).is_err());
+    let odd = AudioData {
+        sample_rate: 999,
+        ..data
+    };
+    assert!(resample(&odd, 48_000).is_err());
+    assert!(daw_media::ChunkResampler::new(4_294_967_291, 48_000, 1).is_err());
+}
+
+#[test]
+fn limited_decode_keeps_nothing_of_a_file_that_is_too_long() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("second.wav");
+    write_wav(&path, &test_signal(48_000, 48_000, 2), WavFormat::Pcm16).unwrap();
+    // The limit counts every channel's samples.
+    assert!(decode_file_within(&path, 48_000).unwrap().is_none());
+    assert!(load_file_within(&path, 44_100, 95_999).unwrap().is_none());
+    let whole = decode_file_within(&path, 96_000).unwrap().expect("fits");
+    assert_eq!(whole.frames(), 48_000);
+    let resampled = load_file_within(&path, 96_000, 96_000)
+        .unwrap()
+        .expect("fits");
+    assert!((resampled.frames() as i64 - 96_000).abs() <= 1);
+    // The limit is on the file's own length, not the resampled one.
+    assert_eq!(resampled.sample_rate, 96_000);
+}
+
+/// A FLAC of `frames` mono frames whose header says it holds only 10.
+fn flac_understating_its_length(dir: &std::path::Path, frames: usize) -> std::path::PathBuf {
+    let path = dir.join("short-they-said.flac");
+    write_flac(&path, &test_signal(48_000, frames, 1), FlacBits::B16).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    // STREAMINFO follows "fLaC" and a 4-byte block header; the frame count
+    // is the low 36 bits of its bytes 13..18.
+    assert_eq!(&bytes[..4], b"fLaC");
+    bytes[21] &= 0xf0;
+    bytes[22..26].copy_from_slice(&10u32.to_be_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn the_decode_limit_holds_against_a_header_that_understates_the_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = flac_understating_its_length(dir.path(), 48_000);
+    assert_eq!(Decoder::open(&path).unwrap().info().frames, Some(10));
+    assert!(decode_file_within(&path, 47_999).unwrap().is_none());
+    let whole = decode_file_within(&path, 48_000).unwrap().expect("fits");
+    assert_eq!(whole.frames(), 48_000);
+}
+
+/// A minimal AIFF header stating `channels`, with no audio.
+fn aiff_claiming_channels(dir: &std::path::Path, channels: u16) -> std::path::PathBuf {
+    let path = dir.join(format!("channels-{channels}.aiff"));
+    let mut bytes = Vec::new();
+    bytes.extend(b"FORM");
+    bytes.extend(46u32.to_be_bytes());
+    bytes.extend(b"AIFFCOMM");
+    bytes.extend(18u32.to_be_bytes());
+    bytes.extend(channels.to_be_bytes());
+    bytes.extend(0u32.to_be_bytes()); // frames
+    // 8 bits a sample: with more, the reader's own frame size overflows.
+    bytes.extend(8u16.to_be_bytes());
+    // 48 kHz as an 80-bit float.
+    bytes.extend([0x40, 0x0e, 0xbb, 0x80, 0, 0, 0, 0, 0, 0]);
+    bytes.extend(b"SSND");
+    bytes.extend(8u32.to_be_bytes());
+    bytes.extend([0; 8]); // offset, block size
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn channel_counts_no_real_file_has_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok = aiff_claiming_channels(dir.path(), 2);
+    assert_eq!(Decoder::open(&ok).unwrap().info().channels, 2);
+    for channels in [65, 65_535] {
+        let path = aiff_claiming_channels(dir.path(), channels);
+        let err = Decoder::open(&path).err().expect("refused");
+        assert!(
+            matches!(err, MediaError::Unsupported(_)),
+            "{channels}: {err}"
+        );
+        assert!(PeakCache::load_or_build(&path).is_err());
+    }
+    assert!(daw_media::ChunkResampler::new(44_100, 48_000, 65).is_err());
+}
+
+#[test]
+fn flushing_a_stream_gives_all_of_it_at_rates_that_share_no_factor() {
+    // The resampler then works in blocks of a whole second or more.
+    for (from, to) in [(767_999, 48_000), (48_000, 767_999), (44_100, 48_000)] {
+        let mut rs = daw_media::ChunkResampler::new(from, to, 2).unwrap();
+        let input = vec![0.5f32; 2 * from as usize / 10];
+        let mut out = Vec::new();
+        rs.process(&input, &mut out).unwrap();
+        rs.flush(&mut out).unwrap();
+        let frames = (out.len() / 2) as i64;
+        assert!(
+            (frames - i64::from(to) / 10).abs() <= 1,
+            "{from} to {to}: {frames}"
+        );
+    }
 }

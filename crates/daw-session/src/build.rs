@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use daw_core::meter::PeakMeter;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::time::TickTime;
 use daw_engine::mixer::SoloState;
@@ -195,166 +194,151 @@ pub(crate) fn graph(
     session: &mut Session,
     snapshot: &ProjectSnapshot,
     structure: Structure,
-    mut old: Built,
+    old: Built,
 ) -> (GraphDesc, Built) {
-    let (inputs, outputs) = (session.config.inputs, session.config.outputs);
-    let mut g = session.controller.graph(inputs, outputs);
-    let mut built = Built {
-        structure,
-        ..Default::default()
-    };
-    let muted = effective_mutes(snapshot);
-    let master = snapshot.master.id;
-
-    // Each track's chain: [player] -> devices -> strip. `heads` is where
-    // audio routed into a track (from outputs and sends) enters.
-    let mut heads: HashMap<TrackId, NodeId> = HashMap::new();
-    let mut pre_fader: HashMap<TrackId, NodeId> = HashMap::new();
-    let mut strips: HashMap<TrackId, NodeId> = HashMap::new();
+    let mut b = Builder::new(session, snapshot, structure, old);
     for track in snapshot.all_tracks() {
-        let key = strip_key(snapshot, track.id);
-        let strip = if track.id == master {
-            g.master()
-        } else if let Some(id) = g.reuse(key) {
-            g.rename(id, &track.name);
-            carry_params(&mut built, &old, key);
-            id
-        } else {
-            let kind = if track.kind == TrackKind::Bus {
-                NodeKind::Bus
-            } else {
-                NodeKind::Track
-            };
-            let mut strip = Strip::track(STRIP_CHANNELS)
-                .with_gain(db_to_gain(track.volume_db) as f32)
-                .with_pan(track.pan as f32);
-            strip.set_muted(muted.contains(&track.id));
-            let id = g.add_node(kind, &track.name, Box::new(strip));
-            g.set_key(id, key);
-            g.set_meter(id, Arc::new(NodeMeter::new(STRIP_CHANNELS as usize)));
-            remember_strip(&mut built, key, track, &muted);
-            id
-        };
-        if track.id == master {
-            if g.meter(strip).is_none() {
-                g.set_meter(strip, Arc::new(NodeMeter::new(outputs as usize)));
-            }
-            // The engine creates the master at unity gain and the old one
-            // may have any; send the model's value after the swap.
-            carry_params(&mut built, &old, key);
-        }
-        strips.insert(track.id, strip);
+        b.track(track);
+    }
+    b.outputs();
+    b.sends();
+    b.metronome();
+    b.automate();
+    b.stopped_lanes();
+    (b.g, b.built)
+}
 
-        let mut chain: Vec<NodeId> = Vec::new();
-        if track.kind == TrackKind::Audio {
-            let pkey = player_key(track.id);
-            match old.players.remove(&track.id) {
-                Some(handle) if g.can_reuse(pkey) => {
-                    let id = g.reuse(pkey).expect("checked");
-                    built.players.insert(track.id, handle);
-                    if let Some(c) = old.clips.remove(&track.id) {
-                        built.clips.insert(track.id, c);
-                    }
-                    chain.push(id);
-                }
-                _ => {
-                    let (node, mut handle) =
-                        player(session.loop_points.clone(), session.offline.clone());
-                    let set = clip_set(session, track, &handle);
-                    // A fresh queue has room for the first set.
-                    let _ = handle.send(set);
-                    built.clips.insert(track.id, track.clips.clone());
-                    built.players.insert(track.id, handle);
-                    let id = g.add_device(format!("{} clips", track.name), Box::new(node));
-                    g.set_key(id, pkey);
-                    chain.push(id);
-                }
-            }
+/// Where a track's nodes are in the graph being built.
+struct Chain {
+    strip: NodeId,
+    /// Where audio routed into the track (from outputs and sends) enters.
+    head: NodeId,
+    /// The end of the track's devices, for pre-fader sends. `None` when
+    /// nothing comes before the strip.
+    pre_fader: Option<NodeId>,
+}
+
+/// A graph being built for a snapshot, one pass at a time: each track's
+/// chain, then the routing between tracks, then automation.
+struct Builder<'a> {
+    session: &'a mut Session,
+    project: &'a Project,
+    g: GraphDesc,
+    built: Built,
+    old: Built,
+    /// What was last sent to each node of the running graph.
+    old_params: HashMap<NodeKey, Vec<(u32, f64)>>,
+    muted: HashSet<TrackId>,
+    /// The keyed nodes added so far.
+    nodes: HashMap<NodeKey, NodeId>,
+    devices: HashMap<NodeKey, &'a Device>,
+    chains: HashMap<TrackId, Chain>,
+    routes: Routes,
+}
+
+impl<'a> Builder<'a> {
+    fn new(
+        session: &'a mut Session,
+        project: &'a Project,
+        structure: Structure,
+        old: Built,
+    ) -> Self {
+        let (inputs, outputs) = (session.config.inputs, session.config.outputs);
+        let g = session.controller.graph(inputs, outputs);
+        let mut old_params: HashMap<NodeKey, Vec<(u32, f64)>> = HashMap::new();
+        for (&(key, param), &value) in &old.params {
+            old_params.entry(key).or_default().push((param, value));
         }
-        // The input tap joins the chain after the player, so monitored input
-        // goes through the track's devices like its clips do.
-        let mut tap = None;
-        if track.kind == TrackKind::Audio && inputs > 0 {
-            let tkey = tap_key(track.id);
-            let id = match old.taps.remove(&track.id) {
-                Some(handle) if g.can_reuse(tkey) => {
-                    built.taps.insert(track.id, handle);
-                    g.reuse(tkey).expect("checked")
-                }
-                _ => {
-                    let (node, handle) = input_tap(inputs);
-                    built.taps.insert(track.id, handle);
-                    let id = g.add_device(format!("{} input", track.name), Box::new(node));
-                    g.set_key(id, tkey);
-                    id
-                }
-            };
-            for ch in 0..inputs {
-                g.connect_audio(g.input(), ch, id, ch);
+        Self {
+            nodes: HashMap::from([(NodeKey::MASTER, g.master())]),
+            g,
+            built: Built {
+                structure,
+                ..Default::default()
+            },
+            old,
+            old_params,
+            muted: effective_mutes(project),
+            devices: project
+                .all_tracks()
+                .flat_map(|t| t.devices.iter())
+                .map(|d| (device_key(d.id), d))
+                .collect(),
+            chains: HashMap::new(),
+            routes: Routes::default(),
+            session,
+            project,
+        }
+    }
+
+    /// Takes the running node with `key` into this graph, if there is one.
+    fn reuse(&mut self, key: NodeKey) -> Option<NodeId> {
+        let id = self.g.reuse(key)?;
+        self.nodes.insert(key, id);
+        Some(id)
+    }
+
+    /// Like [`reuse`](Self::reuse), for a node that is sent only what
+    /// changed: what the running node was last sent counts as sent.
+    fn reuse_with_params(&mut self, key: NodeKey) -> Option<NodeId> {
+        let id = self.reuse(key)?;
+        self.carry_params(key);
+        Some(id)
+    }
+
+    fn add(
+        &mut self,
+        kind: NodeKind,
+        name: impl Into<String>,
+        node: Box<dyn Node>,
+        key: NodeKey,
+    ) -> NodeId {
+        let id = self.g.add_node(kind, name, node);
+        self.g.set_key(id, key);
+        self.nodes.insert(key, id);
+        id
+    }
+
+    /// Copies what was last sent to a node of the running graph, so only
+    /// real changes are sent after the swap.
+    fn carry_params(&mut self, key: NodeKey) {
+        for &(param, value) in self.old_params.get(&key).into_iter().flatten() {
+            self.built.params.insert((key, param), value);
+        }
+    }
+
+    /// A new strip with the values `params` gives it, which count as sent.
+    fn new_strip(&mut self, mut strip: Strip, params: &[((NodeKey, u32), f64)]) -> Box<dyn Node> {
+        for &((key, param), value) in params {
+            match param {
+                Strip::GAIN => strip.set_gain(value as f32),
+                Strip::PAN => strip.set_pan(value as f32),
+                Strip::MUTE => strip.set_muted(value != 0.0),
+                _ => unreachable!("strips have no parameter {param}"),
             }
-            tap = Some(id);
+            self.built.params.insert((key, param), value);
+        }
+        Box::new(strip)
+    }
+
+    /// One track's chain: [player] -> devices -> strip.
+    fn track(&mut self, track: &'a Track) {
+        let strip = self.strip(track);
+        let mut chain: Vec<NodeId> = Vec::new();
+        let mut tap = None;
+        if track.kind == TrackKind::Audio {
+            chain.push(self.clip_player(track));
+            // The input tap joins the chain after the player, so monitored
+            // input goes through the track's devices like its clips do.
+            if self.session.config.inputs > 0 {
+                tap = Some(self.input_tap(track));
+            }
         }
         // An instrument track's MIDI player feeds its first device events,
         // not audio, so it stays out of the audio chain.
-        let mut midi = None;
-        if track.kind == TrackKind::Instrument {
-            let mkey = midi_key(track.id);
-            midi = Some(match old.midi.remove(&track.id) {
-                Some(handle) if g.can_reuse(mkey) => {
-                    built.midi.insert(track.id, handle);
-                    if let Some(c) = old.midi_clips.remove(&track.id) {
-                        built.midi_clips.insert(track.id, c);
-                    }
-                    g.reuse(mkey).expect("checked")
-                }
-                _ => {
-                    let (node, mut handle) = midi_player(MIDI_CAPTURE);
-                    let seq = compile_track(track, &session.tempo, session.sample_rate());
-                    // A fresh queue has room for the first sequence.
-                    let _ = handle.set_sequence(seq);
-                    built.midi_clips.insert(track.id, track.clips.clone());
-                    built.midi.insert(track.id, handle);
-                    let id = g.add_device(format!("{} notes", track.name), Box::new(node));
-                    g.set_key(id, mkey);
-                    id
-                }
-            });
-        }
+        let midi = (track.kind == TrackKind::Instrument).then(|| self.midi_player(track));
         for d in &track.devices {
-            let key = device_key(d.id);
-            let same_source = old.structure.device_source(d.id) == Some(&d.source);
-            let plugin = matches!(d.source, DeviceSource::Plugin { .. });
-            let id = match (same_source, g.can_reuse(key)) {
-                // A plugin keeps its state in its handle; every graph gets a fresh node of
-                // it, with its current ports and latency.
-                _ if plugin => plugin_node(session, &mut g, &mut built, &old, d),
-                (true, true) => {
-                    let id = g.reuse(key).expect("checked");
-                    g.rename(id, &d.name);
-                    carry_params(&mut built, &old, key);
-                    if let Some(m) = old.device_meters.remove(&d.id) {
-                        built.device_meters.insert(d.id, m);
-                    }
-                    id
-                }
-                _ => {
-                    let (node, meter, warning) = device_node(d, session.media.root());
-                    if let Some(w) = warning {
-                        session.warnings.push(w);
-                    }
-                    if let Some(m) = meter {
-                        built.device_meters.insert(d.id, m);
-                    }
-                    let id = g.add_device(&d.name, node);
-                    g.set_key(id, key);
-                    for (&p, &v) in &d.params {
-                        built.params.insert((key, p), v);
-                    }
-                    id
-                }
-            };
-            // Silencing (`Session::silence`) cuts its tail or held voices.
-            g.set_tail(id);
+            let id = self.device(d);
             // A switched-off device stays in the graph, so it keeps its
             // state, but audio goes around it.
             if d.enabled {
@@ -367,32 +351,18 @@ pub(crate) fn graph(
             && track.kind == TrackKind::Bus
             && track.sends.iter().any(|s| s.pre_fader)
         {
-            let key = input_key(track.id);
-            let id = match g.reuse(key) {
-                Some(id) => id,
-                None => {
-                    let id = g.add_node(
-                        NodeKind::Bus,
-                        format!("{} input", track.name),
-                        Box::new(Strip::send(STRIP_CHANNELS, 1.0)),
-                    );
-                    g.set_key(id, key);
-                    id
-                }
-            };
-            chain.push(id);
+            chain.push(self.bus_input(track));
         }
         for pair in chain.windows(2) {
-            g.connect(pair[0], pair[1]);
+            self.g.connect(pair[0], pair[1]);
         }
         if let Some(tap) = tap {
             // The player is first in an audio track's chain.
             let after_player = chain.get(1).copied().unwrap_or(strip);
-            g.connect(tap, after_player);
+            self.g.connect(tap, after_player);
         }
         if let Some(&last) = chain.last() {
-            g.connect(last, strip);
-            pre_fader.insert(track.id, last);
+            self.g.connect(last, strip);
         }
         // Audio routed into a bus goes through its devices; a track with no
         // player and no devices takes it straight into the strip.
@@ -400,130 +370,408 @@ pub(crate) fn graph(
             TrackKind::Audio => strip,
             _ => chain.first().copied().unwrap_or(strip),
         };
-        heads.insert(track.id, head);
-        // Live MIDI goes through the player, which passes on what its
-        // input gate lets through (see `Session::apply_gates`).
         if let Some(player) = midi {
-            match built.structure.live_input(track.id) {
-                LiveInput::All => g.route_external_events(player),
-                LiveInput::Source(i) => g.route_external_events_from(player, i),
-                LiveInput::None | LiveInput::Missing => {}
-            }
             // The first device even when it is switched off: switching the
             // instrument off silences it, and it still gets the note-offs
             // of notes that were sounding.
-            if let Some(first) = track.devices.first()
-                && let Some(id) = find(&g, device_key(first.id))
-            {
-                g.connect_events(player, id);
+            if let Some(first) = track.devices.first() {
+                self.g
+                    .connect_events(player, self.nodes[&device_key(first.id)]);
             }
         }
+        let pre_fader = chain.last().copied();
+        self.chains.insert(
+            track.id,
+            Chain {
+                strip,
+                head,
+                pre_fader,
+            },
+        );
     }
 
-    // Commands and loading never let routing loop, but the engine would
-    // refuse the whole graph if it did, so a route that would close a loop
-    // is left out and reported instead.
-    let mut routes = Routes::default();
-    for track in snapshot.tracks.iter() {
-        let target = match track.output {
-            TrackOutput::Master => master,
-            TrackOutput::Bus(b) => b,
+    fn strip(&mut self, track: &Track) -> NodeId {
+        let key = strip_key(self.project, track.id);
+        if track.kind == TrackKind::Master {
+            let id = self.g.master();
+            if self.g.meter(id).is_none() {
+                let channels = self.session.config.outputs as usize;
+                self.g.set_meter(id, Arc::new(NodeMeter::new(channels)));
+            }
+            // The engine creates the master at unity gain and the old one
+            // may have any; send the model's value after the swap.
+            self.carry_params(key);
+            return id;
+        }
+        if let Some(id) = self.reuse_with_params(key) {
+            self.g.rename(id, &track.name);
+            return id;
+        }
+        let kind = if track.kind == TrackKind::Bus {
+            NodeKind::Bus
+        } else {
+            NodeKind::Track
         };
-        if let Some(&head) = heads.get(&target) {
-            if !routes.add(track.id, target) {
-                session.warnings.push(Warning::RoutingLoop {
-                    track: track.name.clone(),
-                });
-                continue;
-            }
-            g.connect(strips[&track.id], head);
-        }
+        let params = strip_params(key, track, &self.muted);
+        let strip = self.new_strip(Strip::track(STRIP_CHANNELS), &params);
+        let id = self.add(kind, &track.name, strip, key);
+        self.g
+            .set_meter(id, Arc::new(NodeMeter::new(STRIP_CHANNELS as usize)));
+        id
     }
-    for track in snapshot.all_tracks() {
-        for s in &track.sends {
-            // Every send gets its node, connected or not, so its level and
-            // automation always have somewhere to go.
-            let key = send_key(s.id);
-            let node = match g.reuse(key) {
-                Some(id) => {
-                    carry_params(&mut built, &old, key);
-                    id
-                }
-                None => {
-                    let gain = db_to_gain(s.level_db);
-                    let id = g.add_node(
-                        NodeKind::Send,
-                        "send",
-                        Box::new(Strip::send(STRIP_CHANNELS, gain as f32)),
-                    );
-                    g.set_key(id, key);
-                    built.params.insert((key, Strip::GAIN), gain);
-                    id
-                }
-            };
-            let Some(&head) = heads.get(&s.target) else {
-                continue;
-            };
-            let tap = if s.pre_fader {
-                // Before the fader: the end of the device chain. A track with
-                // nothing before its strip (an instrument track without
-                // devices) has no pre-fader signal.
-                match pre_fader.get(&track.id) {
-                    Some(&n) => n,
-                    None => continue,
-                }
-            } else {
-                strips[&track.id]
-            };
-            if !routes.add(track.id, s.target) {
-                session.warnings.push(Warning::RoutingLoop {
-                    track: track.name.clone(),
-                });
-                continue;
+
+    /// An audio track's clip player.
+    fn clip_player(&mut self, track: &Track) -> NodeId {
+        let key = player_key(track.id);
+        if let Some(handle) = self.old.players.remove(&track.id)
+            && let Some(id) = self.reuse(key)
+        {
+            self.built.players.insert(track.id, handle);
+            if let Some(c) = self.old.clips.remove(&track.id) {
+                self.built.clips.insert(track.id, c);
             }
-            g.connect(tap, node);
-            g.connect(node, head);
+            return id;
+        }
+        let (node, mut handle) = player(
+            self.session.loop_points.clone(),
+            self.session.offline.clone(),
+        );
+        let set = clip_set(self.session, track, &handle);
+        // A fresh queue has room for the first set.
+        let _ = handle.send(set);
+        self.built.clips.insert(track.id, track.clips.clone());
+        self.built.players.insert(track.id, handle);
+        let name = format!("{} clips", track.name);
+        self.add(NodeKind::Device, name, Box::new(node), key)
+    }
+
+    /// An audio track's input tap, fed every hardware input.
+    fn input_tap(&mut self, track: &Track) -> NodeId {
+        let key = tap_key(track.id);
+        let inputs = self.session.config.inputs;
+        let reused = match self.old.taps.remove(&track.id) {
+            Some(handle) => self.reuse(key).map(|id| (id, handle)),
+            None => None,
+        };
+        let (id, handle) = reused.unwrap_or_else(|| {
+            let (node, handle) = input_tap(inputs);
+            let name = format!("{} input", track.name);
+            (
+                self.add(NodeKind::Device, name, Box::new(node), key),
+                handle,
+            )
+        });
+        self.built.taps.insert(track.id, handle);
+        for ch in 0..inputs {
+            self.g.connect_audio(self.g.input(), ch, id, ch);
+        }
+        id
+    }
+
+    /// An instrument track's MIDI player, with the live MIDI it passes on
+    /// (what its input gate lets through, see `Session::apply_gates`).
+    fn midi_player(&mut self, track: &Track) -> NodeId {
+        let key = midi_key(track.id);
+        let reused = match self.old.midi.remove(&track.id) {
+            Some(handle) => self.reuse(key).map(|id| (id, handle)),
+            None => None,
+        };
+        let id = match reused {
+            Some((id, handle)) => {
+                self.built.midi.insert(track.id, handle);
+                if let Some(c) = self.old.midi_clips.remove(&track.id) {
+                    self.built.midi_clips.insert(track.id, c);
+                }
+                id
+            }
+            None => {
+                let (node, mut handle) = midi_player(MIDI_CAPTURE);
+                let rate = self.session.sample_rate();
+                let seq = compile_track(track, &self.session.tempo, rate);
+                // A fresh queue has room for the first sequence.
+                let _ = handle.set_sequence(seq);
+                self.built.midi_clips.insert(track.id, track.clips.clone());
+                self.built.midi.insert(track.id, handle);
+                let name = format!("{} notes", track.name);
+                self.add(NodeKind::Device, name, Box::new(node), key)
+            }
+        };
+        match self.built.structure.live_input(track.id) {
+            LiveInput::All => self.g.route_external_events(id),
+            LiveInput::Source(i) => self.g.route_external_events_from(id, i),
+            LiveInput::None | LiveInput::Missing => {}
+        }
+        id
+    }
+
+    fn device(&mut self, d: &Device) -> NodeId {
+        let key = device_key(d.id);
+        let id = match &d.source {
+            // A plugin keeps its state in its handle; every graph gets a
+            // fresh node of it, with its current ports and latency.
+            DeviceSource::Plugin { .. } => self.plugin(d),
+            DeviceSource::Builtin { kind } => {
+                let same_source = self.old.structure.device_source(d.id) == Some(&d.source);
+                match same_source.then(|| self.reuse_with_params(key)).flatten() {
+                    Some(id) => {
+                        self.g.rename(id, &d.name);
+                        if let Some(m) = self.old.device_meters.remove(&d.id) {
+                            self.built.device_meters.insert(d.id, m);
+                        }
+                        id
+                    }
+                    None => self.builtin(d, kind),
+                }
+            }
+        };
+        // Silencing (`Session::silence`) cuts its tail or held voices.
+        self.g.set_tail(id);
+        id
+    }
+
+    /// A new node for a built-in device, or a bypass (and a warning) when
+    /// this build has no such device.
+    fn builtin(&mut self, d: &Device, kind: &str) -> NodeId {
+        let key = device_key(d.id);
+        let Some(mut dev) = daw_devices::create(kind) else {
+            self.session.warnings.push(Warning::UnknownDevice {
+                kind: kind.to_owned(),
+            });
+            // The saved values count as sent: a bypass has no use for them.
+            self.built
+                .params
+                .extend(d.params.iter().map(|(&p, &v)| ((key, p), v)));
+            return self.add(NodeKind::Device, &d.name, Box::new(Bypass), key);
+        };
+        // Samplers find relative sample paths in the project bundle.
+        if let Some(state) = &d.state
+            && let Err(e) = load_device_state(
+                dev.as_mut(),
+                &state.0,
+                self.session.media.root(),
+                &mut self.session.warnings,
+            )
+        {
+            self.session.warnings.push(Warning::DeviceStateRejected {
+                device: d.name.clone(),
+                detail: e.to_string(),
+            });
+        }
+        for (&p, &v) in &d.params {
+            dev.set_param(p, v);
+            self.built.params.insert((key, p), v);
+        }
+        if let Some(m) = dev.gain_reduction_meter() {
+            self.built.device_meters.insert(d.id, m);
+        }
+        self.add(NodeKind::Device, &d.name, dev, key)
+    }
+
+    /// The node of a plugin device: a fresh node of its loaded plugin, or
+    /// a bypass when it can't play.
+    fn plugin(&mut self, d: &Device) -> NodeId {
+        let key = device_key(d.id);
+        let session = &mut *self.session;
+        let (sample_rate, max_frames) = (session.sample_rate(), session.config.engine.max_frames);
+        let live = session
+            .plugins
+            .ensure(d, sample_rate, max_frames, &mut session.warnings);
+        let node: Box<dyn Node> = match live {
+            Some(live) => {
+                // A fresh plugin has had none of the document's values:
+                // the session sends them all once the graph is in.
+                let fresh = std::mem::take(&mut live.fresh);
+                let node = live.handle.node(sample_rate, max_frames);
+                if !fresh {
+                    self.carry_params(key);
+                }
+                Box::new(node)
+            }
+            None => Box::new(Bypass),
+        };
+        self.add(NodeKind::Device, &d.name, node, key)
+    }
+
+    /// A bus's input: a unity stage in front of its strip.
+    fn bus_input(&mut self, track: &Track) -> NodeId {
+        let key = input_key(track.id);
+        self.reuse(key).unwrap_or_else(|| {
+            let name = format!("{} input", track.name);
+            let stage = Box::new(Strip::send(STRIP_CHANNELS, 1.0));
+            self.add(NodeKind::Bus, name, stage, key)
+        })
+    }
+
+    /// Connects each track's strip to where its output goes.
+    fn outputs(&mut self) {
+        for track in self.project.tracks.iter() {
+            let target = match track.output {
+                TrackOutput::Master => self.project.master.id,
+                TrackOutput::Bus(b) => b,
+            };
+            let Some(head) = self.chains.get(&target).map(|c| c.head) else {
+                continue;
+            };
+            if self.route(track, target) {
+                self.g.connect(self.chains[&track.id].strip, head);
+            }
         }
     }
 
-    // The click goes through the master, so its meter shows it, and stays
-    // in every graph so turning it on and off needs no rebuild.
-    let click = match g.reuse(METRONOME_KEY) {
-        Some(id) => {
-            carry_params(&mut built, &old, METRONOME_KEY);
-            id
+    /// Adds every send's node and connects it.
+    fn sends(&mut self) {
+        for track in self.project.all_tracks() {
+            let chain = &self.chains[&track.id];
+            let (strip, pre_fader) = (chain.strip, chain.pre_fader);
+            for s in &track.sends {
+                // Every send gets its node, connected or not, so its level
+                // and automation always have somewhere to go.
+                let key = send_key(s.id);
+                let node = self.reuse_with_params(key).unwrap_or_else(|| {
+                    let stage = self.new_strip(Strip::send(STRIP_CHANNELS, 1.0), &[send_param(s)]);
+                    self.add(NodeKind::Send, "send", stage, key)
+                });
+                let Some(head) = self.chains.get(&s.target).map(|c| c.head) else {
+                    continue;
+                };
+                // Before the fader is the end of the device chain. A track
+                // with nothing before its strip (an instrument track
+                // without devices) has no pre-fader signal.
+                let tap = if s.pre_fader { pre_fader } else { Some(strip) };
+                let Some(tap) = tap else { continue };
+                if self.route(track, s.target) {
+                    self.g.connect(tap, node);
+                    self.g.connect(node, head);
+                }
+            }
         }
-        None => {
+    }
+
+    /// Whether `track` may feed `target`. Commands and loading never let
+    /// routing loop, but the engine would refuse the whole graph if it did,
+    /// so a route that would close a loop is left out and reported instead.
+    fn route(&mut self, track: &Track, target: TrackId) -> bool {
+        let ok = self.routes.add(track.id, target);
+        if !ok {
+            self.session.warnings.push(Warning::RoutingLoop {
+                track: track.name.clone(),
+            });
+        }
+        ok
+    }
+
+    /// The click goes through the master, so its meter shows it, and stays
+    /// in every graph so turning it on and off needs no rebuild.
+    fn metronome(&mut self) {
+        let click = self.reuse_with_params(METRONOME_KEY).unwrap_or_else(|| {
             let mut node = daw_devices::Metronome::new();
-            for ((key, param), value) in metronome_params(&session.metronome) {
+            for ((key, param), value) in metronome_params(&self.session.metronome) {
                 daw_devices::Device::set_param(&mut node, param, value);
-                built.params.insert((key, param), value);
+                self.built.params.insert((key, param), value);
             }
-            let id = g.add_device("metronome", Box::new(node));
-            g.set_key(id, METRONOME_KEY);
-            id
-        }
-    };
-    g.connect(click, g.master());
+            self.add(NodeKind::Device, "metronome", Box::new(node), METRONOME_KEY)
+        });
+        self.g.connect(click, self.g.master());
+    }
 
-    automate(session, snapshot, &mut g, &strips, &mut built, &old);
-    // A lane that stopped playing (switched off, removed, emptied) left
-    // its last value behind: send the control's own value again, or the
-    // one it had before the lane, when the document has none.
-    for &(key, param) in old.automated.difference(&built.automated) {
-        built.params.remove(&(key, param));
-        if let Some(v) = rest_value(session, snapshot, key, param, &old) {
-            built.restore.insert((key, param), v);
+    /// Adds the model's automation lanes to the graph, in engine samples.
+    fn automate(&mut self) {
+        for t in self.project.all_tracks() {
+            for lane in t
+                .automation
+                .iter()
+                .filter(|l| l.enabled && !l.points.is_empty())
+            {
+                let strip = strip_key(self.project, t.id);
+                let (key, param, to_value): (NodeKey, u32, fn(f64) -> f64) = match lane.target {
+                    AutomationTarget::Volume => (strip, Strip::GAIN, db_to_gain),
+                    AutomationTarget::Pan => (strip, Strip::PAN, |v| v),
+                    AutomationTarget::SendLevel { send } => {
+                        (send_key(send), Strip::GAIN, db_to_gain)
+                    }
+                    AutomationTarget::DeviceParam { device, param } => {
+                        (device_key(device), param, |v| v)
+                    }
+                };
+                let Some(&node) = self.nodes.get(&key) else {
+                    continue;
+                };
+                if self.session.suspended.contains(&lane.id) {
+                    // Overwritten by hand for now: the value from before
+                    // the lane still is what removing the lane goes back to.
+                    if let Some(&v) = self.old.rest.get(&(key, param)) {
+                        self.built.rest.insert((key, param), v);
+                    }
+                    continue;
+                }
+                self.built.automated.insert((key, param));
+                if let Some(rest) = self.rest_value(key, param) {
+                    self.built.rest.insert((key, param), rest);
+                }
+                let lane = self.session.playback_lane(lane, to_value);
+                self.g.automate(node, param, lane);
+            }
         }
     }
-    // Not sent yet (a full queue), not taken over by a lane again, and the
-    // device still there.
-    for (k, &v) in &old.restore {
-        if !built.automated.contains(k) && find(&g, k.0).is_some() {
-            built.restore.entry(*k).or_insert(v);
+
+    /// What the device parameter `param` of the device node `key` goes back
+    /// to when its lane stops, if the document has no value for it (with
+    /// one, the document's value is sent again). `None` for other nodes.
+    ///
+    /// A built-in device goes back to its default, as when the document's
+    /// value is reset. A plugin goes back to what it had before the lane
+    /// took over: the value taken when the lane started (or still waiting
+    /// to be put back), else what it had before a take held it by hand,
+    /// else the value last sent to it, else what it reports now (a lane
+    /// that plays from the start).
+    fn rest_value(&self, key: NodeKey, param: u32) -> Option<f64> {
+        let d = self.devices.get(&key)?;
+        if d.params.contains_key(&param) {
+            return None;
+        }
+        let (old, session) = (&self.old, &*self.session);
+        match &d.source {
+            DeviceSource::Builtin { kind } => daw_devices::param_specs(kind)?
+                .iter()
+                .find(|s| s.id == param)
+                .map(|s| s.default),
+            DeviceSource::Plugin { .. } => old
+                .rest
+                .get(&(key, param))
+                .or(old.restore.get(&(key, param)))
+                .or(session.pre_live.get(&(key, param)))
+                .or(old.params.get(&(key, param)))
+                .copied()
+                .or_else(|| session.with_plugin(d.id, |p| p.param_value(param)))
+                .filter(|v| v.is_finite()),
         }
     }
-    (g, built)
+
+    /// Queues what goes back into parameters whose lane no longer plays.
+    fn stopped_lanes(&mut self) {
+        // A lane that stopped playing (switched off, removed, emptied) left
+        // its last value behind: send the control's own value again, or the
+        // one it had before the lane, when the document has none.
+        let stopped: Vec<(NodeKey, u32)> = self
+            .old
+            .automated
+            .difference(&self.built.automated)
+            .copied()
+            .collect();
+        for (key, param) in stopped {
+            self.built.params.remove(&(key, param));
+            if let Some(v) = self.rest_value(key, param) {
+                self.built.restore.insert((key, param), v);
+            }
+        }
+        // Not sent yet (a full queue), not taken over by a lane again, and
+        // the device still there.
+        for (k, &v) in &self.old.restore {
+            if !self.built.automated.contains(k) && self.nodes.contains_key(&k.0) {
+                self.built.restore.entry(*k).or_insert(v);
+            }
+        }
+    }
 }
 
 /// The routes between tracks added to a graph so far.
@@ -548,122 +796,21 @@ impl Routes {
     }
 }
 
-/// Copies what was last sent to a reused node, so only real changes are
-/// sent after the swap.
-fn carry_params(built: &mut Built, old: &Built, key: NodeKey) {
-    for (&(k, p), &v) in &old.params {
-        if k == key {
-            built.params.insert((k, p), v);
-        }
+/// What a track's strip should be set to. The master has neither pan nor
+/// mute.
+fn strip_params(key: NodeKey, t: &Track, muted: &HashSet<TrackId>) -> Vec<((NodeKey, u32), f64)> {
+    let mut out = vec![((key, Strip::GAIN), db_to_gain(t.volume_db))];
+    if t.kind != TrackKind::Master {
+        out.push(((key, Strip::PAN), t.pan.clamp(-1.0, 1.0)));
+        let m = if muted.contains(&t.id) { 1.0 } else { 0.0 };
+        out.push(((key, Strip::MUTE), m));
     }
+    out
 }
 
-/// Records the values a new strip was created with.
-fn remember_strip(built: &mut Built, key: NodeKey, track: &Track, muted: &HashSet<TrackId>) {
-    built
-        .params
-        .insert((key, Strip::GAIN), db_to_gain(track.volume_db));
-    built
-        .params
-        .insert((key, Strip::PAN), track.pan.clamp(-1.0, 1.0));
-    let m = if muted.contains(&track.id) { 1.0 } else { 0.0 };
-    built.params.insert((key, Strip::MUTE), m);
-}
-
-/// Adds the model's automation lanes to the graph, in engine samples.
-fn automate(
-    session: &Session,
-    project: &Project,
-    g: &mut GraphDesc,
-    strips: &HashMap<TrackId, NodeId>,
-    built: &mut Built,
-    old: &Built,
-) {
-    for t in project.all_tracks() {
-        for lane in t
-            .automation
-            .iter()
-            .filter(|l| l.enabled && !l.points.is_empty())
-        {
-            let (node, param, to_value): (Option<NodeId>, u32, fn(f64) -> f64) = match lane.target {
-                AutomationTarget::Volume => (strips.get(&t.id).copied(), Strip::GAIN, db_to_gain),
-                AutomationTarget::Pan => (strips.get(&t.id).copied(), Strip::PAN, |v| v),
-                AutomationTarget::SendLevel { send } => {
-                    (find(g, send_key(send)), Strip::GAIN, db_to_gain)
-                }
-                AutomationTarget::DeviceParam { device, param } => {
-                    (find(g, device_key(device)), param, |v| v)
-                }
-            };
-            let Some(node) = node else { continue };
-            let key = g.key(node);
-            if session.suspended.contains(&lane.id) {
-                // Overwritten by hand for now: the value from before the
-                // lane still is what removing the lane goes back to.
-                if let Some(k) = key
-                    && let Some(&v) = old.rest.get(&(k, param))
-                {
-                    built.rest.insert((k, param), v);
-                }
-                continue;
-            }
-            if let Some(key) = key {
-                built.automated.insert((key, param));
-                if let Some(rest) = rest_value(session, project, key, param, old) {
-                    built.rest.insert((key, param), rest);
-                }
-            }
-            g.automate(node, param, session.playback_lane(lane, to_value));
-        }
-    }
-}
-
-/// What the device parameter `param` of the device node `key` goes back to
-/// when its lane stops, if the document has no value for it (with one, the
-/// document's value is sent again). `None` for other nodes.
-///
-/// A built-in device goes back to its default, as when the document's
-/// value is reset. A plugin goes back to what it had before the lane took
-/// over: the value taken when the lane started (or still waiting to be put
-/// back), else what it had before a take held it by hand, else the value
-/// last sent to it, else what it reports now (a lane that plays from the
-/// start).
-fn rest_value(
-    session: &Session,
-    project: &Project,
-    key: NodeKey,
-    param: u32,
-    old: &Built,
-) -> Option<f64> {
-    let d = project
-        .all_tracks()
-        .flat_map(|t| t.devices.iter())
-        .find(|d| device_key(d.id) == key)?;
-    if d.params.contains_key(&param) {
-        return None;
-    }
-    match &d.source {
-        DeviceSource::Builtin { kind } => daw_devices::param_specs(kind)?
-            .iter()
-            .find(|s| s.id == param)
-            .map(|s| s.default),
-        DeviceSource::Plugin { .. } => old
-            .rest
-            .get(&(key, param))
-            .or(old.restore.get(&(key, param)))
-            .or(session.pre_live.get(&(key, param)))
-            .or(old.params.get(&(key, param)))
-            .copied()
-            .or_else(|| session.with_plugin(d.id, |p| p.param_value(param)))
-            .filter(|v| v.is_finite()),
-    }
-}
-
-/// The node with `key` in a graph being built.
-fn find(g: &GraphDesc, key: NodeKey) -> Option<NodeId> {
-    (0..g.len() as u32)
-        .map(NodeId)
-        .find(|&id| g.key(id) == Some(key))
+/// What a send's node should be set to.
+fn send_param(s: &daw_model::Send) -> ((NodeKey, u32), f64) {
+    ((send_key(s.id), Strip::GAIN), db_to_gain(s.level_db))
 }
 
 /// The parameter value every strip, send and device should have.
@@ -671,16 +818,8 @@ pub(crate) fn params(project: &Project) -> Vec<((NodeKey, u32), f64)> {
     let muted = effective_mutes(project);
     let mut out = Vec::new();
     for t in project.all_tracks() {
-        let key = strip_key(project, t.id);
-        out.push(((key, Strip::GAIN), db_to_gain(t.volume_db)));
-        if t.kind != TrackKind::Master {
-            out.push(((key, Strip::PAN), t.pan.clamp(-1.0, 1.0)));
-            let m = if muted.contains(&t.id) { 1.0 } else { 0.0 };
-            out.push(((key, Strip::MUTE), m));
-        }
-        for s in &t.sends {
-            out.push(((send_key(s.id), Strip::GAIN), db_to_gain(s.level_db)));
-        }
+        out.extend(strip_params(strip_key(project, t.id), t, &muted));
+        out.extend(t.sends.iter().map(send_param));
         for d in &t.devices {
             for (&p, &v) in &d.params {
                 out.push(((device_key(d.id), p), v));
@@ -844,11 +983,13 @@ fn join_contiguous(set: &mut ClipSet) {
 }
 
 /// Restores a built-in device's saved state. A sampler's relative sample
-/// paths are relative to `root`.
+/// paths are relative to `root`; a sample that will not load leaves its zone
+/// silent and a warning in `warnings`.
 fn load_device_state(
     dev: &mut dyn daw_devices::Device,
     data: &[u8],
     root: Option<&Path>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), daw_devices::StateError> {
     let Some(sampler) = dev.as_any_mut().downcast_mut::<daw_devices::Sampler>() else {
         return dev.load_state(data);
@@ -858,75 +999,14 @@ fn load_device_state(
             Some(root) if path.is_relative() => root.join(path),
             _ => path.to_path_buf(),
         };
-        daw_devices::SampleBuffer::load(&path).ok().map(Arc::new)
+        match daw_devices::SampleBuffer::load(&path) {
+            Ok(sample) => Some(Arc::new(sample)),
+            Err(_) => {
+                warnings.push(Warning::CannotRead { path });
+                None
+            }
+        }
     })
-}
-
-/// The node of a plugin device: a fresh node of its loaded plugin, or a
-/// bypass when it can't play.
-fn plugin_node(
-    session: &mut Session,
-    g: &mut GraphDesc,
-    built: &mut Built,
-    old: &Built,
-    d: &Device,
-) -> NodeId {
-    let key = device_key(d.id);
-    let (sample_rate, max_frames) = (session.sample_rate(), session.config.engine.max_frames);
-    let node: Box<dyn Node> =
-        match session
-            .plugins
-            .ensure(d, sample_rate, max_frames, &mut session.warnings)
-        {
-            Some(live) => {
-                if !std::mem::take(&mut live.fresh) {
-                    carry_params(built, old, key);
-                }
-                // A fresh plugin has had none of the document's values: the session sends
-                // them all once the graph is in.
-                Box::new(live.handle.node(sample_rate, max_frames))
-            }
-            None => Box::new(Bypass),
-        };
-    let id = g.add_device(&d.name, node);
-    g.set_key(id, key);
-    id
-}
-
-/// The engine node for a model device, its gain reduction meter if it has
-/// one, and a warning if it can't be made.
-///
-/// Samplers find relative sample paths in `root`, the project bundle.
-fn device_node(
-    d: &Device,
-    root: Option<&Path>,
-) -> (Box<dyn Node>, Option<Arc<PeakMeter>>, Option<Warning>) {
-    match &d.source {
-        DeviceSource::Builtin { kind } => match daw_devices::create(kind) {
-            Some(mut dev) => {
-                let mut warning = None;
-                if let Some(state) = &d.state
-                    && let Err(e) = load_device_state(dev.as_mut(), &state.0, root)
-                {
-                    warning = Some(Warning::DeviceStateRejected {
-                        device: d.name.clone(),
-                        detail: e.to_string(),
-                    });
-                }
-                for (&p, &v) in &d.params {
-                    dev.set_param(p, v);
-                }
-                let meter = dev.gain_reduction_meter();
-                (dev, meter, warning)
-            }
-            None => (
-                Box::new(Bypass),
-                None,
-                Some(Warning::UnknownDevice { kind: kind.clone() }),
-            ),
-        },
-        DeviceSource::Plugin { .. } => unreachable!("plugins are made by plugin_node"),
-    }
 }
 
 /// Stands in for a device that can't be loaded: stereo through.

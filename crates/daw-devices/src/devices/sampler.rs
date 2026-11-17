@@ -72,6 +72,13 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
     ),
 ];
 
+/// The most samples, over all channels, a zone's file may decode to: ten
+/// minutes of stereo at 48 kHz, about 230 MB. A sampler plays short sounds;
+/// this only stops a file from filling memory.
+pub const MAX_SAMPLE_SAMPLES: u64 = 600 * 48_000 * 2;
+/// The range a zone's gain is held to, in dB. A saved state can hold any
+/// number; nothing useful lies outside this.
+const ZONE_GAIN_DB: (f32, f32) = (-70.0, 24.0);
 const VOICES: usize = 32;
 /// Extra voices so stolen voices can fade out while their replacement starts.
 const SPARE_VOICES: usize = 8;
@@ -111,7 +118,10 @@ impl SampleBuffer {
     /// sampler corrects for the rate difference when it plays. Not real-time safe.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, daw_media::MediaError> {
         let path = path.as_ref();
-        daw_media::decode_file(path).map(|d| Self::from(d).with_source(path))
+        Self::loaded(
+            path,
+            daw_media::decode_file_within(path, MAX_SAMPLE_SAMPLES),
+        )
     }
 
     /// Decode an audio file and resample it to `sample_rate` up front, which avoids
@@ -121,7 +131,20 @@ impl SampleBuffer {
         sample_rate: u32,
     ) -> Result<Self, daw_media::MediaError> {
         let path = path.as_ref();
-        daw_media::load_file(path, sample_rate).map(|d| Self::from(d).with_source(path))
+        Self::loaded(
+            path,
+            daw_media::load_file_within(path, sample_rate, MAX_SAMPLE_SAMPLES),
+        )
+    }
+
+    fn loaded(
+        path: &Path,
+        decoded: Result<Option<daw_media::AudioData>, daw_media::MediaError>,
+    ) -> Result<Self, daw_media::MediaError> {
+        let data = decoded?.ok_or_else(|| {
+            daw_media::MediaError::Unsupported("sample too long to hold in memory".into())
+        })?;
+        Ok(Self::from(data).with_source(path))
     }
 
     /// Record the file this audio came from.
@@ -164,6 +187,7 @@ pub struct Zone {
     /// Velocity range in `0..=1`.
     pub velocity_lo: f32,
     pub velocity_hi: f32,
+    /// Held to -70..=24 dB when the zone is put in a sampler.
     pub gain_db: f32,
 }
 
@@ -190,8 +214,9 @@ impl Zone {
         self
     }
 
-    /// Clamp keys to MIDI range and velocities to `0..=1`, and replace
-    /// non-finite numbers, so the zone saves and plays predictably.
+    /// Clamp keys to MIDI range, velocities to `0..=1` and the gain to its
+    /// range, and replace non-finite numbers, so the zone saves and plays
+    /// predictably.
     fn sanitized(mut self) -> Self {
         let unit = |v: f32, default: f32| {
             if v.is_finite() {
@@ -205,9 +230,11 @@ impl Zone {
         self.key_hi = self.key_hi.min(127);
         self.velocity_lo = unit(self.velocity_lo, 0.0);
         self.velocity_hi = unit(self.velocity_hi, 1.0);
-        if !self.gain_db.is_finite() {
-            self.gain_db = 0.0;
-        }
+        self.gain_db = if self.gain_db.is_finite() {
+            self.gain_db.clamp(ZONE_GAIN_DB.0, ZONE_GAIN_DB.1)
+        } else {
+            0.0
+        };
         self
     }
 
@@ -619,6 +646,12 @@ impl Node for Sampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_the_decoder_gave_up_on_as_too_long_is_an_error() {
+        let err = SampleBuffer::loaded(Path::new("long.wav"), Ok(None)).unwrap_err();
+        assert!(err.to_string().contains("too long"), "{err}");
+    }
 
     #[test]
     fn hermite_passes_through_samples() {

@@ -843,7 +843,10 @@ fn midi(project: &Project, clip: ClipId) -> Result<&MidiClip, ModelError> {
     }
 }
 
-/// Adds notes to a MIDI clip.
+/// Adds notes to a MIDI clip. Edits of only those notes that follow in the
+/// same gesture (drawing a note and dragging it to length) merge into it,
+/// so undo takes the notes away in one step and redo brings them back as
+/// they ended up.
 #[derive(Debug)]
 pub struct AddNotes {
     pub clip: ClipId,
@@ -875,10 +878,26 @@ impl Command for AddNotes {
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         let ids: HashSet<NoteUid> = self.notes.iter().map(|n| n.id).collect();
-        midi_mut(project, self.clip)?
-            .notes
-            .retain(|n| !ids.contains(&n.id));
+        let m = midi_mut(project, self.clip)?;
+        let present: HashSet<NoteUid> = m.notes.iter().map(|n| n.id).collect();
+        if let Some(missing) = ids.iter().find(|id| !present.contains(id)) {
+            return Err(ModelError::NoteNotFound(*missing));
+        }
+        // Taken as they are now, which is how redo adds them again: merged
+        // edits changed them since they were added.
+        let (mine, others) = mem::take(&mut m.notes)
+            .into_iter()
+            .partition(|n| ids.contains(&n.id));
+        m.notes = others;
+        self.notes = mine;
         Ok(ChangeSet::one(Change::Clip(self.clip)))
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        next.downcast_ref::<EditNotes>().is_some_and(|edit| {
+            let mine: HashSet<NoteUid> = self.notes.iter().map(|n| n.id).collect();
+            edit.clip == self.clip && edit.notes.iter().all(|n| mine.contains(&n.id))
+        })
     }
 }
 

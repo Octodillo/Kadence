@@ -349,7 +349,8 @@ impl EngineController {
     }
 
     /// Parameter changes dropped because a node's queue was full, the node
-    /// was not in the running graph, or it has no event input.
+    /// was not in the running graph, it has no event input, or automation
+    /// had more changes in one block than fit the node's event list.
     pub fn dropped_params(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
     }
@@ -444,7 +445,12 @@ impl EngineProcessor {
             let state = self.transport.state();
             match self.graph.as_deref_mut() {
                 Some(g) => {
-                    g.process(&state, len, audio_in, offset, &self.external);
+                    let dropped = g.process(&state, len, audio_in, offset, &self.external);
+                    if dropped > 0 {
+                        self.shared
+                            .dropped
+                            .fetch_add(dropped as u64, Ordering::Relaxed);
+                    }
                     let channels = g.output_channels();
                     for (ch, out) in audio_out.iter_mut().enumerate() {
                         let out = &mut out[offset..offset + len];

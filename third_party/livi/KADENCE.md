@@ -38,6 +38,11 @@ Changes from upstream, each with a regression test in this crate:
   `tests::worlds_built_on_several_threads_read_every_port` (it failed about
   one run in six without the lock). Kadence issue #156.
 
+- A port without `lv2:name` is named by its symbol; upstream panicked while
+  the `World` was built, which lost every plugin of that bundle (and of the
+  whole scan when in-process). Test:
+  `tests::a_port_without_a_name_is_called_by_its_symbol`. Kadence issue #186.
+
 The tests need a C compiler, the LV2 headers and the LV2 example plugins
 (Ubuntu: `lv2-dev lv2-examples mda-lv2`):
 

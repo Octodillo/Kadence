@@ -653,7 +653,7 @@ impl qobject::Project {
                 s.loop_range().is_some(),
                 format!("{}.{}", bar + 1, beat + 1),
                 format!("{}:{:04.1}", (secs / 60.0).floor() as i64, secs % 60.0),
-                !s.arrange.selection.is_empty() || s.arrange.lanes.points_selected(p),
+                s.arrange.clips_selected(p) || s.arrange.lanes.points_selected(p),
                 s.arrange.audio_selected(p),
                 selected,
                 s.status.clone(),
@@ -1419,26 +1419,31 @@ impl qobject::Project {
         self.edit(|s| {
             let playhead = s.playhead();
             let p = s.doc.project();
-            let range = if s.loop_range().is_some() {
-                None
-            } else {
-                let sel = p
-                    .tracks
-                    .iter()
-                    .flat_map(|t| t.clips.iter())
-                    .filter(|c| s.arrange.selection.contains(&c.id));
-                let (lo, hi) = sel.fold((i64::MAX, i64::MIN), |(lo, hi), c| {
-                    (lo.min(c.start.0), hi.max(c.start.0 + c.length.0))
-                });
-                if lo < hi {
-                    Some((TickTime(lo), TickTime(hi)))
-                } else {
-                    let bar = s.arrange.meter(p).bar_at(playhead);
-                    Some((bar.start, TickTime(bar.start.0 + 4 * bar.len.max(PPQ))))
-                }
+            let looping = s.loop_range().is_some();
+            let sel = p
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| s.arrange.selection.contains(&c.id));
+            let (lo, hi) = sel.fold((i64::MAX, i64::MIN), |(lo, hi), c| {
+                (lo.min(c.start.0), hi.max(c.start.0 + c.length.0))
+            });
+            let bar = s.arrange.meter(p).bar_at(playhead);
+            let bars = (bar.start, TickTime(bar.start.0 + 4 * bar.len.max(PPQ)));
+            let Some(session) = s.engine.session_mut() else {
+                return;
             };
-            if let Some(session) = s.engine.session_mut() {
-                let _ = session.set_loop(range);
+            if looping {
+                let _ = session.set_loop(None);
+                return;
+            }
+            // The selected clips, or four bars from the playhead when
+            // nothing is selected or the selection is too short to loop.
+            if lo < hi {
+                let _ = session.set_loop(Some((TickTime(lo), TickTime(hi))));
+            }
+            if session.loop_range().is_none() {
+                let _ = session.set_loop(Some(bars));
             }
         });
     }

@@ -236,10 +236,28 @@ impl Drag {
         grabbed: &N,
         selection: &[N],
     ) -> Self {
+        Self::begin_at(
+            kind,
+            view.x_to_tick(x),
+            view.y_to_key(y),
+            grabbed,
+            selection,
+        )
+    }
+
+    /// Starts a drag anchored at a timeline tick and a key rather than at
+    /// the pointer: the pointer's distance from there is what it moves by.
+    pub fn begin_at<N: EditNote>(
+        kind: DragKind,
+        anchor_tick: TickTime,
+        anchor_key: u8,
+        grabbed: &N,
+        selection: &[N],
+    ) -> Self {
         Self {
             kind,
-            anchor_tick: view.x_to_tick(x),
-            anchor_key: view.y_to_key(y),
+            anchor_tick,
+            anchor_key,
             grabbed: grabbed.data(),
             originals: selection.iter().map(|n| n.data()).collect(),
         }

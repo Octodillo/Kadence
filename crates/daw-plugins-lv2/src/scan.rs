@@ -17,17 +17,22 @@ const FOAF_NAME: &str = "http://xmlns.com/foaf/0.1/name";
 /// the plugin extension (`org.freedesktop.LinuxAudio.Plugins`) and plugins
 /// bundled with the app are searched after the others, even with `LV2_PATH`
 /// set: the manifest cannot set `LV2_PATH` without dropping the standard
-/// locations. Only existing directories are returned.
+/// locations. Folders that do not exist yet are listed too, as the other
+/// formats list theirs, so the app can show where plugins may be put.
 pub(crate) fn default_search_paths() -> Vec<PathBuf> {
-    let mut paths = candidate_paths(
+    once_each(candidate_paths(
         std::env::var_os("LV2_PATH"),
         std::env::var_os("HOME"),
         Path::new("/.flatpak-info").is_file(),
-    );
-    // The same directory can be listed twice or reached through a symlink
-    // (/usr/lib64 -> /usr/lib on Arch); scan it once.
+    ))
+}
+
+/// `paths` without the later mentions of a directory, whether it is listed
+/// twice or reached through a symlink (/usr/lib64 -> /usr/lib on Arch), so
+/// it is scanned once.
+fn once_each(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
-    paths.retain(|p| p.is_dir() && seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
+    paths.retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
     paths
 }
 
@@ -40,7 +45,9 @@ fn candidate_paths(
     flatpak: bool,
 ) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = match lv2_path {
-        Some(p) if !p.is_empty() => std::env::split_paths(&p).collect(),
+        Some(p) if !p.is_empty() => std::env::split_paths(&p)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect(),
         _ => {
             let mut v = Vec::new();
             if let Some(home) = home {
@@ -174,6 +181,26 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_is_searched_once_and_missing_ones_stay_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("lib");
+        let link = dir.path().join("lib64");
+        let missing = dir.path().join("missing");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            once_each(vec![
+                real.clone(),
+                link,
+                missing.clone(),
+                real.clone(),
+                missing.clone()
+            ]),
+            vec![real, missing]
+        );
+    }
+
+    #[test]
     fn flatpak_adds_its_plugin_directories() {
         let home = Some("/home/me".into());
         let native = candidate_paths(None, home.clone(), false);
@@ -195,6 +222,11 @@ mod tests {
         assert_eq!(
             custom,
             ["/a", "/b", "/app/extensions/Plugins/lv2", "/app/lib/lv2"].map(PathBuf::from)
+        );
+        // An empty entry names no folder.
+        assert_eq!(
+            candidate_paths(Some("/a::/b:".into()), None, false),
+            ["/a", "/b"].map(PathBuf::from)
         );
         assert_eq!(
             candidate_paths(Some("/a".into()), None, false),

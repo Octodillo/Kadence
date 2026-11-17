@@ -15,6 +15,8 @@
 //! - After a `meter_on` message the processor sends its controller a `meter` message from
 //!   every `process` call. The controller counts the messages it gets in (hidden) parameter
 //!   4, and those that arrive on a thread other than the one that created it in parameter 3.
+//! - A `quirks` message with an int attribute `bits` makes the component behave like plugins
+//!   that leave calls out: see the `QUIRK_` constants.
 //! - `testgain_module_counts` reports how often ModuleEntry and ModuleExit ran and whether
 //!   two of those calls ever overlapped.
 
@@ -80,7 +82,14 @@ struct Processor {
     host: Mutex<Option<ComPtr<IHostApplication>>>,
     /// Send `meter` messages from `process`.
     meter: AtomicBool,
+    /// `QUIRK_*` bits, from a `quirks` message.
+    quirks: AtomicI32,
 }
+
+/// `setProcessing` answers kNotImplemented, as the SDK's base class does.
+const QUIRK_NO_SET_PROCESSING: i32 = 1;
+/// The component's `getState` answers kNotImplemented.
+const QUIRK_NO_STATE: i32 = 2;
 
 impl Class for Processor {
     type Interfaces = (IComponent, IAudioProcessor, IConnectionPoint);
@@ -91,6 +100,10 @@ impl Processor {
 
     fn gain(&self) -> f64 {
         f64::from_bits(self.gain.load(Ordering::Relaxed))
+    }
+
+    fn has_quirk(&self, quirk: i32) -> bool {
+        self.quirks.load(Ordering::Relaxed) & quirk != 0
     }
 
     /// Sends the controller a `meter` message, the way plugins report levels.
@@ -158,12 +171,18 @@ impl IConnectionPointTrait for Processor {
             self.meter.store(true, Ordering::Relaxed);
             return kResultOk;
         }
-        if id != c"set_outputs" {
-            return kResultFalse;
-        }
         let Some(attrs) = (unsafe { ComRef::from_raw(message.getAttributes()) }) else {
             return kInvalidArgument;
         };
+        if id == c"quirks" {
+            let mut bits = 0i64;
+            unsafe { attrs.getInt(c"bits".as_ptr(), &mut bits) };
+            self.quirks.store(bits as i32, Ordering::Relaxed);
+            return kResultOk;
+        }
+        if id != c"set_outputs" {
+            return kResultFalse;
+        }
         let mut channels = 0i64;
         if unsafe { attrs.getInt(c"channels".as_ptr(), &mut channels) } != kResultOk
             || !(1..=2).contains(&channels)
@@ -247,6 +266,9 @@ impl IComponentTrait for Processor {
     }
 
     unsafe fn getState(&self, state: *mut IBStream) -> tresult {
+        if self.has_quirk(QUIRK_NO_STATE) {
+            return kNotImplemented;
+        }
         unsafe { write_f64(state, self.gain()) }
     }
 }
@@ -304,7 +326,11 @@ impl IAudioProcessorTrait for Processor {
     }
 
     unsafe fn setProcessing(&self, _state: TBool) -> tresult {
-        kResultOk
+        if self.has_quirk(QUIRK_NO_SET_PROCESSING) {
+            kNotImplemented
+        } else {
+            kResultOk
+        }
     }
 
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
@@ -607,6 +633,7 @@ impl IPluginFactoryTrait for Factory {
                 peer: Mutex::new(None),
                 host: Mutex::new(None),
                 meter: AtomicBool::new(false),
+                quirks: AtomicI32::new(0),
             })
             .to_com_ptr::<FUnknown>(),
             Controller::CID => ComWrapper::new(Controller {

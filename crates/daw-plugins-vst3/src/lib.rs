@@ -46,7 +46,12 @@ impl PluginFormat for Vst3Format {
     /// `$VST3_PATH` (colon separated) first, then the locations from the VST 3 spec for Linux.
     fn default_search_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = std::env::var_os("VST3_PATH")
-            .map(|v| std::env::split_paths(&v).collect())
+            .map(|v| {
+                // An empty entry (`a::b`, or an empty variable) names no folder.
+                std::env::split_paths(&v)
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
         if let Some(home) = std::env::var_os("HOME") {
             paths.push(PathBuf::from(home).join(".vst3"));
