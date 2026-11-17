@@ -1,7 +1,5 @@
 //! The backend's own per-cycle work must not allocate. With `RtAllocCounter`
-//! installed, the backend counts allocations made inside a cycle. It counts
-//! only in debug builds, so these tests are compiled only there.
-#![cfg(debug_assertions)]
+//! installed, the backend counts allocations made inside a cycle.
 
 use std::time::Duration;
 
@@ -50,11 +48,7 @@ fn dummy_cycles_do_not_allocate() {
     assert!(b.wait_for_cycles(2_000, Duration::from_secs(30)));
     b.stop().unwrap();
     assert!(tap.try_recv().is_some());
-    assert_eq!(
-        b.stats().rt_alloc_violations,
-        RtAllocCounter::CLEAN,
-        "a cycle allocated"
-    );
+    assert_eq!(b.stats().rt_alloc_violations, Some(0), "a cycle allocated");
 }
 
 /// Set in the child process `allocating_cycles_are_counted_silently` runs.

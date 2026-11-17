@@ -26,12 +26,14 @@ rather than writing the check again in a test:
 
 Allocations inside a backend cycle are counted by
 `daw_backend::RtAllocCounter` instead. A test that drives a backend installs
-it as the global allocator and compares
-`BackendStats::rt_alloc_violations` with `RtAllocCounter::CLEAN`.
+it as the global allocator and asserts that
+`BackendStats::rt_alloc_violations` is `Some(0)`. It is `None` when the
+allocator is missing, so forgetting it fails the test.
 
 ## Environment switches
 
-All start with `KADENCE_`.
+All start with `KADENCE_`. The first four are on when set to any value, even
+`0` or nothing; leave them unset to turn them off.
 
 | Variable | Effect |
 | --- | --- |
@@ -41,6 +43,7 @@ All start with `KADENCE_`.
 | `KADENCE_VST3_REQUIRE_SDK_PLUGINS` | Fail, rather than skip, those tests when the bundle is missing. The VST3 workflow sets it. |
 | `KADENCE_TEST_PHYSICAL_PORTS=1` | Says the JACK server's physical ports reach no hardware (`jackd -d dummy`), so the auto-connect test may link them. |
 | `KADENCE_SMOKE_OUT` | Directory in which the song smoke test keeps its project and render. |
+| `KADENCE_SMOKE_TEST_CONFIG` | Directory in which `kadence --smoke-test` keeps the settings it writes, instead of a throwaway one; see `packaging/README.md`. |
 | `KADENCE_AUDIO=stub` | Run the app without an audio server (UI tests and screenshots). |
 
 The JACK tests are `#[ignore]`d; run them against a server with

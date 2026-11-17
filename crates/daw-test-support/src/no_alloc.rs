@@ -1,23 +1,26 @@
 //! Checked no-allocation sections for real-time code.
 //!
 //! The workspace builds `assert_no_alloc` in its warn mode, so that one
-//! allocation does not abort the whole test binary. In that mode
-//! `assert_no_alloc::assert_no_alloc` on its own only prints a line: a test
-//! that calls it and nothing else cannot fail. [`assert_no_alloc`] here
-//! compares the violation count before and after and panics, and
-//! [`allocations_in`] returns the count for tests that want to assert on it.
+//! allocation does not abort the whole test binary. In that mode the crate's
+//! own function only prints a line: a test that calls it and nothing else
+//! cannot fail. [`assert_no_alloc()`] here compares the violation count
+//! before and after and panics, and [`allocations_in`] returns the count for
+//! tests that want to assert on it.
 //!
 //! A test binary that uses either must install the checking allocator, with
 //! [`install_checker!`](crate::install_checker). Both functions verify on
 //! first use that it is installed, so a check can never pass just because
 //! nothing was counting.
 
-use std::cell::Cell;
+use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+#[doc(hidden)]
 pub use assert_no_alloc::AllocDisabler;
 use assert_no_alloc::violation_count;
 
-/// Installs the allocator that [`assert_no_alloc`] and [`allocations_in`]
+/// Installs the allocator that [`assert_no_alloc()`](crate::no_alloc::assert_no_alloc()) and
+/// [`allocations_in`](crate::no_alloc::allocations_in)
 /// count with. Call once at the top level of a test binary.
 #[macro_export]
 macro_rules! install_checker {
@@ -30,7 +33,7 @@ macro_rules! install_checker {
 /// Runs `f` with allocator calls forbidden on this thread and returns the
 /// number of calls (allocations, reallocations and frees) it made anyway.
 /// For tests that expect a count other than zero, or add counts up; the
-/// usual check is [`assert_no_alloc`].
+/// usual check is [`assert_no_alloc()`].
 ///
 /// # Panics
 /// If the binary has not installed the checker.
@@ -40,13 +43,14 @@ pub fn allocations_in(f: impl FnOnce()) -> u32 {
 }
 
 /// Runs `f` with allocator calls forbidden on this thread and returns its
-/// result. `what` names the code under test in the failure message.
+/// result. `what` names the code under test in the failure message; pass
+/// `format_args!` to say where in a loop it was.
 ///
 /// # Panics
 /// If `f` allocated, reallocated or freed, or if the binary has not installed
 /// the checker.
 #[track_caller]
-pub fn assert_no_alloc<R>(what: &str, f: impl FnOnce() -> R) -> R {
+pub fn assert_no_alloc<R>(what: impl Display, f: impl FnOnce() -> R) -> R {
     assert_checker_installed();
     let (result, violations) = count(f);
     assert_eq!(
@@ -64,12 +68,11 @@ fn count<R>(f: impl FnOnce() -> R) -> (R, u32) {
 
 /// Panics unless an allocation inside a forbidden section is counted, which
 /// it is only when the test binary's global allocator is [`AllocDisabler`].
-/// Checked once per thread: the count is per thread.
+/// That is a property of the process, so once it has held the check is
+/// skipped (two threads may both run it the first time, harmlessly).
 fn assert_checker_installed() {
-    thread_local! {
-        static CHECKED: Cell<bool> = const { Cell::new(false) };
-    }
-    if CHECKED.get() {
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.load(Ordering::Relaxed) {
         return;
     }
     // Allocated out here, so the forbidden section holds exactly one call.
@@ -84,5 +87,5 @@ fn assert_checker_installed() {
         "the no-alloc checker is not installed in this test binary; \
          add `daw_test_support::install_checker!();`"
     );
-    CHECKED.set(true);
+    INSTALLED.store(true, Ordering::Relaxed);
 }

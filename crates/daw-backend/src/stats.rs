@@ -29,8 +29,9 @@ pub struct BackendStats {
     /// `stop` returns an error instead.)
     pub callback_panicked: bool,
     /// Allocator calls caught inside cycles. `None` when nothing counts
-    /// them: in release builds, and when the binary has not installed
-    /// [`RtAllocCounter`](crate::RtAllocCounter).
+    /// them, because the binary has not installed
+    /// [`RtAllocCounter`](crate::RtAllocCounter); a test asserting
+    /// `Some(0)` therefore fails if it forgot the allocator.
     pub rt_alloc_violations: Option<u64>,
 }
 

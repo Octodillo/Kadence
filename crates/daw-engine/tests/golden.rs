@@ -8,7 +8,7 @@ mod support;
 
 use daw_engine::nodes::Strip;
 use daw_engine::{CompiledGraph, GraphDesc, NodeKind, RenderOptions, render};
-use daw_test_support::golden;
+use daw_test_support::{golden, golden_dir};
 use support::{Delay, Sine};
 
 const FRAMES: usize = 1000;
@@ -22,9 +22,9 @@ fn opts(block_size: u32) -> RenderOptions {
     }
 }
 
+#[track_caller]
 fn check_golden(name: &str, samples: &[f32]) {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
-    golden::check(dir, name, &[samples], golden::Match::Exact);
+    golden::check(golden_dir!(), name, &[samples], golden::Match::Exact);
 }
 
 fn assert_bits_eq(actual: &[f32], expected: &[f32]) {

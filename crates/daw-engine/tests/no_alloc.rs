@@ -14,7 +14,7 @@ use daw_engine::{
     AutomationLane, AutomationPoint, Curve, EngineConfig, EngineController, GraphDesc, LoopRange,
     NodeId, NodeKey, NodeMeter, PluginHandle,
 };
-use daw_test_support::no_alloc::allocations_in as violations;
+use daw_test_support::no_alloc::allocations_in;
 use support::{Delay, EventProbe, FakePlugin, NoteSource, Sine};
 
 daw_test_support::install_checker!();
@@ -93,7 +93,7 @@ fn swapping_graphs_while_processing_never_allocates() {
         };
         events.push(Event { frame: 70, kind }).unwrap();
         let mut cycles = 0u64;
-        let bad = violations(|| {
+        let bad = allocations_in(|| {
             // 100 frames with max_frames 64 also exercises block splitting.
             while !rt_done.load(Ordering::Acquire) {
                 proc.process(100, &[&input], &mut [&mut out], &events);
@@ -147,7 +147,7 @@ fn steady_state_processing_never_allocates() {
         ctl.set_param(track, Strip::PAN, 0.0).unwrap();
         ctl.locate(SampleTime(0)).unwrap();
     }
-    let bad = violations(|| {
+    let bad = allocations_in(|| {
         for _ in 0..100 {
             proc.process(512, &[&input], &mut [&mut out], &events);
         }
@@ -191,7 +191,7 @@ fn stress_plugin(fake: FakePlugin) {
     let rt = std::thread::spawn(move || {
         let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
         let events = EventList::with_capacity(0);
-        violations(|| {
+        allocations_in(|| {
             while !rt_done.load(Ordering::Acquire) {
                 proc.process(64, &[], &mut [&mut l, &mut r], &events);
             }

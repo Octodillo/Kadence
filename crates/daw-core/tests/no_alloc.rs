@@ -4,16 +4,30 @@
 use daw_core::dispose::deferred_drop;
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::meter::PeakMeter;
-use daw_core::node::TransportState;
+use daw_core::node::{ProcessContext, TransportState};
+use daw_core::plugin::PluginProcessor;
 use daw_core::queue::spsc;
 use daw_core::rt_log;
 use daw_core::rtlog::{RtLevel, rt_log};
+use daw_core::split::{SharedAudio, SplitAudio};
 use daw_core::time::{
     Meter, MeterPoint, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline,
 };
 use daw_test_support::no_alloc::allocations_in;
 
 daw_test_support::install_checker!();
+
+/// Counts the events it is given.
+struct Counter(usize);
+
+impl SplitAudio for Counter {
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        self.0 += ctx.events_in.len();
+    }
+    fn reset(&mut self) {
+        self.0 = 0;
+    }
+}
 
 #[test]
 fn rt_operations_do_not_allocate() {
@@ -126,5 +140,37 @@ fn rt_operations_do_not_allocate() {
         }),
         0,
         "timeline"
+    );
+
+    // A split plugin's audio half: blocks played, skipped and caught up, and a reset.
+    let mut shared = SharedAudio::new(Counter(0));
+    let mut half = shared.lend().unwrap();
+    let mut events_out = EventList::with_capacity(0);
+    let transport = TransportState::default();
+    assert_eq!(
+        allocations_in(|| {
+            let mut block = |half: &mut dyn PluginProcessor| {
+                half.process(&mut ProcessContext {
+                    frames: 16,
+                    transport: &transport,
+                    audio_in: &[],
+                    audio_out: &mut [],
+                    events_in: &list,
+                    events_out: &mut events_out,
+                });
+            };
+            block(half.as_mut());
+            shared.main(|_| block(half.as_mut()));
+            block(half.as_mut());
+            half.reset();
+            block(half.as_mut());
+        }),
+        0,
+        "split processor"
+    );
+    assert_eq!(
+        shared.main(|c| c.0),
+        1,
+        "reset, then the last block's event"
     );
 }

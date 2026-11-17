@@ -5,7 +5,7 @@ mod support;
 
 use daw_core::event::{Event, EventKind};
 use daw_midi::sequence::Sequence;
-use daw_test_support::no_alloc::allocations_in as violations;
+use daw_test_support::no_alloc::allocations_in;
 use support::{Rig, note};
 
 daw_test_support::install_checker!();
@@ -60,7 +60,7 @@ fn process_never_allocates() {
             pos = (round * 1234) % 15_000;
         }
         let playing = round % 23 != 0;
-        total += violations(|| rig.block_into(pos, 128, playing, &input));
+        total += allocations_in(|| rig.block_into(pos, 128, playing, &input));
         pos += 128;
     }
     assert_eq!(total, 0);

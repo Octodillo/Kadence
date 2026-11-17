@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-/// When set (to anything), a missing LV2 test plugin fails the test instead
-/// of skipping it.
+/// When set, to any value (even `0` or nothing), a missing LV2 test plugin
+/// fails the test instead of skipping it.
 pub const REQUIRE_ENV: &str = "KADENCE_REQUIRE_LV2_PLUGINS";
 
 /// The first of `search_paths` that holds every bundle in `bundles`

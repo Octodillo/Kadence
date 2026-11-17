@@ -22,7 +22,7 @@ mod serde_util;
 pub mod snapshot;
 pub mod undo;
 
-pub use bundle::{Bundle, FORMAT_NAME, SCHEMA_VERSION};
+pub use bundle::{Bundle, FORMAT_NAME, Link, SCHEMA_VERSION};
 pub use change::{Change, ChangeSet};
 pub use command::Command;
 pub use document::Document;

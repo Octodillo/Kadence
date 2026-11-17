@@ -25,7 +25,7 @@ thread_local! {
 /// deallocation made inside a backend cycle, without printing anything. The
 /// count shows up in
 /// [`BackendStats::rt_alloc_violations`](crate::BackendStats::rt_alloc_violations)
-/// in debug builds. Install it in a binary or test:
+/// when it is installed in a binary or test:
 ///
 /// ```
 /// #[global_allocator]
@@ -34,22 +34,10 @@ thread_local! {
 pub struct RtAllocCounter;
 
 impl RtAllocCounter {
-    /// What [`BackendStats::rt_alloc_violations`](crate::BackendStats::rt_alloc_violations)
-    /// reads after cycles that never allocated, in a binary that installed
-    /// this allocator: a count of zero in debug builds, and no count in
-    /// release builds, where cycles are not guarded. A test comparing with
-    /// this fails in a debug build when the allocator is missing, instead of
-    /// passing because nothing counted.
-    pub const CLEAN: Option<u64> = if cfg!(debug_assertions) {
-        Some(0)
-    } else {
-        None
-    };
-
-    /// Whether allocations in cycles are being counted: this is a debug
-    /// build and this allocator is the global one.
+    /// Whether allocations in cycles are being counted: this allocator is
+    /// the global one.
     pub(crate) fn counting() -> bool {
-        cfg!(debug_assertions) && INSTALLED.load(Ordering::Relaxed)
+        INSTALLED.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -96,16 +84,12 @@ unsafe impl GlobalAlloc for RtAllocCounter {
 }
 
 /// Allocator calls caught on this thread so far.
-// Only the debug-build guard in `rt_guard` calls this.
-#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(crate) fn violations() -> u64 {
     VIOLATIONS.with(Cell::get)
 }
 
 /// Runs `f` with allocations counted as violations on this thread. The
 /// depth is restored even if `f` unwinds.
-// Only the debug-build guard in `rt_guard` calls this.
-#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub(crate) fn forbid<R>(f: impl FnOnce() -> R) -> R {
     struct Depth;
     impl Drop for Depth {

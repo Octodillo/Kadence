@@ -8,8 +8,8 @@ use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{ProcessContext, TransportState};
 use daw_core::time::{SampleTime, Timeline};
 use daw_devices::Device;
-use daw_test_support::golden;
 use daw_test_support::no_alloc::assert_no_alloc;
+use daw_test_support::{golden, golden_dir};
 
 daw_test_support::install_checker!();
 
@@ -126,7 +126,9 @@ pub fn render_prepared(
                 events_out: &mut events_out,
             };
             let start = Instant::now();
-            assert_no_alloc("process", || dev.process(&mut ctx));
+            assert_no_alloc(format_args!("process at frame {pos}"), || {
+                dev.process(&mut ctx)
+            });
             block_times.push(start.elapsed());
         }
         for (o, b) in out.iter_mut().zip(&out_blocks) {
@@ -198,9 +200,9 @@ pub fn rms(x: &[f32]) -> f32 {
 /// Compare against `tests/golden/<name>.f32`; see [`golden`] for rewriting
 /// the files. A small tolerance absorbs libm differences between platforms;
 /// real DSP changes are far larger.
+#[track_caller]
 pub fn check_golden(name: &str, channels: &[Vec<f32>]) {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
-    golden::check(dir, name, channels, golden::Match::Within(1e-4));
+    golden::check(golden_dir!(), name, channels, golden::Match::Within(1e-4));
 }
 
 /// A device that is excited and then fed silence must decay to exact zeros,

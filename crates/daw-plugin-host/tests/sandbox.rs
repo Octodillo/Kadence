@@ -945,6 +945,7 @@ fn a_prepare_answers_a_change_not_yet_picked_up() {
 /// None when mda-lv2 is not installed (CI requires it).
 fn sample_rate_lv2_bundle() -> Option<tempfile::TempDir> {
     let dirs = daw_plugins::default_registry().search_paths(&PluginFormatKind::Lv2);
+    assert!(!dirs.is_empty(), "daw-plugins was built without LV2");
     let binary = daw_test_support::lv2::find_bundles(dirs, &["mda.lv2"])?.join("mda.lv2/Delay.so");
     assert!(binary.is_file(), "{} is missing", binary.display());
     let control = |i: u32, symbol: &str, range: &str| {
