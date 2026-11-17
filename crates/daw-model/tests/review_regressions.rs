@@ -478,13 +478,19 @@ fn a_failed_save_as_can_be_retried_into_the_same_folder() {
     let src = dir.path().join("take1.wav");
     std::fs::write(&src, b"take").unwrap();
     doc.bundle().unwrap().import_audio(&src).unwrap();
-    // A directory where the temp file goes makes writing the project fail
-    // after the audio is copied.
+    // A directory where the project file goes makes writing the project fail
+    // (at the rename over it) after the audio is copied.
     let target = dir.path().join("New");
-    let blocker = target.join("New.kadence.tmp");
+    let blocker = target.join("New.kadence");
     std::fs::create_dir_all(&blocker).unwrap();
     assert!(doc.save_as(&target).is_err());
     assert!(!target.join("audio/take1.wav").exists());
+    // Nothing else is left behind either: no backup and no temporary file.
+    assert_eq!(
+        std::fs::read_dir(target.join("backups")).unwrap().count(),
+        0
+    );
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 3);
     assert!(doc.bundle().unwrap().root().ends_with("Old"));
     std::fs::remove_dir(&blocker).unwrap();
     doc.save_as(&target).unwrap();
@@ -525,6 +531,8 @@ fn save_writes_through_a_symlinked_project_file() {
     let real = dir.path().join("synced.kadence");
     std::fs::rename(b.project_file(), &real).unwrap();
     std::os::unix::fs::symlink(&real, b.project_file()).unwrap();
+    // Read through the link, which is what makes it the user's own.
+    let mut doc = Document::open(b.root()).unwrap();
     save_versions(&mut doc, id, 1);
     assert!(
         std::fs::symlink_metadata(b.project_file())
@@ -533,4 +541,127 @@ fn save_writes_through_a_symlinked_project_file() {
             .is_symlink()
     );
     assert_eq!(bundle::read_project(&real).unwrap().tracks[0].name, "v0");
+}
+
+/// A saved bundle in a new folder, as if received from somewhere else, and a
+/// file outside it that nothing in the bundle may write to.
+#[cfg(unix)]
+fn received_bundle() -> (tempfile::TempDir, Document, TrackId, std::path::PathBuf) {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Received")).unwrap();
+    let victim = dir.path().join("victim.txt");
+    std::fs::write(&victim, "mine").unwrap();
+    (dir, doc, id, victim)
+}
+
+#[cfg(unix)]
+fn append(path: std::path::PathBuf, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.into_os_string();
+    name.push(suffix);
+    name.into()
+}
+
+#[cfg(unix)]
+#[test]
+fn links_at_temporary_names_are_not_written_through() {
+    let (_dir, mut doc, id, victim) = received_bundle();
+    let b = doc.bundle().unwrap().clone();
+    for planted in [
+        append(b.project_file(), ".tmp"),
+        append(b.autosave_file(), ".tmp"),
+    ] {
+        std::os::unix::fs::symlink(&victim, planted).unwrap();
+    }
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    assert!(doc.autosave().unwrap());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "mine");
+    save_versions(&mut doc, id, 1);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "mine");
+}
+
+#[cfg(unix)]
+#[test]
+fn autosave_replaces_a_link_instead_of_writing_through_it() {
+    let (_dir, mut doc, id, victim) = received_bundle();
+    let b = doc.bundle().unwrap().clone();
+    std::os::unix::fs::symlink(&victim, b.autosave_file()).unwrap();
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    assert!(doc.autosave().unwrap());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "mine");
+    let autosave = std::fs::symlink_metadata(b.autosave_file()).unwrap();
+    assert!(autosave.file_type().is_file());
+    assert!(bundle::read_project(&b.autosave_file()).unwrap().tracks[0].mute);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovering_does_not_follow_a_linked_project_file() {
+    let (_dir, mut doc, id, victim) = received_bundle();
+    let b = doc.bundle().unwrap().clone();
+    doc.execute(SetTrack::new(id, TrackField::Mute(true)))
+        .unwrap();
+    assert!(doc.autosave().unwrap());
+    // The project file was never read, so nothing shows the link is the
+    // user's own.
+    std::fs::remove_file(b.project_file()).unwrap();
+    std::os::unix::fs::symlink(&victim, b.project_file()).unwrap();
+    let mut doc = Document::recover(b.root()).unwrap();
+    doc.save().unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "mine");
+    assert!(b.backups().unwrap().is_empty());
+    let saved = std::fs::symlink_metadata(b.project_file()).unwrap();
+    assert!(saved.file_type().is_file());
+    assert!(b.load().unwrap().tracks[0].mute);
+}
+
+/// Milliseconds since the Unix epoch, as backups are stamped.
+#[cfg(unix)]
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_does_not_create_the_target_of_a_dangling_link() {
+    let (dir, mut doc, id, _victim) = received_bundle();
+    let b = doc.bundle().unwrap().clone();
+    let target = dir.path().join("created.txt");
+    // An hour ahead, as after a clock change, so the next backup's name is
+    // known.
+    let ahead = now_millis() + 3_600_000;
+    let name = |stamp: u64| {
+        b.backups_dir()
+            .join(format!("Received-{stamp:016}.kadence"))
+    };
+    std::fs::copy(b.project_file(), name(ahead)).unwrap();
+    std::os::unix::fs::symlink(&target, name(ahead + 1)).unwrap();
+    save_versions(&mut doc, id, 1);
+    assert!(!target.exists());
+    assert!(name(ahead + 2).is_file());
+}
+
+#[test]
+fn a_backup_at_the_last_time_stamp_fails_the_save_instead_of_piling_up() {
+    let (p, id) = project_with_track();
+    let dir = tempfile::tempdir().unwrap();
+    let mut doc = Document::new(p);
+    doc.save_as(dir.path().join("Far")).unwrap();
+    let b = doc.bundle().unwrap().clone();
+    let last = b.backups_dir().join("Far-9999999999999999.kadence");
+    std::fs::copy(b.project_file(), &last).unwrap();
+    doc.execute(SetTrack::new(id, TrackField::Name("v0".into())))
+        .unwrap();
+    assert!(doc.save().is_err());
+    assert_eq!(backup_names(&b), ["Far-9999999999999999.kadence"]);
+    assert_eq!(b.load().unwrap().tracks[0].name, "A");
+    std::fs::remove_file(last).unwrap();
+    doc.save().unwrap();
+    assert_eq!(b.load().unwrap().tracks[0].name, "v0");
 }
