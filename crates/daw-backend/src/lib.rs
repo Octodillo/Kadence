@@ -168,6 +168,11 @@ pub trait AudioBackend: Send {
     /// still hold it, so don't rely on its drop to signal anything.
     fn start(&mut self, cb: ProcessCallback) -> Result<(), BackendError>;
 
+    /// Ends the callback and keeps the backend open.
+    ///
+    /// If the audio system fails to stop (JACK: deactivation fails, as it
+    /// can once the server is gone), the backend is left closed, as after
+    /// [`close`](Self::close), and the error says so.
     fn stop(&mut self) -> Result<(), BackendError>;
 
     /// Stop if running, then unregister ports and disconnect from the server.
