@@ -222,8 +222,11 @@ fn a_crashed_unsaved_project_is_recovered_with_its_takes() {
     let base = tempfile::tempdir().unwrap();
     let mut crashed = state();
     start_session(&mut crashed, base.path());
+    // An autosave just now: the next is a while off.
+    crashed.set_bpm(90.0).unwrap();
+    crashed.autosave();
     let track = record_a_take(&mut crashed);
-    // A take is autosaved on the next tick, not a minute later.
+    // A take is autosaved on the next tick all the same.
     crashed.autosave();
     let folder = crashed.media_root();
     // As a crash would: nothing is cleaned up.
@@ -267,8 +270,51 @@ fn unsaved_work_stays_on_offer_until_it_is_dealt_with() {
     // Recovered by another Kadence meanwhile: not ours to discard or open.
     std::fs::write(&autosave, good).unwrap();
     let other = recovery::Scratch::adopt(&folder).unwrap().unwrap();
+    let offered = s.recovery.clone();
     assert!(matches!(s.discard_offered(0), Err(Message::AlreadyOpen(_))));
     assert!(autosave.is_file());
     assert!(s.recovery.is_empty());
-    drop(other);
+    s.recovery = offered.clone();
+    assert!(matches!(s.recover_offered(0), Err(Message::AlreadyOpen(_))));
+    assert!(s.recovery.is_empty());
+
+    // Saved or dropped there since: nothing to recover or discard, and no
+    // entry left that can do neither.
+    other.remove();
+    for deal_with in [AppState::recover_offered, AppState::discard_offered] {
+        s.recovery = offered.clone();
+        let _ = deal_with(&mut s, 0);
+        assert!(s.recovery.is_empty());
+    }
+}
+
+#[test]
+fn takes_from_before_the_session_come_along_into_the_scratch_folder() {
+    let base = tempfile::tempdir().unwrap();
+    let mut s = state();
+    let track = record_a_take(&mut s);
+    start_session(&mut s, base.path());
+    assert!(s.media_root().starts_with(base.path()));
+    assert!(s.media_root().join(take_source(&s, track)).is_file());
+    assert!(s.missing_files().is_empty());
+}
+
+#[test]
+fn a_saved_projects_unsaved_work_is_recovered_from_the_offer() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let song = dir.path().join("Song");
+    let mut crashed = state();
+    crashed.save_as(&song).unwrap();
+    crashed.set_bpm(90.0).unwrap();
+    crashed.autosave();
+    drop(crashed);
+
+    let mut s = state();
+    s.recovery = recovery::find(Some(base.path()), std::slice::from_ref(&song));
+    assert_eq!(s.recovery.len(), 1);
+    s.recover_offered(0).unwrap();
+    assert!(s.recovery.is_empty());
+    assert_eq!(s.bundle_root().as_deref(), Some(song.as_path()));
+    assert!(s.doc.is_modified());
 }

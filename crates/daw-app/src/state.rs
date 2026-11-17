@@ -594,9 +594,14 @@ impl AppState {
         self.recent = settings::load_recent(self.settings.as_ref());
         // Look before making our own folder, so it is not offered.
         self.recovery = recovery::find(recovery_base, &self.recent);
+        let stand_in = self.unsaved_root().to_path_buf();
         self.scratch = recovery_base.and_then(|b| Scratch::create(b).ok());
         self.scratch_saved = None;
-        // An unsaved project's audio is looked for in the scratch folder now.
+        // An unsaved project's audio is looked for in the scratch folder
+        // now: what was recorded before there was one comes along.
+        if self.scratch.is_some() && recovery::bring_audio(&stand_in, self.unsaved_root()).is_ok() {
+            let _ = std::fs::remove_dir_all(recovery::audio_dir(&stand_in));
+        }
         self.resync();
     }
 
@@ -637,13 +642,14 @@ impl AppState {
     }
 
     /// Takes `candidate` off the offer once it is dealt with: recovered or
-    /// discarded here, or open in another Kadence.
+    /// discarded here, open in another Kadence, or gone since (another
+    /// Kadence recovered it and saved or dropped it).
     fn settle_offer(
         &mut self,
         candidate: &Candidate,
         result: Result<(), Message>,
     ) -> Result<(), Message> {
-        if matches!(result, Ok(()) | Err(Message::AlreadyOpen(_))) {
+        if matches!(result, Ok(()) | Err(Message::AlreadyOpen(_))) || candidate.is_gone() {
             self.recovery.retain(|c| c != candidate);
             self.touch();
         }
@@ -1009,13 +1015,22 @@ impl AppState {
     /// audio recorded into the project is in there, and the work stays in
     /// one place that goes away when it is saved or discarded.
     pub fn recover_untitled(&mut self, candidate: &Candidate) -> Result<(), Message> {
+        let dir = candidate.autosave.parent().unwrap_or(Path::new(""));
+        // Before reading: not ours to take while another Kadence holds it,
+        // whatever it has done with the autosave since.
+        let adopted = match Scratch::adopt(dir) {
+            Ok(Some(adopted)) => adopted,
+            Ok(None) => return Err(Message::AlreadyOpen(dir.to_path_buf())),
+            Err(e) => {
+                let failed = FormatError::Io {
+                    path: dir.to_path_buf(),
+                    source: e,
+                };
+                return Err(Message::File(Context::Recover, failed));
+            }
+        };
         let project = daw_model::bundle::read_project(&candidate.autosave)
             .map_err(|e| Message::File(Context::Recover, e))?;
-        let dir = candidate.autosave.parent().unwrap_or(Path::new(""));
-        // Not ours to take while another Kadence holds it.
-        let Some(adopted) = Scratch::adopt(dir).ok().flatten() else {
-            return Err(Message::AlreadyOpen(dir.to_path_buf()));
-        };
         self.replace_document(Document::recovered(project));
         if let Some(own) = self.scratch.replace(adopted) {
             own.remove();
@@ -1053,7 +1068,7 @@ impl AppState {
             Vec::new()
         };
         if let Err(e) = self.doc.save_as(dir) {
-            recovery::remove_files(&brought);
+            recovery::take_back_audio(&brought, dir);
             return Err(e);
         }
         self.relock();

@@ -91,11 +91,20 @@ pub fn bring_audio(root: &Path, bundle_root: &Path) -> Result<Vec<PathBuf>, Form
     Ok(made)
 }
 
-/// Removes files [`bring_audio`] made, after the save they were for failed.
-pub fn remove_files(files: &[PathBuf]) {
+/// Removes files [`bring_audio`] made.
+fn remove_files(files: &[PathBuf]) {
     for f in files {
         let _ = fs::remove_file(f);
     }
+}
+
+/// Takes back what [`bring_audio`] put into `bundle_root`, after the save
+/// it was for failed: the files, and the `audio/` folder if that leaves it
+/// empty.
+pub fn take_back_audio(files: &[PathBuf], bundle_root: &Path) {
+    remove_files(files);
+    // Only an empty folder goes.
+    let _ = fs::remove_dir(audio_dir(bundle_root));
 }
 
 /// A folder of this process's own in the temporary folder, made by whoever
@@ -267,18 +276,23 @@ impl Candidate {
             .unwrap_or_default()
     }
 
+    /// Whether the work is no longer there: recovered and then saved or
+    /// dropped by another Kadence since it was offered here.
+    pub fn is_gone(&self) -> bool {
+        !self.autosave.exists()
+    }
+
     /// Deletes the autosave, and an orphaned scratch folder (with the audio
-    /// recorded into its project) with it.
+    /// recorded into its project) with it. Fine if it is gone already.
     pub fn discard(&self) -> io::Result<()> {
-        match &self.bundle {
-            Some(_) => match fs::remove_file(&self.autosave) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-                _ => Ok(()),
-            },
-            None => match self.autosave.parent() {
-                Some(dir) => fs::remove_dir_all(dir),
-                None => Ok(()),
-            },
+        let removed = match (&self.bundle, self.autosave.parent()) {
+            (Some(_), _) => fs::remove_file(&self.autosave),
+            (None, Some(dir)) => fs::remove_dir_all(dir),
+            (None, None) => Ok(()),
+        };
+        match removed {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
         }
     }
 }
