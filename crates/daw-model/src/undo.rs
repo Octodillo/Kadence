@@ -15,6 +15,19 @@ struct Entry {
     command: Box<dyn Command>,
 }
 
+/// What running a step cost the history, which comes back if the step is
+/// [abandoned](UndoStack::abandon).
+#[derive(Debug)]
+struct Displaced {
+    /// The step that displaced it.
+    by: u64,
+    /// The redo steps it cleared.
+    redo: Vec<Entry>,
+    /// The oldest undo step, dropped for the limit, and the base position
+    /// before that.
+    oldest: Option<(Entry, u64)>,
+}
+
 /// Undo and redo stacks with merging of consecutive edits.
 ///
 /// A new command merges into the previous one if [`Command::merge`] accepts
@@ -32,6 +45,8 @@ pub struct UndoStack {
     /// dropped (by the limit or `clear`), because the project then no longer
     /// matches the state before them.
     base_seq: u64,
+    /// What the last new step displaced, until another step replaces it.
+    displaced: Option<Displaced>,
 }
 
 impl Default for UndoStack {
@@ -50,6 +65,7 @@ impl UndoStack {
             sealed: true,
             next_seq: 1,
             base_seq: 0,
+            displaced: None,
         }
     }
 
@@ -60,21 +76,29 @@ impl UndoStack {
         mut command: Box<dyn Command>,
     ) -> Result<ChangeSet, ModelError> {
         let changes = command.apply(project).inspect_err(|e| self.on_error(e))?;
-        self.undone.clear();
         let merged = !self.sealed
             && self
                 .done
                 .back_mut()
                 .is_some_and(|top| top.command.merge(&*command));
-        if !merged {
+        if merged {
+            self.undone.clear();
+        } else {
             let seq = self.next_seq;
             self.next_seq += 1;
             self.done.push_back(Entry { seq, command });
+            let mut displaced = Displaced {
+                by: seq,
+                redo: std::mem::take(&mut self.undone),
+                oldest: None,
+            };
             if self.done.len() > self.limit
                 && let Some(dropped) = self.done.pop_front()
             {
-                self.base_seq = dropped.seq;
+                let base = std::mem::replace(&mut self.base_seq, dropped.seq);
+                displaced.oldest = Some((dropped, base));
             }
+            self.displaced = Some(displaced);
         }
         self.sealed = false;
         Ok(changes)
@@ -82,28 +106,20 @@ impl UndoStack {
 
     /// Reverts the last command. Returns `None` if there is nothing to undo.
     pub fn undo(&mut self, project: &mut Project) -> Result<Option<ChangeSet>, ModelError> {
-        let Some(mut entry) = self.done.pop_back() else {
+        let Some((entry, changes)) = self.revert_last(project)? else {
             return Ok(None);
         };
-        self.sealed = true;
-        match entry.command.revert(project) {
-            Ok(changes) => {
-                self.undone.push(entry);
-                Ok(Some(changes))
-            }
-            Err(e) => {
-                self.done.push_back(entry);
-                self.on_error(&e);
-                Err(e)
-            }
-        }
+        self.undone.push(entry);
+        Ok(Some(changes))
     }
 
     /// Reverts the last command and forgets it, as if it had never run, when
     /// it is the step at `position`: for a gesture the user cancelled, or one
     /// that replaces its step as it goes. Unlike [`undo`](Self::undo) it
-    /// leaves nothing to redo. Returns `None`, changing nothing, when history
-    /// has moved on from `position`.
+    /// leaves the step nothing to redo, and it brings back the redo steps
+    /// (and the oldest undo step, at the limit) the command displaced when
+    /// it ran. Returns `None`, changing nothing, when history has moved on
+    /// from `position`.
     pub fn abandon(
         &mut self,
         project: &mut Project,
@@ -112,10 +128,31 @@ impl UndoStack {
         if self.done.back().is_none_or(|e| e.seq != position) {
             return Ok(None);
         }
-        let mut entry = self.done.pop_back().expect("checked above");
+        let Some((_, changes)) = self.revert_last(project)? else {
+            return Ok(None);
+        };
+        if let Some(d) = self.displaced.take_if(|d| d.by == position) {
+            self.undone = d.redo;
+            if let Some((oldest, base)) = d.oldest {
+                self.done.push_front(oldest);
+                self.base_seq = base;
+            }
+        }
+        Ok(Some(changes))
+    }
+
+    /// Takes the last command off the history and reverts it. A command
+    /// that fails to revert stays.
+    fn revert_last(
+        &mut self,
+        project: &mut Project,
+    ) -> Result<Option<(Entry, ChangeSet)>, ModelError> {
+        let Some(mut entry) = self.done.pop_back() else {
+            return Ok(None);
+        };
         self.sealed = true;
         match entry.command.revert(project) {
-            Ok(changes) => Ok(Some(changes)),
+            Ok(changes) => Ok(Some((entry, changes))),
             Err(e) => {
                 self.done.push_back(entry);
                 self.on_error(&e);
@@ -196,6 +233,7 @@ impl UndoStack {
         self.base_seq = self.position();
         self.done.clear();
         self.undone.clear();
+        self.displaced = None;
         self.sealed = true;
     }
 }

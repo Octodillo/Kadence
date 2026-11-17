@@ -24,7 +24,7 @@ use daw_model::{
 };
 
 use crate::automation::{LaneScale, PointShape};
-use crate::gesture::DragStep;
+use crate::gesture::{DRAG_THRESHOLD, DragStep};
 use crate::scene::{Palette, Prim, Rect, Rgba, Scene};
 use crate::{Button, Cursor, Outcome, Pointer, Snap, TimelineView};
 
@@ -140,6 +140,11 @@ struct LaneDrag {
     /// (with the point the press added, if it added one).
     orig: Vec<AutomationPoint>,
     kind: DragKind,
+    /// Where the press was, until the pointer has moved a drag's distance
+    /// from it: a click on a point selects it and must not move it. `None`
+    /// from the start when the press added the point, which then follows
+    /// the pointer at once.
+    click: Option<(f64, f64)>,
     /// The undo step that holds what the drag did so far.
     step: DragStep,
 }
@@ -343,6 +348,7 @@ impl LaneEditor {
                         lead: i,
                         moving,
                     },
+                    click: Some((p.x, p.y)),
                     step: DragStep::default(),
                 });
                 Outcome::view()
@@ -359,6 +365,7 @@ impl LaneEditor {
                     lane,
                     orig,
                     kind: DragKind::Curve { index, y: p.y },
+                    click: Some((p.x, p.y)),
                     step: DragStep::default(),
                 });
                 Outcome::view()
@@ -397,6 +404,7 @@ impl LaneEditor {
                         lead: i,
                         moving: vec![i],
                     },
+                    click: None,
                     step,
                 });
                 Outcome::document()
@@ -421,35 +429,27 @@ impl LaneEditor {
         let Some(mut drag) = self.drag.take() else {
             return Outcome::default();
         };
-        // Work the edit out again from the points at the press, in place of
-        // what the drag did so far.
-        let rewound = match drag.step.rewind(doc) {
-            Ok(rewound) => rewound,
-            Err(e) => return Outcome::from_result(Err(e)),
-        };
-        let points = match drag.kind {
-            DragKind::Points {
-                tick,
-                y,
-                lead,
-                ref moving,
-            } => moved_points(frame, grid, p, &drag.orig, tick, y, lead, moving),
-            DragKind::Curve { index, y } => bent_points(frame, p, &drag.orig, index, y),
-        };
-        let lane = lane_of(doc.project(), drag.lane).map(|(_, l)| l);
-        let o = match (points, lane) {
-            (Some(points), Some(l)) if points != l.points => {
-                Outcome::from_result(drag.step.run(doc, set_points(drag.lane, points)))
-                    .or_document(rewound)
+        if let Some((x, y)) = drag.click {
+            if (p.x - x).hypot(p.y - y) < DRAG_THRESHOLD {
+                self.drag = Some(drag);
+                return Outcome::default();
             }
-            // Back where the drag began.
-            (Some(_), Some(_)) => Outcome::changed(rewound),
-            // The lane or the points went away under the drag: it ends.
-            _ => {
-                doc.seal();
-                return Outcome::changed(rewound);
-            }
-        };
+            drag.click = None;
+        }
+        let lane = drag.lane;
+        let o = drag.step.replace(doc, |project| {
+            let (_, l) = lane_of(project, lane)?;
+            let points = match drag.kind {
+                DragKind::Points {
+                    tick,
+                    y,
+                    lead,
+                    ref moving,
+                } => moved_points(frame, grid, p, &drag.orig, tick, y, lead, moving),
+                DragKind::Curve { index, y } => bent_points(frame, p, &drag.orig, index, y),
+            }?;
+            (points != l.points).then(|| set_points(lane, points))
+        });
         self.drag = Some(drag);
         self.saw(doc.project());
         o
@@ -460,7 +460,7 @@ impl LaneEditor {
         let drag = self.drag.take()?;
         doc.seal();
         if let DragKind::Points { lead, .. } = drag.kind
-            && !drag.step.edited()
+            && drag.click.is_some()
             && !p.shift
             && !p.ctrl
         {
@@ -474,8 +474,7 @@ impl LaneEditor {
     /// Drops the drag, if one is on a lane, and takes back what it did.
     /// Nothing of it is left to undo or redo.
     pub fn cancel(&mut self, doc: &mut Document) -> Option<Outcome> {
-        let mut drag = self.drag.take()?;
-        Some(Outcome::rewound(drag.step.rewind(doc)))
+        Some(self.drag.take()?.step.cancel(doc))
     }
 
     /// Ends the drag, keeping what it did, so it doesn't merge with the

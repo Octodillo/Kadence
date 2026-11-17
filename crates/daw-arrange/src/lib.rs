@@ -232,14 +232,14 @@ pub enum Refusal {
 }
 
 impl Outcome {
-    fn view() -> Self {
+    pub(crate) fn view() -> Self {
         Self {
             view: true,
             ..Default::default()
         }
     }
 
-    fn document() -> Self {
+    pub(crate) fn document() -> Self {
         Self {
             document: true,
             view: true,
@@ -247,32 +247,7 @@ impl Outcome {
         }
     }
 
-    /// For a step of a drag that may have changed the document.
-    pub(crate) fn changed(document: bool) -> Self {
-        if document {
-            Self::document()
-        } else {
-            Self::default()
-        }
-    }
-
-    /// With `document` set if `changed`: for an edit that was refused after
-    /// the drag's step before it was taken back.
-    pub(crate) fn or_document(mut self, changed: bool) -> Self {
-        self.document |= changed;
-        self
-    }
-
-    /// What taking back a drag's edit ([`DragStep::rewind`]) did.
-    pub(crate) fn rewound(r: Result<bool, ModelError>) -> Self {
-        match r {
-            Ok(false) => Self::view(),
-            Ok(true) => Self::document(),
-            Err(e) => Self::from_result(Err(e)),
-        }
-    }
-
-    fn from_result(r: Result<(), ModelError>) -> Self {
+    pub(crate) fn from_result(r: Result<(), ModelError>) -> Self {
         match r {
             Ok(()) => Self::document(),
             Err(e) => Self {
@@ -918,10 +893,8 @@ impl Arrange {
                 self.motion(doc, env, p)
             }
             Drag::Edit { edit, mut step } => {
-                let o = self.drag_edit(doc, env, p, &edit, &mut step);
-                if self.drag.is_some() {
-                    self.drag = Some(Drag::Edit { edit, step });
-                }
+                let o = step.replace(doc, |project| self.clip_edit(project, env, p, &edit));
+                self.drag = Some(Drag::Edit { edit, step });
                 o
             }
             Drag::Rubber { x0, y0, base, .. } => {
@@ -1004,7 +977,7 @@ impl Arrange {
             return o;
         }
         match self.drag.take() {
-            Some(Drag::Edit { mut step, .. }) => Outcome::rewound(step.rewind(doc)),
+            Some(Drag::Edit { step, .. }) => step.cancel(doc),
             Some(_) => Outcome::view(),
             None => Outcome::default(),
         }
@@ -1166,25 +1139,17 @@ impl Arrange {
         };
     }
 
-    /// One pointer move of a clip drag: puts the edit that takes the clips
-    /// to `p` in place of what the drag has done so far.
-    fn drag_edit(
+    /// The edit that takes the clips of a drag to the pointer at `p`, or
+    /// `None` when that is how `project` has them. Worked out from what the
+    /// drag noted at the press (see [`DragStep::replace`]).
+    fn clip_edit(
         &mut self,
-        doc: &mut Document,
+        project: &Project,
         env: &Env,
         p: Pointer,
         edit: &ClipDrag,
-        step: &mut DragStep,
-    ) -> Outcome {
-        let rewound = match step.rewind(doc) {
-            Ok(rewound) => rewound,
-            Err(e) => {
-                self.drag = None;
-                return Outcome::from_result(Err(e));
-            }
-        };
-        let project = doc.project();
-        let command = match *edit {
+    ) -> Option<Box<dyn Command>> {
+        match *edit {
             ClipDrag::Move {
                 tick,
                 row,
@@ -1201,11 +1166,6 @@ impl Arrange {
             } => self.trim_edit(project, env, p, clip, zone, tick, (start, length, offset)),
             ClipDrag::Fade { clip, out, grab } => self.fade_edit(project, p, clip, out, grab),
             ClipDrag::Gain { clip, y, db } => Self::gain_edit(project, p, clip, y, db),
-        };
-        match command {
-            Some(c) => Outcome::from_result(step.run(doc, c)).or_document(rewound),
-            // Back where the drag began.
-            None => Outcome::changed(rewound),
         }
     }
 

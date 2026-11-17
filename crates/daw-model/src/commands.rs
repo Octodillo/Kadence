@@ -585,7 +585,11 @@ impl Command for RemoveClip {
 }
 
 /// Moves a clip in time and optionally to another track of the same kind.
-/// Consecutive moves of the same clip (a drag) merge.
+/// Consecutive moves of the same clip merge. Undo puts the clip back at the
+/// place it had in its track's list, which is exact as long as nothing else
+/// changed the list in between: true of one command, merged or not, but not
+/// of several clips' moves merged pairwise (move them as a [`Batch`] that is
+/// run once instead).
 #[derive(Debug)]
 pub struct MoveClip {
     pub id: ClipId,

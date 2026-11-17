@@ -155,6 +155,7 @@ fn a_slip_on_a_clip_edge_is_not_an_edit() {
 fn dragging_away_and_back_leaves_no_step() {
     let mut r = Rig::new();
     let id = r.clip(0, BAR, BAR);
+    r.leave_three_redo_steps();
     let steps = r.doc.history().undo_len();
     let position = r.doc.history().position();
     let (x, y) = (r.x(BAR + BAR / 2), r.y(0));
@@ -162,11 +163,18 @@ fn dragging_away_and_back_leaves_no_step() {
     r.motion(x + 128.0, y);
     assert_eq!(r.start(id), 2 * BAR);
     assert_eq!(r.doc.history().undo_len(), steps + 1);
+    // More moves inside the same grid step are nothing new: no edit, no
+    // resync of the engine.
+    let revision = r.doc.revision();
+    r.motion(x + 126.0, y);
+    r.motion(x + 126.0, y);
+    assert_eq!(r.doc.revision(), revision);
     r.motion(x + 1.0, y);
     assert_eq!(r.start(id), BAR);
     r.release(x + 1.0, y);
     assert_eq!(r.doc.history().undo_len(), steps);
     assert_eq!(r.doc.history().position(), position);
+    assert_eq!(r.doc.history().redo_len(), 3, "redo history was wiped");
 }
 
 /// Issue #204 item 8.
@@ -174,6 +182,8 @@ fn dragging_away_and_back_leaves_no_step() {
 fn a_cancelled_drag_cannot_be_redone() {
     let mut r = Rig::new();
     let id = r.clip(0, BAR, BAR);
+    r.leave_three_redo_steps();
+    let redo = r.doc.history().redo_label();
     let steps = r.doc.history().undo_len();
     let position = r.doc.history().position();
     let (x, y) = (r.x(BAR + BAR / 2), r.y(0));
@@ -184,9 +194,32 @@ fn a_cancelled_drag_cannot_be_redone() {
     let o = r.arrange.cancel(&mut r.doc);
     assert!(o.document && o.error.is_none());
     assert_eq!(r.start(id), BAR);
-    assert!(!r.doc.history().can_redo(), "Redo re-applies the drag");
+    // What there was to redo before the drag is there again, and no more.
+    assert_eq!(r.doc.history().redo_len(), 3, "Redo re-applies the drag");
+    assert_eq!(r.doc.history().redo_label(), redo);
     assert_eq!(r.doc.history().undo_len(), steps);
     assert_eq!(r.doc.history().position(), position);
+}
+
+/// Issue #204 item 4.
+#[test]
+fn each_nudge_is_its_own_undo_step() {
+    let mut r = Rig::new();
+    let id = r.clip(0, BAR, BAR);
+    r.arrange.selection = [id].into();
+    let steps = r.doc.history().undo_len();
+    for _ in 0..3 {
+        assert!(r.arrange.nudge(&mut r.doc, 1).document);
+    }
+    let end = r.start(id);
+    assert!(end > BAR);
+    assert_eq!(r.doc.history().undo_len(), steps + 3);
+    r.doc.undo().unwrap();
+    let step = end - r.start(id);
+    assert!(step > 0 && r.start(id) == BAR + 2 * step);
+    // Right then left are two steps, not one that does nothing.
+    r.arrange.nudge(&mut r.doc, -1);
+    assert_eq!(r.doc.history().undo_len(), steps + 3);
 }
 
 /// Something else edits the document while a button is held (a take ends):

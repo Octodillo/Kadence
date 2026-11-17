@@ -4,7 +4,9 @@ use std::mem;
 use std::sync::Arc;
 
 use daw_core::time::{SampleTime, TickTime};
-use daw_model::{Change, ChangeSet, Clip, ClipContent, ClipId, Command, ModelError, Project};
+use daw_model::{
+    Change, ChangeSet, Clip, ClipContent, ClipId, Command, ModelError, Project, TrackId,
+};
 
 /// A clip's start, length and (for audio) file offset.
 type Extent = (TickTime, TickTime, Option<SampleTime>);
@@ -34,8 +36,8 @@ impl TrimClip {
         }
     }
 
-    /// Gives `clip` the extent `to`, shifting MIDI notes so they stay put,
-    /// and returns the extent it had.
+    /// Gives `clip` an extent, shifting MIDI notes so they stay put, and
+    /// returns the extent it had.
     fn resize(clip: &mut Clip, (start, length, offset): Extent) -> Extent {
         let shift = clip.start.0 - start.0;
         let old_start = mem::replace(&mut clip.start, start);
@@ -60,7 +62,7 @@ impl TrimClip {
         (old_start, old_length, old_offset)
     }
 
-    fn changes(&self, track: daw_model::TrackId) -> ChangeSet {
+    fn changes(&self, track: TrackId) -> ChangeSet {
         [Change::ClipList(track), Change::Clip(self.id)]
             .into_iter()
             .collect()

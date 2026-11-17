@@ -570,3 +570,50 @@ fn abandoning_a_step_leaves_no_redo_and_restores_the_position() {
     assert_eq!(doc.project().tracks[0].name, "next");
     assert_eq!(doc.history().undo_len(), 3);
 }
+
+/// A step that is abandoned gives back what running it cost the history:
+/// the redo steps it cleared and, at the undo limit, the oldest undo step.
+#[test]
+fn abandoning_a_step_restores_what_it_displaced() {
+    let (mut p, id) = project_with_track();
+    let mut h = UndoStack::new(3);
+    let rename = |n: &str| Box::new(SetTrack::new(id, TrackField::Name(n.into())));
+    for n in ["a", "b", "c", "d"] {
+        h.execute(&mut p, rename(n)).unwrap();
+        h.seal();
+    }
+    // "a" fell off the limit; undo "d" so there is something to redo.
+    h.undo(&mut p).unwrap();
+    let (position, len) = (h.position(), h.undo_len());
+    assert_eq!((len, h.redo_len()), (2, 1));
+
+    h.execute(&mut p, rename("dragged")).unwrap();
+    assert!(!h.can_redo());
+    assert!(h.abandon(&mut p, h.position()).unwrap().is_some());
+    assert_eq!((h.undo_len(), h.redo_len()), (len, 1));
+    assert_eq!(h.position(), position);
+    h.redo(&mut p).unwrap();
+    assert_eq!(p.tracks[0].name, "d");
+
+    // Full again: the step drops "b", and abandoning it brings "b" back.
+    assert_eq!(h.undo_len(), 3);
+    let position = h.position();
+    h.execute(&mut p, rename("dragged")).unwrap();
+    assert_eq!(h.undo_len(), 3);
+    assert!(h.abandon(&mut p, h.position()).unwrap().is_some());
+    assert_eq!((h.undo_len(), h.position()), (3, position));
+    while h.undo(&mut p).unwrap().is_some() {}
+    assert_eq!(p.tracks[0].name, "a");
+    assert_ne!(h.position(), 0, "the first rename is still out of reach");
+
+    // A step that is kept keeps what it displaced gone.
+    h.redo(&mut p).unwrap();
+    h.execute(&mut p, rename("kept")).unwrap();
+    h.seal();
+    let kept = h.position();
+    h.execute(&mut p, rename("next")).unwrap();
+    assert!(h.abandon(&mut p, kept).unwrap().is_none());
+    assert!(h.abandon(&mut p, h.position()).unwrap().is_some());
+    assert_eq!(p.tracks[0].name, "kept");
+    assert!(!h.can_redo());
+}
