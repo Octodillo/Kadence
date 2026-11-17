@@ -6,7 +6,8 @@
 //! threads that depend on it. Adding a helper or a variant does not.
 //!
 //! The rest are real-time safe tools: [`queue`] for crossing threads, [`exclusive`] for
-//! sharing one object between the audio thread and the main thread,
+//! sharing one object between the audio thread and the main thread, [`split`] for the
+//! audio-thread half of a plugin built on it,
 //! [`dispose`] for freeing memory off the audio thread, [`rtlog`] for logging
 //! from it and [`meter`] for peak meters.
 //!
@@ -20,6 +21,7 @@ pub mod node;
 pub mod plugin;
 pub mod queue;
 pub mod rtlog;
+pub mod split;
 mod sync;
 pub mod time;
 

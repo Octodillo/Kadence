@@ -28,7 +28,7 @@ use daw_core::plugin::{
     ScanBuilder,
 };
 
-pub use instance::{Vst3Instance, Vst3Processor};
+pub use instance::Vst3Instance;
 pub use module::shutdown;
 
 /// Entry point for the plugin registry.

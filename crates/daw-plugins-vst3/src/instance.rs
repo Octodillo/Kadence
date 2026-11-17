@@ -1,7 +1,6 @@
 //! A running VST3 plugin: component, edit controller and audio processor behind
 //! [`PluginInstance`].
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
@@ -10,12 +9,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off};
-use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
     BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
     PluginProcessor, ScanBuilder,
 };
+use daw_core::split::{SharedAudio, SplitAudio};
 use vst3::Steinberg::Vst::{
     AudioBusBuffers, AudioBusBuffers__type0, BusDirections_, BusInfo, ControllerNumbers_,
     Event as VstEvent, Event_::EventTypes_, Event__type0, IAudioProcessor, IAudioProcessorTrait,
@@ -305,7 +304,7 @@ impl Audio {
     /// and plugins treat as a state reset. `setActive` and the latency
     /// re-read stay on the main thread, in `prepare` (and `handle_restart` for a changed
     /// layout).
-    fn reset(&mut self) {
+    fn reset_processing(&mut self) {
         if self.processing {
             in_process(|| unsafe {
                 self.processor.setProcessing(0);
@@ -314,10 +313,10 @@ impl Audio {
         }
     }
 
-    fn process(&mut self, ctx: &mut ProcessContext) {
+    fn process_block(&mut self, ctx: &mut ProcessContext) {
         let rt = self.rt.as_deref_mut().filter(|_| !self.io_stale);
         let Some(rt) = rt else {
-            silence(ctx);
+            ctx.silence_outputs();
             return;
         };
         let frames = ctx.frames.min(rt.max_frames) as usize;
@@ -569,10 +568,8 @@ pub struct Vst3Instance {
     /// The speaker arrangements `prepare` settled on, inputs then outputs.
     arrangements: (Vec<SpeakerArrangement>, Vec<SpeakerArrangement>),
 
-    /// What `process` runs on, shared with the [`Vst3Processor`] that `split` hands out.
-    audio: Arc<Exclusive<Audio>>,
-    /// The processor half is out, so this object's own `process` and `reset` do nothing.
-    lent: bool,
+    /// What `process` runs on, shared with the processor half that `split` hands out.
+    audio: SharedAudio<Audio>,
 
     connection: Option<Connection>,
     controller: ComPtr<IEditController>,
@@ -590,8 +587,8 @@ pub struct Vst3Instance {
 // called from the main thread; `process` goes through `audio`.
 unsafe impl Send for Vst3Instance {}
 
-/// What `process` works on. The instance and its [`Vst3Processor`] share it through an
-/// [`Exclusive`]: the audio thread takes it for one block, and the main thread only for the
+/// What `process` works on. The instance and its processor half share it through a
+/// [`SharedAudio`]: the audio thread takes it for one block, and the main thread only for the
 /// calls the spec keeps apart from `process` (activation, bus changes, the parameter flush)
 /// and to swap in a new parameter list or MIDI mapping, each brief. Everything else the
 /// main thread does (state, editors, the controller) runs while the plugin processes, as
@@ -613,43 +610,16 @@ struct Audio {
 }
 
 // SAFETY: the raw pointers in `Rt` only point at buffers owned by the same `Audio`, and the
-// `Exclusive` it lives in lets one thread at a time call the processor.
+// `SharedAudio` it lives in lets one thread at a time call the processor.
 unsafe impl Send for Audio {}
 
-/// The audio-thread half of a [`Vst3Instance`], from [`PluginInstance::split`].
-///
-/// A block that comes while the main thread is in one of the few calls that must not
-/// overlap `process` waits a few microseconds for it, then is silent and loses its events;
-/// a `reset` then is skipped. Join it before dropping the instance, or the plugin's last
-/// reference goes wherever this is dropped.
-pub struct Vst3Processor(Arc<Exclusive<Audio>>);
-
-/// How many times a [`Vst3Processor`] block retries the audio state the main thread holds.
-const AUDIO_RETRIES: u32 = 100;
-
-impl PluginProcessor for Vst3Processor {
+impl SplitAudio for Audio {
     fn process(&mut self, ctx: &mut ProcessContext) {
-        for _ in 0..AUDIO_RETRIES {
-            if self.0.try_audio(|a| a.process(ctx)).is_some() {
-                return;
-            }
-            std::hint::spin_loop();
-        }
-        silence(ctx);
+        self.process_block(ctx);
     }
 
     fn reset(&mut self) {
-        self.0.try_audio(Audio::reset);
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
-        self
-    }
-}
-
-fn silence(ctx: &mut ProcessContext) {
-    for out in ctx.audio_out.iter_mut() {
-        out.fill(0.0);
+        self.reset_processing();
     }
 }
 
@@ -867,8 +837,7 @@ impl Vst3Instance {
                 layout_changed: false,
                 arrangements: Default::default(),
                 has_params: false,
-                audio: Arc::new(Exclusive::new(audio)),
-                lent: false,
+                audio: SharedAudio::new(audio),
                 connection,
                 controller,
                 split,
@@ -909,7 +878,7 @@ impl Vst3Instance {
     /// Runs `f` with the audio side, after the audio thread finishes its block, keeping it
     /// silent meanwhile. Keep `f` short, and never call this from inside `f`.
     fn with_audio<R>(&mut self, f: impl FnOnce(&mut Self, &mut Audio) -> R) -> R {
-        let audio = Arc::clone(&self.audio);
+        let audio = Arc::clone(self.audio.exclusive());
         audio.main(|a| f(self, a))
     }
 
@@ -1275,9 +1244,7 @@ impl Node for Vst3Instance {
     }
 
     fn process(&mut self, ctx: &mut ProcessContext) {
-        if self.lent || self.audio.try_audio(|a| a.process(ctx)).is_none() {
-            silence(ctx);
-        }
+        self.audio.process(ctx);
     }
 
     fn latency(&self) -> u32 {
@@ -1285,9 +1252,7 @@ impl Node for Vst3Instance {
     }
 
     fn reset(&mut self) {
-        if !self.lent {
-            self.audio.try_audio(Audio::reset);
-        }
+        self.audio.reset();
     }
 }
 
@@ -1470,20 +1435,18 @@ impl PluginInstance for Vst3Instance {
 
     fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
         // Before the first `prepare` there is nothing to process.
-        if self.lent || self.sample_rate == 0.0 {
+        if self.sample_rate == 0.0 {
             return None;
         }
-        self.lent = true;
-        Some(Box::new(Vst3Processor(Arc::clone(&self.audio))))
+        self.audio.lend()
     }
 
     fn join(&mut self, processor: Box<dyn PluginProcessor>) {
-        match processor.into_any().downcast::<Vst3Processor>() {
-            Ok(half) if Arc::ptr_eq(&half.0, &self.audio) => self.lent = false,
-            _ => log::warn!(
+        if !self.audio.take_back(processor) {
+            log::warn!(
                 "vst3 {}: asked to join a processor that is not its own",
                 self.descriptor.name
-            ),
+            );
         }
     }
 }
@@ -1491,7 +1454,7 @@ impl PluginInstance for Vst3Instance {
 impl Drop for Vst3Instance {
     fn drop(&mut self) {
         self.editor = None;
-        if self.lent {
+        if self.audio.is_lent() {
             log::warn!(
                 "vst3 {}: dropped with its processor half still out",
                 self.descriptor.name
@@ -2067,6 +2030,26 @@ mod tests {
         p.join(half);
     }
 
+    /// The main thread holds the audio state for a few calls (activation, the parameter
+    /// flush). A block that comes then is silent, and what it carried is not lost.
+    #[test]
+    fn a_block_the_main_thread_made_a_split_half_skip_delivers_its_events_with_the_next() {
+        let mut p = instance();
+        let mut half = p.split().unwrap();
+        let gain = EventKind::ParamValue {
+            param: GAIN,
+            value: 0.25,
+        };
+        let skipped = p.audio.main(|_| {
+            let heard = heard_through(&mut |ctx| half.process(ctx), &[gain]);
+            half.reset();
+            heard
+        });
+        assert_eq!(skipped, 0.0);
+        assert_eq!(heard_through(&mut |ctx| half.process(ctx), &[]), 0.25);
+        p.join(half);
+    }
+
     #[test]
     fn nothing_splits_before_the_first_prepare() {
         let mut p = Vst3Instance::new(&testgain()).unwrap();
@@ -2080,11 +2063,13 @@ mod tests {
     fn a_processor_from_another_instance_is_not_taken_back() {
         let mut p = instance();
         let mut q = instance();
-        let _ = p.split().unwrap();
-        q.join(Box::new(Vst3Processor(Arc::clone(&p.audio))));
-        assert!(q.split().is_some(), "q's own half was never out");
-        assert!(p.split().is_none(), "p's half is still out");
-        p.lent = false;
+        let half = p.split().unwrap();
+        let other = q.split().unwrap();
+        q.join(half);
+        assert!(q.split().is_none(), "q's own half is still out");
+        assert!(p.split().is_none(), "p's half was not taken back");
+        // Dropped unjoined, which only logs.
+        drop(other);
     }
 
     #[test]
