@@ -20,6 +20,8 @@ Column {
 
     // The roles of Tracks.
     required property int index
+    required property string trackId
+    required property bool selected
     required property string name
     required property int kind
     required property color color
@@ -69,10 +71,14 @@ Column {
         return arrange.laneHeight > 0 ? Math.round((y - index * arrange.trackHeight) / arrange.laneHeight) : 0;
     }
 
-    // The list reuses headers that scroll out of view for other tracks. A
-    // hidden item keeps its focus and open menus, so close them, or the
-    // next track shown here would be renamed, moved or deleted instead.
-    ListView.onPooled: {
+    // A header is a row, and its track can change under it: the list reuses
+    // headers that scroll out of view, and adding, removing or moving a
+    // track shifts the rows. An open name field or menu would then rename,
+    // move or delete the track that took the row, so close them.
+    ListView.onPooled: dismiss()
+    onTrackIdChanged: dismiss()
+
+    function dismiss(): void {
         nameField.focus = false;
         nameField.visible = false;
         menu.dismiss();
@@ -98,7 +104,7 @@ Column {
             ? i18nc("@item a pair of audio inputs, %1 and %2 are input numbers", "Inputs %1–%2", row.input + 1, row.input + 2)
             : i18nc("@item one audio input, %1 is its number", "Input %1", row.input + 1)
 
-        highlighted: Project.selectedTrack === index
+        highlighted: row.selected
         opacity: row.ListView.view && row.ListView.view.dragFrom === index ? 0.5 : 1
         padding: 0
         leftPadding: 0

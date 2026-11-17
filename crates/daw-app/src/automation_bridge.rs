@@ -113,7 +113,7 @@ pub mod qobject {
         fn point_shape(self: &Automation) -> i32;
         /// Gives the selected points a `PointShape`.
         #[qinvokable]
-        fn set_point_shape(self: Pin<&mut Automation>, shape: i32);
+        fn set_point_shape(self: Pin<&mut Automation>, shape: PointShape);
         #[qinvokable]
         fn delete_points(self: Pin<&mut Automation>);
     }
@@ -136,10 +136,11 @@ pub(crate) fn shape_index(s: PointShape) -> i32 {
     shape.repr
 }
 
-/// The shape of an `Automation.PointShape` value; linear for any other.
-pub(crate) fn shape(i: i32) -> PointShape {
+/// The shape QML's `Automation.PointShape` names; linear for a value that
+/// is none of them.
+pub(crate) fn shape(shape: qobject::PointShape) -> PointShape {
     use qobject::PointShape as Qml;
-    match (Qml { repr: i }) {
+    match shape {
         Qml::StepShape => PointShape::Step,
         Qml::SlowStartShape => PointShape::SlowStart,
         Qml::FastStartShape => PointShape::FastStart,
@@ -276,9 +277,9 @@ impl qobject::Automation {
         })
     }
 
-    fn set_point_shape(self: Pin<&mut Self>, i: i32) {
+    fn set_point_shape(self: Pin<&mut Self>, to: qobject::PointShape) {
         self.edit(|s| {
-            let out = s.arrange.set_point_shape(&mut s.doc, shape(i));
+            let out = s.arrange.set_point_shape(&mut s.doc, shape(to));
             s.apply(out);
         });
     }

@@ -84,7 +84,8 @@ pub mod qobject {
         fn next_number(self: &Tracks, kind: TrackKind) -> i32;
         #[qinvokable]
         fn remove(self: Pin<&mut Tracks>, row: i32);
-        /// Moves the track at `from` to row `to`, as one undo step.
+        /// Moves the track at `from` to row `to`, as one undo step. (Not
+        /// `move`, a keyword in Rust and a function in C++.)
         #[qinvokable]
         #[cxx_name = "moveTrack"]
         fn move_track(self: Pin<&mut Tracks>, from: i32, to: i32);
@@ -117,6 +118,13 @@ pub mod qobject {
         /// empty when it has none.
         #[qinvokable]
         fn instrument_device(self: &Tracks, row: i32) -> QString;
+    }
+
+    extern "RustQt" {
+        /// An edit was made through this model; whatever else shows the
+        /// project is stale.
+        #[qsignal]
+        fn edited(self: Pin<&mut Tracks>);
     }
 
     unsafe extern "RustQt" {
@@ -171,6 +179,10 @@ use qobject::TrackKind as QmlKind;
 model_roles!(
     /// What a track header reads.
     enum Role {
+        /// The track's id, which stays with it when its row changes.
+        TrackId => "trackId",
+        /// Whether it is the selected track.
+        Selected => "selected",
         Name => "name",
         /// A `Tracks.TrackKind`.
         Kind => "kind",
@@ -261,6 +273,8 @@ pub(crate) fn lane_list(lanes: &[LaneRow]) -> QList<QVariant> {
 fn value(t: &TrackRow, role: Role) -> QVariant {
     let instrument = t.instrument.as_ref();
     match role {
+        Role::TrackId => text(&t.id.to_string()),
+        Role::Selected => QVariant::from(&t.selected),
         Role::Name => text(&t.name),
         Role::Kind => QVariant::from(&qml_kind(t.kind).repr),
         Role::Color => QVariant::from(&to_qcolor(t.color)),
@@ -303,17 +317,10 @@ impl qobject::Tracks {
     }
 
     /// Runs an edit on the state, then shows it.
-    fn edit_all(self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
-        state::with(|s| {
-            // A button may still be held on the timeline.
-            s.end_drag();
-            // A change made in a plugin's editor comes before this edit.
-            s.flush_plugin_changes();
-            f(s);
-            s.sync();
-            s.touch();
-        });
-        self.reload();
+    fn edit_all(mut self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
+        state::with(|s| s.edit(f));
+        self.as_mut().reload();
+        self.edited();
     }
 
     fn sync(self: Pin<&mut Self>) {

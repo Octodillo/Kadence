@@ -14,6 +14,7 @@ use cxx_qt_lib::{QColor, QList, QString, QVariant};
 use daw_midi::edit::{Quantize, QuantizeEnds};
 use daw_pianoroll::Accidentals;
 
+use crate::automation_bridge::qobject::PointShape;
 use crate::automation_bridge::{shape, shape_index};
 use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
 use crate::session_mixer::strip_row;
@@ -142,7 +143,8 @@ pub mod qobject {
         /// `Automation.PointShape`, or -1.
         #[qinvokable]
         fn point_shape(self: &PianoRoll) -> i32;
-        /// Gives the selected automation points an `Automation.PointShape`.
+        /// Gives the selected automation points an `Automation.PointShape`
+        /// (an int here: the enum's type belongs to `Automation`).
         #[qinvokable]
         fn set_point_shape(self: Pin<&mut PianoRoll>, shape: i32);
         /// Deletes the selected automation points (never notes).
@@ -504,7 +506,8 @@ impl qobject::PianoRoll {
     }
 
     fn set_point_shape(self: Pin<&mut Self>, i: i32) {
-        self.act(|s| s.piano.set_point_shape(&mut s.doc, shape(i)));
+        let to = shape(PointShape { repr: i });
+        self.act(|s| s.piano.set_point_shape(&mut s.doc, to));
     }
 
     fn delete_points(self: Pin<&mut Self>) {

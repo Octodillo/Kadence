@@ -1,5 +1,6 @@
-//! `Project`: the QML-facing document. File handling, undo, tracks and the
-//! transport, over [`crate::state`].
+//! `Project`: the QML-facing document. File handling, undo, the selection
+//! and the transport, over [`crate::state`]. The track list is
+//! [`Tracks`](crate::tracks_bridge).
 
 use std::pin::Pin;
 
@@ -667,15 +668,7 @@ impl qobject::Project {
 
     /// Runs `f` on the state, then refreshes every property.
     fn edit(self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
-        state::with(|s| {
-            // A button may still be held on the timeline.
-            s.end_drag();
-            // A change made in a plugin's editor comes before this edit.
-            s.flush_plugin_changes();
-            f(s);
-            s.sync();
-            s.touch();
-        });
+        state::with(|s| s.edit(f));
         self.refresh(true);
     }
 

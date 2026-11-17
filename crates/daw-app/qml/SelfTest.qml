@@ -81,8 +81,6 @@ Item {
             const arrange = window.pageStack.currentItem;
             check(Tracks.count === 0, "new project is empty");
             arrange.addTrack(Tracks.InstrumentTrack);
-            // The Project's own properties follow on its next tick.
-            Project.tick();
             check(Tracks.count === 1, "add instrument track");
             check(Tracks.get(0).name === i18nc("@item default track name, %1 is a number", "Instrument %1", 1),
                   "default track name worded in QML");
@@ -112,10 +110,8 @@ Item {
             check(Project.undoText in editNames.names, "undo name has a translation");
             // Arm it and pick a MIDI input: both undoable, both translated.
             Tracks.setArmed(0, true);
-            Project.tick();
             check(Tracks.get(0).armed && Project.undoText === "Arm Track", "arm a track");
             Tracks.setMidiInput(0, "Midi-Bridge:USB Keyboard (capture)", 9);
-            Project.tick();
             check(Tracks.get(0).midiDevice === "Midi-Bridge:USB Keyboard (capture)"
                   && Tracks.get(0).midiChannel === 9
                   && Project.undoText === "Change MIDI Input"
@@ -527,7 +523,6 @@ Item {
                     break;
                 }
             }
-            Project.tick();
             // Dragging the velocity lane's edge up makes it taller, but
             // never so tall the notes lose their last three rows.
             const velocity = window.pageStack.currentItem.velocitySize;
@@ -702,7 +697,6 @@ Item {
             // A take in progress is unsaved work too, though the project
             // itself has no changes yet.
             Tracks.setArmed(0, true);
-            Project.tick();
             check(Project.save().context === undefined && !Project.modified, "save with the track armed");
             Project.toggleRecord();
             check(Project.recording && !Project.modified, "a take in progress is not in the project yet");

@@ -750,6 +750,18 @@ impl AppState {
         self.view_revision += 1;
     }
 
+    /// Runs `f`, an edit the user made outside the timeline, and marks the
+    /// views stale.
+    pub fn edit(&mut self, f: impl FnOnce(&mut Self)) {
+        // A button may still be held on the timeline.
+        self.end_drag();
+        // A change made in a plugin's editor comes before this edit.
+        self.flush_plugin_changes();
+        f(self);
+        self.sync();
+        self.touch();
+    }
+
     pub fn root(&self) -> Option<PathBuf> {
         self.doc.bundle().map(|b| b.root().to_path_buf())
     }

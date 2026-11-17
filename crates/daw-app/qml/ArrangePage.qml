@@ -210,6 +210,13 @@ Kirigami.Page {
         view.refresh();
     }
 
+    // An edit in a track header shows everywhere at once, not on the
+    // Project's next tick.
+    Connections {
+        target: Tracks
+        function onEdited() { Project.tick(); }
+    }
+
     // Redraw on any change, and every frame while the playhead moves.
     Connections {
         target: Project

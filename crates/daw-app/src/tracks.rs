@@ -70,6 +70,8 @@ pub struct LaneRow {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackRow {
     pub id: TrackId,
+    /// Whether it is the selected track.
+    pub selected: bool,
     pub name: String,
     pub kind: TrackKind,
     pub color: Rgba,
@@ -89,7 +91,9 @@ pub struct TrackRow {
 }
 
 impl AppState {
-    /// Every track in list order.
+    /// Every track in list order. A row's place here is its track's place
+    /// in the project, which the edits below take: the master is never
+    /// among a project's tracks.
     pub fn track_rows(&self) -> Vec<TrackRow> {
         let project = self.doc.project();
         project
@@ -104,6 +108,7 @@ impl AppState {
                 });
                 Some(TrackRow {
                     id: t.id,
+                    selected: self.arrange.selected_track == Some(t.id),
                     name: t.name.clone(),
                     kind: TrackKind::of(t.kind)?,
                     color: daw_arrange::track_color(t, row),
@@ -275,5 +280,89 @@ impl AppState {
             self.report(e.into());
         }
         self.doc.seal();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::StubEngine;
+
+    fn state() -> AppState {
+        AppState::with_engine(Box::new(StubEngine::default()))
+    }
+
+    fn names(s: &AppState) -> Vec<String> {
+        s.track_rows().into_iter().map(|t| t.name).collect()
+    }
+
+    #[test]
+    fn a_new_track_follows_the_selected_one_and_is_selected() {
+        let mut s = state();
+        s.add_track(TrackKind::Audio, "A".into());
+        s.add_track(TrackKind::Bus, "B".into());
+        s.arrange.selected_track = Some(s.track_rows()[0].id);
+        s.add_track(TrackKind::Instrument, "C".into());
+
+        assert_eq!(names(&s), ["A", "C", "B"]);
+        let rows = s.track_rows();
+        let selected: Vec<bool> = rows.iter().map(|t| t.selected).collect();
+        assert_eq!(selected, [false, true, false]);
+        assert_eq!(rows[1].kind, TrackKind::Instrument);
+        assert!(rows[1].instrument.is_some(), "the default instrument");
+        assert!(rows[0].instrument.is_none());
+        assert_eq!(s.next_track_number(TrackKind::Audio), 2);
+    }
+
+    #[test]
+    fn removing_the_selected_track_clears_the_selection() {
+        let mut s = state();
+        s.add_track(TrackKind::Audio, "A".into());
+        s.add_track(TrackKind::Audio, "B".into());
+        s.remove_track(1);
+        assert_eq!(names(&s), ["A"]);
+        assert_eq!(s.arrange.selected_track, None);
+        // No such row: nothing happens.
+        s.remove_track(5);
+        assert_eq!(names(&s), ["A"]);
+    }
+
+    #[test]
+    fn moves_stay_inside_the_list() {
+        let mut s = state();
+        for name in ["A", "B", "C"] {
+            s.add_track(TrackKind::Audio, name.into());
+        }
+        s.move_track(0, 2);
+        assert_eq!(names(&s), ["B", "C", "A"]);
+        let steps = s.doc.revision();
+        s.move_track(0, 3);
+        s.move_track(1, 1);
+        s.move_track(7, 0);
+        assert_eq!(names(&s), ["B", "C", "A"]);
+        assert_eq!(s.doc.revision(), steps, "no undo step for a move nowhere");
+    }
+
+    #[test]
+    fn settings_that_change_nothing_are_not_undo_steps() {
+        let mut s = state();
+        s.add_track(TrackKind::Audio, "A".into());
+        s.rename_track(0, "  ".into());
+        assert_eq!(names(&s), ["A"]);
+
+        s.set_track_input(0, 2, true);
+        assert_eq!(
+            s.track_rows()[0].audio_input.channels,
+            InputChannels::Stereo(2)
+        );
+        let steps = s.doc.revision();
+        s.set_track_input(0, 2, true);
+        let monitor = s.track_rows()[0].audio_input.monitor == Monitoring::Auto;
+        s.set_track_monitor_auto(0, monitor);
+        s.set_track_midi_input(0, MidiInput::default());
+        assert_eq!(s.doc.revision(), steps);
+
+        s.set_track_monitor_auto(0, !monitor);
+        assert_ne!(s.doc.revision(), steps);
     }
 }

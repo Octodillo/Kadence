@@ -259,21 +259,6 @@ impl AppState {
         self.lanes.params.param(d, param)
     }
 
-    pub fn lane_count(&self, track: i32) -> usize {
-        self.track_at_index(track).map_or(0, |t| t.automation.len())
-    }
-
-    pub fn lane_name(&self, track: i32, lane: i32) -> Option<TargetName> {
-        let t = self.track_at_index(track)?;
-        let l = t.automation.get(usize::try_from(lane).ok()?)?;
-        Some(target_name(
-            self.doc.project(),
-            &self.lanes.params,
-            t,
-            l.target,
-        ))
-    }
-
     pub fn lane_mode(&self, track: i32, lane: i32) -> LaneMode {
         let Some(t) = self.track_at_index(track) else {
             return LaneMode::Read;
@@ -344,11 +329,6 @@ impl AppState {
         };
         let out = self.arrange.add_lane(&mut self.doc, t, target);
         self.apply(out);
-    }
-
-    pub fn lanes_expanded(&self, track: i32) -> bool {
-        self.track_at_index(track)
-            .is_some_and(|t| self.arrange.expanded.contains(&t.id))
     }
 
     pub fn set_lanes_expanded(&mut self, track: i32, on: bool) {
