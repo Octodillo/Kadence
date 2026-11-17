@@ -570,10 +570,13 @@ impl CompiledGraph {
                 }
             }
 
-            // Events that don't fit are dropped and counted: a full list
-            // must not allocate.
+            // Events that don't fit are dropped, since a full list must not
+            // allocate; the list counts them, and each kind is read off it
+            // once its events are in.
             step.events_in.clear();
-            dropped.params += step.events_in.push_counting(step.params.iter().copied());
+            for e in step.params.iter() {
+                let _ = step.events_in.push(*e);
+            }
             step.params.clear();
             if transport.playing {
                 // A dense ramp must not fill the list and crowd out the notes
@@ -599,14 +602,18 @@ impl CompiledGraph {
                     lane_changes(mf),
                 );
             }
+            dropped.params += step.events_in.take_overflow();
             for list in step.external_events.lists(external) {
-                dropped.events += step.events_in.push_counting(list.iter().copied());
+                for e in list.iter() {
+                    let _ = step.events_in.push(*e);
+                }
             }
             for &src in &step.event_sources {
-                dropped.events += step
-                    .events_in
-                    .push_counting(done[src].events_out.iter().copied());
+                for e in done[src].events_out.iter() {
+                    let _ = step.events_in.push(*e);
+                }
             }
+            dropped.events += step.events_in.take_overflow();
 
             let mut ins: [&[f32]; MAX_CHANNELS] = [&[]; MAX_CHANNELS];
             for (slot, ch) in ins.iter_mut().zip(step.inputs.chunks_exact(mf)) {
@@ -628,6 +635,9 @@ impl CompiledGraph {
                 events_out: &mut step.events_out,
             };
             step.node.process(&mut ctx);
+            // What the node had no room to send on: a clip's notes, a
+            // plugin's MIDI output.
+            dropped.events += step.events_out.take_overflow();
             if let Some(meter) = &step.meter {
                 for (ch, out) in step.outputs.chunks_exact(mf).enumerate() {
                     meter.update(ch, &out[..frames]);
@@ -643,7 +653,8 @@ impl CompiledGraph {
 pub(crate) struct Dropped {
     /// Parameter changes, queued or from automation.
     pub params: u64,
-    /// Notes and other events, from outside or from another node.
+    /// Notes and other events: into a node from outside or from another
+    /// node, and out of a node that made more than its output list holds.
     pub events: u64,
 }
 
@@ -654,10 +665,11 @@ impl std::ops::AddAssign for Dropped {
     }
 }
 
-/// Pushes what `lanes` do in the block of `frames` samples starting at `now`
-/// and returns how many events did not fit. `reserve` slots of `out` are
-/// left free for the notes still to come, as far as that leaves every lane
-/// its own `own` changes. RT-safe.
+/// Pushes what `lanes` do in the block of `frames` samples starting at `now`.
+/// `reserve` slots of `out` are left free for the notes still to come, as far
+/// as that leaves every lane its own `own` changes. Returns how many changes
+/// were held back for that; those `out` had no room for at all are in its
+/// own [overflow count](EventList::take_overflow). RT-safe.
 fn emit_automation(
     lanes: &mut [Lane],
     now: i64,
@@ -666,15 +678,13 @@ fn emit_automation(
     reserve: usize,
     own: usize,
 ) -> u64 {
-    let mut dropped = 0;
+    let mut held_back = 0;
     // Every lane's value at the start of the block goes first: whatever is
     // dropped below, no parameter is left behind for longer than a block.
     for lane in lanes.iter_mut() {
         lane.sent = 0;
-        if let Some(value) = lane.points.value_at(SampleTime(now))
-            && out.push(param_event(lane.param, 0, value)).is_err()
-        {
-            dropped += 1;
+        if let Some(value) = lane.points.value_at(SampleTime(now)) {
+            let _ = out.push(param_event(lane.param, 0, value));
         }
     }
     // What the lanes may use between them beyond their own changes.
@@ -692,21 +702,22 @@ fn emit_automation(
         let to = next_grid(from + 1).min(end);
         for lane in lanes.iter_mut() {
             for (t, value) in lane.points.changes(from, (to - from) as usize) {
-                let fits = lane.sent < own || spare > 0;
+                if lane.sent >= own && spare == 0 {
+                    held_back += 1;
+                    continue;
+                }
                 let event = param_event(lane.param, (t - now) as usize, value);
-                if fits && out.push(event).is_ok() {
+                if out.push(event).is_ok() {
                     if lane.sent >= own {
                         spare -= 1;
                     }
                     lane.sent += 1;
-                } else {
-                    dropped += 1;
                 }
             }
         }
         from = to - 1;
     }
-    dropped
+    held_back
 }
 
 /// The keyed nodes of `steps` and the delay lines between them.

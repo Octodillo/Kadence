@@ -40,11 +40,27 @@ impl DropLog {
             return None;
         }
         (self.events, self.params, self.warned_at) = (events, params, Some(now));
-        Some(format!(
-            "the engine dropped {new_events} events (more reached one device in a block than \
-             fit; a lost note-off leaves a note sounding) and {new_params} parameter changes"
-        ))
+        let mut parts = Vec::new();
+        if new_events > 0 {
+            parts.push(format!(
+                "{} (more for one device in a block than its list holds; a lost note-off \
+                 leaves a note sounding)",
+                counted(new_events, "note or other event", "notes or other events")
+            ));
+        }
+        if new_params > 0 {
+            parts.push(format!(
+                "{} (more for one device in a block than its list holds, or for a device \
+                 that is not playing)",
+                counted(new_params, "parameter change", "parameter changes")
+            ));
+        }
+        Some(format!("the engine dropped {}", parts.join(" and ")))
     }
+}
+
+fn counted(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 #[cfg(test)]
@@ -57,16 +73,19 @@ mod tests {
         let start = Instant::now();
         assert_eq!(log.message(0, 0, start), None);
         let first = log.message(3, 1, start).expect("counts moved");
-        assert!(first.contains("dropped 3 events"), "{first}");
-        assert!(first.contains("1 parameter changes"), "{first}");
+        assert!(first.contains("dropped 3 notes or other events"), "{first}");
+        assert!(first.contains(" and 1 parameter change ("), "{first}");
         // More drops straight away wait for the interval, then are reported
         // together, counted from the last warning.
         assert_eq!(log.message(5, 1, start + INTERVAL / 2), None);
         let second = log
             .message(9, 1, start + INTERVAL)
             .expect("interval passed");
-        assert!(second.contains("dropped 6 events"), "{second}");
-        assert!(second.contains("0 parameter changes"), "{second}");
+        assert!(second.contains("dropped 6 notes"), "{second}");
+        assert!(
+            !second.contains("parameter"),
+            "only what was dropped: {second}"
+        );
         assert_eq!(log.message(9, 1, start + 3 * INTERVAL), None);
     }
 }

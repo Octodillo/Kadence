@@ -54,6 +54,8 @@ pub struct EventList {
     events: Vec<Event>,
     // `Vec::with_capacity` may round up, so the logical limit is tracked separately.
     capacity: usize,
+    /// Pushes refused since [`take_overflow`](Self::take_overflow).
+    overflow: u64,
 }
 
 impl EventList {
@@ -61,14 +63,18 @@ impl EventList {
         Self {
             events: Vec::with_capacity(n),
             capacity: n,
+            overflow: 0,
         }
     }
 
     /// Inserts `e` after every event whose frame is `<= e.frame`.
     ///
-    /// Returns the event back when the list is full. Never allocates.
+    /// Returns the event back when the list is full, and counts it for
+    /// [`take_overflow`](Self::take_overflow), so a caller with nothing better
+    /// to do than drop the event can ignore the result. Never allocates.
     pub fn push(&mut self, e: Event) -> Result<(), Event> {
         if self.events.len() >= self.capacity {
+            self.overflow += 1;
             return Err(e);
         }
         // Events almost always arrive in order, so check the tail before searching.
@@ -82,16 +88,12 @@ impl EventList {
         Ok(())
     }
 
-    /// Pushes each of `events` that fits, in order, and returns how many did
-    /// not. Never allocates.
-    pub fn push_counting(&mut self, events: impl IntoIterator<Item = Event>) -> u64 {
-        let mut dropped = 0;
-        for e in events {
-            if self.push(e).is_err() {
-                dropped += 1;
-            }
-        }
-        dropped
+    /// How many events [`push`](Self::push) refused since the last call:
+    /// what whoever filled the list had to drop. The audio thread cannot
+    /// report a full list, so the owner of the list reads this instead.
+    /// [`clear`](Self::clear) leaves the count alone.
+    pub fn take_overflow(&mut self) -> u64 {
+        std::mem::take(&mut self.overflow)
     }
 
     pub fn clear(&mut self) {
@@ -139,6 +141,7 @@ impl Clone for EventList {
         Self {
             events,
             capacity: self.capacity,
+            overflow: self.overflow,
         }
     }
 }
@@ -198,13 +201,17 @@ mod tests {
     }
 
     #[test]
-    fn push_counting_keeps_what_fits_and_counts_the_rest() {
+    fn refused_pushes_are_counted_until_taken() {
         let mut list = EventList::with_capacity(3);
-        list.push(ev(4, 0)).unwrap();
-        let dropped = list.push_counting([ev(2, 1), ev(6, 2), ev(0, 3), ev(1, 4)]);
-        assert_eq!(dropped, 2);
+        for e in [ev(4, 0), ev(2, 1), ev(6, 2), ev(0, 3), ev(1, 4)] {
+            let _ = list.push(e);
+        }
         assert_eq!(tags(&list), [(2, 1), (4, 0), (6, 2)]);
-        assert_eq!(list.push_counting([]), 0);
+        list.clear();
+        assert_eq!(list.take_overflow(), 2, "clearing does not forget them");
+        assert_eq!(list.take_overflow(), 0);
+        list.push(ev(0, 0)).unwrap();
+        assert_eq!(list.take_overflow(), 0);
     }
 
     #[test]

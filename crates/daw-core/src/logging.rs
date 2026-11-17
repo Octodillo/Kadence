@@ -1,9 +1,10 @@
 //! Where diagnostics go.
 //!
 //! Library crates report through the [`log`] macros (`log::warn!` and so on)
-//! and never print. Each binary calls [`init`] first thing in `main`, which
-//! sends the records to stderr; a desktop session's journal collects that.
-//! Until `init` runs, records go nowhere.
+//! rather than print. A process calls [`init`] as soon as it knows what it is
+//! (the application, or a plugin host or scanner started from the same
+//! binary), which sends the records to stderr; a desktop session's journal
+//! collects that. Until `init` runs, records go nowhere.
 //!
 //! Formatting and writing a record allocates and can block, so nothing on the
 //! audio thread may log. Real-time code counts what went wrong in an atomic
@@ -29,9 +30,9 @@ const DEFAULT_LEVEL: LevelFilter = LevelFilter::Warn;
 
 /// Sends every crate's `log` records to stderr, each line starting with
 /// `program` so the application's lines can be told from those of the plugin
-/// host and scanner processes it starts. The level comes from [`LEVEL_ENV`].
+/// host processes that share its stderr. The level comes from [`LEVEL_ENV`].
 ///
-/// Call once, first thing in `main`. Later calls change nothing.
+/// The first call decides; later calls change nothing.
 pub fn init(program: &'static str) {
     static LOGGER: OnceLock<StderrLogger> = OnceLock::new();
     let logger = LOGGER.get_or_init(|| StderrLogger { program });
@@ -56,7 +57,7 @@ struct StderrLogger {
 impl StderrLogger {
     fn line(&self, record: &Record) -> String {
         format!(
-            "{}: {}: {}: {}",
+            "{}: {}: {}: {}\n",
             self.program,
             record.level().as_str().to_ascii_lowercase(),
             record.target(),
@@ -72,8 +73,12 @@ impl Log for StderrLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            // Nothing useful can be done when stderr is closed or full.
-            let _ = writeln!(std::io::stderr().lock(), "{}", self.line(record));
+            // In one write, so lines from processes sharing this stderr do
+            // not run into each other. Nothing useful can be done when it is
+            // closed or full.
+            let _ = std::io::stderr()
+                .lock()
+                .write_all(self.line(record).as_bytes());
         }
     }
 
@@ -106,7 +111,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "kadence: warn: daw_backend::jack_backend: JACK refused buffer size 64"
+            "kadence: warn: daw_backend::jack_backend: JACK refused buffer size 64\n"
         );
     }
 }

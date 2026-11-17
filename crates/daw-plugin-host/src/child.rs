@@ -44,8 +44,10 @@ pub fn run_host_child(
 ) -> Option<ExitCode> {
     let args: Vec<OsString> = args.into_iter().collect();
     let pos = args.iter().position(|a| a == HOST_ARG)?;
+    // This process is a plugin host, whatever binary it was started from.
+    daw_core::logging::init("kadence-plugin-host");
     let Some(socket) = args.get(pos + 1) else {
-        eprintln!("usage: {HOST_ARG} <socket>");
+        log::error!("usage: {HOST_ARG} <socket>");
         return Some(ExitCode::from(2));
     };
     // A panic anywhere (the plugin's adapter, a poisoned lock) must end the process, so the
@@ -53,7 +55,7 @@ pub fn run_host_child(
     // Printed rather than logged, like the default hook: a panic must be seen
     // whatever the log level.
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("daw-plugin-host: {info}");
+        eprintln!("kadence-plugin-host: {info}");
         std::process::abort();
     }));
     exit_with_parent();

@@ -356,10 +356,15 @@ impl EngineController {
         self.shared.dropped_params.load(Ordering::Relaxed)
     }
 
-    /// Events dropped because an event list was full: more events for one
-    /// node in a block than [`EngineConfig::event_capacity`]. A dropped
-    /// note-off leaves its note sounding, so a count that moves is worth
-    /// reporting.
+    /// Notes and other events dropped because an event list was full: more
+    /// in one block than [`EngineConfig::event_capacity`], whether coming in
+    /// from outside, passing from one node to the next, or made by a node
+    /// (a clip's notes, a plugin's MIDI output). A dropped note-off leaves
+    /// its note sounding, so a count that moves is worth reporting.
+    ///
+    /// Not counted: lists a node keeps to itself, such as the events held
+    /// for a plugin that could not be reached for a block, and those inside
+    /// a sandboxed plugin's own process.
     pub fn dropped_events(&self) -> u64 {
         self.shared.dropped_events.load(Ordering::Relaxed)
     }
@@ -451,7 +456,10 @@ impl EngineProcessor {
                         ..*e
                     })
                 });
-                dropped.events += list.push_counting(in_block);
+                for e in in_block {
+                    let _ = list.push(e);
+                }
+                dropped.events += list.take_overflow();
             }
             let state = self.transport.state();
             match self.graph.as_deref_mut() {

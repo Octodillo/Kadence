@@ -7,7 +7,7 @@ use daw_engine::{
     CompileError, CompiledGraph, EngineConfig, EngineController, GraphDesc, LoopRange, NodeId,
     RenderOptions, render,
 };
-use support::{Delay, EventProbe, NoteSource, Position, Sine};
+use support::{Delay, EventProbe, NoteBurst, NoteSource, Position, Sine};
 
 fn config(max_frames: u32) -> EngineConfig {
     EngineConfig {
@@ -212,6 +212,28 @@ fn events_that_do_not_fit_are_counted() {
     proc.process(32, &[], &mut [&mut out], &events);
     assert_eq!(ctl.dropped_events(), 2 + 2 + 1);
     assert_eq!(ctl.dropped_params(), 0, "the change itself was delivered");
+}
+
+/// A node that makes more events than its output list holds (a dense clip, a
+/// plugin's MIDI output) drops them itself, where only the list can count.
+#[test]
+fn events_a_node_cannot_send_on_are_counted() {
+    let mut g = GraphDesc::new(0, 1);
+    let burst = g.add_device("burst", Box::new(NoteBurst { notes: 7 }));
+    let probe = g.add_device("probe", Box::new(EventProbe));
+    g.connect_events(burst, probe);
+    g.connect(probe, g.master());
+    let (mut ctl, mut proc) = EngineController::new(EngineConfig {
+        event_capacity: 4,
+        ..config(64)
+    });
+    ctl.set_graph(g).unwrap();
+    let out = run(&mut proc, 32, &EventList::default());
+    assert_eq!(out[0], 4.0, "four notes fit the burst's list");
+    assert_eq!(ctl.dropped_events(), 3);
+    run(&mut proc, 32, &EventList::default());
+    assert_eq!(ctl.dropped_events(), 6);
+    assert_eq!(ctl.dropped_params(), 0);
 }
 
 #[test]

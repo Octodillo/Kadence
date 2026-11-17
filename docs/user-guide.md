@@ -219,5 +219,6 @@ installed it.
 When something goes wrong without a message on screen, Kadence writes what
 it knows to its standard error, which a Plasma session keeps in the journal
 (`journalctl --user -e`). Warnings and errors are written by default; start
-Kadence with `KADENCE_LOG=debug` for more, or `KADENCE_LOG=off` for none. The
-plugin sandbox and scanner processes write there too, under their own names.
+Kadence with `KADENCE_LOG=debug` for more, or `KADENCE_LOG=off` for none.
+Lines start with `kadence:`, or `kadence-plugin-host:` when they come from
+the separate process a plugin runs in.
