@@ -8,12 +8,15 @@
 #   ci/arch-package.sh lint FILE...         only namcap, on a PKGBUILD or package
 set -euo pipefail
 
-# namcap exits 0 whatever it finds, so fail on its error lines.
+# namcap exits 0 whatever it finds, so fail on its error lines. One is not an
+# error here: namcap wants a file per license that pacman ships no text for
+# (MIT, ISC, Zlib) and only counts files, while the package has every crate's
+# notice in the one THIRD-PARTY-LICENSES (ci/check-install.sh checks that).
 lint() {
     local log
     log=$(mktemp)
     namcap "$@" | tee "$log"
-    ! grep -q ' E: ' "$log"
+    ! grep ' E: ' "$log" | grep -qv 'Uncommon license identifiers'
 }
 if [ "${1:-}" = lint ]; then
     shift
