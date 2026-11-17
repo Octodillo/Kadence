@@ -14,44 +14,63 @@ pub fn bundle_extension(kind: &PluginFormatKind) -> &'static str {
     }
 }
 
-/// Every bundle of `kind` under `roots`, without duplicates. Roots keep their order, so earlier
-/// search paths take precedence; bundles within one root are sorted. A root may itself be a
-/// bundle. The walk does not descend into bundles (VST3 and LV2 bundles are directories) and
-/// skips anything it cannot read.
+/// Every bundle of `kind` under `roots`, each once. Roots keep their order, so earlier search
+/// paths take precedence; each directory's entries are visited in sorted order. A root may
+/// itself be a bundle.
+/// The walk does not descend into bundles (VST3 and LV2 bundles are directories) and skips
+/// anything it cannot read.
+///
+/// Symbolic links are followed, but a bundle or directory reached a second time (through a
+/// link, or because one root is inside another) is left out: each bundle is reported under the
+/// first path that led to it.
 pub fn find_candidates(kind: &PluginFormatKind, roots: &[PathBuf]) -> Vec<PathBuf> {
-    let ext = bundle_extension(kind);
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
+    let mut walk = Walk {
+        extension: bundle_extension(kind),
+        visited: HashSet::new(),
+        found: Vec::new(),
+    };
     for root in roots {
-        let mut here = Vec::new();
-        walk(root, ext, &mut here, 0);
-        here.sort();
-        found.extend(here.into_iter().filter(|b| seen.insert(b.clone())));
+        walk.visit(root, 0);
     }
-    found
+    walk.found
 }
 
-/// Deep enough for vendor/product/version layouts, shallow enough to stop symlink loops.
+/// Deep enough for vendor/product/version layouts.
 const MAX_DEPTH: usize = 8;
 
-fn walk(path: &Path, ext: &str, found: &mut Vec<PathBuf>, depth: usize) {
-    if path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-        && path.exists()
-    {
-        found.push(path.to_owned());
-        return;
-    }
-    if depth >= MAX_DEPTH || !path.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return;
-    };
-    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    children.sort();
-    for child in children {
-        walk(&child, ext, found, depth + 1);
+struct Walk {
+    extension: &'static str,
+    /// The bundles and directories seen so far, with links resolved.
+    visited: HashSet<PathBuf>,
+    found: Vec<PathBuf>,
+}
+
+impl Walk {
+    fn visit(&mut self, path: &Path, depth: usize) {
+        // A path that does not resolve is missing or a broken link.
+        let Ok(real) = path.canonicalize() else {
+            return;
+        };
+        let is_bundle = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(self.extension));
+        if !is_bundle && (depth >= MAX_DEPTH || !real.is_dir()) {
+            return;
+        }
+        if !self.visited.insert(real) {
+            return;
+        }
+        if is_bundle {
+            self.found.push(path.to_owned());
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        children.sort();
+        for child in children {
+            self.visit(&child, depth + 1);
+        }
     }
 }

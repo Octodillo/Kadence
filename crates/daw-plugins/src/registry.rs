@@ -1,7 +1,7 @@
 //! The registry of formats and known plugins.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -141,21 +141,27 @@ impl PluginRegistry {
         let mut report = ScanReport::default();
         // One slot per bundle, in search-path order, filled from the cache or a scan.
         let mut slots: Vec<(PathBuf, Option<BundleResult>)> = Vec::new();
-        // Bundles to scan, and the slot each one fills.
-        let mut jobs: Vec<(PluginFormatKind, PathBuf)> = Vec::new();
-        let mut job_slots: Vec<usize> = Vec::new();
+        let mut jobs: Vec<Job> = Vec::new();
 
         for format in &self.formats {
             let kind = format.kind();
             for bundle in find_candidates(&kind, &self.search_paths(&kind)) {
-                match cache.get(&bundle) {
-                    Some(entry) if entry.format == kind => {
+                let mtime_ns = modified_time(&bundle);
+                let cached = mtime_ns
+                    .and_then(|at| cache.get(&bundle, at))
+                    .filter(|entry| entry.format == kind);
+                match cached {
+                    Some(entry) => {
                         report.cached += 1;
                         slots.push((bundle, Some(entry.result.clone())));
                     }
-                    _ => {
-                        job_slots.push(slots.len());
-                        jobs.push((kind.clone(), bundle.clone()));
+                    None => {
+                        jobs.push(Job {
+                            kind: kind.clone(),
+                            bundle: bundle.clone(),
+                            mtime_ns,
+                            slot: slots.len(),
+                        });
                         slots.push((bundle, None));
                     }
                 }
@@ -168,23 +174,28 @@ impl PluginRegistry {
         let results = scan_parallel(scanner, &jobs, &|| {
             progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
         });
-        for ((slot, (kind, bundle)), result) in job_slots.into_iter().zip(jobs).zip(results) {
+        for (job, result) in jobs.into_iter().zip(results) {
             report.scanned += 1;
             let cacheable = result
                 .as_ref()
                 .map_or_else(|e| e.is_plugin_fault(), |_| true);
             let result = result.map_err(|e| e.to_string());
-            if cacheable && let Some(mtime_ns) = modified_time(&bundle) {
+            // A bundle replaced while it was scanned gave the result of neither version for
+            // certain, so it is left out of the cache and scanned again next time.
+            if cacheable
+                && let Some(mtime_ns) = job.mtime_ns
+                && modified_time(&job.bundle) == Some(mtime_ns)
+            {
                 cache.insert(
-                    bundle,
+                    job.bundle,
                     CacheEntry {
-                        format: kind,
+                        format: job.kind,
                         mtime_ns,
                         result: result.clone(),
                     },
                 );
             }
-            slots[slot].1 = Some(result);
+            slots[job.slot].1 = Some(result);
         }
         cache.prune();
 
@@ -210,9 +221,19 @@ impl PluginRegistry {
     }
 }
 
+/// One bundle to scan.
+struct Job {
+    kind: PluginFormatKind,
+    bundle: PathBuf,
+    /// The bundle's modification time when the scan was planned.
+    mtime_ns: Option<u128>,
+    /// The slot the result fills.
+    slot: usize,
+}
+
 fn scan_parallel(
     scanner: &Scanner,
-    todo: &[(PluginFormatKind, PathBuf)],
+    todo: &[Job],
     finished: &(dyn Fn() + Sync),
 ) -> Vec<Result<BundleScan, crate::ScanError>> {
     let next = Mutex::new(0usize);
@@ -227,10 +248,10 @@ fn scan_parallel(
                         *next += 1;
                         i
                     };
-                    let Some((kind, bundle)) = todo.get(i) else {
+                    let Some(job) = todo.get(i) else {
                         break;
                     };
-                    let result = scanner.scan(kind, Path::new(bundle));
+                    let result = scanner.scan(&job.kind, &job.bundle);
                     *results[i].lock().unwrap() = Some(result);
                     finished();
                 }
@@ -246,6 +267,7 @@ fn scan_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::AtomicU32;
 

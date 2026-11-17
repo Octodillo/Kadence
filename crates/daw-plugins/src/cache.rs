@@ -74,10 +74,12 @@ impl ScanCache {
         written
     }
 
-    /// The cached entry for `bundle`, if it is still current.
-    pub fn get(&self, bundle: &Path) -> Option<&CacheEntry> {
-        let entry = self.entries.get(bundle)?;
-        (Some(entry.mtime_ns) == modified_time(bundle)).then_some(entry)
+    /// The cached entry for `bundle`, if it was scanned at `mtime_ns`: the bundle's
+    /// [`modified_time`] now.
+    pub fn get(&self, bundle: &Path, mtime_ns: u128) -> Option<&CacheEntry> {
+        self.entries
+            .get(bundle)
+            .filter(|entry| entry.mtime_ns == mtime_ns)
     }
 
     pub fn insert(&mut self, bundle: PathBuf, entry: CacheEntry) {
@@ -120,7 +122,12 @@ impl Default for ScanCache {
     }
 }
 
-/// The latest modification time of `path` or, for a bundle directory, of anything inside it.
+/// The latest modification time of `path` or, for a bundle directory, of anything inside it,
+/// in nanoseconds since the Unix epoch.
+///
+/// The bundle itself may be a symbolic link, and so may files in it: their targets' times
+/// count. Linked directories inside the bundle are not entered, so a link back up the tree
+/// cannot make the walk loop or wander outside the bundle.
 pub fn modified_time(path: &Path) -> Option<u128> {
     fn mtime(path: &Path) -> Option<u128> {
         let modified = std::fs::metadata(path).ok()?.modified().ok()?;
@@ -131,16 +138,18 @@ pub fn modified_time(path: &Path) -> Option<u128> {
                 .as_nanos(),
         )
     }
-    fn newest(path: &Path, depth: usize) -> Option<u128> {
+    fn newest(path: &Path, is_dir: bool, depth: usize) -> Option<u128> {
         let mut best = mtime(path)?;
-        if depth < 8 && path.is_dir() {
+        if depth < 8 && is_dir {
             for entry in std::fs::read_dir(path).ok()?.flatten() {
-                if let Some(t) = newest(&entry.path(), depth + 1) {
+                // `file_type` does not follow links.
+                let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+                if let Some(t) = newest(&entry.path(), is_dir, depth + 1) {
                     best = best.max(t);
                 }
             }
         }
         Some(best)
     }
-    newest(path, 0)
+    newest(path, path.is_dir(), 0)
 }

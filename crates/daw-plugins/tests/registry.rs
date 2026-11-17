@@ -1,5 +1,5 @@
-//! Registry, scanner and cache tests. The end-to-end ones run the real `daw-plugin-scan` binary
-//! on the CLAP test plugin.
+//! Registry, scanner and cache tests. The end-to-end ones run the `daw-plugin-scan` binary on
+//! the CLAP test plugin.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -101,6 +101,66 @@ fn candidates_are_found_without_descending_into_bundles() {
 }
 
 #[test]
+fn bundles_reached_through_links_are_found_once() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugins");
+    std::fs::create_dir_all(root.join("vendor")).unwrap();
+    std::fs::write(root.join("vendor/one.clap"), "").unwrap();
+    // A link back to the root, one to a sibling directory, and a second name for the bundle.
+    symlink(&root, root.join("vendor/all")).unwrap();
+    symlink(root.join("vendor"), root.join("zz-vendor")).unwrap();
+    symlink(root.join("vendor/one.clap"), root.join("zz-one.clap")).unwrap();
+    symlink(root.join("missing.clap"), root.join("broken.clap")).unwrap();
+    // A second search path that is the first one again.
+    let alias = dir.path().join("alias");
+    symlink(&root, &alias).unwrap();
+
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Clap, &[root.clone(), alias.clone()]),
+        vec![root.join("vendor/one.clap")]
+    );
+    // The first path that leads to a bundle names it.
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Clap, &[alias.clone(), root]),
+        vec![alias.join("vendor/one.clap")]
+    );
+}
+
+#[test]
+fn a_bundles_time_ignores_what_its_links_lead_to() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = dir.path().join("Synth.vst3");
+    std::fs::create_dir_all(bundle.join("Contents")).unwrap();
+    std::fs::write(bundle.join("Contents/Synth.so"), "").unwrap();
+    let before = daw_plugins::modified_time(&bundle).unwrap();
+
+    // A link out of the bundle, to a directory holding something newer.
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let later = std::time::SystemTime::now() + Duration::from_secs(60);
+    let touch = |path: &Path| {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(later).unwrap();
+    };
+    std::fs::write(outside.join("newer"), "").unwrap();
+    touch(&outside.join("newer"));
+    symlink(&outside, bundle.join("Contents/up")).unwrap();
+    symlink(&bundle, bundle.join("Contents/loop")).unwrap();
+    let linked = daw_plugins::modified_time(&bundle).unwrap();
+    assert!(linked < before + Duration::from_secs(30).as_nanos());
+
+    // A change inside the bundle counts, also when the bundle is reached through a link.
+    touch(&bundle.join("Contents/Synth.so"));
+    let alias = dir.path().join("Alias.vst3");
+    symlink(&bundle, &alias).unwrap();
+    let changed = daw_plugins::modified_time(&bundle).unwrap();
+    assert!(changed > linked);
+    assert_eq!(daw_plugins::modified_time(&alias), Some(changed));
+}
+
+#[test]
 fn scanner_child_describes_the_plugin() {
     let dir = plugin_dir();
     let found = scanner()
@@ -128,6 +188,28 @@ fn a_crashing_scanner_is_reported_not_fatal() {
 fn a_hanging_scanner_is_killed() {
     let err = sh("sleep 10")
         .with_timeout(Duration::from_millis(200))
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap_err();
+    assert!(matches!(err, ScanError::TimedOut(_)), "{err}");
+}
+
+/// A plugin that hangs as the scanner exits has already had its result written.
+#[test]
+fn a_scanner_that_hangs_after_a_complete_result_keeps_it() {
+    let found = sh(&format!("echo '{NO_PLUGINS}'; sleep 10"))
+        .with_timeout(Duration::from_millis(300))
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap();
+    assert!(found.plugins.is_empty());
+    match sh(r#"printf '{"load_failed":"boom"}'; sleep 10"#)
+        .with_timeout(Duration::from_millis(300))
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+    {
+        Err(ScanError::LoadFailed(why)) => assert_eq!(why, "boom"),
+        other => panic!("expected a load failure, got {other:?}"),
+    }
+    let err = sh(r#"printf '{"plugins":['; sleep 10"#)
+        .with_timeout(Duration::from_millis(300))
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap_err();
     assert!(matches!(err, ScanError::TimedOut(_)), "{err}");
@@ -491,4 +573,25 @@ fn skipped_plugins_are_reported_and_retried() {
             .find(&PluginFormatKind::Clap, "org.daw.test.gain")
             .is_some()
     );
+}
+
+/// A bundle replaced while its scan ran is not cached under the new file's time with the old
+/// file's result.
+#[test]
+fn a_bundle_replaced_during_its_scan_is_scanned_again() {
+    let dir = plugin_dir();
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    // The scanner's arguments are `--scan clap <bundle>`.
+    let replacing = sh(&format!("touch -d 2030-01-01 \"$3\"; echo '{NO_PLUGINS}'"));
+    let report = registry.scan(&replacing, &mut cache);
+    assert_eq!(report.scanned, 1);
+    assert!(cache.is_empty(), "the stale result was cached");
+
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!((report.scanned, report.cached), (1, 0));
+    assert_eq!(registry.plugins().len(), 1);
+    assert_eq!(cache.len(), 1);
 }
