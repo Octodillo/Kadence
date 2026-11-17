@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use daw_media::{AudioData, Decoder, DiskStreamer, MediaError, StreamerConfig, load_file};
+use daw_media::{AudioData, Decoder, DiskStreamer, MediaError, StreamerConfig, load_file_within};
 
 use crate::player::Streams;
 
@@ -95,12 +95,17 @@ impl MediaPool {
         let seconds = info
             .frames
             .map(|f| f as f64 / f64::from(info.sample_rate.max(1)));
-        match seconds {
+        let in_memory = match seconds {
+            // The header's length decides whether to try, but the decoder
+            // holds to the limit itself: a file can be longer than it says.
             Some(s) if s <= self.memory_limit => {
-                let data = load_file(path, self.sample_rate)?;
-                Ok(Loaded::Memory(Arc::new(data), info.sample_rate))
+                load_file_within(path, self.sample_rate, self.memory_limit)?
             }
-            _ => Ok(Loaded::Stream(info.sample_rate)),
-        }
+            _ => None,
+        };
+        Ok(match in_memory {
+            Some(data) => Loaded::Memory(Arc::new(data), info.sample_rate),
+            None => Loaded::Stream(info.sample_rate),
+        })
     }
 }

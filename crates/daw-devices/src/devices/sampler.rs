@@ -72,6 +72,12 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
     ),
 ];
 
+/// The longest file a zone may hold in memory, by its real decoded length.
+/// A sampler plays short sounds; this only stops a file from filling memory.
+pub const MAX_SAMPLE_SECONDS: f64 = 600.0;
+/// The range a zone's gain is held to, in dB. A saved state can hold any
+/// number, and far above this the gain factor overflows.
+const ZONE_GAIN_DB: (f32, f32) = (-70.0, 24.0);
 const VOICES: usize = 32;
 /// Extra voices so stolen voices can fade out while their replacement starts.
 const SPARE_VOICES: usize = 8;
@@ -111,7 +117,10 @@ impl SampleBuffer {
     /// sampler corrects for the rate difference when it plays. Not real-time safe.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, daw_media::MediaError> {
         let path = path.as_ref();
-        daw_media::decode_file(path).map(|d| Self::from(d).with_source(path))
+        Self::loaded(
+            path,
+            daw_media::decode_file_within(path, MAX_SAMPLE_SECONDS),
+        )
     }
 
     /// Decode an audio file and resample it to `sample_rate` up front, which avoids
@@ -121,7 +130,23 @@ impl SampleBuffer {
         sample_rate: u32,
     ) -> Result<Self, daw_media::MediaError> {
         let path = path.as_ref();
-        daw_media::load_file(path, sample_rate).map(|d| Self::from(d).with_source(path))
+        Self::loaded(
+            path,
+            daw_media::load_file_within(path, sample_rate, MAX_SAMPLE_SECONDS),
+        )
+    }
+
+    fn loaded(
+        path: &Path,
+        decoded: Result<Option<daw_media::AudioData>, daw_media::MediaError>,
+    ) -> Result<Self, daw_media::MediaError> {
+        let data = decoded?.ok_or_else(|| {
+            daw_media::MediaError::Unsupported(format!(
+                "sample longer than {} minutes",
+                MAX_SAMPLE_SECONDS / 60.0
+            ))
+        })?;
+        Ok(Self::from(data).with_source(path))
     }
 
     /// Record the file this audio came from.
@@ -205,9 +230,11 @@ impl Zone {
         self.key_hi = self.key_hi.min(127);
         self.velocity_lo = unit(self.velocity_lo, 0.0);
         self.velocity_hi = unit(self.velocity_hi, 1.0);
-        if !self.gain_db.is_finite() {
-            self.gain_db = 0.0;
-        }
+        self.gain_db = if self.gain_db.is_finite() {
+            self.gain_db.clamp(ZONE_GAIN_DB.0, ZONE_GAIN_DB.1)
+        } else {
+            0.0
+        };
         self
     }
 

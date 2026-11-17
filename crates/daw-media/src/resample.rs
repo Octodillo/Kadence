@@ -1,12 +1,24 @@
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Fft, FixedSync, Resampler};
 
-use crate::{AudioData, MediaError, Result};
+use crate::{AudioData, MediaError, Result, SAMPLE_RATES};
 
 const CHUNK: usize = 1024;
 
 fn err(e: impl std::fmt::Display) -> MediaError {
     MediaError::Resample(e.to_string())
+}
+
+/// An FFT resampler between two rates. Its filter and buffers are sized from
+/// the rates, so rates no file or device has are refused here, wherever they
+/// came from.
+fn fft(from: u32, to: u32, channels: usize, sync: FixedSync) -> Result<Fft<f32>> {
+    for rate in [from, to] {
+        if !SAMPLE_RATES.contains(&rate) {
+            return Err(err(format_args!("sample rate of {rate} Hz")));
+        }
+    }
+    Fft::new(from as usize, to as usize, CHUNK, channels, sync).map_err(err)
 }
 
 /// Resample a whole clip in memory to `sample_rate` (FFT-based, fixed ratio).
@@ -19,14 +31,7 @@ pub fn resample(data: &AudioData, sample_rate: u32) -> Result<AudioData> {
         });
     }
     let frames = data.frames();
-    let mut rs = Fft::<f32>::new(
-        data.sample_rate as usize,
-        sample_rate as usize,
-        CHUNK,
-        ch,
-        FixedSync::Both,
-    )
-    .map_err(err)?;
+    let mut rs = fft(data.sample_rate, sample_rate, ch, FixedSync::Both)?;
     let out_len = rs.process_all_needed_output_len(frames);
     let mut out = vec![vec![0.0f32; out_len]; ch];
     let input = SequentialSliceOfVecs::new(&data.channels, ch, frames).map_err(err)?;
@@ -64,14 +69,7 @@ pub struct ChunkResampler {
 
 impl ChunkResampler {
     pub fn new(from: u32, to: u32, channels: usize) -> Result<Self> {
-        let rs = Fft::<f32>::new(
-            from as usize,
-            to as usize,
-            CHUNK,
-            channels,
-            FixedSync::Input,
-        )
-        .map_err(err)?;
+        let rs = fft(from, to, channels, FixedSync::Input)?;
         let input = vec![vec![0.0; rs.input_frames_max()]; channels];
         let output = vec![vec![0.0; rs.output_frames_max()]; channels];
         let to_trim = rs.output_delay();

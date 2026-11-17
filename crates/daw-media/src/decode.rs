@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -44,9 +45,21 @@ pub struct Decoder {
     eof: bool,
 }
 
+/// The sample rates a file may state. A header can hold any 32-bit number,
+/// and everything sized from the rate (resampler filters above all) would
+/// follow it.
+pub const SAMPLE_RATES: RangeInclusive<u32> = 1_000..=768_000;
+
 impl Decoder {
+    /// Opens an audio file. The file is untrusted: its header is checked
+    /// here, so nothing later sizes work from a value no real file has.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        // Opening a FIFO or a device can block for good.
+        let meta = std::fs::metadata(path).map_err(|e| MediaError::io(path, e))?;
+        if !meta.is_file() {
+            return Err(MediaError::Unsupported("not a regular file".into()));
+        }
         let file = File::open(path).map_err(|e| MediaError::io(path, e))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let mut hint = Hint::new();
@@ -72,6 +85,11 @@ impl Decoder {
         let sample_rate = params
             .sample_rate
             .ok_or_else(|| MediaError::Unsupported("unknown sample rate".into()))?;
+        if !SAMPLE_RATES.contains(&sample_rate) {
+            return Err(MediaError::Unsupported(format!(
+                "sample rate of {sample_rate} Hz"
+            )));
+        }
         let channels = params.channels.as_ref().map_or(0, |c| c.count());
         let track_id = track.id;
         let time_base = track.time_base;
@@ -243,11 +261,27 @@ impl Decoder {
     }
 }
 
-/// Decode a whole file into memory at its own sample rate.
+/// Decode a whole file into memory at its own sample rate. For files this
+/// program wrote or the caller otherwise trusts: memory use follows the
+/// file's real length. See [`decode_file_within`].
 pub fn decode_file(path: impl AsRef<Path>) -> Result<AudioData> {
-    let mut dec = Decoder::open(path)?;
+    let data = decode_all(Decoder::open(path)?, f64::INFINITY)?;
+    Ok(data.expect("no limit to exceed"))
+}
+
+/// Decode a whole file into memory unless it holds more than `max_seconds`
+/// of audio, in which case nothing is kept and `None` is returned. The
+/// length is measured while decoding, since the one in the header need not
+/// be true.
+pub fn decode_file_within(path: impl AsRef<Path>, max_seconds: f64) -> Result<Option<AudioData>> {
+    decode_all(Decoder::open(path)?, max_seconds)
+}
+
+fn decode_all(mut dec: Decoder, max_seconds: f64) -> Result<Option<AudioData>> {
     let ch = dec.info().channels;
     let rate = dec.info().sample_rate;
+    // Saturates: no limit is `u64::MAX` frames.
+    let max_frames = (max_seconds * f64::from(rate)).ceil() as u64;
     // The header's frame count is untrusted (truncated or corrupt files), so only use
     // it as a capped hint; the planes grow to the real decoded length.
     // Cap the total reservation (all channels), not per plane.
@@ -256,6 +290,7 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<AudioData> {
         .info()
         .frames
         .unwrap_or(0)
+        .min(max_frames)
         .min(MAX_HINT_SAMPLES / ch.max(1) as u64) as usize;
     let mut data = AudioData {
         sample_rate: rate,
@@ -267,16 +302,33 @@ pub fn decode_file(path: impl AsRef<Path>) -> Result<AudioData> {
         if n == 0 {
             break;
         }
+        if data.frames() as u64 + n as u64 > max_frames {
+            return Ok(None);
+        }
         // Deinterleave straight into the planes; no second full-size copy.
         data.extend_interleaved(&chunk[..n * ch]);
     }
-    Ok(data)
+    Ok(Some(data))
 }
 
 /// Decode a whole file and resample it to `sample_rate` if needed. This is what the
-/// sampler and other in-memory users want.
+/// sampler and other in-memory users want. Like [`decode_file`], for trusted files.
 pub fn load_file(path: impl AsRef<Path>, sample_rate: u32) -> Result<AudioData> {
-    let data = decode_file(path)?;
+    to_rate(decode_file(path)?, sample_rate)
+}
+
+/// [`load_file`] with the length limit of [`decode_file_within`].
+pub fn load_file_within(
+    path: impl AsRef<Path>,
+    sample_rate: u32,
+    max_seconds: f64,
+) -> Result<Option<AudioData>> {
+    decode_file_within(path, max_seconds)?
+        .map(|data| to_rate(data, sample_rate))
+        .transpose()
+}
+
+fn to_rate(data: AudioData, sample_rate: u32) -> Result<AudioData> {
     if data.sample_rate == sample_rate {
         Ok(data)
     } else {

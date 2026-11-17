@@ -2,8 +2,8 @@ mod common;
 
 use common::{estimate_freq, max_abs_diff, test_signal};
 use daw_media::{
-    AudioData, Decoder, FlacBits, PeakCache, WavFormat, decode_file, load_file, resample,
-    write_flac, write_wav,
+    AudioData, Decoder, FlacBits, MediaError, PeakCache, WavFormat, decode_file,
+    decode_file_within, load_file, load_file_within, resample, write_flac, write_wav,
 };
 
 fn data_dir() -> std::path::PathBuf {
@@ -227,4 +227,71 @@ fn rewriting_a_file_drops_its_peak_cache() {
     let new = PeakCache::load_or_build(&path).unwrap();
     assert_ne!(new, old, "stale peaks served for the rewritten file");
     assert_eq!(new, PeakCache::build(&path).unwrap());
+}
+
+/// A WAV whose header states `rate`, whatever the audio in it is.
+fn wav_claiming_rate(dir: &std::path::Path, rate: u32) -> std::path::PathBuf {
+    let path = dir.join(format!("rate-{rate}.wav"));
+    write_wav(&path, &test_signal(48_000, 100, 1), WavFormat::Pcm16).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    // The sample rate of the canonical header hound writes.
+    assert_eq!(bytes[24..28], 48_000u32.to_le_bytes());
+    bytes[24..28].copy_from_slice(&rate.to_le_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn sample_rates_no_real_file_has_are_refused_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    // A prime near the top of the range sizes a resampler by the whole rate.
+    for rate in [1, 999, 768_001, 4_294_967_291] {
+        let path = wav_claiming_rate(dir.path(), rate);
+        let err = Decoder::open(&path).err().expect("refused");
+        assert!(matches!(err, MediaError::Unsupported(_)), "{rate}: {err}");
+        assert!(load_file(&path, 48_000).is_err());
+    }
+    for rate in [1_000, 768_000] {
+        Decoder::open(wav_claiming_rate(dir.path(), rate)).unwrap();
+    }
+}
+
+#[test]
+fn resampling_refuses_rates_outside_the_supported_range() {
+    let data = test_signal(48_000, 100, 1);
+    assert!(resample(&data, 4_294_967_291).is_err());
+    let odd = AudioData {
+        sample_rate: 999,
+        ..data
+    };
+    assert!(resample(&odd, 48_000).is_err());
+    assert!(daw_media::ChunkResampler::new(4_294_967_291, 48_000, 1).is_err());
+}
+
+#[test]
+fn limited_decode_keeps_nothing_of_a_file_that_is_too_long() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("second.wav");
+    write_wav(&path, &test_signal(48_000, 48_000, 2), WavFormat::Pcm16).unwrap();
+    assert!(decode_file_within(&path, 0.5).unwrap().is_none());
+    assert!(load_file_within(&path, 44_100, 0.999).unwrap().is_none());
+    let whole = decode_file_within(&path, 1.0).unwrap().expect("fits");
+    assert_eq!(whole.frames(), 48_000);
+    let resampled = load_file_within(&path, 96_000, 1.0).unwrap().expect("fits");
+    assert!((resampled.frames() as i64 - 96_000).abs() <= 1);
+    // The limit is on the file's own length, not the resampled one.
+    assert_eq!(resampled.sample_rate, 96_000);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_without_being_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe.wav");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.unwrap().success());
+    // Opening it would block until something writes to it.
+    let err = Decoder::open(&fifo).err().expect("refused");
+    assert!(matches!(err, MediaError::Unsupported(_)), "{err}");
+    assert!(PeakCache::load_or_build(&fifo).is_err());
 }
