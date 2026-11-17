@@ -228,19 +228,28 @@ impl Document {
     ///
     /// The old bundle's `audio/` folder is copied across, with any other
     /// file in the old bundle that a clip plays. Choosing the document's own
-    /// project file is a plain save; another project's is refused, since
-    /// its bundle is not this one's to write into.
+    /// bundle, by its folder or a file in it, is a plain save; another
+    /// project's file is refused, since its bundle is not this one's to
+    /// write into.
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), FormatError> {
-        let dir = match Bundle::target(&path)? {
+        let path = path.as_ref();
+        let own = |root: &Path| {
+            let real = |p: &Path| p.canonicalize().ok();
+            self.bundle
+                .as_ref()
+                .is_some_and(|b| real(root).is_some_and(|r| Some(r) == real(b.root())))
+        };
+        // Its own project file is the bundle it has, even when that file is
+        // not there (the document was recovered from the autosave alone).
+        let own_file = self.bundle.as_ref().is_some_and(|b| {
+            path.file_name() == b.project_file().file_name() && path.parent().is_some_and(own)
+        });
+        let dir = match Bundle::target(path)? {
+            _ if own_file => return self.save(),
+            Target::New(dir) if own(&dir) => return self.save(),
+            Target::Existing(chosen) if own(chosen.root()) => return self.save(),
             Target::New(dir) => dir,
             Target::Existing(chosen) => {
-                let same = |a: &Bundle, b: &Bundle| {
-                    let real = |b: &Bundle| b.project_file().canonicalize().ok();
-                    real(a).is_some_and(|a| Some(a) == real(b))
-                };
-                if self.bundle.as_ref().is_some_and(|own| same(own, &chosen)) {
-                    return self.save();
-                }
                 return Err(FormatError::io(chosen.project_file())(
                     std::io::ErrorKind::AlreadyExists.into(),
                 ));

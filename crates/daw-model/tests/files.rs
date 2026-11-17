@@ -457,6 +457,31 @@ fn save_as_brings_every_file_of_the_bundle_that_plays() {
 }
 
 #[test]
+fn save_as_leaves_the_project_files_and_backups_behind() {
+    let fx = fixture();
+    // A project from someone else can name anything as a clip's source.
+    let named: Vec<PathBuf> = [
+        "Song.kadence",
+        "Song.KADENCE.autosave",
+        "backups/Song-0000000000000001.kadence",
+        "backups/old.wav",
+    ]
+    .map(PathBuf::from)
+    .into();
+    let mut doc = saved(&fx, project_with(&named));
+    for n in &named[1..] {
+        write(&fx.root.join(n), b"{}");
+    }
+    let new = fx._tmp.path().join("Other");
+    doc.save_as(&new).unwrap();
+    for n in &named {
+        assert!(new.join(n).symlink_metadata().is_err(), "{n:?}");
+    }
+    // Still one project file, so the bundle opens.
+    assert_eq!(Document::open(&new).unwrap().project(), doc.project());
+}
+
+#[test]
 fn failed_save_as_takes_back_the_folders_it_made() {
     let fx = fixture();
     let mut doc = saved(

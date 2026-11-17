@@ -54,16 +54,24 @@ pub struct AudioRecording {
 /// Where takes of an unsaved project go: `recordings` in Kadence's data
 /// folder, if the user has one (see [`crate::user_dirs::data`]).
 fn unsaved_recordings_dir() -> Result<PathBuf, Message> {
-    const FOLDER: &str = "recordings";
-    match crate::user_dirs::data() {
-        Some(data) => Ok(data.join(FOLDER)),
-        None => Err(Message::Record(RecordProblem::Take(
-            TakeProblem::CannotCreate {
-                path: FOLDER.into(),
-                detail: "no home folder to keep it in; save the project first".into(),
-            },
-        ))),
-    }
+    crate::user_dirs::data()
+        .map(|data| data.join("recordings"))
+        .ok_or(Message::Record(RecordProblem::NoTakeFolder))
+}
+
+/// Where takes of a saved project go: its `audio/` folder. Not made anew
+/// where the bundle used to be if its folder was moved since.
+fn bundle_recordings_dir(bundle: &daw_model::Bundle) -> Result<PathBuf, Message> {
+    bundle.audio_dir_for_writing().map_err(|e| {
+        let (path, detail) = match e {
+            daw_model::FormatError::Io { path, source } => (path, source.to_string()),
+            e => (bundle.audio_dir(), e.to_string()),
+        };
+        Message::Record(RecordProblem::Take(TakeProblem::CannotCreate {
+            path,
+            detail,
+        }))
+    })
 }
 
 /// The instrument track that hears live MIDI while none is armed: the one
@@ -186,7 +194,7 @@ impl AppState {
             return Ok(false);
         }
         let dir = match self.doc.bundle() {
-            Some(bundle) => bundle.audio_dir(),
+            Some(bundle) => bundle_recordings_dir(bundle)?,
             None => unsaved_recordings_dir()?,
         };
         let latency = self.engine.round_trip_latency();

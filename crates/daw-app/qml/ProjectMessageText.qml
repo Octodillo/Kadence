@@ -106,6 +106,8 @@ QtObject {
             return i18nc("@info", "Some MIDI input arrived too fast to be recorded, so the take may be missing notes.");
         case Project.NothingRecorded:
             return i18nc("@info", "The take was outside the song, so nothing was added.");
+        case Project.NoTakeFolder:
+            return i18nc("@info", "There is no folder to record into. Save the project first.");
         case Project.Exported:
             return i18ncp("@info %2 is a file path", "Exported %1 second of audio to “%2”.",
                           "Exported %1 seconds of audio to “%2”.", m.number, m.path);

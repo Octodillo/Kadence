@@ -49,7 +49,7 @@ struct Entry {
 
 /// Brings the audio of `old` into `new`: everything in its `audio/` folder,
 /// sub-folders included, and any other file in the bundle that a clip of
-/// `project` plays. Each file keeps its place, so the clips' sources hold.
+/// `project` plays, except the project files and backups Kadence keeps there. Each file keeps its place, so the clips' sources hold.
 /// Refuses before copying anything if a file is already at one of those
 /// places, since clips may use it. On failure nothing it made is left.
 ///
@@ -59,9 +59,18 @@ struct Entry {
 /// a link to another file in `old` is copied as that file, since its content
 /// is in the bundle anyway. Folders reached through a link are not walked,
 /// and a clip's file reached through one comes across as a link.
+///
+/// If the old bundle's folder is gone (moved or renamed while open) and
+/// clips play files in it, that is an error naming the folder: the new
+/// bundle would be saved without its audio.
 pub(crate) fn audio(project: &Project, old: &Bundle, new: &Bundle) -> Result<Made, FormatError> {
-    let Ok(root) = old.root().canonicalize() else {
-        return Ok(Made::default());
+    let played = audio_files(project, Some(old));
+    let root = match old.root().canonicalize() {
+        Ok(root) => root,
+        Err(e) if played.iter().any(|f| f.source.is_relative()) => {
+            return Err(FormatError::io(old.root())(e));
+        }
+        Err(_) => return Ok(Made::default()),
     };
     let mut entries = Vec::new();
     walk(
@@ -71,9 +80,11 @@ pub(crate) fn audio(project: &Project, old: &Bundle, new: &Bundle) -> Result<Mad
         &mut entries,
     )?;
     let mut planned: HashSet<PathBuf> = entries.iter().map(|e| e.rel.clone()).collect();
-    for file in audio_files(project, Some(old)) {
+    for file in played {
         if let Some(rel) = relative_inside(old.root(), &file.path)
             && file.source.is_relative()
+            // A project from someone else can name these as a clip's source.
+            && !Bundle::is_own_file(&rel)
             && !planned.contains(&rel)
             && let Some(carry) = carry(&root, &file.path)
         {

@@ -25,30 +25,33 @@ My Song/                      bundle directory
   directory that already has one, or has a `.kadence.autosave`, fails.
 - Save As takes the bundle directory or, as a file dialog gives it, the
   project file `Name.kadence` for the directory `Name` around it. Choosing
-  the open project's own file is a plain save; choosing another project's
-  file fails rather than write into its bundle. It copies the old bundle's
-  `audio/` folder with its sub-folders, and any other file in the old bundle
-  that a clip plays, each to the same place in the new bundle, and fails
-  rather than overwrite a file already there. A failed Save As removes what
-  it copied.
+  the open project's own bundle, by its folder or a file in it, is a plain
+  save; choosing another project's file fails rather than write into its
+  bundle. It copies the old bundle's `audio/` folder with its sub-folders,
+  and any other file in the old bundle that a clip plays (never a project
+  file, an autosave or anything in `backups/`), each to the same place in
+  the new bundle, and fails rather than overwrite a file already there. A
+  failed Save As removes what it copied.
 - Saving copies the current project file into `backups/` as
   `<name>-<timestamp>.kadence`, where the timestamp is a zero-padded
   millisecond Unix time, always later than the newest backup's, then writes
   the new file atomically: write a new `.kadence-<pid>-<n>.tmp` beside it,
   fsync, rename, fsync the directory (`daw_core::atomic_file`, which exports
   and caches use too). A temporary file a killed Kadence left behind is
-  removed by a later write into the same folder once it is an hour old. A crash never leaves a half-written project.
-  The new file keeps the old one's permissions. Once it is written, that
-  project's backups beyond the newest 10 are removed (backups under another
-  name, from before the project file was renamed, are left alone). If the
-  write fails, the backup just made is removed again.
+  removed by a later write into the same folder once it is an hour old. A
+  crash never leaves a half-written project. The new file keeps the old
+  one's permissions. Once it is written, that project's backups beyond the
+  newest 10 are removed (backups under another name, from before the project
+  file was renamed, are left alone). If the write fails, the backup just
+  made is removed again.
 - Saving a project whose file already holds exactly what would be written
   changes nothing, so repeated saves do not push earlier versions out of
   `backups/`.
 - Only creating a bundle makes its directory. If the directory of an open
-  bundle was moved, renamed or deleted, saving, autosaving and importing
-  fail with a not-found error naming it instead of starting a second bundle
-  at the old place.
+  bundle was moved, renamed or deleted, saving, autosaving, importing and
+  recording fail with a not-found error naming it instead of starting a
+  second bundle at the old place. So does Save As when clips play files of
+  the bundle, since the new bundle would be without them.
 - A symlinked project file is written through, and stays a link, only when
   the open project was read from it. After recovering an autosave or Save As
   the project file was not read, so a link there is replaced by the new file
@@ -60,8 +63,9 @@ My Song/                      bundle directory
   touches the project file. A link at that name is replaced, not followed.
   Symlinked `audio/` and `backups/` folders are still followed. Saving
   deletes it, and so does undoing back to the saved state; a save still
-  succeeds if the autosave cannot be deleted. If one exists when a bundle is opened, `Document::open` fails
-  with `FormatError::AutosavePending` instead of loading the older file: the
+  succeeds if the autosave cannot be deleted. If one exists when a bundle is
+  opened, `Document::open` fails with `FormatError::AutosavePending` instead
+  of loading the older file: the
   app asks the user, then calls `Document::recover` (load the autosave) or
   `Document::open_discarding_autosave`. The open document therefore always owns
   its bundle's autosave. In a bundle that cannot be written, discarding

@@ -110,6 +110,8 @@ pub enum Reason {
     MidiInputDropped,
     /// The take has no notes inside the song.
     NothingRecorded,
+    /// The project was never saved and there is no home folder for its takes.
+    NoTakeFolder,
     /// The song was exported to `path`; `number` is its length in seconds.
     Exported,
     /// The user cancelled the export; no file was written.
@@ -214,6 +216,8 @@ pub enum RecordProblem {
     NoMidiPlayer,
     InputDropped,
     NothingRecorded,
+    /// The project has no bundle and the user no data folder to record into.
+    NoTakeFolder,
     /// The model refused the take.
     Refused(ModelError),
     /// Something went wrong with an audio take.
@@ -391,6 +395,7 @@ impl Message {
                 RecordProblem::NoMidiPlayer => Fields::new(C::Record, R::NoMidiPlayer),
                 RecordProblem::InputDropped => Fields::new(C::Record, R::MidiInputDropped),
                 RecordProblem::NothingRecorded => Fields::new(C::Record, R::NothingRecorded),
+                RecordProblem::NoTakeFolder => Fields::new(C::Record, R::NoTakeFolder),
                 RecordProblem::Refused(e) => Fields::new(C::Record, R::EditRefused).detail(e),
                 RecordProblem::Take(t) => take_fields(t),
                 RecordProblem::Xruns(n) => Fields {

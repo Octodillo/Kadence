@@ -85,13 +85,13 @@ fn check(data: &AudioData) -> Result<()> {
 /// [`commit`](Self::commit), through [`daw_core::atomic_file`]. Dropped without
 /// committing, the temporary file is removed, so a failure part way (disk full, a
 /// cancelled export) leaves any existing file untouched and no partial file behind.
-struct Replacement {
+struct Rewrite {
     /// What the caller asked for, for removing its peak cache.
     path: PathBuf,
     file: atomic_file::Replacement,
 }
 
-impl Replacement {
+impl Rewrite {
     /// A symlink is followed and its target replaced; an existing file keeps its
     /// permissions, and a read-only one is refused.
     fn begin(path: &Path) -> Result<(Self, File)> {
@@ -349,8 +349,8 @@ impl FlacSink {
 /// succeeds; dropping the writer before that (an error, a cancelled export) leaves no
 /// file behind and any existing one untouched.
 pub struct AudioWriter {
-    replacement: Replacement,
-    /// The file the replacement commits; `sink` writes through a clone of it.
+    rewrite: Rewrite,
+    /// The file the rewrite commits; `sink` writes through a clone of it.
     file: File,
     sink: Sink,
     channels: usize,
@@ -374,12 +374,12 @@ impl AudioWriter {
         if sample_rate == 0 {
             return Err(MediaError::Encode("sample rate is 0".into()));
         }
-        let (replacement, file) = Replacement::begin(path.as_ref())?;
+        let (rewrite, file) = Rewrite::begin(path.as_ref())?;
         let sink = match format {
             FileFormat::Wav(format) => {
                 let clone = file
                     .try_clone()
-                    .map_err(|e| MediaError::io(replacement.tmp(), e))?;
+                    .map_err(|e| MediaError::io(rewrite.tmp(), e))?;
                 let writer = hound::WavWriter::new(
                     BufWriter::new(clone),
                     format.spec(channels, sample_rate),
@@ -393,7 +393,7 @@ impl AudioWriter {
             FileFormat::Flac(bits) => {
                 let clone = file
                     .try_clone()
-                    .map_err(|e| MediaError::io(replacement.tmp(), e))?;
+                    .map_err(|e| MediaError::io(rewrite.tmp(), e))?;
                 let bits = match bits {
                     FlacBits::B16 => 16,
                     FlacBits::B24 => 24,
@@ -404,7 +404,7 @@ impl AudioWriter {
         let dither =
             (dither && format.int_bits().is_some()).then_some(Dither(0x9e37_79b9_7f4a_7c15));
         Ok(Self {
-            replacement,
+            rewrite,
             file,
             sink,
             channels,
@@ -431,7 +431,7 @@ impl AudioWriter {
         if planes.iter().any(|p| p.len() != n) {
             return Err(MediaError::Encode("channels differ in length".into()));
         }
-        let tmp = self.replacement.tmp();
+        let tmp = self.rewrite.tmp();
         match &mut self.sink {
             Sink::Wav {
                 writer,
@@ -479,18 +479,18 @@ impl AudioWriter {
     /// Completes the file and moves it into place.
     pub fn finish(self) -> Result<()> {
         let Self {
-            replacement,
+            rewrite,
             file,
             sink,
             ..
         } = self;
         match sink {
-            Sink::Wav { writer, .. } => writer
-                .finalize()
-                .map_err(|e| wav_error(replacement.tmp(), e))?,
+            Sink::Wav { writer, .. } => {
+                writer.finalize().map_err(|e| wav_error(rewrite.tmp(), e))?
+            }
             Sink::Flac(flac) => flac.finish()?,
         }
-        replacement.commit(file)
+        rewrite.commit(file)
     }
 }
 

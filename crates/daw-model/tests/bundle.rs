@@ -244,6 +244,7 @@ fn a_failed_save_leaves_no_backup() {
     set_mode(&root, 0o555);
     if ignores_permissions(&root) {
         set_mode(&root, 0o755);
+        eprintln!("skipped: this user writes into read-only folders");
         return;
     }
     for _ in 0..3 {
@@ -272,6 +273,7 @@ fn a_read_only_bundle_opens_at_its_saved_version() {
     set_mode(&root, 0o555);
     if ignores_permissions(&root) {
         set_mode(&root, 0o755);
+        eprintln!("skipped: this user writes into read-only folders");
         return;
     }
     let opened = Document::open_discarding_autosave(&root);
@@ -291,6 +293,7 @@ fn saving_never_brings_back_a_bundle_that_moved() {
     let moved = dir.path().join("Song final");
     let mut doc = Document::new(sample_project());
     doc.save_as(&root).unwrap();
+    std::fs::write(root.join("audio/take1.wav"), b"take").unwrap();
     let id = doc.project().tracks[0].id;
     doc.execute(SetTrack::new(id, TrackField::Mute(true)))
         .unwrap();
@@ -307,11 +310,31 @@ fn saving_never_brings_back_a_bundle_that_moved() {
     not_found(doc.autosave().map(drop));
     let bundle = doc.bundle().unwrap().clone();
     not_found(bundle.import_audio(moved.join("Song.kadence")).map(drop));
+    // Where a take would be recorded.
+    not_found(bundle.audio_dir_for_writing().map(drop));
     assert!(!root.exists(), "a second, empty bundle at the old place");
-    assert!(doc.is_modified());
 
-    // Saving as a new bundle is the way out, and works.
-    doc.save_as(dir.path().join("Song 2")).unwrap();
+    // Saving as a new bundle would leave the audio the clips play behind.
+    let copy = dir.path().join("Song 2");
+    not_found(doc.save_as(&copy));
+    assert!(!copy.join("Song 2.kadence").exists());
+    assert!(doc.is_modified());
+    assert_eq!(doc.bundle().unwrap().root(), root);
+
+    // Moved back, everything works again.
+    std::fs::rename(&moved, &root).unwrap();
+    doc.save_as(&copy).unwrap();
+    assert_eq!(
+        std::fs::read(copy.join("audio/take1.wav")).unwrap(),
+        b"take"
+    );
+
+    // A project that plays nothing from its bundle has nothing to lose.
+    let lone = dir.path().join("Lone");
+    let mut doc = Document::new(Project::new("Lone"));
+    doc.save_as(&lone).unwrap();
+    std::fs::remove_dir_all(&lone).unwrap();
+    doc.save_as(dir.path().join("Lone 2")).unwrap();
     assert!(!doc.is_modified());
 }
 
@@ -353,6 +376,41 @@ fn save_as_a_project_file_means_its_bundle() {
     assert_eq!(
         Document::open(&own).unwrap().project().tracks[0].name,
         "Edited"
+    );
+
+    // The document's own bundle by any other way of choosing it: its folder,
+    // its autosave, its name typed beside the folder.
+    for (i, chosen) in [
+        root.clone(),
+        root.join("Song.kadence.autosave"),
+        dir.path().join("Song.kadence"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        doc.execute(SetTrack::new(id, TrackField::Name(format!("v{i}"))))
+            .unwrap();
+        doc.autosave().unwrap();
+        doc.save_as(&chosen).unwrap();
+        assert!(!doc.is_modified(), "{chosen:?}");
+        assert_eq!(doc.bundle().unwrap().root(), root);
+        assert!(!root.join("Song").exists(), "{chosen:?}");
+        let saved = bundle::read_project(&own).unwrap();
+        assert_eq!(saved.tracks[0].name, format!("v{i}"));
+    }
+
+    // Its project file is gone and only the autosave is left to recover:
+    // choosing the file's name still means this bundle.
+    doc.execute(SetTrack::new(id, TrackField::Name("Recovered".into())))
+        .unwrap();
+    doc.autosave().unwrap();
+    std::fs::remove_file(&own).unwrap();
+    let mut recovered = Document::recover(&root).unwrap();
+    recovered.save_as(&own).unwrap();
+    assert!(!root.join("Song").exists(), "a bundle inside the bundle");
+    assert_eq!(
+        bundle::read_project(&own).unwrap().tracks[0].name,
+        "Recovered"
     );
 
     // A folder called Name.kadence is a bundle folder as it stands.
@@ -727,7 +785,10 @@ fn key_paths(value: &Value, path: &str, out: &mut std::collections::BTreeSet<Str
 #[test]
 fn the_keys_of_a_project_file_are_those_of_its_schema_version() {
     let mut p = sample_project();
-    // Fill in what the sample leaves empty, so every key shows.
+    // Fill in what the sample leaves empty, so every key shows. The list
+    // can only hold what this project holds: a new variant that carries
+    // data (an automation target, a device source) has to be added here to
+    // be guarded.
     let mut tracks = p.tracks.clone();
     let bus = tracks[2].id;
     let inst = std::sync::Arc::make_mut(&mut tracks[1]);
@@ -752,7 +813,7 @@ fn the_keys_of_a_project_file_are_those_of_its_schema_version() {
 
     let json: Value = serde_json::from_str(&bundle::to_json(&p).unwrap()).unwrap();
     let mut keys = std::collections::BTreeSet::new();
-    key_paths(&json["project"], "project", &mut keys);
+    key_paths(&json, "file", &mut keys);
     let found: String = keys.iter().map(|k| format!("{k}\n")).collect();
 
     let version = bundle::SCHEMA_VERSION;

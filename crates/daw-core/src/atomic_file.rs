@@ -132,16 +132,23 @@ fn folder(path: &Path) -> &Path {
     }
 }
 
-/// Whether `name` is one this module gives a temporary file.
-fn is_temp_name(name: &str) -> bool {
+/// The id of the process that made the temporary file called `name`, if it
+/// is a name this module gives one.
+fn temp_owner(name: &str) -> Option<u32> {
+    let (pid, serial) = name
+        .strip_prefix(PREFIX)?
+        .strip_suffix(SUFFIX)?
+        .split_once('-')?;
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    name.strip_prefix(PREFIX)
-        .and_then(|rest| rest.strip_suffix(SUFFIX))
-        .and_then(|id| id.split_once('-'))
-        .is_some_and(|(pid, serial)| digits(pid) && digits(serial))
+    (digits(pid) && digits(serial))
+        .then(|| pid.parse().ok())
+        .flatten()
 }
 
-/// Removes the temporary files in `dir` last written at least `age` ago.
+/// Removes the temporary files in `dir` that other processes last wrote at
+/// least `age` ago. This process's own are left: one may be a write that
+/// has stood still that long (the machine slept), and each is removed when
+/// its [`Replacement`] is dropped anyway.
 fn remove_stale(dir: &Path, age: Duration) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -149,7 +156,8 @@ fn remove_stale(dir: &Path, age: Duration) {
     for entry in entries.flatten() {
         // The name is checked before any stat, so a big sample folder costs
         // one comparison per entry.
-        if !entry.file_name().to_str().is_some_and(is_temp_name) {
+        let owner = entry.file_name().to_str().and_then(temp_owner);
+        if owner.is_none_or(|pid| pid == std::process::id()) {
             continue;
         }
         let stale = entry
@@ -173,7 +181,7 @@ mod tests {
         let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .filter(|n| is_temp_name(n))
+            .filter(|n| temp_owner(n).is_some())
             .collect();
         names.sort();
         names
@@ -237,8 +245,13 @@ mod tests {
     #[test]
     fn only_old_temporary_files_are_swept() {
         let dir = tempfile::tempdir().unwrap();
-        let stale = dir.path().join(".kadence-4242-0.tmp");
+        // Another process's: this one's id plus one is not this one's.
+        let stale = dir
+            .path()
+            .join(format!(".kadence-{}-0.tmp", std::process::id() + 1));
+        let own = format!(".kadence-{}-999999999.tmp", std::process::id());
         let other = [
+            own.as_str(),
             ".kadence-4242-0.tmp.bak",
             "kadence-1-1.tmp",
             ".kadence--1.tmp",

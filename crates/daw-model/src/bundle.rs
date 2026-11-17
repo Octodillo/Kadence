@@ -88,9 +88,9 @@ pub fn to_json(project: &Project) -> Result<String, FormatError> {
 
 /// A project file's content: [`to_json`] and the newline that ends it.
 fn file_content(project: &Project) -> Result<Vec<u8>, FormatError> {
-    let mut bytes = serde_json::to_vec_pretty(&envelope(project))?;
-    bytes.push(b'\n');
-    Ok(bytes)
+    let mut json = to_json(project)?;
+    json.push('\n');
+    Ok(json.into_bytes())
 }
 
 fn envelope(project: &Project) -> EnvelopeOut<'_> {
@@ -299,18 +299,46 @@ impl Bundle {
         self.root.join(BACKUPS_DIR)
     }
 
-    /// Makes sure `dir`, a folder of this bundle, is there. The bundle's
-    /// own folder is only ever made by [`Bundle::create`]: if it was moved,
-    /// renamed or deleted since, writing into a new one at the old place
-    /// would split the project from its audio, so that is an error naming
-    /// the folder.
-    fn ensure_dir(&self, dir: &Path) -> Result<(), FormatError> {
-        if !self.root.is_dir() {
-            return Err(FormatError::io(&self.root)(
+    /// Checks that the bundle's own folder is still there. Only
+    /// [`Bundle::create`] ever makes it: if it was moved, renamed or deleted
+    /// since, writing into a new one at the old place would split the
+    /// project from its audio, so that is an error naming the folder.
+    pub fn check_root(&self) -> Result<(), FormatError> {
+        if self.root.is_dir() {
+            Ok(())
+        } else {
+            Err(FormatError::io(&self.root)(
                 std::io::ErrorKind::NotFound.into(),
-            ));
+            ))
         }
-        fs::create_dir_all(dir).map_err(FormatError::io(dir))
+    }
+
+    /// Makes sure `dir`, a folder inside this bundle, is there, and returns
+    /// it. Never makes the bundle's own folder (see [`Bundle::check_root`]).
+    fn ensure_dir(&self, dir: PathBuf) -> Result<PathBuf, FormatError> {
+        self.check_root()?;
+        fs::create_dir_all(&dir).map_err(FormatError::io(&dir))?;
+        Ok(dir)
+    }
+
+    /// The `audio/` folder, made if it is missing, for writing a new file
+    /// into. Fails if the bundle's own folder is gone.
+    pub fn audio_dir_for_writing(&self) -> Result<PathBuf, FormatError> {
+        self.ensure_dir(self.audio_dir())
+    }
+
+    /// Whether `rel`, a path relative to the bundle root, is one of the
+    /// files Kadence keeps there itself: a project file or autosave directly
+    /// in the root, or anything in `backups/`. Never audio to play or copy.
+    pub(crate) fn is_own_file(rel: &Path) -> bool {
+        let mut parts = rel.iter();
+        match (parts.next().and_then(|p| p.to_str()), parts.next()) {
+            (Some(name), None) => {
+                has_suffix_ci(name, PROJECT_SUFFIX) || autosave_of(name).is_some()
+            }
+            (Some(dir), Some(_)) => dir == BACKUPS_DIR,
+            _ => false,
+        }
     }
 
     /// Reads the project file.
@@ -327,7 +355,7 @@ impl Bundle {
     /// [`Link::Follow`] only when `project` was loaded through it with
     /// [`Bundle::load`].
     pub fn save(&self, project: &Project, link: Link) -> Result<(), FormatError> {
-        self.ensure_dir(&self.root)?;
+        self.check_root()?;
         let file = self.project_file();
         let content = file_content(project)?;
         let previous = match link {
@@ -365,7 +393,7 @@ impl Bundle {
     /// Copies `file` into `backups/` under the next name. Returns this
     /// project's backups, oldest first, the new one last.
     fn backup(&self, file: &Path) -> Result<Vec<(u64, PathBuf)>, FormatError> {
-        self.ensure_dir(&self.backups_dir())?;
+        self.ensure_dir(self.backups_dir())?;
         let mut backups = self.own_backups()?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -435,7 +463,7 @@ impl Bundle {
 
     /// Writes the autosave file atomically. The project file is untouched.
     pub fn write_autosave(&self, project: &Project) -> Result<(), FormatError> {
-        self.ensure_dir(&self.root)?;
+        self.check_root()?;
         // The autosave holds the same data, so it gets the same permissions.
         write_atomic(
             &self.autosave_file(),
@@ -470,8 +498,7 @@ impl Bundle {
     /// [`crate::AudioClip::source`]. A failed copy leaves nothing behind.
     pub fn import_audio(&self, src: impl AsRef<Path>) -> Result<PathBuf, FormatError> {
         let src = src.as_ref();
-        let dir = self.audio_dir();
-        self.ensure_dir(&dir)?;
+        let dir = self.audio_dir_for_writing()?;
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("audio");
         let ext = src.extension().and_then(|s| s.to_str());
         for n in 0usize.. {
