@@ -55,3 +55,14 @@ pub(crate) fn backoff(spins: u32) {
 pub(crate) fn backoff(_spins: u32) {
     loom::thread::yield_now();
 }
+
+/// One CPU pause hint between tries of a bounded spin.
+#[cfg(not(loom))]
+pub(crate) fn spin() {
+    std::hint::spin_loop();
+}
+
+#[cfg(loom)]
+pub(crate) fn spin() {
+    loom::thread::yield_now();
+}

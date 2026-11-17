@@ -39,10 +39,6 @@ use daw_core::exclusive::Exclusive;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{PluginInstance, PluginProcessor};
 
-/// How many times the audio thread retries a plugin the main thread holds before it outputs
-/// silence for that block: a few microseconds, enough for a short main-thread call.
-const AUDIO_RETRIES: u32 = 100;
-
 /// What the audio thread plays.
 enum Audio {
     /// The whole instance, for a format that cannot [`split`](PluginInstance::split): the
@@ -454,14 +450,11 @@ impl PluginNode {
             shared.rewire.store(rewired, Ordering::Relaxed);
             Some(f(target))
         };
-        for _ in 0..AUDIO_RETRIES {
-            if let Some(r) = self.shared.inner.try_audio(&mut call) {
-                return r;
-            }
-            std::hint::spin_loop();
+        let played = self.shared.inner.try_audio_spin(&mut call);
+        if played.is_none() {
+            self.shared.busy.fetch_add(1, Ordering::Relaxed);
         }
-        self.shared.busy.fetch_add(1, Ordering::Relaxed);
-        None
+        played.flatten()
     }
 }
 
@@ -492,9 +485,7 @@ impl Node for PluginNode {
             p.process(ctx)
         });
         if played.is_none() {
-            for out in ctx.audio_out.iter_mut() {
-                out.fill(0.0);
-            }
+            ctx.silence_outputs();
         }
     }
 

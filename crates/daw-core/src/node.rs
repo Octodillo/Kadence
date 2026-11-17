@@ -232,13 +232,41 @@ pub struct PortLayout {
 
 /// Everything a node sees for one buffer. Every audio slice is exactly
 /// `frames` long; there is one slice per channel in [`PortLayout`].
-pub struct ProcessContext<'a> {
+///
+/// `'a` is the block; `'buf` is the output channels' own lifetime, kept apart so a context
+/// can be reborrowed for a shorter time ([`with_events_in`](Self::with_events_in)).
+pub struct ProcessContext<'a, 'buf> {
     pub frames: u32,
     pub transport: &'a TransportState,
     pub audio_in: &'a [&'a [f32]],
-    pub audio_out: &'a mut [&'a mut [f32]],
+    pub audio_out: &'a mut [&'buf mut [f32]],
     pub events_in: &'a EventList,
     pub events_out: &'a mut EventList,
+}
+
+impl<'buf> ProcessContext<'_, 'buf> {
+    /// Fills every output channel with silence.
+    pub fn silence_outputs(&mut self) {
+        for out in self.audio_out.iter_mut() {
+            out.fill(0.0);
+        }
+    }
+
+    /// Runs `f` on this block with `events_in` in place of its own input events.
+    pub fn with_events_in<R>(
+        &mut self,
+        events_in: &EventList,
+        f: impl FnOnce(&mut ProcessContext<'_, 'buf>) -> R,
+    ) -> R {
+        f(&mut ProcessContext {
+            frames: self.frames,
+            transport: self.transport,
+            audio_in: self.audio_in,
+            audio_out: &mut *self.audio_out,
+            events_in,
+            events_out: &mut *self.events_out,
+        })
+    }
 }
 
 /// A unit of audio processing: track, bus, built-in device or plugin.

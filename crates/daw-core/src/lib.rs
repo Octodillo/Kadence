@@ -6,12 +6,15 @@
 //! threads that depend on it. Adding a helper or a variant does not.
 //!
 //! The rest are real-time safe tools: [`queue`] for crossing threads, [`exclusive`] for
-//! sharing one object between the audio thread and the main thread,
-//! [`dispose`] for freeing memory off the audio thread, [`rtlog`] for logging
+//! sharing one object between the audio thread and the main thread, [`split`] for the
+//! audio-thread half of a plugin built on it,
+//! [`dispose`] for freeing memory off the audio thread, [`denormals`] for the
+//! floating-point mode of audio threads, [`rtlog`] for logging
 //! from it and [`meter`] for peak meters.
 //!
 //! Nothing in this crate depends on Qt or any other UI toolkit.
 
+pub mod denormals;
 pub mod dispose;
 pub mod event;
 pub mod exclusive;
@@ -20,6 +23,7 @@ pub mod node;
 pub mod plugin;
 pub mod queue;
 pub mod rtlog;
+pub mod split;
 mod sync;
 pub mod time;
 
