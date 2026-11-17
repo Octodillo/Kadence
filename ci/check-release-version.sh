@@ -34,7 +34,7 @@ check() {
 
 check Cargo.toml "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
 check CMakeLists.txt "$(sed -n 's/^project(kadence VERSION \([^ ]*\) .*/\1/p' CMakeLists.txt)"
-check packaging/arch/release/PKGBUILD "$(sed -n 's/^pkgver=//p' packaging/arch/release/PKGBUILD)"
+check packaging/arch/PKGBUILD "$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)"
 check packaging/fedora/kadence.spec "$(sed -n 's/^Version: *//p' packaging/fedora/kadence.spec)"
 # The newest release in the metainfo comes first.
 check data/io.github.octodillo.daw.metainfo.xml \

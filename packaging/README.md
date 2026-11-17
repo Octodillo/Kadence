@@ -10,7 +10,7 @@ There is no separate plugin host to install: each plugin runs in its own
 
 | Where | Recipe | Tested in CI (`.github/workflows/packaging.yml`) |
 |---|---|---|
-| Arch Linux, SteamOS (distrobox), Manjaro | `arch/PKGBUILD` (`kadence-git`); `arch/release/PKGBUILD` (`kadence`, built by the release workflow) | makepkg, namcap, install, smoke test |
+| Arch Linux, SteamOS (distrobox), Manjaro | `arch/PKGBUILD` (`kadence-git`); `arch/release-pkgbuild.sh` writes the release one (`kadence`) | makepkg, namcap, install, smoke test |
 | Fedora KDE | `fedora/kadence.spec` | offline rpmbuild, rpmlint, install, smoke test |
 | KDE neon, Kubuntu | CMake from source, or the Flatpak | install to `/usr`, smoke test |
 | Debian 13 and newer | CMake from source, or the Flatpak | install to `/usr`, smoke test (oldest supported: Qt 6.8, KF 6.13) |
@@ -19,7 +19,12 @@ There is no separate plugin host to install: each plugin runs in its own
 Every native install is smoke-tested by `ci/smoke-matrix.sh`, which runs
 `kadence --smoke-test` on X11 (Xvfb), Wayland (headless weston) and at 100%,
 125%, 150% and 200% scale. The Flatpak job runs the smoke test offscreen
-inside the sandbox and checks that libjack is visible there.
+inside the sandbox, a second time saving its projects and exports to the
+home directory outside `~/Music`, and checks that libjack is visible there.
+
+The Packaging and Release workflows run the same scripts (`ci/arch-package.sh`,
+`ci/fedora-package.sh`, `ci/flatpak-package.sh`), so a release is built the
+way every pull request was tested.
 
 ## Runtime requirements
 
@@ -40,7 +45,7 @@ recipe lists them by hand.
 
 ## Build requirements
 
-Rust 1.88 or newer, a C++ compiler, clang (bindgen), `lld` (CXX-Qt picks
+Rust 1.95 or newer (`rust-version` in `Cargo.toml`, which CI builds with), a C++ compiler, clang (bindgen), `lld` (CXX-Qt picks
 it over the deprecated gold linker), CMake, Ninja, extra-cmake-modules,
 the `-dev` packages of everything above (`lilv-0.pc` for lilv), and `jack.pc` (from
 `pipewire-jack` or JACK2's development package).
@@ -52,9 +57,11 @@ cd packaging/arch
 makepkg -si
 ```
 
-`arch/PKGBUILD` (`kadence-git`) builds from git. `arch/release/PKGBUILD`
-(`kadence`) builds a release offline from its vendored source tarball; the
-release workflow fills in its checksum and attaches it to each release.
+`arch/PKGBUILD` (`kadence-git`) builds from git. The release package
+(`kadence`) builds offline from the vendored source tarball; its PKGBUILD is
+written from the git one by `arch/release-pkgbuild.sh VERSION [TARBALL]`, so
+the two share their dependencies and build steps. The release workflow
+attaches it, with the tarball's checksum, to each release.
 
 To build a local checkout with the git PKGBUILD:
 
@@ -100,7 +107,16 @@ flatpak run io.github.octodillo.daw
 
 The manifest uses the KDE 6.11 runtime with the Rust and LLVM (for `lld`)
 SDK extensions. Audio goes through PipeWire's JACK interface; the sandbox
-gets the PipeWire socket. Plugins come from two places:
+gets the PipeWire socket and nothing else for audio.
+
+A project is a folder, which the file chooser portal cannot grant (it hands
+over single files), so the sandbox can read and write the home directory,
+the music folder and removable drives (`/run/media`, `/media`, `/mnt`).
+Projects, exports and imported samples work anywhere there; other places,
+such as a second internal disk mounted elsewhere, need
+`flatpak override --user --filesystem=/path io.github.octodillo.daw`.
+
+Plugins come from two places:
 
 - The Flatpak plugin extension point `org.freedesktop.LinuxAudio.Plugins`,
   mounted at `/app/extensions/Plugins`, which Flathub's packaged CLAP, LV2 and

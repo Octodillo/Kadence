@@ -94,6 +94,36 @@ jobs:
         with:
           command: check licenses bans sources
 
+  # The oldest Rust that Cargo.toml says can build Kadence (rust-version),
+  # which every other job, on current stable, would not notice breaking. The
+  # whole workspace, so in the Arch image for daw-app's Qt.
+  msrv:
+    name: Minimum Rust (rust-version)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      # Whether it builds, not what an older compiler's lints make of it.
+      RUSTFLAGS: ''
+    steps:
+      # Before git is installed, so this is a plain download; nothing
+      # below needs the history.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install system packages and that Rust
+        # As the default toolchain and through RUSTUP_TOOLCHAIN, which
+        # outranks rust-toolchain.toml's "stable".
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          test -n "$msrv"
+          ci/arch-build-deps.sh "$msrv"
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv
+      - name: cargo check
+        run: |
+          rustc --version
+          cargo check --workspace --all-targets --locked
+
   # The desktop images install the system libraries later crates link
   # against (Qt 6, Kirigami, JACK via PipeWire, lilv), build and test the
   # whole workspace, and check the CMake install layout.
@@ -102,18 +132,11 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - name: Install system packages
-        run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel git rustup cmake ninja clang \
-            qt6-base qt6-declarative qt6-wayland kirigami qqc2-desktop-style \
-            kcoreaddons ki18n kcrash kconfig kcolorscheme kiconthemes \
-            breeze breeze-icons noto-fonts lld gettext python \
-            extra-cmake-modules pipewire-jack lilv \
-            desktop-file-utils appstream xorg-server-xvfb
-          rustup default stable
-          rustup component add rustfmt clippy
+      # Before git is installed, so this is a plain download; nothing
+      # below needs the history.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install system packages
+        run: ci/arch-build-deps.sh stable rustfmt clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: arch
@@ -188,13 +211,7 @@ jobs:
           desktop-file-utils appstream xvfb
       - name: Install Rust
         if: steps.neon.outputs.available == 'true'
-        run: |
-          # A pinned rustup-init, checked against its sha256, rather than curl | sh.
-          curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
-          echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal --component clippy
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        run: ci/install-rustup.sh --component clippy
       - if: steps.neon.outputs.available == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
