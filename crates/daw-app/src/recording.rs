@@ -51,15 +51,12 @@ pub struct AudioRecording {
     xruns_reported: bool,
 }
 
-/// Where takes of an unsaved project go: `kadence/recordings` in the
-/// user's data directory.
+/// Where takes of an unsaved project go: `recordings` in Kadence's data
+/// folder, or in the temporary folder when there is none.
 fn unsaved_recordings_dir() -> PathBuf {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    data.join("kadence").join("recordings")
+    crate::paths::data_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join("kadence"))
+        .join("recordings")
 }
 
 /// The instrument track that hears live MIDI while none is armed: the one
