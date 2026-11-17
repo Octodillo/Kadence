@@ -15,7 +15,7 @@ thiserror.workspace = true
 # Building still needs jack.pc (libjack-jackd2-dev or pipewire-jack).
 jack.workspace = true
 libc = "0.2"
-log = "0.4"
+log.workspace = true
 
 [dev-dependencies]
 ctrlc = "3"

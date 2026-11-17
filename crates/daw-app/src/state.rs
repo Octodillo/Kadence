@@ -60,6 +60,10 @@ pub struct AppState {
     /// Counts documents opened, so views can tell a new document from an
     /// edit (document revisions start over).
     pub doc_serial: u64,
+    /// Whether each file outside the bundle opened as audio when it was
+    /// last tried, so counting them doesn't open every file on every edit.
+    /// Emptied with each new document.
+    opens_as_audio: std::collections::HashMap<PathBuf, bool>,
     /// Plugin devices that reported a state change, and when they last did.
     /// The change is recorded once the plugin has been quiet a moment, so a
     /// knob turned in its editor is one undo step.
@@ -148,6 +152,13 @@ pub fn with<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
     })
 }
 
+/// Whether `file` is audio this program can read. Collect Files copies
+/// nothing else: a project from someone else can name any file as a clip's
+/// source.
+fn opens_as_audio(file: &Path) -> bool {
+    Decoder::open(file).is_ok()
+}
+
 /// What the user calls a device: its name, or for an unnamed one its plugin
 /// or kind.
 fn device_label(d: &daw_model::Device) -> String {
@@ -187,6 +198,7 @@ impl AppState {
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
+            opens_as_audio: std::collections::HashMap::new(),
             plugin_changes: std::collections::HashMap::new(),
             plugin_values_epoch: 0,
             editor_title_format: "%1 — %2".into(),
@@ -1005,6 +1017,7 @@ impl AppState {
         // Changes of the old document's plugins, whose editors closed with them.
         self.plugin_changes.clear();
         self.doc_serial += 1;
+        self.opens_as_audio.clear();
         self.arrange.selection.clear();
         self.arrange.hovered = None;
         self.arrange.lanes.clear_selection();
@@ -1023,11 +1036,20 @@ impl AppState {
     }
 
     /// How many files clips play from outside the bundle, which Collect
-    /// Files would copy in. 0 without a bundle.
-    pub fn external_file_count(&self) -> usize {
-        self.doc.bundle().map_or(0, |b| {
-            daw_model::files::external_audio(self.doc.project(), b).len()
-        })
+    /// Files would copy in: those that open as audio. 0 without a bundle.
+    pub fn external_file_count(&mut self) -> usize {
+        let Some(bundle) = self.doc.bundle() else {
+            return 0;
+        };
+        let seen = &mut self.opens_as_audio;
+        daw_model::files::external_audio(self.doc.project(), bundle)
+            .into_iter()
+            .filter(|f| {
+                *seen
+                    .entry(f.path.clone())
+                    .or_insert_with(|| opens_as_audio(&f.path))
+            })
+            .count()
     }
 
     /// Points the clips playing the missing file `source` at `file`, and
@@ -1057,15 +1079,16 @@ impl AppState {
         Ok(changes.len())
     }
 
-    /// Copies every file clips play from outside the bundle into it.
-    /// Returns how many files were copied.
+    /// Copies every file clips play from outside the bundle into it, if it
+    /// opens as audio. Returns how many files were copied.
     pub fn collect_files(&mut self) -> Result<usize, Message> {
         let bundle = self
             .doc
             .bundle()
             .ok_or(Message::File(Context::Collect, FormatError::NoBundle))?;
-        let Some(collected) = daw_model::files::collect_files(self.doc.project(), bundle)
-            .map_err(|e| Message::File(Context::Collect, e))?
+        let Some(collected) =
+            daw_model::files::collect_files(self.doc.project(), bundle, opens_as_audio)
+                .map_err(|e| Message::File(Context::Collect, e))?
         else {
             return Ok(0);
         };

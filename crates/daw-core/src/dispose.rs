@@ -20,9 +20,6 @@ use std::sync::atomic::Ordering::Relaxed;
 use crate::queue::{Consumer, Producer, spsc};
 use crate::sync::{Arc, AtomicU64};
 
-/// Values of different types can share one collector as `Box<dyn Send>`.
-pub type Garbage = Box<dyn Send>;
-
 /// Creates a retirer/collector pair that holds up to `capacity` uncollected values.
 pub fn deferred_drop<T: Send>(capacity: usize) -> (Retirer<T>, Collector<T>) {
     let (tx, rx) = spsc(capacity);
@@ -81,7 +78,7 @@ mod tests {
 
     #[test]
     fn collects_mixed_garbage() {
-        let (mut retirer, mut collector) = deferred_drop::<Garbage>(2);
+        let (mut retirer, mut collector) = deferred_drop::<Box<dyn Send>>(2);
         let shared = std::sync::Arc::new(5);
         assert!(retirer.retire(Box::new(shared.clone())).is_ok());
         assert!(retirer.retire(Box::new(vec![1u8; 32])).is_ok());

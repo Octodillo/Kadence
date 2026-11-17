@@ -15,7 +15,7 @@ vst3 = "0.3"
 libloading = "0.8"
 rtrb = "0.3"
 libc = "0.2"
-log = "0.4"
+log.workspace = true
 
 [dev-dependencies]
 daw-test-support.workspace = true

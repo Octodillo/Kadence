@@ -383,3 +383,49 @@ fn multi_clip_drags_undo_exactly() {
     }
     assert!(edited > 200, "only {edited} drags edited anything");
 }
+
+#[test]
+fn moves_and_trims_keep_a_clip_within_what_a_project_file_may_say() {
+    use daw_model::commands::MoveClip;
+    use daw_model::{MAX_AUDIO_OFFSET, MAX_PROJECT_TICK, bundle};
+    let mut doc = Document::new(Project::new("t"));
+    let t = Track::new(TrackKind::Audio, "T");
+    let tid = t.id;
+    doc.execute(AddTrack::new(0, t)).unwrap();
+    let a = Clip::new(
+        "a",
+        TickTime(0),
+        TickTime(PPQ),
+        ClipContent::Audio(AudioClip::new("x.wav", SampleTime(0))),
+    );
+    let id = a.id;
+    doc.execute(AddClip::new(tid, a)).unwrap();
+    let before = doc.project().clone();
+    let far = TickTime(MAX_PROJECT_TICK.0 + 1);
+    let deep = SampleTime(MAX_AUDIO_OFFSET.0 + 1);
+    assert!(doc.execute(MoveClip::new(id, tid, far)).is_err());
+    assert!(
+        doc.execute(TrimClip::new(id, far, TickTime(PPQ), None))
+            .is_err()
+    );
+    assert!(
+        doc.execute(TrimClip::new(id, TickTime(0), far, None))
+            .is_err()
+    );
+    assert!(
+        doc.execute(TrimClip::new(id, TickTime(0), TickTime(PPQ), Some(deep)))
+            .is_err()
+    );
+    assert_eq!(doc.project(), &before);
+    // The furthest a clip can go still saves as a file that loads.
+    doc.execute(MoveClip::new(id, tid, MAX_PROJECT_TICK))
+        .unwrap();
+    doc.execute(TrimClip::new(
+        id,
+        MAX_PROJECT_TICK,
+        MAX_PROJECT_TICK,
+        Some(MAX_AUDIO_OFFSET),
+    ))
+    .unwrap();
+    bundle::from_json(&bundle::to_json(doc.project()).unwrap()).unwrap();
+}

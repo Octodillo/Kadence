@@ -134,11 +134,19 @@ impl<'a> SharedHandler<'a> for HostShared {
 
 impl HostLogImpl for HostShared {
     fn log(&self, severity: LogSeverity, message: &str) {
-        // Printing is not real-time safe, so messages sent from the audio thread are dropped.
-        if severity < LogSeverity::Warning || IN_PROCESS.with(Cell::get) {
+        // Logging is not real-time safe, so messages sent from the audio thread are dropped.
+        if IN_PROCESS.with(Cell::get) {
             return;
         }
-        eprintln!("[clap {severity}] {message}");
+        let level = match severity {
+            LogSeverity::Debug => log::Level::Debug,
+            LogSeverity::Info => log::Level::Info,
+            LogSeverity::Warning => log::Level::Warn,
+            // Errors, fatal errors, and reports that the host or the plugin
+            // broke the CLAP rules.
+            _ => log::Level::Error,
+        };
+        log::log!(level, "plugin says ({severity}): {message}");
     }
 }
 

@@ -4,8 +4,8 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -27,8 +27,9 @@ const MAX_DATA_BYTES: u64 = u32::MAX as u64 - (1 << 20);
 
 struct Shared {
     stop: AtomicBool,
-    /// Set by the writer when it hit an error and stopped writing.
-    failed: AtomicBool,
+    /// The error the writer hit and stopped writing on. Written once, by the
+    /// writer thread; reading it is one atomic load, so the audio thread may.
+    error: OnceLock<Arc<MediaError>>,
     dropped_frames: AtomicU64,
 }
 
@@ -76,7 +77,7 @@ impl RecordInput {
     /// True once the writer has stopped on an error. Nothing more is recorded; stop
     /// and call [`Recorder::finish`] to get the error and what was saved.
     pub fn failed(&self) -> bool {
-        self.shared.failed.load(Ordering::Relaxed)
+        self.shared.error.get().is_some()
     }
 
     /// Queue one block: one slice per channel, equal lengths. If the ring is too full
@@ -157,7 +158,7 @@ impl Recorder {
         let (tx, rx) = RingBuffer::new(capacity);
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
-            failed: AtomicBool::new(false),
+            error: OnceLock::new(),
             dropped_frames: AtomicU64::new(0),
         });
         let thread = {
@@ -196,9 +197,11 @@ impl Recorder {
         self.shared.dropped_frames.load(Ordering::Relaxed)
     }
 
-    /// True once the writer has stopped on an error; see [`RecordInput::failed`].
-    pub fn failed(&self) -> bool {
-        self.shared.failed.load(Ordering::Relaxed)
+    /// The error the writer stopped on (disk full, drive removed), once it
+    /// has. Nothing more is recorded after it; [`finish`](Self::finish)
+    /// returns the same error with what was saved.
+    pub fn error(&self) -> Option<Arc<MediaError>> {
+        self.shared.error.get().cloned()
     }
 
     /// Stop after writing everything already queued, finalize the files and save their
@@ -365,20 +368,20 @@ impl Writer {
         Ok(())
     }
 
-    fn finish(mut self, error: Option<MediaError>, dropped_frames: u64) -> RecordingStats {
+    fn finish(mut self, error: Option<Arc<MediaError>>, dropped_frames: u64) -> RecordingStats {
         let mut error = error;
         if let Some(seg) = self.current.take() {
             let (file, finalized) = seg.close();
             self.done.push(file);
             if let Err(e) = finalized {
-                error.get_or_insert(e);
+                error.get_or_insert_with(|| Arc::new(e));
             }
         }
         RecordingStats {
             files: self.done,
             frames: self.frames,
             dropped_frames,
-            error: error.map(Arc::new),
+            error,
         }
     }
 }
@@ -415,8 +418,10 @@ fn writer_loop(mut rx: Consumer<f32>, mut w: Writer, shared: Arc<Shared>) -> Rec
             since_header = Duration::ZERO;
         }
     };
-    if error.is_some() {
-        shared.failed.store(true, Ordering::Relaxed);
+    let error = error.map(Arc::new);
+    if let Some(e) = &error {
+        // Only this thread sets it, once.
+        let _ = shared.error.set(e.clone());
         // Keep the ring until the RT side lets go or we are told to stop, so it is
         // never freed on the RT thread.
         while !shared.stop.load(Ordering::Acquire) && !rx.is_abandoned() {
@@ -460,7 +465,7 @@ mod tests {
             input.write(&[&block, &block]);
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(rec.failed());
+        let live = rec.error().expect("the error can be read while recording");
         let dropped_before = rec.dropped_frames();
         assert_eq!(
             input.write(&[&block, &block]),
@@ -474,6 +479,10 @@ mod tests {
             .expect("a writer error still returns the stats");
         let err = stats.error.expect("the error is reported");
         assert!(err.to_string().contains("space"), "{err}");
+        assert!(
+            Arc::ptr_eq(&live, &err),
+            "the same error, live and at the end"
+        );
         assert_eq!(stats.files.len(), 1);
         // No peak cache is written for a failed file (here it would be /dev/full.peaks).
         assert!(stats.files[0].peaks_error.is_some());

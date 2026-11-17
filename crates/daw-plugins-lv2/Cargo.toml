@@ -13,7 +13,7 @@ daw-core.workspace = true
 daw-plugin-window = { path = "../daw-plugin-window" }
 libloading = "0.8"
 livi = "0.9"
-log = "0.4"
+log.workspace = true
 lv2-sys = "2"
 lv2_raw = "0.3"
 rtrb = "0.3"
