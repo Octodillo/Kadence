@@ -1,4 +1,5 @@
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use daw_backend::{
@@ -664,4 +665,24 @@ fn allocation_count_is_absent_without_the_counter() {
     assert!(b.wait_for_cycles(4, WAIT));
     b.stop().unwrap();
     assert_eq!(b.stats().rt_alloc_violations, None);
+}
+
+#[test]
+fn a_server_rate_change_reaches_the_backend_and_its_cycles() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(BackendConfig::default()).unwrap();
+    let before = b.sample_rate();
+    let seen = Arc::new(AtomicU32::new(0));
+    let rate = seen.clone();
+    b.start(Box::new(move |c| {
+        rate.store(c.sample_rate as u32, Ordering::Relaxed);
+    }))
+    .unwrap();
+    b.system().change_sample_rate(44_100);
+    let from = b.stats().cycles;
+    assert!(b.wait_for_cycles(from + 2, Duration::from_secs(5)));
+    assert_ne!(before, 44_100.0);
+    assert_eq!(b.sample_rate(), 44_100.0);
+    assert_eq!(seen.load(Ordering::Relaxed), 44_100);
+    b.close().unwrap();
 }

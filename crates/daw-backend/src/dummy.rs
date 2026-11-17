@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -92,6 +92,8 @@ struct World {
 struct Faults {
     server_gone: AtomicBool,
     callback_panic: AtomicBool,
+    /// The rate the server switches to, in Hz; 0 for none.
+    new_rate: AtomicU32,
 }
 
 /// The pretend system around a [`DummyBackend`]: other clients' ports, to
@@ -123,6 +125,13 @@ impl DummySystem {
     /// backend then reports [`BackendHealth::CallbackPanicked`].
     pub fn panic_callback(&self) {
         self.faults.callback_panic.store(true, Relaxed);
+    }
+
+    /// The pretend server switches to `rate` Hz under a running backend, as
+    /// PipeWire does when its clock rate is forced: from the next cycle on
+    /// the backend reports and runs at the new rate.
+    pub fn change_sample_rate(&self, rate: u32) {
+        self.faults.new_rate.store(rate, Relaxed);
     }
 
     /// Another client's port appears. `name` is the full `client:port`.
@@ -730,7 +739,7 @@ impl Worker {
     fn run(&mut self, stop: &AtomicBool) {
         let shared = self.shared.clone();
         shared.set_realtime(current_thread_is_realtime());
-        let period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
+        let mut period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
         let mut deadline = Instant::now() + period;
         let mut cycles = 0u64;
         while !stop.load(Relaxed) && self.max_cycles.is_none_or(|m| cycles < m) {
@@ -740,6 +749,12 @@ impl Worker {
             }
             if self.faults.callback_panic.swap(false, Relaxed) {
                 panic!("DummySystem::panic_callback");
+            }
+            let rate = self.faults.new_rate.swap(0, Relaxed);
+            if rate != 0 {
+                self.sample_rate = f64::from(rate);
+                shared.sample_rate.store(rate, Relaxed);
+                period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
             }
             let started = Instant::now();
             crate::rt_guard(&shared, || self.cycle());
