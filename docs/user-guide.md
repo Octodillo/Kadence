@@ -104,8 +104,9 @@ MIDI recorded over an open MIDI clip goes into that clip; otherwise a new
 clip is made. A recorded take can be undone like any edit.
 
 Closing Kadence, or starting or opening another project, while recording
-ends the take, keeps it, and asks whether to save. **Save As…** ends the
-take too; **Save** lets it run on.
+ends the take and keeps it, so you are asked whether to save it like any
+other change. **Save As…** (and the first save of a new project) ends the
+take too; **Save** in a saved project lets it run on.
 
 ## Arranging
 

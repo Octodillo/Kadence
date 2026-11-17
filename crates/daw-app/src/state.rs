@@ -394,13 +394,6 @@ impl AppState {
         !self.plugin_changes.is_empty()
     }
 
-    /// Whether closing or replacing the project now would lose something:
-    /// unsaved edits, a plugin change not yet recorded, or a take still
-    /// being recorded (which only becomes an edit when it stops).
-    pub fn has_unsaved_work(&self) -> bool {
-        self.doc.is_modified() || self.has_pending_plugin_changes() || self.is_recording()
-    }
-
     /// Records a plugin device's state, if it changed, as an undo step.
     fn record_plugin_state(&mut self, device: daw_model::DeviceId) {
         // The plugin's state is compared with the document's as the engine
@@ -988,7 +981,7 @@ impl AppState {
 
     /// Replaces the open document. The old one's unsaved changes are
     /// dropped, with their autosave and any take still being recorded:
-    /// callers ask the user first (see [`AppState::has_unsaved_work`]).
+    /// callers end the take and ask the user first.
     pub fn replace_document(&mut self, doc: Document) {
         // A take belongs to the document it was recorded for.
         self.discard_recording();

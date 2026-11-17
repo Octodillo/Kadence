@@ -262,16 +262,21 @@ Kirigami.ApplicationWindow {
         onRejected: then = null
     }
 
-    // Runs `proceed` once the project's unsaved changes are saved or the
-    // user chose to discard them; not at all if they cancel. Everything
-    // that closes or replaces the project goes through here.
-    function whenChangesHandled(proceed: var): void {
-        // A take in progress is unsaved work too: end it, so it is part of
-        // the project the question is about.
+    // Whether closing or replacing the project now would lose something.
+    // A take in progress is unsaved work the project doesn't show yet, so
+    // this ends it first: it becomes an edit like any other, or nothing if
+    // nothing was recorded.
+    function hasUnsavedWork(): bool {
         if (Project.recording) {
             Project.stop();
         }
-        if (!Project.modified) {
+        return Project.modified;
+    }
+
+    // Runs `proceed` once the project's unsaved changes are saved or the
+    // user chose to discard them; not at all if they cancel.
+    function whenChangesHandled(proceed: var): void {
+        if (!hasUnsavedWork()) {
             proceed();
             return;
         }
@@ -385,11 +390,13 @@ Kirigami.ApplicationWindow {
     property bool closeConfirmed: false
 
     onClosing: (close) => {
-        if (!closeConfirmed && Project.modified && !smokeTest && screenshotDir === "") {
+        if (!closeConfirmed && !smokeTest && screenshotDir === "" && hasUnsavedWork()) {
             close.accepted = false;
             whenChangesHandled(() => {
                 root.closeConfirmed = true;
-                root.close();
+                // Later: a close asked for while this one is still being
+                // refused does nothing.
+                Qt.callLater(root.close);
             });
             return;
         }

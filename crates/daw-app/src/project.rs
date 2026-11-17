@@ -643,7 +643,7 @@ impl qobject::Project {
                 playhead.0,
                 p.tracks.len() as i32,
                 shown_name(p, s.doc.bundle()),
-                s.has_unsaved_work(),
+                s.doc.is_modified() || s.has_pending_plugin_changes(),
                 s.doc.bundle().is_some(),
                 h.can_undo(),
                 h.can_redo(),

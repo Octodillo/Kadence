@@ -676,9 +676,13 @@ Item {
             Project.setTrackArmed(0, true);
             check(Project.save().context === undefined && !Project.modified, "save with the track armed");
             Project.toggleRecord();
-            check(Project.recording && Project.modified, "a take in progress counts as unsaved");
+            check(Project.recording && !Project.modified, "a take in progress is not in the project yet");
         },
         () => {
+            // Until the take holds some audio.
+            if (Project.timeText === "0:00.0" && test.waits < 75) {
+                return false;
+            }
             window.fileActions[0].trigger();
             check(!Project.recording && Project.undoText === "Record Audio", "New ends the take and keeps it");
             check(window.unsavedDialog.visible, "New asks about the take");
