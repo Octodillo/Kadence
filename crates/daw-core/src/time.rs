@@ -214,6 +214,19 @@ fn assert_valid_bpm(bpm: f64) {
     assert!(bpm.is_finite() && bpm > 0.0, "invalid bpm {bpm}");
 }
 
+/// Frames of an audio file at `file_rate` (what clip offsets count) as samples at
+/// `engine_rate`, to the nearest.
+pub fn file_to_engine_frames(frames: i64, file_rate: f64, engine_rate: f64) -> i64 {
+    (frames as f64 * engine_rate / file_rate).round() as i64
+}
+
+/// Samples at `engine_rate` as frames of an audio file at `file_rate`, to the nearest. Every
+/// edit that moves a clip's offset by a stretch of the timeline uses this, so the session can
+/// tell that two clips still continue each other in the file.
+pub fn engine_to_file_frames(samples: i64, file_rate: f64, engine_rate: f64) -> i64 {
+    (samples as f64 * file_rate / engine_rate).round() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

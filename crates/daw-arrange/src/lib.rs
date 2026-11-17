@@ -90,11 +90,11 @@ impl Env<'_> {
     /// Frames of a file at `rate` (what clip offsets count) as engine
     /// samples, and back.
     fn file_to_engine(&self, frames: i64, rate: f64) -> i64 {
-        (frames as f64 * self.sample_rate / rate).round() as i64
+        daw_core::time::file_to_engine_frames(frames, rate, self.sample_rate)
     }
 
     fn engine_to_file(&self, samples: i64, rate: f64) -> i64 {
-        (samples as f64 * rate / self.sample_rate).round() as i64
+        daw_core::time::engine_to_file_frames(samples, rate, self.sample_rate)
     }
 }
 

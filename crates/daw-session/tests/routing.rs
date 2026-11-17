@@ -3,17 +3,22 @@
 use std::path::Path;
 
 use daw_core::event::EventList;
+use daw_core::node::{Node, PortLayout, ProcessContext};
+use daw_core::plugin::{
+    ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
+};
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
 use daw_media::{AudioData, WavFormat, write_wav};
 use daw_model::commands::{
-    AddClip, AddDevice, AddSend, AddTrack, SendField, SetSend, SetTrack, TrackField,
+    AddClip, AddDevice, AddLane, AddSend, AddTrack, SendField, SetSend, SetTrack, TrackField,
 };
 use daw_model::{
-    AudioClip, Clip, ClipContent, Device, DeviceSource, Document, Project, Send, SendId, Track,
-    TrackId, TrackKind, TrackOutput,
+    AudioClip, AudioInput, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent,
+    Device, DeviceSource, Document, InputChannels, MidiClip, Monitoring, Note, Project, Send,
+    SendId, Track, TrackId, TrackKind, TrackOutput,
 };
-use daw_session::{Session, SessionConfig, Warning};
+use daw_session::{LoadError, LoadedPlugin, PluginLoader, Session, SessionConfig, Warning};
 
 const RATE: f64 = 48_000.0;
 const BLOCK: usize = 256;
@@ -31,8 +36,14 @@ struct Rig {
 impl Rig {
     /// An audio track playing a beat of DC at 0.5 from the start.
     fn new() -> Self {
+        Self::with(0, &[0.5])
+    }
+
+    /// An audio track playing a beat of DC, at one level per channel of its file, in a
+    /// session with `inputs` hardware inputs and the [`Fake`] plugins.
+    fn with(inputs: u16, levels: &[f32]) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        write_dc(dir.path(), "a.wav");
+        write_dc(dir.path(), "a.wav", levels);
         let mut doc = Document::new(Project::new("routing"));
         let track = Track::new(TrackKind::Audio, "Audio 1");
         let id = track.id;
@@ -50,9 +61,10 @@ impl Rig {
                 max_frames: BLOCK as u32,
                 ..Default::default()
             },
-            inputs: 0,
+            inputs,
             outputs: 2,
         });
+        session.set_plugin_loader(Some(Box::new(FakeLoader)));
         session.set_root(Some(dir.path().to_path_buf()));
         let mut rig = Self {
             doc,
@@ -89,31 +101,150 @@ impl Rig {
         self.doc.execute(SetTrack::new(track, field)).unwrap();
     }
 
+    fn plugin(&mut self, track: TrackId, index: usize, id: &str) {
+        let source = DeviceSource::Plugin {
+            format: PluginFormatKind::Clap,
+            id: id.into(),
+        };
+        let device = Device::new(id, source);
+        self.doc
+            .execute(AddDevice {
+                track,
+                index,
+                device,
+            })
+            .unwrap();
+    }
+
+    fn pre_fader_send(&mut self, from: TrackId, to: TrackId) -> SendId {
+        let id = self.send(from, to);
+        let field = SendField::PreFader(true);
+        self.doc.execute(SetSend { id, field }).unwrap();
+        id
+    }
+
     /// Plays `frames` from the start and returns the left channel.
     fn play(&mut self, frames: usize) -> Vec<f32> {
+        let [left, _] = self.play_stereo(frames);
+        left
+    }
+
+    /// Plays `frames` from the start and returns both channels.
+    fn play_stereo(&mut self, frames: usize) -> [Vec<f32>; 2] {
         self.sync();
         self.session.stop().unwrap();
         self.session.locate(TickTime(0)).unwrap();
         self.session.play().unwrap();
-        let mut out = Vec::with_capacity(frames);
+        let out = self.process(frames, 0.0);
+        self.session.collect_garbage();
+        out
+    }
+
+    /// Runs `frames` with every hardware input at `input` and returns both channels.
+    fn process(&mut self, frames: usize, input: f32) -> [Vec<f32>; 2] {
+        let mut out = [Vec::with_capacity(frames), Vec::with_capacity(frames)];
         let mut l = vec![0.0; BLOCK];
         let mut r = vec![0.0; BLOCK];
         let events = EventList::with_capacity(0);
-        while out.len() < frames {
-            let n = BLOCK.min(frames - out.len());
+        let inputs = vec![vec![input; BLOCK]; self.session.config().inputs as usize];
+        while out[0].len() < frames {
+            let n = BLOCK.min(frames - out[0].len());
+            let ins: Vec<&[f32]> = inputs.iter().map(|c| &c[..n]).collect();
             let mut outs: [&mut [f32]; 2] = [&mut l[..n], &mut r[..n]];
-            self.proc.process(n, &[], &mut outs, &events);
-            out.extend_from_slice(&l[..n]);
+            self.proc.process(n, &ins, &mut outs, &events);
+            out[0].extend_from_slice(&l[..n]);
+            out[1].extend_from_slice(&r[..n]);
         }
-        self.session.collect_garbage();
         out
     }
 }
 
-fn write_dc(dir: &Path, name: &str) {
+/// What a [`Fake`] with no inputs plays.
+const FAKE_LEVEL: f32 = 0.25;
+
+/// A plugin with the channel counts its id names ("1x1": one input, one output) and no
+/// event input. It passes each input on to the output of the same number (its last input to
+/// the outputs beyond), or with no inputs plays [`FAKE_LEVEL`].
+struct Fake {
+    descriptor: PluginDescriptor,
+}
+
+impl Node for Fake {
+    fn ports(&self) -> PortLayout {
+        PortLayout {
+            audio_in: self.descriptor.ports.0,
+            audio_out: self.descriptor.ports.1,
+            ..Default::default()
+        }
+    }
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        for (i, out) in ctx.audio_out.iter_mut().enumerate() {
+            match ctx.audio_in.get(i).or(ctx.audio_in.last()) {
+                Some(input) => out.copy_from_slice(input),
+                None => out.fill(FAKE_LEVEL),
+            }
+        }
+    }
+}
+
+impl PluginInstance for Fake {
+    fn descriptor(&self) -> &PluginDescriptor {
+        &self.descriptor
+    }
+    fn params(&self) -> Vec<ParamInfo> {
+        Vec::new()
+    }
+    fn param_value(&self, _id: u32) -> f64 {
+        0.0
+    }
+    fn save_state(&mut self) -> Result<Vec<u8>, PluginError> {
+        Ok(Vec::new())
+    }
+    fn load_state(&mut self, _data: &[u8]) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn has_editor(&self) -> bool {
+        false
+    }
+    fn open_editor(&mut self) -> Result<(), PluginError> {
+        Err(PluginError::Editor("none".into()))
+    }
+    fn close_editor(&mut self) {}
+}
+
+struct FakeLoader;
+
+impl PluginLoader for FakeLoader {
+    fn load(
+        &mut self,
+        format: &PluginFormatKind,
+        id: &str,
+        _sample_rate: f64,
+        _max_frames: u32,
+    ) -> Result<LoadedPlugin, LoadError> {
+        let ports = id.split_once('x').ok_or(LoadError::NotFound)?;
+        let count = |s: &str| s.parse::<u16>().map_err(|_| LoadError::NotFound);
+        let descriptor = PluginDescriptor {
+            format: format.clone(),
+            id: id.into(),
+            name: id.into(),
+            vendor: String::new(),
+            path: Default::default(),
+            is_instrument: false,
+            ports: (count(ports.0)?, count(ports.1)?),
+        };
+        Ok(LoadedPlugin {
+            instance: Box::new(Fake { descriptor }),
+            monitor: None,
+        })
+    }
+}
+
+fn write_dc(dir: &Path, name: &str, levels: &[f32]) {
     let data = AudioData {
         sample_rate: RATE as u32,
-        channels: vec![vec![0.5; BEAT]],
+        channels: levels.iter().map(|&level| vec![level; BEAT]).collect(),
     };
     write_wav(dir.join(name), &data, WavFormat::Float32).unwrap();
 }
@@ -276,4 +407,224 @@ fn a_routing_loop_is_left_out_and_reported() {
         session.warnings(),
         [Warning::RoutingLoop { track: "B".into() }]
     );
+}
+
+fn close(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-6
+}
+
+/// Both channels in the middle of the clip.
+fn during_stereo(out: &[Vec<f32>; 2]) -> (f32, f32) {
+    (during(&out[0]), during(&out[1]))
+}
+
+#[test]
+fn a_mono_effect_gets_both_channels_and_plays_on_both() {
+    let mut rig = Rig::with(0, &[0.5, 0.1]);
+    let (l, r) = during_stereo(&rig.play_stereo(BEAT));
+    assert!(close(l, 0.5) && close(r, 0.1), "{l} {r} without the effect");
+
+    rig.plugin(rig.track, 0, "1x1");
+    let (l, r) = during_stereo(&rig.play_stereo(BEAT));
+    assert!(close(l, 0.3) && close(r, 0.3), "{l} {r}: the mix of both");
+
+    // A mono effect first on a bus: what is routed into the bus goes the same way.
+    rig.doc.undo().unwrap();
+    let bus = rig.bus("Group");
+    rig.set(rig.track, TrackField::Output(TrackOutput::Bus(bus)));
+    rig.plugin(bus, 0, "1x1");
+    let (l, r) = during_stereo(&rig.play_stereo(BEAT));
+    assert!(close(l, 0.3) && close(r, 0.3), "{l} {r} through the bus");
+
+    // Into a stereo effect after it, the mono output goes to both inputs.
+    rig.plugin(bus, 1, "2x2");
+    let (l, r) = during_stereo(&rig.play_stereo(BEAT));
+    assert!(
+        close(l, 0.3) && close(r, 0.3),
+        "{l} {r} through both effects"
+    );
+}
+
+#[test]
+fn a_mono_instrument_plays_on_both_channels() {
+    let mut rig = Rig::new();
+    let keys = Track::new(TrackKind::Instrument, "Keys");
+    let id = keys.id;
+    rig.doc.execute(AddTrack::new(1, keys)).unwrap();
+    rig.set(rig.track, TrackField::Mute(true));
+    rig.plugin(id, 0, "0x1");
+    let (l, r) = during_stereo(&rig.play_stereo(BEAT));
+    assert!(close(l, FAKE_LEVEL) && close(r, FAKE_LEVEL), "{l} {r}");
+}
+
+/// A device without audio inputs on a bus (an instrument, a tone generator) adds its sound
+/// to what is routed into the bus instead of replacing it.
+#[test]
+fn a_device_without_inputs_adds_to_the_signal() {
+    let mut rig = Rig::new();
+    let bus = rig.bus("Group");
+    rig.set(rig.track, TrackField::Output(TrackOutput::Bus(bus)));
+    rig.plugin(bus, 0, "0x2");
+    let out = during(&rig.play(BEAT));
+    assert!(close(out, 0.5 + FAKE_LEVEL), "{out}");
+    // After an effect, too: the effect's output and the generator's are mixed.
+    rig.plugin(bus, 0, "2x2");
+    let out = during(&rig.play(BEAT));
+    assert!(close(out, 0.5 + FAKE_LEVEL), "{out}");
+}
+
+/// The engine refuses a graph with events sent to a node that takes none, and with it every
+/// later edit. Notes skip such a device.
+#[test]
+fn an_instrument_track_syncs_with_a_first_device_that_takes_no_events() {
+    let mut rig = Rig::new();
+    let keys = Track::new(TrackKind::Instrument, "Keys");
+    let id = keys.id;
+    rig.doc.execute(AddTrack::new(1, keys)).unwrap();
+    rig.plugin(id, 0, "2x2");
+    rig.sync();
+    assert!(
+        matches!(rig.session.warnings(), [Warning::NotesUnplayed { track }] if track == "Keys"),
+        "{:?}",
+        rig.session.warnings()
+    );
+    // An edit after it still reaches the engine.
+    rig.set(rig.track, TrackField::VolumeDb(-144.0));
+    assert_eq!(during(&rig.play(BEAT)), 0.0);
+
+    // The notes go to the first device that does take them.
+    let synth = DeviceSource::Builtin {
+        kind: "daw.synth".into(),
+    };
+    rig.doc
+        .execute(AddDevice {
+            track: id,
+            index: 1,
+            device: Device::new("Synth", synth),
+        })
+        .unwrap();
+    let mut notes = MidiClip::default();
+    notes
+        .notes
+        .push(Note::new(TickTime(0), TickTime(PPQ), 60, 0.8));
+    let clip = Clip::new(
+        "notes",
+        TickTime(0),
+        TickTime(PPQ),
+        ClipContent::Midi(notes),
+    );
+    rig.doc.execute(AddClip::new(id, clip)).unwrap();
+    let out = rig.play(BEAT);
+    assert!(rig.session.warnings().is_empty());
+    assert!(out.iter().any(|x| x.abs() > 1e-3), "the synth plays");
+}
+
+/// A lane on a parameter of a device that takes no events can't play; the graph is still
+/// accepted, and the user is told.
+#[test]
+fn a_lane_on_a_device_without_event_input_is_left_out() {
+    let mut rig = Rig::new();
+    rig.plugin(rig.track, 0, "2x2");
+    let device = rig.doc.project().tracks[0].devices[0].id;
+    let mut lane = AutomationLane::new(AutomationTarget::DeviceParam { device, param: 0 });
+    lane.points = vec![AutomationPoint {
+        tick: TickTime(0),
+        value: 1.0,
+        curve: 0.0,
+        step: true,
+    }];
+    rig.doc
+        .execute(AddLane {
+            track: rig.track,
+            lane,
+        })
+        .unwrap();
+    assert!(close(during(&rig.play(BEAT)), 0.5));
+    assert!(
+        matches!(rig.session.warnings(), [Warning::LaneSkipped { device }] if device == "2x2"),
+        "{:?}",
+        rig.session.warnings()
+    );
+}
+
+/// A device with inputs and no outputs (an analyser) only listens: the signal goes on
+/// past it, also when it is the first device of a bus or the master, where routed audio
+/// comes in.
+#[test]
+fn a_device_without_outputs_only_listens() {
+    let mut rig = Rig::new();
+    rig.plugin(rig.track, 0, "2x0");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "on the track");
+
+    let bus = rig.bus("Group");
+    rig.set(rig.track, TrackField::Output(TrackOutput::Bus(bus)));
+    rig.plugin(bus, 0, "2x0");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "first on a bus");
+    // An effect after it gets the routed audio as well.
+    rig.plugin(bus, 1, "2x2");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "before an effect");
+
+    let master = rig.doc.project().master.id;
+    rig.plugin(master, 0, "2x0");
+    assert!(close(during(&rig.play(BEAT)), 0.5), "first on the master");
+}
+
+#[test]
+fn mute_and_solo_silence_pre_fader_sends() {
+    let mut rig = Rig::new();
+    let bus = rig.bus("Reverb");
+    let send = rig.pre_fader_send(rig.track, bus);
+    // Only the send is heard.
+    rig.set(rig.track, TrackField::VolumeDb(-144.0));
+    assert!(close(during(&rig.play(BEAT)), 0.5));
+
+    rig.set(rig.track, TrackField::Mute(true));
+    assert_eq!(during(&rig.play(BEAT)), 0.0, "muted");
+    rig.set(rig.track, TrackField::Mute(false));
+    assert!(close(during(&rig.play(BEAT)), 0.5), "and back");
+
+    // Another track soloed, which feeds the same bus: the bus stays audible, the first
+    // track's send must not.
+    let other = Track::new(TrackKind::Audio, "Audio 2");
+    let other_id = other.id;
+    rig.doc.execute(AddTrack::new(1, other)).unwrap();
+    rig.send(other_id, bus);
+    rig.set(other_id, TrackField::Solo(true));
+    assert_eq!(during(&rig.play(BEAT)), 0.0, "not part of the solo");
+    rig.set(other_id, TrackField::Solo(false));
+    assert!(close(during(&rig.play(BEAT)), 0.5));
+
+    // Switching the send back to post-fader takes the stage out again: the send follows
+    // the fader, and a mute has no stage to reach.
+    let field = SendField::PreFader(false);
+    rig.doc.execute(SetSend { id: send, field }).unwrap();
+    assert_eq!(during(&rig.play(BEAT)), 0.0, "post-fader");
+    rig.set(rig.track, TrackField::VolumeDb(0.0));
+    assert!(close(during(&rig.play(BEAT)), 1.0), "track and send");
+    rig.set(rig.track, TrackField::Mute(true));
+    assert_eq!(during(&rig.play(BEAT)), 0.0, "muted");
+}
+
+/// The usual cue mix while tracking: an armed track without effects, monitored, with a
+/// pre-fader send. The send carries the input, not only the track's clips.
+#[test]
+fn a_pre_fader_send_carries_the_monitored_input() {
+    let mut rig = Rig::with(2, &[0.5]);
+    let cue = rig.bus("Cue");
+    rig.pre_fader_send(rig.track, cue);
+    rig.set(rig.track, TrackField::VolumeDb(-144.0));
+    rig.set(rig.track, TrackField::Armed(true));
+    rig.set(
+        rig.track,
+        TrackField::AudioInput(AudioInput {
+            channels: InputChannels::Stereo(0),
+            monitor: Monitoring::Auto,
+        }),
+    );
+    rig.sync();
+    assert!(rig.session.is_monitoring(rig.track));
+    // Stopped, so no clip plays: what comes out is the input, through the send.
+    let [left, right] = rig.process(8 * BLOCK, 0.2);
+    let (l, r) = (left[left.len() - 1], right[right.len() - 1]);
+    assert!(close(l, 0.2) && close(r, 0.2), "{l} {r}");
 }

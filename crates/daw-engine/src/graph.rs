@@ -376,15 +376,15 @@ impl GraphDesc {
         &self.event_edges
     }
 
+    /// A node's ports as the graph will be compiled with them: a reused node's are those it
+    /// has in the running graph.
+    pub fn ports(&self, id: NodeId) -> Option<PortLayout> {
+        self.nodes.get(id.0 as usize).map(|n| n.node.ports())
+    }
+
     fn channels_between(&self, from: NodeId, to: NodeId) -> u16 {
-        let outs = self
-            .nodes
-            .get(from.0 as usize)
-            .map_or(0, |n| n.node.ports().audio_out);
-        let ins = self
-            .nodes
-            .get(to.0 as usize)
-            .map_or(0, |n| n.node.ports().audio_in);
+        let outs = self.ports(from).map_or(0, |p| p.audio_out);
+        let ins = self.ports(to).map_or(0, |p| p.audio_in);
         outs.min(ins)
     }
 }
