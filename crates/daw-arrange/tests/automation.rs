@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use daw_arrange::automation::{SILENCE_DB, lane_targets, static_value};
-use daw_arrange::{Arrange, Env, Hit, LaneScale, ParamCatalog, PointShape, Pointer, Prim, Snap};
+use daw_arrange::{
+    Arrange, Env, Hit, LaneScale, Outcome, ParamCatalog, PointShape, Pointer, Prim, Snap,
+};
 use daw_core::event::ParamId;
 use daw_core::time::{PPQ, SegmentTempoMap, TickTime};
 use daw_model::commands::{AddDevice, AddSend, AddTrack};
@@ -560,4 +562,156 @@ fn moving_points_in_time_keeps_their_values() {
     assert_eq!(pts[0].value, -80.0);
     assert_eq!(pts[1].tick, TickTime(2 * BAR + BEAT));
     assert_eq!(pts[1].value, 12.0);
+}
+
+/// Issue #204 item 8, for lanes: Escape takes a point drag back without
+/// leaving it to redo, and a drag back to the start is no edit.
+#[test]
+fn cancelled_and_returned_point_drags_leave_no_step() {
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Pan);
+    r.click(r.x(BAR), r.y(0, 0, 0.5));
+    // Something to redo, which a drag that comes to nothing must leave.
+    r.click(r.x(2 * BAR), r.y(0, 0, 0.5));
+    r.doc.undo().unwrap();
+    let redo = r.doc.history().redo_label();
+    let before = r.points(lane);
+    let steps = r.doc.history().undo_len();
+    let position = r.doc.history().position();
+    let tempo = r.tempo.clone();
+    let env = env(&tempo);
+    let (x, y) = (r.x(BAR), r.y(0, 0, 0.5));
+
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 64.0, y - 10.0));
+    assert_ne!(r.points(lane), before);
+    assert_eq!(r.doc.history().undo_len(), steps + 1);
+    let o = r.arrange.cancel(&mut r.doc);
+    assert!(o.document && o.error.is_none());
+    assert_eq!(r.points(lane), before);
+    assert_eq!(r.doc.history().redo_len(), 1, "only the old redo step");
+    assert_eq!(r.doc.history().redo_label(), redo);
+    assert_eq!(r.doc.history().position(), position);
+
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    let away = Pointer::left(x + 64.0, y - 10.0);
+    assert!(r.arrange.motion(&mut r.doc, &env, away).document);
+    // The same spot again is nothing new: no edit, no resync.
+    let revision = r.doc.revision();
+    assert_eq!(r.arrange.motion(&mut r.doc, &env, away), Outcome::default());
+    assert_eq!(r.doc.revision(), revision);
+    r.arrange.motion(&mut r.doc, &env, Pointer::left(x, y));
+    r.arrange.release(&mut r.doc, Pointer::left(x, y));
+    assert_eq!(r.points(lane), before);
+    assert_eq!(r.doc.history().undo_len(), steps);
+    assert_eq!(r.doc.history().position(), position);
+
+    // Escape during the click that adds a point takes the point away too.
+    let x = r.x(3 * BAR);
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 30.0, y - 5.0));
+    assert_eq!(r.points(lane).len(), 2);
+    assert_eq!(r.doc.history().undo_len(), steps + 1);
+    r.arrange.cancel(&mut r.doc);
+    assert_eq!(r.points(lane), before);
+    assert_eq!(r.doc.history().redo_len(), 1);
+    assert_eq!(r.doc.history().redo_label(), redo);
+}
+
+/// A drag of several points that ends where it began is still a drag: it
+/// keeps them all selected.
+#[test]
+fn a_returned_drag_keeps_the_points_selected() {
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Pan);
+    for bar in 1..=2 {
+        r.click(r.x(bar * BAR), r.y(0, 0, 0.5));
+    }
+    let (x, y) = (r.x(BAR), r.y(0, 0, 0.5));
+    let ctrl = Pointer {
+        ctrl: true,
+        ..Pointer::left(x, y)
+    };
+    r.arrange.press(&mut r.doc, ctrl);
+    r.arrange.release(&mut r.doc, ctrl);
+    let before = r.points(lane);
+    let tempo = r.tempo.clone();
+    let env = env(&tempo);
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x + 40.0, y - 10.0));
+    assert_ne!(r.points(lane), before);
+    r.arrange.motion(&mut r.doc, &env, Pointer::left(x, y));
+    r.arrange.release(&mut r.doc, Pointer::left(x, y));
+    assert_eq!(r.points(lane), before);
+    assert_eq!(
+        r.arrange.lanes.selection(r.doc.project()).unwrap().1.len(),
+        2
+    );
+}
+
+/// Issue #204 item 2: a press on a point with a little pointer jitter is a
+/// click. It selects the point and leaves it, and the history, alone.
+#[test]
+fn clicking_a_point_does_not_move_it() {
+    let mut r = Rig::new();
+    let lane = r.add_lane(0, AutomationTarget::Volume);
+    for bar in 1..=2 {
+        r.click(r.x(bar * BAR), r.y(0, 0, 0.5));
+    }
+    r.doc.seal();
+    let before = r.points(lane);
+    let steps = r.doc.history().undo_len();
+    let tempo = r.tempo.clone();
+    let env = env(&tempo);
+
+    // Both points selected, then a shaky click on the first.
+    let (x, y) = (r.x(BAR), r.y(0, 0, 0.5));
+    let ctrl = Pointer {
+        ctrl: true,
+        ..Pointer::left(x, y)
+    };
+    r.arrange.press(&mut r.doc, ctrl);
+    r.arrange.release(&mut r.doc, ctrl);
+    assert_eq!(
+        r.arrange.lanes.selection(r.doc.project()).unwrap().1.len(),
+        2
+    );
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    for (dx, dy) in [(0.0, 1.0), (1.0, 2.0), (-2.0, 1.0)] {
+        let o = r
+            .arrange
+            .motion(&mut r.doc, &env, Pointer::left(x + dx, y + dy));
+        assert!(!o.document);
+    }
+    r.arrange
+        .release(&mut r.doc, Pointer::left(x - 2.0, y + 1.0));
+    assert_eq!(r.points(lane), before, "the click changed the value");
+    assert_eq!(r.doc.history().undo_len(), steps);
+    assert_eq!(
+        r.arrange.lanes.selection(r.doc.project()).unwrap().1,
+        [0].into_iter().collect(),
+        "a click selects only the point clicked"
+    );
+
+    // Past the dead zone it is a drag, measured from the press.
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x, y - 10.0));
+    r.arrange.release(&mut r.doc, Pointer::left(x, y - 10.0));
+    assert!(r.points(lane)[0].value > before[0].value);
+    assert_eq!(r.doc.history().undo_len(), steps + 1);
+
+    // A press that adds a point drags it at once.
+    let x = r.x(3 * BAR);
+    r.arrange.press(&mut r.doc, Pointer::left(x, y));
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x, y - 1.0));
+    let added = r.points(lane)[2].value;
+    r.arrange
+        .motion(&mut r.doc, &env, Pointer::left(x, y - 2.0));
+    assert!(r.points(lane)[2].value > added);
+    r.arrange.release(&mut r.doc, Pointer::left(x, y - 2.0));
 }
