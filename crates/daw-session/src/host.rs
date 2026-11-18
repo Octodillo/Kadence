@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Latency, MAX_MIDI_INPUTS,
-    MidiInputPort, Pacing, PortDirection, PortFilter, PortInfo, PortKind,
+    AudioBackend, BackendConfig, BackendError, DummyBackend, JackBackend, Latency, MAIN_MIDI_INPUT,
+    MAIN_MIDI_OUTPUT, MAX_MIDI_INPUTS, MidiInputPort, Pacing, PortDirection, PortFilter, PortKind,
 };
 use daw_core::event::EventList;
 use daw_core::time::TickTime;
@@ -167,9 +167,6 @@ impl AudioHost {
             midi_output: false,
             sample_rate: Some(config.sample_rate),
             buffer_size: Some(config.buffer_size),
-            // MIDI sources are connected to ports of their own below, not
-            // all to `midi_in`, so audio is connected here if at all.
-            auto_connect: false,
             midi_capacity: 1024,
         })?;
         let rate = backend.sample_rate();
@@ -200,7 +197,9 @@ impl AudioHost {
             );
         }))?;
         if config.auto_connect {
-            connect_audio(backend.as_mut());
+            // Audio only: MIDI sources get ports of their own, not all the
+            // main input.
+            daw_backend::connect_physical(backend.as_mut(), false);
         }
         Ok(Self {
             backend,
@@ -282,7 +281,7 @@ impl AudioHost {
             .collect();
         let mut name = base.clone();
         let mut n = 2;
-        while taken.contains(&name) || name == "midi_in" || name == "midi_out" {
+        while taken.contains(&name) || name == MAIN_MIDI_INPUT || name == MAIN_MIDI_OUTPUT {
             name = format!("{base} {n}");
             n += 1;
         }
@@ -445,37 +444,6 @@ impl AudioHost {
 
     pub fn position(&self) -> TickTime {
         self.session.position()
-    }
-}
-
-/// Connects our audio ports to the system's physical ones, in order, like
-/// the backends' own auto-connect.
-fn connect_audio(backend: &mut dyn AudioBackend) {
-    let list = |direction, ours: bool| -> Vec<PortInfo> {
-        let filter = PortFilter {
-            kind: Some(PortKind::Audio),
-            direction: Some(direction),
-            physical_only: !ours,
-        };
-        backend
-            .list_ports(&filter)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|p| p.is_ours == ours)
-            .collect()
-    };
-    use PortDirection::{Input, Output};
-    let pairs: Vec<(String, String)> = list(Output, true)
-        .into_iter()
-        .zip(list(Input, false))
-        .chain(list(Output, false).into_iter().zip(list(Input, true)))
-        .map(|(a, b)| (a.name, b.name))
-        .collect();
-    for (from, to) in pairs {
-        // Already-connected pairs (WirePlumber may link us first) are fine.
-        if let Err(e) = backend.connect(&from, &to) {
-            log::debug!("auto-connect {from} -> {to}: {e}");
-        }
     }
 }
 

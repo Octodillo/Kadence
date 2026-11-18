@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use daw_core::event::{Event, EventKind, EventList, ParamId};
+use daw_core::event::{Event, EventKind, EventList, ParamId, midi};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor};
 use daw_core::split::{SharedAudio, SplitAudio};
@@ -12,7 +12,7 @@ use livi::event::{LV2AtomEventBuilder, LV2AtomSequence};
 use livi::{EmptyPortConnections, PortIndex, PortType};
 
 use crate::atom::{self, Urids};
-use crate::{Shared, midi, ring, ui};
+use crate::{Shared, ring, ui};
 
 const LV2_CORE: &str = "http://lv2plug.in/ns/lv2core#";
 const PPROPS_NOT_AUTOMATIC: &str = "http://lv2plug.in/ns/ext/port-props#notAutomatic";
@@ -567,7 +567,7 @@ impl Audio {
                 if ty == self.urids.midi_event
                     && self.atom_out_midi[j]
                     && let (Some(out), Some(kind)) =
-                        (events_out.as_deref_mut(), midi::from_midi(ev.data))
+                        (events_out.as_deref_mut(), midi::decode(ev.data))
                 {
                     let time = ev.time.clamp(0, (n - 1) as i64);
                     let frame = (start as i64 + time) as u32;
@@ -666,7 +666,7 @@ impl Audio {
                     pending_at = at;
                 }
                 ref kind => {
-                    let (Some(i), Some((bytes, len))) = (self.midi_in, midi::to_midi(kind)) else {
+                    let (Some(i), Some((bytes, len))) = (self.midi_in, midi::encode(kind)) else {
                         continue;
                     };
                     let bytes = &bytes[..len];
@@ -1221,7 +1221,7 @@ mod tests {
         });
         let arrived: Vec<_> = events_out.iter().map(|e| (e.frame, e.kind)).collect();
         let sent: Vec<_> = (0..notes)
-            .map(|key| (frames - 1, midi::from_midi(&[0x80, 60 + key, 0]).unwrap()))
+            .map(|key| (frames - 1, midi::decode(&[0x80, 60 + key, 0]).unwrap()))
             .collect();
         assert_eq!(arrived, sent);
     }

@@ -123,6 +123,10 @@ signature, and the metronome.
 - **Bus**, to group tracks or share an effect such as reverb.
 
 Right-click a track header to rename, move, delete or show its automation.
+On a touch screen, hold a finger on it; from the keyboard, press Menu or
+Shift+F10 on a focused header or timeline. The page menu also has **Rename
+Track…** (F2), **Move Track Up** and **Down** (Alt+Up, Alt+Down) and **Delete
+Track** for the selected track.
 **M** mutes a track and **S** solos it.
 
 ## Recording
@@ -182,6 +186,9 @@ Double-click a MIDI clip to open it on the **Edit** page.
   way. **Humanize**, **Legato** and **Fix Overlaps** are in the same menu.
 - Up and Down transpose by a semitone, Shift+Up and Shift+Down by an
   octave.
+- On a touch screen, a finger on the empty grid scrolls and two fingers
+  zoom; a finger on a note moves it, and holding still opens the menu.
+  From the keyboard, Menu or Shift+F10 opens it.
 - **Flats** on the toolbar, also in the General settings, names the black
   keys as flats (B♭) instead of sharps (A♯).
 

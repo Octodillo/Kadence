@@ -61,6 +61,18 @@ Kirigami.ApplicationWindow {
     // should press that button rather than start playback.
     readonly property bool buttonHasKeyboardFocus: activeFocusItem instanceof QQC2.AbstractButton
                                                    && activeFocusItem.visualFocus
+    // True when the focused control moves with the arrow keys (a fader, a
+    // combo box, a number or text field): a window shortcut on one of
+    // those keys steps aside for it in the same way.
+    readonly property bool controlHasArrowKeys: activeFocusItem instanceof QQC2.Slider
+                                                || activeFocusItem instanceof QQC2.SpinBox
+                                                || controlHasHomeKey
+    // The same for Home: a slider and a number box have no use for it, so
+    // there it still goes to the start.
+    readonly property bool controlHasHomeKey: activeFocusItem instanceof QQC2.Dial
+                                              || activeFocusItem instanceof QQC2.ComboBox
+                                              || activeFocusItem instanceof TextInput
+                                              || activeFocusItem instanceof TextEdit
 
     // Shared by every page's toolbar.
     readonly property Kirigami.Action playAction: Kirigami.Action {
@@ -96,7 +108,7 @@ Kirigami.ApplicationWindow {
         id: goToStartAction
         text: i18nc("@action", "Go to Start")
         icon.name: "media-skip-backward"
-        shortcut: "Home"
+        shortcut: root.controlHasHomeKey ? "" : "Home"
         onTriggered: Project.goToStart()
     }
 
@@ -414,7 +426,7 @@ Kirigami.ApplicationWindow {
             }
         }
         onClosed: pickHandler = null
-        onConfigureRequested: root.openSettings()
+        onConfigureRequested: root.openSettings(SettingsPage.Tab.Audio)
     }
 
     Kirigami.Action {
@@ -426,7 +438,7 @@ Kirigami.ApplicationWindow {
         text: i18nc("@action:inmenu", "Configure Kadence…")
         icon.name: "configure"
         shortcut: StandardKey.Preferences
-        onTriggered: root.openSettings()
+        onTriggered: root.openSettings(SettingsPage.Tab.General)
     }
 
     // Shown in the drawer like the pages: checked while About is open.
@@ -582,7 +594,7 @@ Kirigami.ApplicationWindow {
         case Engine.AudioFailed:
             showPassiveNotification(engineError.text, "long",
                                     i18nc("@action:button", "Audio Settings…"),
-                                    () => root.openSettings());
+                                    () => root.openSettings(SettingsPage.Tab.Audio));
             break;
         }
     }
@@ -649,8 +661,9 @@ Kirigami.ApplicationWindow {
         return pluginBrowser;
     }
 
-    function openSettings(): Item {
-        return pageStack.pushDialogLayer(Qt.resolvedUrl("SettingsPage.qml"), {}, {
+    // Opens the settings on `tab`, a SettingsPage.Tab.
+    function openSettings(tab: int): Item {
+        return pageStack.pushDialogLayer(Qt.resolvedUrl("SettingsPage.qml"), { currentTab: tab }, {
             title: i18nc("@title:window", "Configure — Kadence"),
             width: Kirigami.Units.gridUnit * 32,
             height: Kirigami.Units.gridUnit * 24

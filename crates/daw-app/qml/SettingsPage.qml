@@ -11,7 +11,13 @@ Kirigami.ScrollablePage {
 
     title: i18nc("@title", "Settings")
 
-    // For the self test.
+    // The tabs, in order.
+    enum Tab {
+        General,
+        Audio,
+        Midi
+    }
+    // The tab showing, a SettingsPage.Tab.
     property alias currentTab: tabs.currentIndex
 
     header: QQC2.TabBar {

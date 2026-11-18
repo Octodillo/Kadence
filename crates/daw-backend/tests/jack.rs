@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use daw_backend::{
     AudioBackend, BackendConfig, BackendHealth, BackendStats, JackBackend, PortDirection,
-    PortFilter, PortKind, RtAllocCounter,
+    PortFilter, PortKind, RtAllocCounter, connect_physical,
 };
 use daw_core::event::{Event, EventKind};
 
@@ -343,7 +343,7 @@ fn audio_and_midi_flow_between_two_clients() {
 /// are someone's speakers.
 #[test]
 #[ignore = "needs a running JACK server"]
-fn auto_connect_reaches_physical_ports() {
+fn connect_physical_reaches_physical_ports() {
     if std::env::var("KADENCE_TEST_PHYSICAL_PORTS").as_deref() != Ok("1") {
         eprintln!("skipped: set KADENCE_TEST_PHYSICAL_PORTS=1 on a jackd -d dummy server");
         return;
@@ -351,11 +351,7 @@ fn auto_connect_reaches_physical_ports() {
     let _g = serial();
     let me = unique("auto");
     let mut b = JackBackend::new();
-    b.open(BackendConfig {
-        auto_connect: true,
-        ..cfg(&me)
-    })
-    .unwrap();
+    b.open(cfg(&me)).unwrap();
     let physical_in = b
         .list_ports(&PortFilter {
             kind: Some(PortKind::Audio),
@@ -364,6 +360,7 @@ fn auto_connect_reaches_physical_ports() {
         })
         .unwrap();
     b.start(Box::new(|_| {})).unwrap();
+    connect_physical(&mut b, true);
     let first = physical_in
         .first()
         .expect("the dummy server has playback ports");

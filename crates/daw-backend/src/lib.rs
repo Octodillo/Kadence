@@ -16,14 +16,15 @@
 //! [`BackendStats::rt_alloc_violations`].
 
 mod alloc;
+mod connect;
 mod cycle;
 mod dummy;
 mod jack_backend;
 mod link_log;
-pub mod midi;
 mod stats;
 
 pub use alloc::RtAllocCounter;
+pub use connect::{MAIN_MIDI_INPUT, MAIN_MIDI_OUTPUT, connect_physical};
 pub use cycle::BackendCycle;
 pub(crate) use cycle::{MidiInputs, MidiInputsControl, midi_inputs};
 pub use dummy::{DummyBackend, DummySystem, MidiInjector, MidiTap, Pacing};
@@ -62,10 +63,6 @@ pub struct BackendConfig {
     /// server may refuse or change it later. Callbacks must read
     /// [`BackendCycle::frames`] every cycle, never assume a fixed size.
     pub buffer_size: Option<u32>,
-    /// Connect our ports to the system's physical ports after starting:
-    /// the speakers, the microphone and every MIDI device. Off by default,
-    /// so nothing is heard unless asked for.
-    pub auto_connect: bool,
     /// Capacity of the MIDI in and MIDI out event lists, per cycle. Events
     /// beyond it are dropped and counted in [`BackendStats::midi_dropped`].
     pub midi_capacity: usize,
@@ -81,7 +78,6 @@ impl Default for BackendConfig {
             midi_output: false,
             sample_rate: None,
             buffer_size: None,
-            auto_connect: false,
             midi_capacity: 1024,
         }
     }
@@ -280,7 +276,7 @@ pub fn port_short_name(name: &str) -> String {
     }
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
-        "midi_in".into()
+        MAIN_MIDI_INPUT.into()
     } else {
         trimmed.to_owned()
     }
@@ -312,7 +308,7 @@ mod tests {
     fn short_names_are_capped_in_bytes_on_a_char_boundary() {
         assert_eq!(port_short_name("seq out"), "seq out");
         assert_eq!(port_short_name("a:b"), "a-b");
-        assert_eq!(port_short_name("  "), "midi_in");
+        assert_eq!(port_short_name("  "), crate::MAIN_MIDI_INPUT);
         let wide = "🎹".repeat(40);
         let short = port_short_name(&wide);
         assert!(short.len() <= 64, "{} bytes", short.len());
