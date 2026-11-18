@@ -3,9 +3,10 @@
 //! [`crate::transport`]).
 //!
 //! Its properties follow the state when [`sync`](qobject::Transport::sync)
-//! is called: by the UI clock on every beat (the playhead moves) and on
-//! every revision of the project. Its own edits emit `edited`, so the
-//! project's revision follows at once.
+//! is called, which only the UI clock (`UiClock.qml`) does: on every beat
+//! (the playhead moves) and on every revision of the project. Its own edits
+//! emit `edited`, on which the clock moves the project's revision, and so
+//! these properties too.
 
 use std::pin::Pin;
 
@@ -211,10 +212,11 @@ impl qobject::Transport {
         this.set_counting_in(shown.counting_in);
     }
 
-    /// Runs `f` on the state as an edit, then shows it here and says so.
-    fn edit(mut self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
+    /// Runs `f` on the state as an edit and says so. The properties here
+    /// follow with everything else's, through the project's revision (see
+    /// `UiClock.qml`), so QML sees them all change together.
+    fn edit(self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
         state::with(|s| s.edit(f));
-        self.as_mut().sync();
         self.edited();
     }
 

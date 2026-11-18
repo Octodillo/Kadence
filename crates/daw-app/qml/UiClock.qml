@@ -26,9 +26,10 @@ QtObject {
     id: clock
 
     // The project changed, whoever changed it (`Project.revision` or
-    // `Automation.revision` moved). The track list has followed already,
-    // so a view that listens here lays out against the tracks and lanes
-    // as they are now. Views redraw from this, not from the two revisions.
+    // `Automation.revision` moved). Tracks, Transport and Arrangement have
+    // followed already, so a view that listens here lays out against the
+    // tracks, lanes and selection as they are now. Views redraw from this,
+    // not from the two revisions.
     signal revised()
 
     // About 30 times a second: `seconds` since the last one. For meters
@@ -89,8 +90,10 @@ QtObject {
         }
     }
 
-    // A change is shown in this order: the track list first, then
-    // everything that listens to `revised`.
+    // A change is shown in this order: the track list, the transport and
+    // the arrangement, then everything that listens to `revised`. Transport
+    // and Arrangement follow the project only through here (and Transport
+    // on every beat as well).
     function revise(): void {
         Tracks.sync();
         Transport.sync();

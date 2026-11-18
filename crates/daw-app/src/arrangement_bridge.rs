@@ -4,8 +4,9 @@
 //! [`ArrangeView`](crate::arrange_view).
 //!
 //! Its properties follow the state when [`sync`](qobject::Arrangement::sync)
-//! is called, on every revision of the project (see `UiClock.qml`). Its own
-//! edits emit `edited`, so the project's revision follows at once.
+//! is called, which only the UI clock (`UiClock.qml`) does, on every
+//! revision of the project. Its own edits emit `edited`, on which the clock
+//! moves the project's revision, and so these properties too.
 
 use std::pin::Pin;
 
@@ -132,10 +133,11 @@ impl qobject::Arrangement {
         self.set_selected_track(selected);
     }
 
-    /// Runs `f` on the state as an edit, then shows it here and says so.
-    fn edit(mut self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
+    /// Runs `f` on the state as an edit and says so. The properties here
+    /// follow with everything else's, through the project's revision (see
+    /// `UiClock.qml`), so QML sees them all change together.
+    fn edit(self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
         state::with(|s| s.edit(f));
-        self.as_mut().sync();
         self.edited();
     }
 

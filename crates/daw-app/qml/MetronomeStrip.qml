@@ -86,7 +86,7 @@ StripFrame {
         checked: Transport.metronome
         icon.name: "chronometer"
         text: Transport.metronome ? i18nc("@action:button metronome is on", "On")
-                                : i18nc("@action:button metronome is off", "Off")
+                                  : i18nc("@action:button metronome is off", "Off")
         Accessible.name: i18nc("@action:button", "Metronome")
         QQC2.ToolTip.text: i18nc("@info:tooltip", "Metronome: click on every beat while playing")
         QQC2.ToolTip.visible: hovered
