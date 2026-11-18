@@ -1,6 +1,7 @@
 //! Plays projects with a plugin device: the `daw-clap-test-plugin` CLAP, a gain whose state is
 //! its gain, loaded in a sandbox host through the session's plugin loader.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -336,18 +337,26 @@ impl Rig {
         self.session.play().unwrap();
     }
 
-    /// Runs until the plugin's host has an answer about real-time priority.
+    /// Runs until the plugin's host, which asks for real-time priority, has an answer. Until
+    /// a tick has heard from the host, the session knows of no question (`Off`).
     fn realtime_answer(&mut self) -> Realtime {
         let start = Instant::now();
         loop {
+            self.run(BLOCK);
             let answer = self.session.plugin_realtime(self.device).unwrap();
-            if answer != Realtime::Pending {
+            if !matches!(answer, Realtime::Off | Realtime::Pending) {
                 return answer;
             }
             assert!(start.elapsed() < Duration::from_secs(20), "no answer");
-            self.run(BLOCK);
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn said_not_realtime(&self) -> usize {
+        self.news
+            .iter()
+            .filter(|w| **w == Warning::PluginsNotRealtime)
+            .count()
     }
 
     /// Kills the plugin's sandbox host and runs until the session notices.
@@ -760,41 +769,55 @@ fn a_crashed_plugin_is_reported_bypassed_and_reloaded() {
     rig.settles_at(LEVEL * 0.5);
 }
 
-/// A host refused real-time priority is said once: it is about the system, not one plugin,
-/// so neither another host nor the next session says it again. Whether this machine grants
-/// it differs (a container may give it directly, a desktop through a broker, a build machine
-/// not at all), so the test follows what the host was told.
+/// Hosts that ask for real-time priority and cannot get it: no `CAP_SYS_NICE`, no
+/// `RLIMIT_RTPRIO`, and no D-Bus to reach RealtimeKit or the portal through. Whatever this
+/// machine would grant.
+fn refused_real_time(mut config: SandboxConfig) -> SandboxConfig {
+    let (_, host) = binaries();
+    let nowhere = "unix:path=/nonexistent/kadence-test-bus";
+    let mut args: Vec<OsString> = vec![
+        format!("DBUS_SYSTEM_BUS_ADDRESS={nowhere}").into(),
+        format!("DBUS_SESSION_BUS_ADDRESS={nowhere}").into(),
+        "prlimit".into(),
+        "--rtprio=0:0".into(),
+        "--".into(),
+    ];
+    // SAFETY: plain syscall wrapper.
+    if unsafe { libc::geteuid() } == 0 {
+        // Root may raise priorities whatever its limit says, unless it gives that up.
+        args.extend([
+            "setpriv".into(),
+            "--bounding-set=-sys_nice".into(),
+            "--".into(),
+        ]);
+    }
+    args.push(host.into());
+    config.launcher = HostLauncher::new("env", args);
+    config.rt_priority = Some(1);
+    config
+}
+
+/// A host refused real-time priority, with no other host granted it, is said once: it is
+/// about the system, not one plugin, so the next session does not say it again.
 #[test]
 fn a_host_refused_real_time_priority_is_reported_once() {
-    let asks = |mut c: SandboxConfig| {
-        c.rt_priority = Some(1);
-        c
-    };
-    let mut rig = Rig::loading_with(Box::new(loader_with(asks)));
-    let answer = rig.realtime_answer();
-    let said = |rig: &Rig| {
-        let warnings = rig.news.iter();
-        warnings
-            .filter(|w| **w == Warning::PluginsNotRealtime)
-            .count()
-    };
-    let once = usize::from(answer == Realtime::Refused);
-    assert_eq!(said(&rig), once, "{answer:?}");
-    assert_eq!(rig.session.plugin_realtime(rig.device), Some(answer));
+    let mut rig = Rig::loading_with(Box::new(loader_with(refused_real_time)));
+    assert_eq!(rig.realtime_answer(), Realtime::Refused);
+    assert_eq!(rig.said_not_realtime(), 1);
 
     rig.restart_audio();
-    assert_eq!(rig.realtime_answer(), answer);
+    assert_eq!(rig.realtime_answer(), Realtime::Refused);
     rig.run(BLOCK * 8);
-    assert_eq!(said(&rig), once);
+    assert_eq!(rig.said_not_realtime(), 1);
 }
 
 /// A plugin that does not ask for real-time priority is not refused it.
 #[test]
 fn a_host_that_does_not_ask_for_real_time_priority_says_nothing() {
     let mut rig = Rig::new();
-    assert_eq!(rig.realtime_answer(), Realtime::Off);
-    rig.run(BLOCK * 8);
-    assert!(!rig.news.contains(&Warning::PluginsNotRealtime));
+    rig.settles_at(LEVEL);
+    assert_eq!(rig.session.plugin_realtime(rig.device), Some(Realtime::Off));
+    assert_eq!(rig.said_not_realtime(), 0);
 }
 
 /// A crashed plugin's sandbox remembers the state it last saved or loaded; an audio restart

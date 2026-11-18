@@ -133,10 +133,11 @@ pub enum Warning {
     /// is reloaded.
     #[error("plugin {plugin} of {device} crashed; it is bypassed")]
     PluginCrashed { device: String, plugin: String },
-    /// A sandboxed plugin's host got no real-time priority: the system grants it neither
-    /// directly nor through RealtimeKit or the desktop portal, so plugin audio may drop out
-    /// while the machine is busy. Said once, as it is about the system, not one plugin; which
-    /// plugins it holds for, [`Session::plugin_realtime`] says.
+    /// The system grants the sandboxed plugins' hosts no real-time priority, neither directly
+    /// nor through RealtimeKit or the desktop portal: one was refused and none got it. Plugin
+    /// audio may then drop out while the machine is busy. Said once, as it is about the
+    /// system, not one plugin. A host refused while others got it is RealtimeKit's rationing,
+    /// which this does not say; [`Session::plugin_realtime`] tells each plugin's.
     #[error("plugin hosts get no real-time priority; their audio may drop out")]
     PluginsNotRealtime,
     /// A plugin would not hand over its state (or take back the one it
@@ -737,12 +738,9 @@ impl Session {
                     });
                 }
             }
-            if !self.plugins.realtime_warned
-                && l.monitor.as_ref().map(|m| m.realtime()) == Some(Realtime::Refused)
-            {
-                self.plugins.realtime_warned = true;
-                news.push(Warning::PluginsNotRealtime);
-            }
+        }
+        if self.plugins.says_not_realtime() {
+            news.push(Warning::PluginsNotRealtime);
         }
         // States a plugin could not be asked about before (busy, or its host
         // down): now that it runs, it takes or refuses them.

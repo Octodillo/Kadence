@@ -59,10 +59,14 @@ reported instead of closing Kadence.
 
 That process asks for real-time priority, directly or through RealtimeKit
 (`rtkit`) or the desktop portal, so the plugin's audio keeps up while the
-computer is busy. If none of them grants it, Kadence says so once, and the
-plugin's device panel shows it: the plugin still plays, but its sound may
-drop out under load. Most Plasma desktops run RealtimeKit; check that the
-`rtkit` package is installed and its service running.
+computer is busy. A plugin that did not get it still plays, but its sound
+may drop out under load, and its device panel says so. If no plugin gets
+it, Kadence also says so once. Most Plasma desktops run RealtimeKit; check
+that the `rtkit` package is installed and its service running.
+RealtimeKit grants a limited number of programs, so with many plugins some
+may go without: allowing your user real-time priority (on many
+distributions, by joining the `realtime` or `audio` group) lifts the
+limit.
 
 In the Flatpak, install plugins from Flathub (their IDs start with
 `org.freedesktop.LinuxAudio.Plugins.`) or put them in `~/.clap`, `~/.vst3`

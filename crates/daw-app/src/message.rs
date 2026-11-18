@@ -80,7 +80,7 @@ pub enum Reason {
     PluginLoadFailed,
     /// Plugin `detail` of device `name` crashed; it is bypassed.
     PluginCrashed,
-    /// Plugin hosts get no real-time priority, so their audio may drop out.
+    /// No plugin host gets real-time priority, so their audio may drop out.
     PluginsNotRealtime,
     /// Device `name` did not save its plugin state; `detail`.
     PluginStateNotSaved,
