@@ -35,9 +35,14 @@ folders inside them, in this order:
 
 | Format | Folders |
 |---|---|
-| CLAP | the folders in `$CLAP_PATH`, `~/.clap`, `/usr/lib/clap` |
-| VST3 | the folders in `$VST3_PATH`, `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` |
-| LV2 | `~/.lv2`, `/usr/local/lib/lv2`, `/usr/local/lib64/lv2`, `/usr/lib/lv2`, `/usr/lib64/lv2`, `/usr/lib/x86_64-linux-gnu/lv2`, `/usr/lib/aarch64-linux-gnu/lv2` |
+| CLAP | the folders in `$CLAP_PATH`, `~/.clap`, then `clap` in each system folder |
+| VST3 | the folders in `$VST3_PATH`, `~/.vst3`, then `vst3` in each system folder |
+| LV2 | `~/.lv2`, then `lv2` in each system folder |
+
+The system folders are `/usr/local/lib`, `/usr/local/lib64`, `/usr/lib`,
+`/usr/lib64` and, on Debian and Ubuntu, `/usr/lib/x86_64-linux-gnu` (or the
+one named after your computer's architecture). So CLAP plugins from your
+distribution are found in `/usr/lib/clap` or `/usr/lib64/clap`, for example.
 
 `CLAP_PATH`, `VST3_PATH` and `LV2_PATH` are optional environment variables
 that each hold a list of folders separated by colons. The folders in
@@ -69,14 +74,25 @@ audio it uses, so it can be copied or backed up as one. **New Project**
 (Ctrl+S) and **Save As…** (Ctrl+Shift+S) are in the main menu, with
 **Open Recent**.
 
-- Every save keeps the previous ten versions in the project's `backups`
-  folder.
+- Saving keeps the ten versions before it in the project's `backups`
+  folder. Saving again without a change adds nothing to it.
+- **Save As…** makes a new project folder and copies the project's audio
+  into it. Choosing the open project's own file there just saves it.
+- Don't move or rename a project's folder while the project is open:
+  Kadence then can't save into it, and says so. Move it back, save, and
+  close the project first.
 - While a project has unsaved changes, Kadence keeps a recovery copy (you
   can turn this off in **General** settings). After a crash, Kadence offers
   to **Recover** it the next time you open the project.
+- Audio recorded before a project's first save is kept with its recovery
+  copy and moves into the project folder when you save. Discarding the
+  recovery copy deletes those recordings with it. If Kadence crashes when
+  there is no recovery copy, the next start moves the recordings to a
+  folder of their own in `recordings` in Kadence's data folder (usually
+  `~/.local/share/kadence`).
 - If audio files were moved, **Find Missing Audio Files…** relinks them.
   **Collect Audio Files** copies audio from outside the project folder into
-  it.
+  it. Only files that open as audio are copied.
 
 Every edit can be undone with Ctrl+Z and redone with Ctrl+Shift+Z.
 
@@ -107,6 +123,10 @@ signature, and the metronome.
 - **Bus**, to group tracks or share an effect such as reverb.
 
 Right-click a track header to rename, move, delete or show its automation.
+On a touch screen, hold a finger on it; from the keyboard, press Menu or
+Shift+F10 on a focused header or timeline. The page menu also has **Rename
+Track…** (F2), **Move Track Up** and **Down** (Alt+Up, Alt+Down) and **Delete
+Track** for the selected track.
 **M** mutes a track and **S** solos it.
 
 ## Recording
@@ -166,6 +186,9 @@ Double-click a MIDI clip to open it on the **Edit** page.
   way. **Humanize**, **Legato** and **Fix Overlaps** are in the same menu.
 - Up and Down transpose by a semitone, Shift+Up and Shift+Down by an
   octave.
+- On a touch screen, a finger on the empty grid scrolls and two fingers
+  zoom; a finger on a note moves it, and holding still opens the menu.
+  From the keyboard, Menu or Shift+F10 opens it.
 - **Flats** on the toolbar, also in the General settings, names the black
   keys as flats (B♭) instead of sharps (A♯).
 
@@ -215,3 +238,10 @@ the Mix page and move the controls while the song plays.
 Report problems and ideas at <https://github.com/Octodillo/Kadence/issues>.
 Include the Kadence version (**About Kadence** in the main menu) and how you
 installed it.
+
+When something goes wrong without a message on screen, Kadence writes what
+it knows to its standard error, which a Plasma session keeps in the journal
+(`journalctl --user -e`). Warnings and errors are written by default; start
+Kadence with `KADENCE_LOG=debug` for more, or `KADENCE_LOG=off` for none.
+Lines start with `kadence:`, or `kadence-plugin-host:` when they come from
+the separate process a plugin runs in.

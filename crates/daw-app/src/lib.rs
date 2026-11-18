@@ -25,6 +25,7 @@ pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;
 mod paint;
+mod paths;
 pub mod piano_roll;
 pub mod plugin_editors_bridge;
 pub mod plugins_bridge;
@@ -37,6 +38,8 @@ pub mod settings;
 pub mod settings_bridge;
 pub mod state;
 mod test_helper;
+pub mod tracks;
+pub mod tracks_bridge;
 mod transport;
 
 /// Runs a plugin sandbox host or scanner if the arguments ask for one

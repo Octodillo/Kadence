@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_core::event::EventList;
 use daw_core::time::{PPQ, SampleTime, TempoMap, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
@@ -16,9 +15,9 @@ use daw_model::{
     TrackKind,
 };
 use daw_session::{Session, SessionConfig, Warning, effective_mutes};
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const RATE: f64 = 48_000.0;
 const BLOCK: usize = 256;
@@ -109,9 +108,7 @@ impl Rig {
         while done < frames {
             let n = BLOCK.min(frames - done);
             let mut outs: [&mut [f32]; 2] = [&mut l[..n], &mut r[..n]];
-            let before = violation_count();
-            assert_no_alloc(|| self.proc.process(n, &[], &mut outs, &events));
-            assert_eq!(violation_count(), before, "process allocated");
+            assert_no_alloc("process", || self.proc.process(n, &[], &mut outs, &events));
             out.extend_from_slice(&l[..n]);
             done += n;
         }
@@ -579,6 +576,95 @@ fn split_clip_plays_through_the_cut_without_a_dip() {
             "dip at {}: {x} vs {level}",
             cut - 128 + i
         );
+    }
+}
+
+/// A split of a file at another sample rate: the right half's offset is kept in the file's
+/// frames, so at the engine's rate it can land a sample off where the left half stops. The
+/// halves still continue each other.
+#[test]
+fn split_clip_of_a_file_at_another_rate_plays_through_the_cut() {
+    use daw_core::time::{engine_to_file_frames, file_to_engine_frames};
+    const FILE_RATE: f64 = 44_100.0;
+    let mut rig = Rig::new(60.0);
+    let data = AudioData {
+        sample_rate: FILE_RATE as u32,
+        channels: vec![vec![0.5; 4 * FILE_RATE as usize]],
+    };
+    write_wav(rig.dir().join("pad.wav"), &data, WavFormat::Float32).unwrap();
+    // A cut a beat and 15 ticks in, as the arrange view's split makes it.
+    let at = TickTime(PPQ + 15);
+    let shift = rig.session.ticks_to_samples(at).0;
+    let offset = engine_to_file_frames(shift, FILE_RATE, RATE);
+    assert_ne!(
+        file_to_engine_frames(offset, FILE_RATE, RATE),
+        shift,
+        "a cut that rounds apart at the engine's rate"
+    );
+    let audio = |offset| ClipContent::Audio(AudioClip::new("pad.wav", SampleTime(offset)));
+    let left = Clip::new("left", TickTime(0), at, audio(0));
+    let right = Clip::new("right", at, TickTime(2 * PPQ), audio(offset));
+    rig.doc.execute(AddClip::new(rig.track, left)).unwrap();
+    rig.doc.execute(AddClip::new(rig.track, right)).unwrap();
+    rig.sync();
+    rig.session.play().unwrap();
+    let out = rig.run(2 * BEAT as usize);
+    let cut = shift as usize;
+    let level = out[cut - 2_000];
+    assert!((level - 0.5).abs() < 1e-3, "{level}");
+    for (i, &x) in out[cut - 128..cut + 128].iter().enumerate() {
+        assert!(
+            (x - level).abs() < 1e-3,
+            "dip at {}: {x} vs {level}",
+            cut - 128 + i
+        );
+    }
+}
+
+/// A file at another rate cut twice, the later cut first: the middle part's file end is two
+/// rounded lengths from the file's start and the right part's offset one, a frame apart.
+/// They still continue each other.
+#[test]
+fn parts_of_a_file_at_another_rate_cut_twice_play_through_the_cuts() {
+    use daw_core::time::engine_to_file_frames;
+    const FILE_RATE: f64 = 44_100.0;
+    let mut rig = Rig::new(60.0);
+    let data = AudioData {
+        sample_rate: FILE_RATE as u32,
+        channels: vec![vec![0.5; 4 * FILE_RATE as usize]],
+    };
+    write_wav(rig.dir().join("pad.wav"), &data, WavFormat::Float32).unwrap();
+    let frames = |rig: &Rig, from: TickTime, to: TickTime| {
+        let len = rig.session.ticks_to_samples(to).0 - rig.session.ticks_to_samples(from).0;
+        engine_to_file_frames(len, FILE_RATE, RATE)
+    };
+    // A second cut (`a`) to the left of the first (`b`), where the roundings differ.
+    let b = TickTime(PPQ + 15);
+    let a = (1..PPQ)
+        .map(TickTime)
+        .find(|&a| {
+            frames(&rig, TickTime(0), a) + frames(&rig, a, b) != frames(&rig, TickTime(0), b)
+        })
+        .expect("a cut where two rounded lengths are not the rounded sum");
+    let mid_offset = frames(&rig, TickTime(0), a);
+    let right_offset = frames(&rig, TickTime(0), b);
+    let audio = |offset| ClipContent::Audio(AudioClip::new("pad.wav", SampleTime(offset)));
+    for (name, start, len, offset) in [
+        ("left", TickTime(0), a, 0),
+        ("mid", a, TickTime(b.0 - a.0), mid_offset),
+        ("right", b, TickTime(2 * PPQ), right_offset),
+    ] {
+        let clip = Clip::new(name, start, len, audio(offset));
+        rig.doc.execute(AddClip::new(rig.track, clip)).unwrap();
+    }
+    rig.sync();
+    rig.session.play().unwrap();
+    let out = rig.run(2 * BEAT as usize);
+    for cut in [a, b] {
+        let cut = rig.session.ticks_to_samples(cut).0 as usize;
+        for (i, &x) in out[cut.saturating_sub(128)..cut + 128].iter().enumerate() {
+            assert!((x - 0.5).abs() < 1e-3, "dip {i} samples around {cut}: {x}");
+        }
     }
 }
 
@@ -1314,4 +1400,206 @@ fn stop_lets_tails_ring_and_silence_cuts_them() {
     rig.session.play().unwrap();
     let again = peak(&rig.run(BEAT as usize));
     assert!(again > 0.1, "{again}");
+}
+
+/// Sends the engine commands until its queue is full but for `room` places.
+fn fill_queue(rig: &mut Rig, room: usize) {
+    let capacity = config().engine.command_capacity;
+    // Empty to start with.
+    rig.run(BLOCK);
+    for _ in 0..capacity - room {
+        rig.session.locate(TickTime(0)).unwrap();
+    }
+}
+
+/// A graph the engine could not take (its command queue was full) is sent again by a later
+/// tick, and built on what is running: the players keep playing.
+#[test]
+fn a_refused_graph_is_sent_again() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 8 * BEAT as usize, 0.5);
+    let clip = rig.add_clip("a.wav", 0, 8);
+    rig.session.play().unwrap();
+    rig.run(BLOCK);
+    let swaps = rig.session.controller().graphs_swapped();
+
+    fill_queue(&mut rig, 0);
+    let other = Track::new(TrackKind::Audio, "Audio 2");
+    rig.doc.execute(AddTrack::new(1, other)).unwrap();
+    assert!(rig.session.sync(&rig.doc.snapshot()).is_err(), "refused");
+    assert!(
+        rig.session.has_clip(rig.track, clip),
+        "still the old graph's"
+    );
+
+    // The audio thread catches up; a tick after the wait sends the graph.
+    rig.run(BLOCK);
+    std::thread::sleep(Duration::from_millis(50));
+    let report = rig.session.tick();
+    assert!(report.error.is_none(), "{:?}", report.error);
+    let out = rig.run(4 * BLOCK);
+    assert_eq!(rig.session.controller().graphs_swapped(), swaps + 1);
+    assert!(
+        out.iter().all(|&x| (x - 0.5).abs() < 1e-6),
+        "the clip's player was reused and played through"
+    );
+    // And nothing more is owed.
+    std::thread::sleep(Duration::from_millis(50));
+    rig.session.tick();
+    rig.run(BLOCK);
+    assert_eq!(rig.session.controller().graphs_swapped(), swaps + 1);
+}
+
+/// A file that could not be read is looked for again by every sync, a file that changed is
+/// read again when its track's clips are next sent, and a new document has every file
+/// looked at afresh.
+#[test]
+fn a_file_that_appears_or_changes_is_read_again() {
+    let mut rig = Rig::new(60.0);
+    let clip = rig.add_clip("late.wav", 0, 4);
+    let path = rig.dir().join("late.wav");
+    assert_eq!(
+        rig.session.warnings(),
+        [Warning::CannotRead { path: path.clone() }]
+    );
+    rig.session.play().unwrap();
+    assert_eq!(rig.run(BLOCK)[BLOCK - 1], 0.0);
+
+    // The drive is mounted; nothing in the document changes.
+    dc_file(rig.dir(), "late.wav", 4 * BEAT as usize, 0.5);
+    rig.sync();
+    assert!(rig.session.warnings().is_empty());
+    assert!(rig.session.has_clip(rig.track, clip));
+    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.5);
+    rig.sync();
+    assert!(!rig.session.wants_sync());
+
+    // Written over (another length each time, so it shows whatever the clock's grain):
+    // the next edit of the track's clips reads it again.
+    dc_file(rig.dir(), "late.wav", 5 * BEAT as usize, 0.25);
+    rig.add_clip("late.wav", 6, 1);
+    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.25);
+    // And so does opening the project again.
+    dc_file(rig.dir(), "late.wav", 6 * BEAT as usize, 0.125);
+    rig.session.reload_media();
+    rig.sync();
+    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.125);
+}
+
+/// A file that is there but is no audio is not decoded again by every sync, nor are its
+/// track's clips sent again: only once it has changed.
+#[test]
+fn a_file_that_is_no_audio_is_tried_again_once_it_changed() {
+    let mut rig = Rig::new(60.0);
+    let path = rig.dir().join("bad.wav");
+    std::fs::write(&path, b"not audio").unwrap();
+    rig.add_clip("bad.wav", 0, 4);
+    assert_eq!(
+        rig.session.warnings(),
+        [Warning::CannotRead { path: path.clone() }]
+    );
+    rig.sync();
+    assert!(rig.session.warnings().is_empty(), "not tried again");
+
+    dc_file(rig.dir(), "bad.wav", 4 * BEAT as usize, 0.5);
+    rig.sync();
+    assert!(rig.session.warnings().is_empty());
+    rig.session.play().unwrap();
+    assert_eq!(rig.run(2 * BLOCK)[2 * BLOCK - 1], 0.5);
+}
+
+/// A streamed file that changed is opened again: the clip does not keep the readers of the
+/// file as it was.
+#[test]
+fn a_streamed_file_that_changed_is_opened_again() {
+    let mut rig = Rig::new(0.0);
+    dc_file(rig.dir(), "long.wav", 4 * BEAT as usize, 0.5);
+    rig.add_clip("long.wav", 0, 4);
+    rig.session.play().unwrap();
+    let out = rig.run_paced(BEAT as usize);
+    assert_eq!(out[BEAT as usize - 1], 0.5);
+
+    std::fs::remove_file(rig.dir().join("long.wav")).unwrap();
+    dc_file(rig.dir(), "long.wav", 5 * BEAT as usize, 0.25);
+    rig.session.reload_media();
+    rig.sync();
+    rig.session.locate(TickTime(0)).unwrap();
+    let out = rig.run_paced(BEAT as usize);
+    assert_eq!(out[BEAT as usize - 1], 0.25);
+}
+
+/// A loop the engine could not take (its queue was full) is owed: the session asks for a
+/// sync, which sends it.
+#[test]
+fn a_refused_loop_is_set_by_the_next_sync() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 8 * BEAT as usize, 0.5);
+    rig.add_clip("a.wav", 0, 1);
+    fill_queue(&mut rig, 0);
+    let range = Some((TickTime(0), TickTime(2 * PPQ)));
+    assert!(rig.session.set_loop(range).is_err());
+    assert!(rig.session.wants_sync());
+    rig.run(BLOCK);
+    rig.sync();
+    assert!(!rig.session.wants_sync());
+    rig.session.play().unwrap();
+    // Around the loop: the clip's beat plays a second time.
+    let out = rig.run(3 * BEAT as usize);
+    assert_eq!(out[2 * BEAT as usize + 1_000], 0.5);
+}
+
+/// The engine takes the new tempo and then refuses the next command: what is kept in
+/// samples (here a clip's position) still follows, on the next sync.
+#[test]
+fn a_tempo_change_cut_short_is_finished_by_the_next_sync() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", BEAT as usize, 0.5);
+    rig.add_clip("a.wav", 1, 1);
+    rig.session
+        .set_loop(Some((TickTime(0), TickTime(4 * PPQ))))
+        .unwrap();
+
+    // Room for the timeline, none for the loop that follows it.
+    fill_queue(&mut rig, 1);
+    let mut tempo = rig.doc.project().tempo.clone();
+    tempo.tempos[0].bpm = 60.0;
+    rig.doc.execute(SetTempo { tempo }).unwrap();
+    assert!(rig.session.sync(&rig.doc.snapshot()).is_err());
+    assert!(rig.session.wants_sync(), "the rest is owed");
+
+    rig.run(BLOCK);
+    rig.sync();
+    assert!(!rig.session.wants_sync());
+    rig.session.locate(TickTime(0)).unwrap();
+    rig.session.play().unwrap();
+    // At 60 bpm the second beat starts a second in, not half of one.
+    let out = rig.run(3 * BEAT as usize);
+    assert_eq!(
+        out[BEAT as usize + 1_000],
+        0.0,
+        "not at the old tempo's place"
+    );
+    assert_eq!(out[2 * BEAT as usize + 1_000], 0.5);
+}
+
+/// Saving a project to a new place moves its root. Without samplers nothing in the graph
+/// depends on it: the players get their clips from the new place and the graph stays.
+#[test]
+fn moving_the_root_keeps_the_graph() {
+    let mut rig = Rig::new(60.0);
+    dc_file(rig.dir(), "a.wav", 8 * BEAT as usize, 0.5);
+    rig.add_clip("a.wav", 0, 8);
+    rig.session.play().unwrap();
+    rig.run(BLOCK);
+    let swaps = rig.session.controller().graphs_swapped();
+
+    let elsewhere = rig.dir().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    dc_file(&elsewhere, "a.wav", 8 * BEAT as usize, 0.25);
+    rig.session.set_root(Some(elsewhere));
+    assert!(rig.session.wants_sync());
+    rig.sync();
+    let out = rig.run(4 * BLOCK);
+    assert_eq!(out[4 * BLOCK - 1], 0.25, "the file in the new place");
+    assert_eq!(rig.session.controller().graphs_swapped(), swaps);
 }

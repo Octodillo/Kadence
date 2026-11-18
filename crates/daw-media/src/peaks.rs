@@ -151,51 +151,6 @@ impl PeakBuilder {
     }
 }
 
-/// Delete temp files a crashed save left next to `cache` (anything matching
-/// `<cache>.<pid>-<n>.tmp` older than an hour; younger ones may be in use).
-fn remove_stale_temps(cache: &Path) {
-    let (Some(dir), Some(name)) = (cache.parent(), cache.file_name()) else {
-        return;
-    };
-    let dir = if dir.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        dir
-    };
-    let prefix = format!("{}.", name.to_string_lossy());
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        // Exactly `<cache>.<pid>-<n>.tmp`; checked before any stat so big sample
-        // folders cost one name comparison per entry.
-        let ours = file_name
-            .strip_prefix(&prefix)
-            .and_then(|rest| rest.strip_suffix(".tmp"))
-            .and_then(|id| id.split_once('-'))
-            .is_some_and(|(pid, n)| {
-                !pid.is_empty()
-                    && !n.is_empty()
-                    && pid.bytes().all(|b| b.is_ascii_digit())
-                    && n.bytes().all(|b| b.is_ascii_digit())
-            });
-        if !ours {
-            continue;
-        }
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age.as_secs() > 3600);
-        if old {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
 /// Size and mtime of the source, used to tell whether a cache is stale.
 fn source_stamp(audio: &Path) -> Result<(u64, i64)> {
     let meta = fs::metadata(audio).map_err(|e| MediaError::io(audio, e))?;
@@ -252,28 +207,13 @@ impl PeakCache {
         self.save(&Self::path_for(audio), source_stamp(audio)?)
     }
 
+    /// Through [`daw_core::atomic_file`], so readers never see a half-written cache
+    /// and two savers of the same cache (say the recorder and the UI) never write
+    /// into each other's file.
     fn save(&self, path: &Path, (len, mtime): (u64, i64)) -> Result<()> {
         let io = |e| MediaError::io(path, e);
-        // Write to a temp name and rename so readers never see a half-written cache.
-        // A unique temp name, so two savers of the same cache (say the recorder and the
-        // UI) never truncate, rename or delete each other's file.
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = path.with_extension(format!("peaks.{}-{n}.tmp", std::process::id()));
-        remove_stale_temps(path);
-        let result = self
-            .write_to(&tmp, (len, mtime))
-            .and_then(|()| fs::rename(&tmp, path).map_err(io));
-        if result.is_err() {
-            // Don't leave a partial temp file next to the user's audio.
-            let _ = fs::remove_file(&tmp);
-        }
-        result
-    }
-
-    fn write_to(&self, tmp: &Path, (len, mtime): (u64, i64)) -> Result<()> {
-        let io = |e| MediaError::io(tmp, e);
-        let mut w = BufWriter::new(fs::File::create(tmp).map_err(io)?);
+        let (replacement, file) = daw_core::atomic_file::Replacement::begin(path).map_err(io)?;
+        let mut w = BufWriter::new(file);
         let mut put = |b: &[u8]| w.write_all(b).map_err(io);
         put(MAGIC)?;
         put(&VERSION.to_le_bytes())?;
@@ -289,10 +229,8 @@ impl PeakCache {
             let bytes: Vec<u8> = level.data.iter().flat_map(|s| s.to_le_bytes()).collect();
             put(&bytes)?;
         }
-        w.into_inner()
-            .map_err(|e| io(e.into_error()))?
-            .sync_all()
-            .map_err(io)
+        let file = w.into_inner().map_err(|e| io(e.into_error()))?;
+        replacement.commit(file).map_err(io)
     }
 
     fn load(path: &Path, stamp: (u64, i64)) -> Result<Self> {

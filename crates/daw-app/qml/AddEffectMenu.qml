@@ -18,7 +18,7 @@ QQC2.Menu {
         delegate: QQC2.MenuItem {
             required property int index
             required property string modelData
-            text: modelData
+            text: DeviceNames.name(modelData)
             onTriggered: Mixer.addInsert(menu.row, index)
         }
     }
@@ -29,7 +29,7 @@ QQC2.Menu {
         onTriggered: {
             // The strip may move while the browser is open.
             const row = menu.row;
-            applicationWindow().browsePlugins(2, (format, pluginId, name) => {
+            applicationWindow().browsePlugins(Plugins.EffectPlugin, (format, pluginId, name) => {
                 Mixer.addPluginInsert(row, format, pluginId, name);
             });
         }

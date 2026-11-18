@@ -12,7 +12,13 @@
 //! [`AutomationRecorder`] instead of changing the control's static value.
 //! While held, the control's existing lane is left out of playback so the
 //! user hears the hand, not the old curve. On release the take is merged
-//! into the lane (creating it if needed) as one undoable edit.
+//! into the lane (creating it if needed) as one undoable edit. That half of
+//! the mixer is in [`automation_write`].
+
+mod automation_write;
+
+pub use automation_write::ParamStart;
+use automation_write::Take;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -20,51 +26,25 @@ use std::sync::Arc;
 use crate::double_click::Clicks;
 use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
-use daw_arrange::ParamCatalog;
 use daw_core::plugin::PluginFormatKind;
-use daw_core::time::{SampleTime, TickTime};
-use daw_engine::nodes::Strip;
-use daw_engine::{AutomationRecorder, Curve, NodeKey};
 use daw_model::commands::{
-    AddDevice, AddLane, AddSend, Batch, LaneField, RemoveDevice, RemoveSend, SendField, SetLane,
-    SetParam, SetSend, SetTrack, TrackField,
+    AddDevice, AddSend, RemoveDevice, RemoveSend, SendField, SetParam, SetSend, SetTrack,
+    TrackField,
 };
 use daw_model::{
-    AutomationLane, AutomationPoint, AutomationTarget, Command, Device, DeviceSource, Document,
-    LaneId, Project, Send, SendId, Track, TrackId, TrackKind, TrackOutput,
+    Command, Device, DeviceSource, Document, LaneId, Project, Send, SendId, Track, TrackId,
+    TrackKind, TrackOutput,
 };
-use daw_session::{Session, db_to_gain, effective_mutes};
+use daw_session::{Session, effective_mutes};
 
-use crate::device_panel::BuiltinParams;
 use crate::mixer::{
-    Control, EffectChoice, InsertInfo, MAX_DB, MixerHandle, RouteTarget, SILENT_DB, SendInfo,
-    StripId, StripInfo, StripKind, StripLevels, effect_choices,
+    Control, EffectChoice, InsertInfo, MAX_DB, RouteTarget, SILENT_DB, SendInfo, StripId,
+    StripInfo, StripKind, StripLevels, effect_choices,
 };
 use crate::state;
 
 /// The fader's bottom stored as a level the session plays as silence.
 const SILENCE_DB: f64 = -144.0;
-
-/// How far (in the control's unit) a thinned take may stray from what the
-/// hand did.
-fn tolerance(control: Control) -> f64 {
-    match control {
-        Control::Pan => 0.005,
-        Control::Volume | Control::Send(_) => 0.2,
-        // Plain values of any range: thin only what is flat, unless the
-        // caller knows the range (see [`ParamStart`]).
-        Control::Param { .. } => 1e-6,
-    }
-}
-
-/// What the device panel knows about a parameter it starts recording: the
-/// value it shows (a plugin's own value, when the document holds none) and
-/// how far a take of it may stray, from the parameter's range.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ParamStart {
-    pub value: f64,
-    pub tolerance: f64,
-}
 
 pub(crate) fn strip_id(track: TrackId) -> StripId {
     track.0.as_u128()
@@ -77,22 +57,6 @@ fn fader_db(db: f64) -> f64 {
     } else {
         db.min(MAX_DB)
     }
-}
-
-/// A control being recorded.
-struct Take {
-    track: TrackId,
-    control: Control,
-    target: AutomationTarget,
-    recorder: AutomationRecorder,
-    /// Where the hand is now, in the control's unit.
-    value: f64,
-    /// The control's static value when the document holds none.
-    fallback: Option<f64>,
-    tolerance: f64,
-    /// How often the hand moved the control since the take started (a
-    /// take moved only once is a click).
-    moves: u32,
 }
 
 /// The mixer on a [`Document`] and the [`Session`] playing it. See the
@@ -227,12 +191,7 @@ impl SessionMixer {
         let silenced = effective_mutes(project);
         let routing = Routing::of(project);
         let master = &project.master;
-        let held = |track: TrackId, control: Control| {
-            self.takes
-                .iter()
-                .find(|t| t.track == track && t.control == control)
-                .map(|t| t.value)
-        };
+        let held = |track: TrackId, control: Control| self.held_value(track, control);
         ordered(project)
             .into_iter()
             .map(|t| StripInfo {
@@ -335,17 +294,7 @@ impl SessionMixer {
             return Ok(());
         };
         let track = track.id;
-        let mut result = Ok(());
-        if let Some(i) = self
-            .takes
-            .iter()
-            .position(|t| t.track == track && t.control == Control::Send(target))
-        {
-            let take = self.takes.remove(i);
-            if let Some(session) = session {
-                result = self.end(doc, session, take);
-            }
-        }
+        let result = self.end_control(doc, session, track, Control::Send(target));
         let r = doc.execute(RemoveSend::new(send));
         doc.seal();
         result.and(r.map(|_| ()).map_err(Message::from))
@@ -411,20 +360,7 @@ impl SessionMixer {
             Control::Pan => value.clamp(-1.0, 1.0),
             Control::Param { .. } => value,
         };
-        if let Some(take) = self
-            .takes
-            .iter_mut()
-            .find(|t| t.track == track.id && t.control == control)
-        {
-            take.value = value;
-            take.moves += 1;
-            if let Some(s) = session {
-                record(take, s);
-                if let Some((key, param, v)) = live_param(doc.project(), s, take) {
-                    s.set_live_param(key, param, Some(v))
-                        .map_err(Message::from)?;
-                }
-            }
+        if self.record_move(doc.project(), session, track.id, control, value)? {
             return Ok(());
         }
         let command: Box<dyn Command> = match control {
@@ -574,469 +510,13 @@ impl SessionMixer {
             })
             .collect()
     }
-
-    /// Lets go of every device parameter a take records (the device
-    /// panel's controls were released, or the panel closed). A take the
-    /// hand moved only once was a click, not a gesture: it is dropped
-    /// unwritten and returned, with the value clicked, for the caller to
-    /// set as the parameter's static value.
-    pub fn release_params(
-        &mut self,
-        doc: &mut Document,
-        mut session: Option<&mut Session>,
-    ) -> Result<Vec<(Control, f64)>, Message> {
-        let mut clicks = Vec::new();
-        let mut r = Ok(());
-        while let Some(i) = self
-            .takes
-            .iter()
-            .position(|t| matches!(t.control, Control::Param { .. }))
-        {
-            let take = self.takes.remove(i);
-            let Some(session) = session.as_deref_mut() else {
-                continue;
-            };
-            let done = if take.moves <= 1 {
-                clicks.push((take.control, take.value));
-                self.drop_take(doc, session, take)
-            } else {
-                self.end(doc, session, take)
-            };
-            r = r.and(done);
-        }
-        doc.seal();
-        r.map(|()| clicks)
-    }
-
-    /// Whether a take is running.
-    pub fn recording(&self) -> bool {
-        !self.takes.is_empty()
-    }
-
-    /// Whether a take for `control` of strip `id` is running.
-    pub fn recording_control(&self, id: StripId, control: Control) -> bool {
-        self.takes
-            .iter()
-            .any(|t| strip_id(t.track) == id && t.control == control)
-    }
-
-    pub fn write(&self) -> bool {
-        self.write
-    }
-
-    /// Turns touch writing on or off. Turning it off ends every take.
-    pub fn set_write(
-        &mut self,
-        doc: &mut Document,
-        session: Option<&mut Session>,
-        on: bool,
-    ) -> Result<(), Message> {
-        self.write = on;
-        if on {
-            return Ok(());
-        }
-        self.finish_all(doc, session)
-    }
-
-    /// The user grabbed or let go of a control. Grabbing starts a take when
-    /// writing is on and the transport plays; letting go ends it.
-    pub fn touch(
-        &mut self,
-        doc: &mut Document,
-        session: Option<&mut Session>,
-        id: StripId,
-        control: Control,
-        pressed: bool,
-    ) -> Result<(), Message> {
-        if pressed {
-            // A press is its own undo step, apart from wheel or key edits.
-            doc.seal();
-            self.held = Some(((id, control), doc.revision(), doc.history().undo_len()));
-        }
-        let r = self.touch_with(doc, session, id, control, pressed, None);
-        if !pressed {
-            if let Some((key, before, undo_len)) = self.held.take()
-                && key == (id, control)
-            {
-                self.clicks = Clicks::after_edit(self.clicks, key, before, undo_len, doc);
-            }
-            // Also without a session, the next edit is its own step.
-            doc.seal();
-        }
-        r
-    }
-
-    /// Puts a control back to its default (0 dB, centre) as one undo step,
-    /// written into automation like a touch while writing. The edits of a
-    /// double-click's clicks on it just before are taken back.
-    pub fn reset(
-        &mut self,
-        doc: &mut Document,
-        mut session: Option<&mut Session>,
-        id: StripId,
-        control: Control,
-    ) -> Result<(), Message> {
-        let value = match control {
-            Control::Volume | Control::Pan | Control::Send(_) => 0.0,
-            Control::Param { .. } => return Ok(()),
-        };
-        Clicks::take_back(self.clicks.take(), (id, control), doc).map_err(Message::from)?;
-        doc.seal();
-        self.touch_with(doc, session.as_deref_mut(), id, control, true, None)?;
-        let r = self.set(doc, session.as_deref_mut(), id, control, value);
-        let ended = self.touch_with(doc, session, id, control, false, None);
-        doc.seal();
-        r.and(ended)
-    }
-
-    /// Grabs a device parameter, as [`touch`](Self::touch) does, with what
-    /// the device panel knows about it.
-    pub fn touch_param(
-        &mut self,
-        doc: &mut Document,
-        session: Option<&mut Session>,
-        id: StripId,
-        control: Control,
-        start: ParamStart,
-    ) -> Result<(), Message> {
-        self.touch_with(doc, session, id, control, true, Some(start))
-    }
-
-    fn touch_with(
-        &mut self,
-        doc: &mut Document,
-        session: Option<&mut Session>,
-        id: StripId,
-        control: Control,
-        pressed: bool,
-        start: Option<ParamStart>,
-    ) -> Result<(), Message> {
-        let fallback = start.map(|s| s.value);
-        let Some(session) = session else {
-            return Ok(());
-        };
-        let Some(track) = find(doc.project(), id).cloned() else {
-            return Ok(());
-        };
-        let running = self
-            .takes
-            .iter()
-            .position(|t| t.track == track.id && t.control == control);
-        let armed = |m: &Self| {
-            m.write
-                || target_of(&track, control, fallback)
-                    .and_then(|(target, _)| track.lane_for(target))
-                    .is_some_and(|l| l.enabled && m.write_lanes.contains(&l.id))
-        };
-        match (pressed, running) {
-            (true, None) if armed(self) && session.is_playing() => {
-                let Some((target, value)) = target_of(&track, control, fallback) else {
-                    return Ok(());
-                };
-                // Start from what is heard: the lane's value, if it has one.
-                let now = session.samples_to_ticks(session.controller().position());
-                let value = track
-                    .lane_for(target)
-                    .filter(|l| l.enabled)
-                    .and_then(|l| l.value_at(now))
-                    .unwrap_or(value);
-                let tolerance = start.map_or(tolerance(control), |s| s.tolerance);
-                let mut take = Take {
-                    track: track.id,
-                    control,
-                    target,
-                    recorder: AutomationRecorder::new(tolerance),
-                    value,
-                    fallback,
-                    tolerance,
-                    moves: 0,
-                };
-                record(&mut take, session);
-                // Hold the take's value before the lane stops playing, so
-                // the graph without it never plays the static value.
-                if let Some((key, param, v)) = live_param(doc.project(), session, &take)
-                    && let Err(e) = session.set_live_param(key, param, Some(v))
-                {
-                    // No take holds it, so don't leave it held.
-                    let _ = session.set_live_param(key, param, None);
-                    return Err(Message::from(e));
-                }
-                self.takes.push(take);
-                self.suspend(doc, session)
-            }
-            (false, running) => {
-                let mut r = Ok(());
-                if let Some(i) = running {
-                    let take = self.takes.remove(i);
-                    r = self.end(doc, session, take);
-                }
-                // Letting go ends the gesture, written or not: the next drag
-                // is its own undo step.
-                doc.seal();
-                r
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// Ends a take: writes it, lets the document's value play again and
-    /// resumes its lane.
-    fn end(
-        &mut self,
-        doc: &mut Document,
-        session: &mut Session,
-        take: Take,
-    ) -> Result<(), Message> {
-        let live = live_param(doc.project(), session, &take);
-        let r = commit(doc, session, take);
-        if let Some((key, param, _)) = live {
-            session
-                .set_live_param(key, param, None)
-                .map_err(Message::from)?;
-        }
-        self.suspend(doc, session)?;
-        r
-    }
-
-    /// Ends a take without writing it.
-    fn drop_take(
-        &mut self,
-        doc: &mut Document,
-        session: &mut Session,
-        take: Take,
-    ) -> Result<(), Message> {
-        if let Some((key, param, _)) = live_param(doc.project(), session, &take) {
-            session
-                .set_live_param(key, param, None)
-                .map_err(Message::from)?;
-        }
-        self.suspend(doc, session)
-    }
-
-    /// Records held controls on the clock. A take ends when the transport
-    /// stops, and starts over when the play position jumps back (a loop
-    /// wrapped, the user located).
-    pub fn tick(
-        &mut self,
-        doc: &mut Document,
-        session: Option<&mut Session>,
-    ) -> Result<(), Message> {
-        let Some(session) = session else {
-            return Ok(());
-        };
-        if self.takes.is_empty() {
-            return Ok(());
-        }
-        if !session.is_playing() {
-            return self.finish_all(doc, Some(session));
-        }
-        let now = session.controller().position();
-        let mut result = Ok(());
-        let mut wrote = false;
-        for i in 0..self.takes.len() {
-            let take = &mut self.takes[i];
-            let behind = take.recorder.range().is_some_and(|(_, end)| now < end);
-            if behind {
-                // Close the take at the jump and carry on with a new one.
-                let next = Take {
-                    track: take.track,
-                    control: take.control,
-                    target: take.target,
-                    recorder: AutomationRecorder::new(take.tolerance),
-                    value: take.value,
-                    fallback: take.fallback,
-                    tolerance: take.tolerance,
-                    // The gesture goes on: letting go writes it.
-                    moves: take.moves.max(2),
-                };
-                let done = std::mem::replace(take, next);
-                if let Err(e) = commit(doc, session, done) {
-                    result = Err(e);
-                }
-                wrote = true;
-            }
-            record(&mut self.takes[i], session);
-        }
-        if wrote {
-            // A lane written just now must not drown out the hand that is
-            // still on the control.
-            self.suspend(doc, session)?;
-        }
-        result
-    }
-
-    fn finish_all(
-        &mut self,
-        doc: &mut Document,
-        session: Option<&mut Session>,
-    ) -> Result<(), Message> {
-        let Some(session) = session else {
-            self.takes.clear();
-            return Ok(());
-        };
-        let mut result = Ok(());
-        while let Some(take) = self.takes.pop() {
-            if let Err(e) = self.end(doc, session, take) {
-                result = Err(e);
-            }
-        }
-        doc.seal();
-        result
-    }
-
-    /// Leaves the lanes of running takes out of playback.
-    fn suspend(&self, doc: &mut Document, session: &mut Session) -> Result<(), Message> {
-        let project = doc.project();
-        let lanes: HashSet<LaneId> = self
-            .takes
-            .iter()
-            .filter_map(|t| project.track(t.track)?.lane_for(t.target).map(|l| l.id))
-            .collect();
-        if &lanes == session.suspended_lanes() {
-            return Ok(());
-        }
-        session.set_suspended_lanes(lanes);
-        session.sync(&doc.snapshot()).map_err(Message::from)
-    }
-}
-
-/// The automation target of a control and its static value. `fallback` is
-/// a device parameter's value when neither the document nor the built-in
-/// device's defaults hold one (a plugin's own value).
-fn target_of(
-    track: &Track,
-    control: Control,
-    fallback: Option<f64>,
-) -> Option<(AutomationTarget, f64)> {
-    match control {
-        Control::Volume => Some((AutomationTarget::Volume, track.volume_db)),
-        Control::Pan if track.kind == TrackKind::Master => None,
-        Control::Pan => Some((AutomationTarget::Pan, track.pan)),
-        Control::Send(target) => {
-            let send = track.sends.iter().find(|s| strip_id(s.target) == target)?;
-            Some((AutomationTarget::SendLevel { send: send.id }, send.level_db))
-        }
-        Control::Param { device, param } => {
-            let d = track.devices.iter().find(|d| d.id == device)?;
-            let value = d
-                .params
-                .get(&param)
-                .copied()
-                .or_else(|| BuiltinParams.default_value(d, param));
-            let value = value.or(fallback)?;
-            Some((AutomationTarget::DeviceParam { device, param }, value))
-        }
-    }
-}
-
-/// The engine parameter a take drives, and its value there.
-fn live_param(project: &Project, session: &Session, take: &Take) -> Option<(NodeKey, u32, f64)> {
-    match take.target {
-        AutomationTarget::Volume => Some((
-            session.strip_key(take.track)?,
-            Strip::GAIN,
-            db_to_gain(take.value),
-        )),
-        AutomationTarget::Pan => Some((session.strip_key(take.track)?, Strip::PAN, take.value)),
-        AutomationTarget::SendLevel { send } => {
-            project.send_location(send)?;
-            Some((Session::send_key(send), Strip::GAIN, db_to_gain(take.value)))
-        }
-        AutomationTarget::DeviceParam { device, param } => {
-            project.device_location(device)?;
-            Some((Session::device_key(device), param, take.value))
-        }
-    }
-}
-
-fn record(take: &mut Take, session: &Session) {
-    take.recorder
-        .record(session.controller().position(), take.value);
-}
-
-/// Merges a finished take into its lane, creating the lane if needed.
-fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), Message> {
-    if take.recorder.is_empty() {
-        return Ok(());
-    }
-    let project = doc.project();
-    let Some(track) = project.track(take.track) else {
-        return Ok(());
-    };
-    let Some((_, static_value)) = target_of(track, take.control, take.fallback) else {
-        return Ok(());
-    };
-    let existing = track.lane_for(take.target);
-    let base = match existing {
-        Some(l) if l.enabled && !l.points.is_empty() => session.engine_lane(&l.points),
-        // A new lane, or one that was switched off (and so not heard while
-        // writing), starts over from the static value around the take.
-        _ => daw_engine::AutomationLane::new(vec![daw_engine::AutomationPoint {
-            time: SampleTime(0),
-            value: static_value,
-            curve: Curve::Step,
-        }]),
-    };
-    let merged = take.recorder.finish(&base);
-    // Points the take left alone keep their exact tick and curve shape,
-    // which the engine's lane doesn't carry.
-    let kept: Vec<&AutomationPoint> = existing
-        .filter(|l| l.enabled)
-        .map(|l| l.points.iter().collect())
-        .unwrap_or_default();
-    let mut points: Vec<AutomationPoint> = Vec::with_capacity(merged.points().len());
-    for p in merged.points() {
-        if let Some(&orig) = kept
-            .iter()
-            .find(|o| session.ticks_to_samples(o.tick) == p.time && o.value == p.value)
-            && points.last().is_none_or(|prev| prev.tick < orig.tick)
-        {
-            points.push(orig.clone());
-            continue;
-        }
-        let mut tick = session.samples_to_ticks(p.time);
-        // Samples finer than a tick: keep points apart and in order.
-        if let Some(prev) = points.last() {
-            tick = TickTime(tick.0.max(prev.tick.0 + 1));
-        }
-        points.push(AutomationPoint {
-            tick,
-            value: p.value,
-            curve: 0.0,
-            step: p.curve == Curve::Step,
-        });
-    }
-    let command: Box<dyn Command> = match existing {
-        Some(l) => {
-            let mut edits: Vec<Box<dyn Command>> = vec![Box::new(SetLane {
-                id: l.id,
-                field: LaneField::Points(points),
-            })];
-            if !l.enabled {
-                edits.push(Box::new(SetLane {
-                    id: l.id,
-                    field: LaneField::Enabled(true),
-                }));
-            }
-            Box::new(Batch::new("Write Automation", edits))
-        }
-        None => {
-            let mut lane = AutomationLane::new(take.target);
-            lane.points = points;
-            Box::new(AddLane {
-                track: take.track,
-                lane,
-            })
-        }
-    };
-    doc.execute_boxed(command)
-        .map(|_| ())
-        .map_err(Message::from)
 }
 
 /// The app state's [`SessionMixer`]: the mixer the Mix page shows. The
 /// mixer itself lives in the state so the device panel records into the
-/// same takes.
+/// same takes. Takes are ticked with the project (see
+/// `AppState::tick_mixer`), whichever page is showing. Called on the UI
+/// thread only.
 #[derive(Default)]
 pub struct AppMixer;
 
@@ -1066,8 +546,9 @@ impl AppMixer {
     }
 }
 
-impl MixerHandle for AppMixer {
-    fn strips(&self) -> Vec<StripInfo> {
+impl AppMixer {
+    /// Strips in display order: tracks, then buses, then master.
+    pub fn strips(&self) -> Vec<StripInfo> {
         state::with(|s| {
             let mut strips = s.mixer.strips(s.doc.project(), s.engine.session());
             for (strip, track) in strips.iter_mut().zip(ordered(s.doc.project())) {
@@ -1078,47 +559,52 @@ impl MixerHandle for AppMixer {
         })
     }
 
-    fn set_volume(&mut self, id: StripId, db: f64) {
+    pub fn set_volume(&mut self, id: StripId, db: f64) {
         self.report(|m, d, s| m.set(d, s, id, Control::Volume, db));
     }
 
-    fn set_pan(&mut self, id: StripId, pan: f64) {
+    pub fn set_pan(&mut self, id: StripId, pan: f64) {
         self.report(|m, d, s| m.set(d, s, id, Control::Pan, pan));
     }
 
-    fn set_muted(&mut self, id: StripId, muted: bool) {
+    pub fn set_muted(&mut self, id: StripId, muted: bool) {
         self.report(|m, d, _| m.set_muted(d, id, muted));
     }
 
-    fn set_soloed(&mut self, id: StripId, soloed: bool) {
+    pub fn set_soloed(&mut self, id: StripId, soloed: bool) {
         self.report(|m, d, _| m.set_soloed(d, id, soloed));
     }
 
-    fn set_send_level(&mut self, id: StripId, target: StripId, db: f64) {
+    pub fn set_send_level(&mut self, id: StripId, target: StripId, db: f64) {
         self.report(|m, d, s| m.set(d, s, id, Control::Send(target), db));
     }
 
-    fn add_send(&mut self, id: StripId, target: StripId) -> bool {
+    /// Adds a send to bus `target`, at 0 dB after the fader.
+    pub fn add_send(&mut self, id: StripId, target: StripId) -> bool {
         self.edit(|m, d, _| m.add_send(d, id, target))
     }
 
-    fn remove_send(&mut self, id: StripId, target: StripId) {
+    pub fn remove_send(&mut self, id: StripId, target: StripId) {
         self.report(|m, d, s| m.remove_send(d, s, id, target));
     }
 
-    fn set_send_pre_fader(&mut self, id: StripId, target: StripId, pre_fader: bool) {
+    pub fn set_send_pre_fader(&mut self, id: StripId, target: StripId, pre_fader: bool) {
         self.report(|m, d, _| m.set_send_pre_fader(d, id, target, pre_fader));
     }
 
-    fn set_output(&mut self, id: StripId, target: StripId) {
+    /// Routes the strip's output to `target`, a bus or the master.
+    pub fn set_output(&mut self, id: StripId, target: StripId) {
         self.report(|m, d, _| m.set_output(d, id, target));
     }
 
-    fn add_insert(&mut self, id: StripId, device_id: &str) -> bool {
+    /// Appends a built-in effect to the strip's insert chain.
+    pub fn add_insert(&mut self, id: StripId, device_id: &str) -> bool {
         self.edit(|m, d, _| m.add_insert(d, id, device_id))
     }
 
-    fn add_plugin_insert(
+    /// Appends a plugin to the strip's insert chain, as a device called
+    /// `name`.
+    pub fn add_plugin_insert(
         &mut self,
         id: StripId,
         format: PluginFormatKind,
@@ -1128,28 +614,28 @@ impl MixerHandle for AppMixer {
         self.edit(|m, d, _| m.add_plugin_insert(d, id, format, plugin, name))
     }
 
-    fn remove_insert(&mut self, id: StripId, index: usize) {
+    /// Removes the effect at `index` in [`StripInfo::inserts`].
+    pub fn remove_insert(&mut self, id: StripId, index: usize) {
         self.report(|m, d, _| m.remove_insert(d, id, index));
     }
 
-    fn effects(&self) -> Vec<EffectChoice> {
+    pub fn effects(&self) -> Vec<EffectChoice> {
         state::with(|s| s.mixer.effects())
     }
 
-    fn set_instrument(&mut self, id: StripId, choice: &InstrumentChoice) {
+    /// Puts `choice` in an instrument track's instrument slot.
+    pub fn set_instrument(&mut self, id: StripId, choice: &InstrumentChoice) {
         self.report(|m, d, _| m.set_instrument(d, id, choice));
     }
 
-    fn levels(&mut self) -> Vec<StripLevels> {
+    /// Meter readings, parallel to [`strips`](Self::strips). Resets them.
+    pub fn levels(&mut self) -> Vec<StripLevels> {
         state::with(|s| s.mixer.levels(s.doc.project(), s.engine.session()))
     }
 
-    fn tick(&mut self, _playing: bool, _seconds: f64) {
-        // Takes are ticked with the project (see `AppState::tick_mixer`),
-        // whichever page is showing.
-    }
-
-    fn revision(&self) -> u64 {
+    /// Changes whenever the strips may have changed from elsewhere (an
+    /// edit in another view, undo, another project opened).
+    pub fn revision(&self) -> u64 {
         // Strips depend on the document, and on which plugins a scan found
         // to be effects (that moves where an instrument track's inserts
         // start). A new document restarts its revision count, so its serial
@@ -1160,19 +646,23 @@ impl MixerHandle for AppMixer {
         })
     }
 
-    fn set_write_automation(&mut self, on: bool) {
+    /// Touch writing: while on, moving a control during playback records
+    /// it as automation.
+    pub fn set_write_automation(&mut self, on: bool) {
         self.report(|m, d, s| m.set_write(d, s, on));
     }
 
-    fn write_automation(&self) -> bool {
+    pub fn write_automation(&self) -> bool {
         state::with(|s| s.mixer.write())
     }
 
-    fn touch(&mut self, id: StripId, control: Control, pressed: bool) {
+    /// The user grabbed (`pressed`) or let go of a control.
+    pub fn touch(&mut self, id: StripId, control: Control, pressed: bool) {
         self.report(|m, d, s| m.touch(d, s, id, control, pressed));
     }
 
-    fn reset(&mut self, id: StripId, control: Control) {
+    /// A double-click on a control: back to its default.
+    pub fn reset(&mut self, id: StripId, control: Control) {
         self.report(|m, d, s| m.reset(d, s, id, control));
     }
 }
@@ -1181,8 +671,11 @@ impl MixerHandle for AppMixer {
 mod tests {
     use super::*;
     use daw_core::time::PPQ;
+    use daw_core::time::{SampleTime, TickTime};
     use daw_engine::EngineProcessor;
     use daw_model::Send;
+    use daw_model::commands::AddLane;
+    use daw_model::{AutomationLane, AutomationPoint, AutomationTarget};
     use daw_session::SessionConfig;
 
     struct Rig {

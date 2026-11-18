@@ -13,7 +13,8 @@
 //! - **Seek and loop.** The engine splits blocks at the loop end, so a loop
 //!   wrap or a locate shows up as a block whose position is not where the
 //!   last one ended. The player then stops every sounding note and, with
-//!   chase on, restarts notes that span the new position.
+//!   chase on, restarts the notes that would be sounding at the new
+//!   position had playback run up to it.
 //! - **Recording.** While armed and playing, input notes and raw MIDI are
 //!   copied to a queue with their timeline position, along with markers for
 //!   jumps and stops. [`crate::record::Recorder`] turns that into notes.
@@ -24,13 +25,20 @@
 //!   (a key clicked in the piano roll, a note being dragged) whether or not
 //!   the transport plays. It bypasses the input gate and is never recorded.
 //!
+//! - **Full output.** An event that does not fit in the output list is
+//!   counted ([`PlayerHandle::take_event_overflows`]) and the player's
+//!   state follows what went out: a note-off or sustain-pedal lift is sent
+//!   first thing in the next block, and a sequence note starts then, a
+//!   chased one included.
+//!   Nothing is left sounding for good.
+//!
 //! `process` never allocates, locks or blocks.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
-use daw_core::event::{Event, EventKind, EventList, NoteId};
+use daw_core::event::{Event, EventKind, EventList, NoteId, midi};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::SampleTime;
@@ -105,7 +113,7 @@ pub struct Preview {
 fn pack_preview(serial: u32, preview: Option<Preview>) -> u32 {
     let note = preview.map_or(0, |p| {
         // At least 1: a note-on at velocity 0 is a note-off to instruments.
-        let velocity = ((p.velocity.clamp(0.0, 1.0) * 127.0).round() as u32).max(1);
+        let velocity = u32::from(midi::to_7bit(p.velocity).max(1));
         u32::from(p.key & 0x7F) | u32::from(p.channel & 0x0F) << 8 | velocity << 12 | 1 << 19
     });
     serial << 20 | note
@@ -124,6 +132,7 @@ struct Shared {
     armed: AtomicBool,
     chase: AtomicBool,
     capture_overflows: AtomicU64,
+    event_overflows: AtomicU64,
     input_open: AtomicBool,
     input_channel: AtomicU8,
     end_live: AtomicBool,
@@ -155,6 +164,8 @@ pub fn midi_player(capture_capacity: usize) -> (MidiPlayer, PlayerHandle) {
         live: [0; 16],
         pedal: 0,
         captured: [0; 16],
+        owed: Owed::default(),
+        chase_again: false,
         preview_seen: 0,
         previewing: None,
         shared: shared.clone(),
@@ -249,6 +260,13 @@ impl PlayerHandle {
     pub fn take_capture_overflows(&self) -> u64 {
         self.shared.capture_overflows.swap(0, Relaxed)
     }
+
+    /// How many events did not fit in the player's output list, since the
+    /// last call. Ends of notes among them were sent a block late, starts
+    /// of sequence notes too, and other events were lost.
+    pub fn take_event_overflows(&self) -> u64 {
+        self.shared.event_overflows.swap(0, Relaxed)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -283,6 +301,10 @@ pub struct MidiPlayer {
     pedal: u16,
     /// Live notes captured and not yet ended, like `live`.
     captured: [u128; 16],
+    owed: Owed,
+    /// The last chase ran out of room in the output list: the next block
+    /// chases again at its own position.
+    chase_again: bool,
     /// The last preview request acted on.
     preview_seen: u32,
     /// The preview note sounding: channel, key and note id.
@@ -292,7 +314,11 @@ pub struct MidiPlayer {
 
 /// The channel and value of a sustain pedal (CC 64) message.
 fn sustain(kind: &EventKind) -> Option<(u8, bool)> {
-    match *kind {
+    let EventKind::Midi(raw) = *kind else {
+        return None;
+    };
+    // Decoded first: instruments do not hear a malformed message either.
+    match midi::decode_padded(raw)? {
         EventKind::Midi([status, 64, value]) if status & 0xF0 == 0xB0 => {
             Some((status & 0x0F, value >= 64))
         }
@@ -339,9 +365,9 @@ fn channel_open(gate: &InputGate, channel: u8) -> bool {
     })
 }
 
-/// Calls `f` with a note-off for every note in `held` on a channel `gate`
-/// closed, and forgets them.
-fn close_held(held: &mut [u128; 16], gate: &InputGate, mut f: impl FnMut(EventKind)) {
+/// Calls `f` with the channel and key of every note in `held` on a channel
+/// `gate` closed, and forgets them.
+fn close_held(held: &mut [u128; 16], gate: &InputGate, mut f: impl FnMut(u8, u8)) {
     for (channel, keys) in held.iter_mut().enumerate() {
         let channel = channel as u8;
         if *keys == 0 || channel_open(gate, channel) {
@@ -349,35 +375,111 @@ fn close_held(held: &mut [u128; 16], gate: &InputGate, mut f: impl FnMut(EventKi
         }
         for key in 0..128u8 {
             if *keys & (1 << key) != 0 {
-                f(EventKind::NoteOff {
-                    channel,
-                    key: Some(key),
-                    velocity: 0.0,
-                    note_id: -1,
-                });
+                f(channel, key);
             }
         }
         *keys = 0;
     }
 }
 
-fn push(out: &mut EventList, frame: u32, kind: EventKind) {
-    // A full list drops the event; the engine sizes lists generously.
-    let _ = out.push(Event { frame, kind });
+/// The end of the note on `key`; a `note_id` of -1 ends whatever sounds
+/// there.
+fn key_off(channel: u8, key: u8, note_id: NoteId) -> EventKind {
+    EventKind::NoteOff {
+        channel,
+        key: Some(key),
+        velocity: 0.0,
+        note_id,
+    }
+}
+
+/// The sustain pedal of `channel` going up.
+fn pedal_up(channel: u8) -> EventKind {
+    EventKind::Midi([0xB0 | channel, 64, 0])
+}
+
+/// Appends an event to `out`. A full list drops it (the engine sizes lists
+/// generously), which `shared` counts. Returns whether it went out.
+fn push(out: &mut EventList, shared: &Shared, frame: u32, kind: EventKind) -> bool {
+    let sent = out.push(Event { frame, kind }).is_ok();
+    if !sent {
+        shared.event_overflows.fetch_add(1, Relaxed);
+    }
+    sent
+}
+
+/// Note-offs and sustain-pedal lifts that found the output list full. They
+/// go out first thing in the next block, so a full list delays the end of
+/// a note but never leaves it sounding.
+///
+/// Only the key is kept, so the late note-off ends whatever sounds on it:
+/// when a preview and a sequence note share a key and the preview's end
+/// was owed, the sequence note ends with it.
+#[derive(Debug, Default)]
+struct Owed {
+    /// One bit per key, per channel, like `MidiPlayer::live`.
+    notes: [u128; 16],
+    /// One bit per channel, like `MidiPlayer::pedal`.
+    pedals: u16,
+}
+
+impl Owed {
+    /// Sends the note-off on `key`, or owes it when `out` is full.
+    fn note_off(
+        &mut self,
+        out: &mut EventList,
+        shared: &Shared,
+        frame: u32,
+        (channel, key): (u8, u8),
+        note_id: NoteId,
+    ) {
+        if !push(out, shared, frame, key_off(channel, key, note_id)) {
+            self.notes[usize::from(channel & 0x0F)] |= 1 << (key & 0x7F);
+        }
+    }
+
+    /// Lifts the sustain pedal of `channel`, or owes that when `out` is
+    /// full.
+    fn lift_pedal(&mut self, out: &mut EventList, shared: &Shared, channel: u8) {
+        if !push(out, shared, 0, pedal_up(channel)) {
+            self.pedals |= 1 << (channel & 0x0F);
+        }
+    }
+
+    /// Sends what earlier blocks owe, as far as `out` has room.
+    fn settle(&mut self, out: &mut EventList) {
+        if self.pedals == 0 && self.notes.iter().all(|&keys| keys == 0) {
+            return;
+        }
+        for channel in 0..16u8 {
+            let pedal = 1 << channel;
+            if self.pedals & pedal != 0 && out.push(event(pedal_up(channel))).is_ok() {
+                self.pedals &= !pedal;
+            }
+            let keys = &mut self.notes[usize::from(channel)];
+            if *keys == 0 {
+                continue;
+            }
+            for key in 0..128u8 {
+                let bit = 1 << key;
+                if *keys & bit != 0 && out.push(event(key_off(channel, key, -1))).is_ok() {
+                    *keys &= !bit;
+                }
+            }
+        }
+    }
+}
+
+/// An event at the start of the block.
+fn event(kind: EventKind) -> Event {
+    Event { frame: 0, kind }
 }
 
 impl MidiPlayer {
-    fn note_off(out: &mut EventList, frame: u32, a: &Active) {
-        push(
-            out,
-            frame,
-            EventKind::NoteOff {
-                channel: a.channel,
-                key: Some(a.key),
-                velocity: 0.0,
-                note_id: a.note_id,
-            },
-        );
+    /// Ends a sounding note; see [`Owed::note_off`].
+    fn note_off(&mut self, out: &mut EventList, frame: u32, a: Active) {
+        self.owed
+            .note_off(out, &self.shared, frame, (a.channel, a.key), a.note_id);
     }
 
     /// Whether a live input event passes `gate`, keeping track of the
@@ -398,12 +500,32 @@ impl MidiPlayer {
     /// Ends the live notes, and lifts the sustain pedal, on channels `gate`
     /// no longer lets through.
     fn close_live(&mut self, gate: &InputGate, out: &mut EventList) {
-        close_held(&mut self.live, gate, |kind| push(out, 0, kind));
+        let (owed, shared) = (&mut self.owed, &*self.shared);
+        close_held(&mut self.live, gate, |channel, key| {
+            owed.note_off(out, shared, 0, (channel, key), -1);
+        });
         for channel in 0..16u8 {
             let bit = 1 << channel;
             if self.pedal & bit != 0 && !channel_open(gate, channel) {
-                push(out, 0, EventKind::Midi([0xB0 | channel, 64, 0]));
+                owed.lift_pedal(out, shared, channel);
                 self.pedal &= !bit;
+            }
+        }
+    }
+
+    /// Passes on the live input `gate` lets through.
+    fn pass_input(&mut self, gate: &InputGate, input: &EventList, out: &mut EventList) {
+        for e in input.iter() {
+            let (live, pedal) = (self.live, self.pedal);
+            if self.admit(gate, &e.kind) && !push(out, &self.shared, e.frame, e.kind) {
+                // The instrument never heard this event: what it would
+                // have released is still down there.
+                for (owed, (before, now)) in
+                    self.owed.notes.iter_mut().zip(live.iter().zip(&self.live))
+                {
+                    *owed |= before & !now;
+                }
+                self.owed.pedals |= pedal & !self.pedal;
             }
         }
     }
@@ -414,44 +536,51 @@ impl MidiPlayer {
         if word == self.preview_seen {
             return;
         }
-        self.preview_seen = word;
         if let Some((channel, key, note_id)) = self.previewing.take() {
-            push(
-                out,
-                0,
-                EventKind::NoteOff {
-                    channel,
-                    key: Some(key),
-                    velocity: 0.0,
-                    note_id,
-                },
-            );
+            self.owed
+                .note_off(out, &self.shared, 0, (channel, key), note_id);
         }
         if let Some(p) = unpack_preview(word) {
-            let note_id = self.next_note_id;
-            self.next_note_id = self.next_note_id.wrapping_add(1) & NoteId::MAX;
-            push(
-                out,
-                0,
-                EventKind::NoteOn {
-                    channel: p.channel,
-                    key: p.key,
-                    velocity: p.velocity,
-                    note_id,
-                },
-            );
+            let Some(note_id) = self.note_on(out, 0, (p.channel, p.key), p.velocity) else {
+                // No room: the request stays unseen for the next block.
+                return;
+            };
             self.previewing = Some((p.channel, p.key, note_id));
         }
+        self.preview_seen = word;
     }
 
     fn all_off(&mut self, out: &mut EventList) {
-        for a in &self.active {
-            Self::note_off(out, 0, a);
+        for i in 0..self.active.len() {
+            self.note_off(out, 0, self.active[i]);
         }
         self.active.clear();
     }
 
-    fn start_note(&mut self, out: &mut EventList, frame: u32, n: &SeqNote) {
+    /// Sends a note-on with a fresh note id. `None` when `out` is full.
+    fn note_on(
+        &mut self,
+        out: &mut EventList,
+        frame: u32,
+        (channel, key): (u8, u8),
+        velocity: f32,
+    ) -> Option<NoteId> {
+        let note_id = self.next_note_id;
+        let kind = EventKind::NoteOn {
+            channel,
+            key,
+            velocity,
+            note_id,
+        };
+        push(out, &self.shared, frame, kind).then(|| {
+            self.next_note_id = note_id.wrapping_add(1) & NoteId::MAX;
+            note_id
+        })
+    }
+
+    /// Starts `n`, ending the note already on its key. `false` when `out`
+    /// is full: `n` is not sounding, and the caller starts it later.
+    fn start_note(&mut self, out: &mut EventList, frame: u32, n: &SeqNote) -> bool {
         // Retrigger: stop the same key on the same channel first.
         if let Some(i) = self
             .active
@@ -459,26 +588,17 @@ impl MidiPlayer {
             .position(|a| a.key == n.key && a.channel == n.channel)
         {
             let a = self.active.swap_remove(i);
-            Self::note_off(out, frame, &a);
+            self.note_off(out, frame, a);
         }
         if self.active.len() == MAX_ACTIVE
             && let Some(i) = (0..self.active.len()).min_by_key(|&i| self.active[i].end)
         {
             let a = self.active.swap_remove(i);
-            Self::note_off(out, frame, &a);
+            self.note_off(out, frame, a);
         }
-        let note_id = self.next_note_id;
-        self.next_note_id = self.next_note_id.wrapping_add(1) & NoteId::MAX;
-        push(
-            out,
-            frame,
-            EventKind::NoteOn {
-                channel: n.channel,
-                key: n.key,
-                velocity: n.velocity,
-                note_id,
-            },
-        );
+        let Some(note_id) = self.note_on(out, frame, (n.channel, n.key), n.velocity) else {
+            return false;
+        };
         self.active.push(Active {
             start: n.start,
             end: n.end.0,
@@ -487,6 +607,7 @@ impl MidiPlayer {
             channel: n.channel,
             note_id,
         });
+        true
     }
 
     fn retire(&mut self, old: Box<Sequence>) {
@@ -528,7 +649,7 @@ impl MidiPlayer {
                     i += 1;
                 }
                 _ => {
-                    Self::note_off(out, 0, &a);
+                    self.note_off(out, 0, a);
                     self.active.swap_remove(i);
                 }
             }
@@ -551,17 +672,42 @@ impl MidiPlayer {
         }
     }
 
-    /// Starts every note that spans `pos` and is not already sounding.
+    /// Starts the notes that playing up to `pos` would have left sounding
+    /// and that are not sounding already. A note retriggers its key, so
+    /// per channel and key only the last note to start before `pos` can
+    /// sound, and only while it has not ended: an earlier note that still
+    /// spans `pos` was cut off when the later one started, and is stopped
+    /// here if it sounds (a note added behind the play position can make
+    /// it so).
+    ///
+    /// When `out` fills up, the rest is chased in the next block.
     fn chase(&mut self, out: &mut EventList, pos: i64) {
-        for i in self.seq.sounding_range(pos) {
+        self.chase_again = false;
+        let slot = |n: &SeqNote| (usize::from(n.channel & 0x0F), usize::from(n.key & 0x7F));
+        let range = self.seq.sounding_range(pos);
+        // How many notes of each channel and key are still to come: the
+        // one that brings its count to 0 started last.
+        let mut left = [[0u32; 128]; 16];
+        for n in &self.seq.notes()[range.clone()] {
+            let (channel, key) = slot(n);
+            left[channel][key] += 1;
+        }
+        for i in range {
             let n = self.seq.notes()[i];
-            if n.end.0 > pos
-                && !self
-                    .active
-                    .iter()
-                    .any(|a| a.uid == n.uid && a.start == n.start)
-            {
-                self.start_note(out, 0, &n);
+            let (channel, key) = slot(&n);
+            left[channel][key] -= 1;
+            let sounding = self
+                .active
+                .iter()
+                .position(|a| a.uid == n.uid && a.start == n.start);
+            if left[channel][key] != 0 {
+                if let Some(at) = sounding {
+                    let cut = self.active.swap_remove(at);
+                    self.note_off(out, 0, cut);
+                }
+            } else if n.end.0 > pos && sounding.is_none() && !self.start_note(out, 0, &n) {
+                self.chase_again = true;
+                break;
             }
         }
     }
@@ -581,6 +727,7 @@ impl Node for MidiPlayer {
 
     fn process(&mut self, ctx: &mut ProcessContext) {
         let out = &mut *ctx.events_out;
+        self.owed.settle(out);
         self.receive(out);
         let gate = InputGate {
             open: self.shared.input_open.load(Relaxed),
@@ -592,12 +739,9 @@ impl Node for MidiPlayer {
             open: false,
             channel: None,
         };
-        self.close_live(if ended { &closed } else { &gate }, out);
-        for e in ctx.events_in.iter() {
-            if self.admit(&gate, &e.kind) {
-                let _ = out.push(*e);
-            }
-        }
+        let closing = if ended { &closed } else { &gate };
+        self.close_live(closing, out);
+        self.pass_input(&gate, ctx.events_in, out);
         self.update_preview(out);
 
         let t = ctx.transport;
@@ -628,6 +772,8 @@ impl Node for MidiPlayer {
                 self.chase(out, pos);
             }
             self.cursor = self.seq.first_at_or_after(pos);
+        } else if self.chase_again {
+            self.chase(out, pos);
         }
         if self.capturing && !armed {
             self.capture(Captured::Stop {
@@ -643,10 +789,10 @@ impl Node for MidiPlayer {
             // What reaches the instrument is what gets recorded: notes the
             // gate let start also end in the take, even if it closed since.
             let mut captured = self.captured;
-            close_held(&mut captured, if ended { &closed } else { &gate }, |kind| {
+            close_held(&mut captured, closing, |channel, key| {
                 self.capture(Captured::Event {
                     time: SampleTime(pos),
-                    kind,
+                    kind: key_off(channel, key, -1),
                 })
             });
             for e in ctx.events_in.iter() {
@@ -676,19 +822,21 @@ impl Node for MidiPlayer {
             let next_off = (0..self.active.len())
                 .filter(|&i| self.active[i].end < end)
                 .min_by_key(|&i| self.active[i].end);
+            // A note-off comes first unless a note starts before it.
+            let next_on =
+                next_on.filter(|on| next_off.is_none_or(|off| self.active[off].end > on.start.0));
             match (next_on, next_off) {
                 (None, None) => break,
-                (Some(on), Some(off)) if self.active[off].end > on.start.0 => {
+                (Some(on), _) => {
+                    if !self.start_note(out, frame_of(on.start.0), &on) {
+                        // No room: it starts with the next block.
+                        break;
+                    }
                     self.cursor += 1;
-                    self.start_note(out, frame_of(on.start.0), &on);
                 }
-                (Some(on), None) => {
-                    self.cursor += 1;
-                    self.start_note(out, frame_of(on.start.0), &on);
-                }
-                (_, Some(off)) => {
+                (None, Some(off)) => {
                     let a = self.active.swap_remove(off);
-                    Self::note_off(out, frame_of(a.end), &a);
+                    self.note_off(out, frame_of(a.end), a);
                 }
             }
         }
@@ -697,6 +845,8 @@ impl Node for MidiPlayer {
 
     fn reset(&mut self) {
         self.active.clear();
+        self.owed = Owed::default();
+        self.chase_again = false;
         // The instrument is reset too; a later request starts afresh.
         self.previewing = None;
         if let Some(at) = self.expected.take()

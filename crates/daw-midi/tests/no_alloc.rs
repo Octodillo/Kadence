@@ -3,24 +3,12 @@
 
 mod support;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
 use daw_core::event::{Event, EventKind};
 use daw_midi::sequence::Sequence;
+use daw_test_support::no_alloc::allocations_in;
 use support::{Rig, note};
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
-
-fn violations(f: impl FnOnce()) -> u32 {
-    reset_violation_count();
-    assert_no_alloc(f);
-    violation_count()
-}
-
-#[test]
-fn detector_catches_allocations() {
-    assert!(violations(|| drop(std::hint::black_box(vec![1u8; 16]))) > 0);
-}
+daw_test_support::install_checker!();
 
 #[test]
 fn process_never_allocates() {
@@ -38,7 +26,19 @@ fn process_never_allocates() {
                 .collect(),
         )
     };
+    // A roomy output list, and one that overflows and owes note-offs.
+    for (capacity, overflows) in [(1024, false), (8, true)] {
+        let (violations, overflowed) = violations_playing(capacity, &seq);
+        assert_eq!(violations, 0, "with room for {capacity} events");
+        assert_eq!(overflowed > 0, overflows, "with room for {capacity} events");
+    }
+}
+
+/// Allocations seen, and events that did not fit, while playing into an
+/// output list with room for `capacity` events.
+fn violations_playing(capacity: usize, seq: &impl Fn(i64) -> Sequence) -> (u32, u64) {
     let mut rig = Rig::new();
+    rig.limit_output(capacity);
     rig.handle.set_sequence(seq(0)).unwrap();
     rig.handle.set_armed(true);
     let input = [Event {
@@ -72,8 +72,8 @@ fn process_never_allocates() {
             pos = (round * 1234) % 15_000;
         }
         let playing = round % 23 != 0;
-        total += violations(|| rig.block_into(pos, 128, playing, &input));
+        total += allocations_in(|| rig.block_into(pos, 128, playing, &input));
         pos += 128;
     }
-    assert_eq!(total, 0);
+    (total, rig.handle.take_event_overflows())
 }

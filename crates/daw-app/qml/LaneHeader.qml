@@ -15,53 +15,65 @@ Rectangle {
 
     property int track: -1
     property int lane: -1
-    property int revision: 0
+    // The lane as one entry of the track's `lanes` role (see Tracks); null
+    // for the empty row.
+    property var info: null
 
-    readonly property bool placeholder: lane < 0
-    // `revision >= 0 ?` makes the bindings depend on it (the QML compiler
-    // drops a bare `revision;` statement).
-    readonly property string laneText: revision >= 0 && !placeholder
-        ? laneName.text(kind,
-                        Automation.laneDetail(track, lane),
-                        Automation.laneParam(track, lane))
-        : ""
-    readonly property int mode: revision >= 0 && !placeholder ? Automation.laneMode(track, lane) : 1
+    readonly property bool placeholder: lane < 0 || !info
+    readonly property string laneText: placeholder ? "" : laneName.text(kind, info.detail, info.param)
+    // An Automation.LaneMode.
+    readonly property int mode: placeholder ? Automation.LaneRead : info.mode
 
-    // What the lane controls, as it is now: kind (see Automation.laneKind),
-    // value in its unit, and whether the lane's points set it as it plays.
-    readonly property int kind: revision >= 0 && !placeholder ? Automation.laneKind(track, lane) : -1
+    // What the lane controls, as it is now: kind (an Automation.LaneKind,
+    // -1 for the empty row), value in its unit, and whether the lane's
+    // points set it as it plays.
+    readonly property int kind: placeholder ? -1 : info.kind
     property real value: 0
     property bool following: false
     // Moving the control during playback records over the lane.
     property bool writes: false
     // How a device parameter's value is worded (see ValueText.param).
-    readonly property string paramControl: kind === 3 && revision >= 0 ? Automation.laneControlKind(track, lane) : ""
-    readonly property string paramUnit: kind === 3 && revision >= 0 ? Automation.laneUnit(track, lane) : ""
-    readonly property var paramChoices: kind === 3 && revision >= 0 ? Automation.laneChoices(track, lane) : []
+    readonly property string paramControl: placeholder ? "" : info.control
+    readonly property string paramUnit: placeholder ? "" : info.unit
+    readonly property var paramChoices: placeholder ? [] : info.choices
 
     function readValue(): void {
         if (placeholder) {
             return;
         }
-        value = Automation.laneValue(track, lane);
-        following = Automation.laneFollowing(track, lane);
-        writes = Automation.laneWrites(track, lane);
+        const control = Automation.laneControl(track, lane);
+        value = control.value;
+        following = control.following;
+        writes = control.writes;
         if (!levelSlider.pressed) {
-            levelSlider.value = Automation.lanePosition(track, lane);
+            levelSlider.value = control.position;
         }
     }
 
-    onRevisionChanged: readValue()
+    onInfoChanged: readValue()
     onTrackChanged: readValue()
     onLaneChanged: readValue()
     Component.onCompleted: readValue()
 
+    // An edit or an undo can move the control without changing `info`.
+    Connections {
+        target: Project
+        function onRevisionChanged() {
+            laneHeader.readValue();
+        }
+    }
+    Connections {
+        target: Automation
+        function onRevisionChanged() {
+            laneHeader.readValue();
+        }
+    }
+
     // A playing lane moves its control.
-    Timer {
-        interval: 50
-        repeat: true
-        running: laneHeader.following && Project.playing && laneHeader.visible
-        onTriggered: laneHeader.readValue()
+    Connections {
+        target: UiClock
+        enabled: laneHeader.following && Project.playing && laneHeader.visible
+        function onTicked() { laneHeader.readValue(); }
     }
     // So does moving the playhead while stopped.
     Connections {
@@ -78,12 +90,12 @@ Rectangle {
     // The value with its unit, for the tooltip and screen readers.
     readonly property string valueText: {
         switch (kind) {
-        case 0: // volume
-        case 2: // send
+        case Automation.VolumeLane:
+        case Automation.SendLane:
             return ValueText.level(value);
-        case 1:
+        case Automation.PanLane:
             return ValueText.pan(value);
-        case 3:
+        case Automation.DeviceParamLane:
             return ValueText.param(value, paramControl, paramUnit, paramChoices);
         }
         return "";
@@ -126,7 +138,7 @@ Rectangle {
             text: laneHeader.laneText
             elide: Text.ElideRight
             font: Kirigami.Theme.smallFont
-            opacity: laneHeader.mode === 0 ? 0.6 : 1
+            opacity: laneHeader.mode === Automation.LaneOff ? 0.6 : 1
         }
 
         Item {
@@ -148,7 +160,7 @@ Rectangle {
             // a key press is a gesture of its own.
             function move(): void {
                 Automation.setLanePosition(laneHeader.track, laneHeader.lane, value);
-                laneHeader.value = Automation.laneValue(laneHeader.track, laneHeader.lane);
+                laneHeader.readValue();
             }
             onMoved: {
                 if (pressed) {
@@ -181,13 +193,15 @@ Rectangle {
             Layout.maximumWidth: Kirigami.Units.gridUnit * 4.5
             flat: true
             font: Kirigami.Theme.smallFont
+            // The modes in the order the list shows them.
+            readonly property list<int> modes: [Automation.LaneOff, Automation.LaneRead, Automation.LaneWrite]
             model: [
                 i18nc("@item:inlistbox automation lane mode", "Off"),
                 i18nc("@item:inlistbox automation lane mode", "Read"),
                 i18nc("@item:inlistbox automation lane mode", "Write")
             ]
-            currentIndex: laneHeader.mode
-            onActivated: (i) => Automation.setLaneMode(laneHeader.track, laneHeader.lane, i)
+            currentIndex: modes.indexOf(laneHeader.mode)
+            onActivated: (i) => Automation.setLaneMode(laneHeader.track, laneHeader.lane, modes[i])
             Accessible.name: i18nc("@label:listbox", "Automation mode")
             QQC2.ToolTip.text: i18nc("@info:tooltip", "Off: the control keeps its own setting. Read: the lane plays. Write: the lane plays, and moving the control on the Mix page while playing records over it.")
             QQC2.ToolTip.visible: hovered
@@ -244,6 +258,12 @@ Rectangle {
     TapHandler {
         acceptedButtons: Qt.RightButton
         onTapped: laneMenu.popup()
+    }
+    // The keyboard's way to the same menu, from any of the lane's controls.
+    Keys.forwardTo: [menuKey]
+    MenuKey {
+        id: menuKey
+        onRequested: laneMenu.popup(laneHeader, Kirigami.Units.gridUnit, laneHeader.height)
     }
     // Touch screens have no right button: hold a finger instead.
     TapHandler {

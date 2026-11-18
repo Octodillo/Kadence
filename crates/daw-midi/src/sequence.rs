@@ -6,7 +6,7 @@
 
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 
-use crate::edit::clamp_velocity;
+use crate::edit::clamp_unit;
 use crate::note::NoteData;
 
 /// One note on the timeline, in samples.
@@ -89,13 +89,6 @@ impl Sequence {
         from..self.first_at_or_after(pos)
     }
 
-    /// Notes that started before `pos` and are still sounding at it.
-    pub fn sounding_at(&self, pos: i64) -> impl Iterator<Item = &SeqNote> {
-        self.notes[self.sounding_range(pos)]
-            .iter()
-            .filter(move |n| n.end.0 > pos)
-    }
-
     /// The note with this start and uid, if it is still there.
     pub fn find(&self, start: SampleTime, uid: u64) -> Option<&SeqNote> {
         let from = self.first_at_or_after(start.0);
@@ -142,7 +135,7 @@ where
                 end: tempo.ticks_to_samples(TickTime(end), sample_rate),
                 key: n.key,
                 channel: n.channel,
-                velocity: clamp_velocity(n.velocity) as f32,
+                velocity: clamp_unit(n.velocity) as f32,
                 uid,
             });
         }
@@ -205,9 +198,9 @@ mod tests {
         ]);
         assert_eq!(seq.len(), 3);
         assert_eq!(seq.first_at_or_after(100), 1);
-        let sounding: Vec<u64> = seq.sounding_at(550).map(|n| n.uid).collect();
-        assert_eq!(sounding, [1, 3]);
-        assert_eq!(seq.sounding_at(500).count(), 1);
+        // Every note that started before the position, ended or not.
+        assert_eq!(seq.sounding_range(550), 0..3);
+        assert_eq!(seq.sounding_range(500), 0..2);
         assert_eq!(seq.find(SampleTime(500), 3).map(|n| n.end.0), Some(600));
         assert!(seq.find(SampleTime(500), 1).is_none());
         assert_eq!(uid_from_u128(1 | (3 << 64)), 2);

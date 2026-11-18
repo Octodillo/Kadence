@@ -180,13 +180,6 @@ Kirigami.Dialog {
         onAccepted: dialog.start(selectedFile)
     }
 
-    Timer {
-        interval: 100
-        repeat: true
-        running: Exporter.running
-        onTriggered: Exporter.poll()
-    }
-
     Connections {
         target: Exporter
         function onFinished(message: var): void {

@@ -1,20 +1,22 @@
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use daw_core::event::EventList;
 use daw_core::queue::{Consumer, Producer, spsc};
 
-use crate::cycle::{PortBuffers, push_or_count};
+use crate::cycle::{CycleDriver, MidiPorts};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback, midi,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, BackendStats, Latency, PortDirection,
+    PortFilter, PortInfo, PortKind, ProcessCallback,
 };
-use crate::{MAX_MIDI_INPUTS, MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
+use crate::{
+    MAIN_MIDI_INPUT, MAIN_MIDI_OUTPUT, MAX_MIDI_INPUTS, MidiInputPort, MidiInputs,
+    MidiInputsControl, midi_inputs,
+};
 
 const DEFAULT_RATE: u32 = 48_000;
 const DEFAULT_FRAMES: u32 = 256;
@@ -34,7 +36,8 @@ pub enum Pacing {
 /// A raw MIDI message for the dummy backend's injector and tap.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RawMessage {
-    /// For tapped output: the absolute frame (`frame_time + event frame`).
+    /// For tapped output: the absolute frame (`frame_time + event frame`,
+    /// the event's frame held inside its period).
     /// Ignored on injection.
     pub frame: u64,
     pub bytes: [u8; 3],
@@ -86,16 +89,58 @@ struct World {
     connections: BTreeSet<(String, String)>,
 }
 
+/// Failures a test asked the pretend system for. The worker reads them
+/// between cycles.
+#[derive(Debug, Default)]
+struct Faults {
+    server_gone: AtomicBool,
+    callback_panic: AtomicBool,
+    /// The rate the server switches to, in Hz; 0 for none.
+    new_rate: AtomicU32,
+}
+
 /// The pretend system around a [`DummyBackend`]: other clients' ports, to
-/// add and remove the way devices are plugged in and out.
+/// add and remove the way devices are plugged in and out, and the failures
+/// of a real audio system, to bring about on demand.
 #[derive(Clone, Debug)]
-pub struct DummySystem(Arc<Mutex<World>>);
+pub struct DummySystem {
+    world: Arc<Mutex<World>>,
+    faults: Arc<Faults>,
+}
 
 impl DummySystem {
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
-        self.0
+        self.world
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The pretend server shuts down, as when `jackd` exits or PipeWire
+    /// restarts: a running backend ends its cycles before the next one and
+    /// reports [`BackendHealth::ServerGone`]. Until [`restore`](Self::restore)
+    /// there is no server: `start` fails and closes the backend, and `open`
+    /// fails to connect, as with JACK.
+    pub fn shut_down(&self) {
+        self.faults.server_gone.store(true, Relaxed);
+    }
+
+    /// The pretend server is there again, for the next `open`.
+    pub fn restore(&self) {
+        self.faults.server_gone.store(false, Relaxed);
+    }
+
+    /// The next cycle panics in place of calling the process callback, for
+    /// a callback the test cannot reach to make it panic itself. The
+    /// backend then reports [`BackendHealth::CallbackPanicked`].
+    pub fn panic_callback(&self) {
+        self.faults.callback_panic.store(true, Relaxed);
+    }
+
+    /// The pretend server switches to `rate` Hz under a running backend, as
+    /// PipeWire does when its clock rate is forced: from the next cycle on
+    /// the backend reports and runs at the new rate.
+    pub fn change_sample_rate(&self, rate: u32) {
+        self.faults.new_rate.store(rate, Relaxed);
     }
 
     /// Another client's port appears. `name` is the full `client:port`.
@@ -145,6 +190,8 @@ pub struct DummyBackend {
     /// Other clients' ports and every connection, shared with
     /// [`DummySystem`] handles.
     world: Arc<Mutex<World>>,
+    /// Shared with [`DummySystem`] handles and the worker.
+    faults: Arc<Faults>,
     midi_in_rx: Option<Consumer<RawMessage>>,
     midi_out_tx: Option<Producer<RawMessage>>,
     running: Option<Running>,
@@ -159,8 +206,7 @@ pub struct DummyBackend {
 
 struct Running {
     stop: Arc<AtomicBool>,
-    /// The worker, and whether the callback panicked.
-    thread: JoinHandle<(Worker, bool)>,
+    thread: JoinHandle<Worker>,
 }
 
 impl DummyBackend {
@@ -175,6 +221,7 @@ impl DummyBackend {
                 others: Self::system_ports(),
                 connections: BTreeSet::new(),
             })),
+            faults: Arc::default(),
             midi_in_rx: None,
             midi_out_tx: None,
             running: None,
@@ -206,10 +253,13 @@ impl DummyBackend {
         v
     }
 
-    /// A handle on the pretend system's other ports, for tests to plug
-    /// devices in and out while the backend is in use elsewhere.
+    /// A handle on the pretend system, for tests to plug devices in and
+    /// out, or make it fail, while the backend is in use elsewhere.
     pub fn system(&self) -> DummySystem {
-        DummySystem(self.world.clone())
+        DummySystem {
+            world: self.world.clone(),
+            faults: self.faults.clone(),
+        }
     }
 
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
@@ -309,16 +359,16 @@ impl DummyBackend {
                 add(me, format!("audio_out_{i}"), Audio, Output);
             }
             if cfg.midi_input {
-                add(me, "midi_in".into(), Midi, Input);
+                add(me, MAIN_MIDI_INPUT.into(), Midi, Input);
             }
             if cfg.midi_output {
-                add(me, "midi_out".into(), Midi, Output);
+                add(me, MAIN_MIDI_OUTPUT.into(), Midi, Output);
             }
         }
         if let Some(control) = &self.extra_control {
-            for (_, name) in control.names() {
+            for port in control.ports() {
                 v.push(PortInfo {
-                    name: name.to_owned(),
+                    name: port.name,
                     kind: Midi,
                     direction: Input,
                     is_physical: false,
@@ -335,29 +385,22 @@ impl DummyBackend {
             .find(|p| p.name == name)
             .ok_or_else(|| format!("no port named {name}"))
     }
-
-    fn auto_connect(&mut self) {
-        let ports = self.all_ports();
-        let pick = |ours: bool, kind, dir| {
-            ports
-                .iter()
-                .filter(move |p| p.is_ours == ours && p.kind == kind && p.direction == dir)
-                .map(|p| p.name.clone())
-        };
-        use PortDirection::{Input, Output};
-        use PortKind::{Audio, Midi};
-        let pairs: Vec<_> = pick(true, Audio, Output)
-            .zip(pick(false, Audio, Input))
-            .chain(pick(false, Audio, Output).zip(pick(true, Audio, Input)))
-            .chain(pick(false, Midi, Output).zip(pick(true, Midi, Input)))
-            .collect();
-        self.world().connections.extend(pairs);
-    }
 }
 
 impl Default for DummyBackend {
     fn default() -> Self {
         Self::new(Pacing::RealTime)
+    }
+}
+
+impl DummyBackend {
+    /// Forgets the connection: ports, links and configuration.
+    fn set_closed(&mut self) {
+        self.cfg = None;
+        self.world().connections.clear();
+        self.extra = None;
+        self.extra_control = None;
+        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
     }
 }
 
@@ -370,6 +413,11 @@ impl AudioBackend for DummyBackend {
         if self.cfg.is_some() {
             return Err(BackendError::AlreadyOpen);
         }
+        if self.faults.server_gone.load(Relaxed) {
+            return Err(BackendError::Connect(
+                "the pretend server is shut down".into(),
+            ));
+        }
         let rate = cfg.sample_rate.unwrap_or(DEFAULT_RATE);
         let frames = cfg.buffer_size.unwrap_or(DEFAULT_FRAMES);
         if rate == 0 || frames == 0 {
@@ -380,6 +428,9 @@ impl AudioBackend for DummyBackend {
         self.shared = Arc::new(SharedStats::new());
         self.shared.sample_rate.store(rate, Relaxed);
         self.shared.buffer_size.store(frames, Relaxed);
+        // Faults asked of the last connection do not reach this one.
+        self.faults.callback_panic.store(false, Relaxed);
+        self.faults.new_rate.store(0, Relaxed);
         self.world().connections.clear();
         let (extra, control) = midi_inputs(cfg.midi_capacity);
         self.extra = Some(extra);
@@ -394,19 +445,25 @@ impl AudioBackend for DummyBackend {
             return Err(BackendError::AlreadyRunning);
         }
         let cfg = self.cfg()?.clone();
+        if self.faults.server_gone.load(Relaxed) {
+            // A client of a server that is gone cannot be activated.
+            self.set_closed();
+            return Err(BackendError::Other(
+                "the pretend server is shut down".into(),
+            ));
+        }
         let frames = self.shared.buffer_size.load(Relaxed);
+        self.shared.callback_panicked.store(false, Relaxed);
         let mut worker = Worker {
-            cb,
+            driver: CycleDriver::new(cb, &cfg, self.shared.clone()),
             shared: self.shared.clone(),
+            faults: self.faults.clone(),
             pacing: self.pacing,
             max_cycles: self.max_cycles,
             frames,
             sample_rate: f64::from(self.shared.sample_rate.load(Relaxed)),
             inputs: vec![vec![0.0; frames as usize]; usize::from(cfg.audio_inputs)],
             outputs: vec![vec![0.0; frames as usize]; usize::from(cfg.audio_outputs)],
-            bufs: PortBuffers::new(cfg.audio_inputs.into(), cfg.audio_outputs.into()),
-            midi_in: EventList::with_capacity(cfg.midi_capacity),
-            midi_out: EventList::with_capacity(cfg.midi_capacity),
             loopback: self.loopback.map(|l| {
                 let delay = l.total().max(frames) as usize;
                 Loopback::new(usize::from(cfg.audio_inputs), delay, frames as usize)
@@ -423,7 +480,6 @@ impl AudioBackend for DummyBackend {
                 None
             },
             extra: self.extra.take().ok_or(BackendError::NotOpen)?,
-            frame_time: 0,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = stop.clone();
@@ -432,14 +488,13 @@ impl AudioBackend for DummyBackend {
             .spawn(move || {
                 daw_core::denormals::flush_to_zero();
                 // Catch a panic so `stop` gets the worker, and its queues, back.
+                // `health` reports the panic.
                 let panicked = catch_unwind(AssertUnwindSafe(|| worker.run(&stop2))).is_err();
-                (worker, panicked)
+                worker.shared.callback_panicked.store(panicked, Relaxed);
+                worker
             })
             .map_err(|e| BackendError::Other(e.to_string()))?;
         self.running = Some(Running { stop, thread });
-        if cfg.auto_connect {
-            self.auto_connect();
-        }
         Ok(())
     }
 
@@ -450,7 +505,7 @@ impl AudioBackend for DummyBackend {
         running.stop.store(true, Relaxed);
         // Wake the worker from its wait for the next period.
         running.thread.thread().unpark();
-        let (worker, panicked) = running
+        let worker = running
             .thread
             .join()
             .map_err(|_| BackendError::Other("the dummy audio thread panicked".into()))?;
@@ -467,20 +522,14 @@ impl AudioBackend for DummyBackend {
         self.midi_out_tx = self.midi_out_tx.take().or(midi_out_tx);
         self.extra = Some(extra);
         self.apply_extra_now();
-        if panicked {
-            return Err(BackendError::Other("the process callback panicked".into()));
-        }
         Ok(())
     }
 
     fn close(&mut self) -> Result<(), BackendError> {
-        self.stop()?;
-        self.cfg = None;
-        self.world().connections.clear();
-        self.extra = None;
-        self.extra_control = None;
-        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
-        Ok(())
+        // Close even if the run ended badly, then say that it did.
+        let result = self.stop();
+        self.set_closed();
+        result
     }
 
     fn is_running(&self) -> bool {
@@ -542,6 +591,10 @@ impl AudioBackend for DummyBackend {
         self.shared.snapshot()
     }
 
+    fn health(&self) -> BackendHealth {
+        self.shared.health()
+    }
+
     fn add_midi_input(&mut self, name: &str) -> Result<MidiInputPort, BackendError> {
         let me = self.cfg()?.client_name.clone();
         let full = format!("{me}:{name}");
@@ -549,32 +602,16 @@ impl AudioBackend for DummyBackend {
             return Err(BackendError::Port(name.into()));
         }
         let control = self.extra_control.as_mut().ok_or(BackendError::NotOpen)?;
-        let slot = control.free_slot().ok_or_else(|| {
-            BackendError::Config(format!("at most {MAX_MIDI_INPUTS} MIDI inputs"))
-        })?;
         let (tx, rx) = spsc(RING_CAPACITY);
-        if control.add(slot, full.clone(), rx).is_err() {
-            return Err(BackendError::Other(
-                "the audio thread has not caught up with earlier port changes".into(),
-            ));
-        }
-        self.extra_tx[slot] = Some(tx);
+        let port = control.add(full, rx).map_err(|(e, _)| e)?;
+        self.extra_tx[port.slot] = Some(tx);
         self.apply_extra_now();
-        Ok(MidiInputPort { slot, name: full })
+        Ok(port)
     }
 
     fn remove_midi_input(&mut self, slot: usize) -> Result<(), BackendError> {
         let control = self.extra_control.as_mut().ok_or(BackendError::NotOpen)?;
-        let name = control
-            .names()
-            .find(|&(s, _)| s == slot)
-            .map(|(_, n)| n.to_owned())
-            .ok_or_else(|| BackendError::Config(format!("no MIDI input in slot {slot}")))?;
-        if !control.remove(slot) {
-            return Err(BackendError::Other(
-                "the audio thread has not caught up with earlier port changes".into(),
-            ));
-        }
+        let name = control.remove(slot)?;
         self.extra_tx[slot] = None;
         self.world()
             .connections
@@ -584,14 +621,9 @@ impl AudioBackend for DummyBackend {
     }
 
     fn midi_inputs(&self) -> Vec<MidiInputPort> {
-        self.extra_control.as_ref().map_or_else(Vec::new, |c| {
-            c.names()
-                .map(|(slot, name)| MidiInputPort {
-                    slot,
-                    name: name.to_owned(),
-                })
-                .collect()
-        })
+        self.extra_control
+            .as_ref()
+            .map_or_else(Vec::new, MidiInputsControl::ports)
     }
 
     fn latency(&self) -> Latency {
@@ -663,32 +695,84 @@ impl Drop for DummyBackend {
 }
 
 struct Worker {
-    cb: ProcessCallback,
+    driver: CycleDriver,
     shared: Arc<SharedStats>,
+    faults: Arc<Faults>,
     pacing: Pacing,
     max_cycles: Option<u64>,
     frames: u32,
     sample_rate: f64,
     inputs: Vec<Vec<f32>>,
     outputs: Vec<Vec<f32>>,
-    bufs: PortBuffers,
-    midi_in: EventList,
-    midi_out: EventList,
     midi_in_rx: Option<Consumer<RawMessage>>,
     midi_out_tx: Option<Producer<RawMessage>>,
     extra: MidiInputs<Consumer<RawMessage>>,
-    frame_time: u64,
     loopback: Option<Loopback>,
+}
+
+fn drain(queue: &mut Consumer<RawMessage>, each: &mut dyn FnMut(u32, &[u8])) {
+    while let Some(m) = queue.pop() {
+        each(0, m.as_bytes());
+    }
+}
+
+/// The dummy's MIDI ports are queues: an injected message arrives at frame 0
+/// of the next cycle, and a sent one is stamped with its absolute frame.
+struct QueuePorts<'a> {
+    main: Option<&'a mut Consumer<RawMessage>>,
+    out: Option<&'a mut Producer<RawMessage>>,
+    frame_time: u64,
+}
+
+impl MidiPorts for QueuePorts<'_> {
+    type Input = Consumer<RawMessage>;
+
+    fn read_main(&mut self, each: &mut dyn FnMut(u32, &[u8])) {
+        if let Some(main) = &mut self.main {
+            drain(main, each);
+        }
+    }
+
+    fn read(&mut self, port: &mut Self::Input, each: &mut dyn FnMut(u32, &[u8])) {
+        drain(port, each);
+    }
+
+    fn has_output(&self) -> bool {
+        self.out.is_some()
+    }
+
+    fn write(&mut self, frame: u32, bytes: &[u8]) -> bool {
+        let mut msg = RawMessage {
+            frame: self.frame_time + u64::from(frame),
+            bytes: [0; 3],
+            len: bytes.len() as u8,
+        };
+        msg.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.out.as_mut().is_some_and(|tx| tx.push(msg).is_ok())
+    }
 }
 
 impl Worker {
     fn run(&mut self, stop: &AtomicBool) {
         let shared = self.shared.clone();
         shared.set_realtime(current_thread_is_realtime());
-        let period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
+        let mut period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
         let mut deadline = Instant::now() + period;
         let mut cycles = 0u64;
         while !stop.load(Relaxed) && self.max_cycles.is_none_or(|m| cycles < m) {
+            if self.faults.server_gone.load(Relaxed) {
+                shared.server_gone.store(true, Relaxed);
+                break;
+            }
+            if self.faults.callback_panic.swap(false, Relaxed) {
+                panic!("DummySystem::panic_callback");
+            }
+            let rate = self.faults.new_rate.swap(0, Relaxed);
+            if rate != 0 {
+                self.sample_rate = f64::from(rate);
+                shared.sample_rate.store(rate, Relaxed);
+                period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
+            }
             let started = Instant::now();
             crate::rt_guard(&shared, || self.cycle());
             cycles += 1;
@@ -712,75 +796,26 @@ impl Worker {
     }
 
     fn cycle(&mut self) {
-        let frames = self.frames;
-        let mut dropped = 0;
-        self.midi_in.clear();
-        self.midi_out.clear();
-        if let Some(rx) = &mut self.midi_in_rx {
-            while let Some(m) = rx.pop() {
-                if let Some(e) = midi::decode(0, m.as_bytes()) {
-                    push_or_count(&mut self.midi_in, e, &mut dropped);
-                }
-            }
-        }
+        let frames = self.frames as usize;
         if let Some(l) = &mut self.loopback {
-            l.read(&mut self.inputs, frames as usize);
+            l.read(&mut self.inputs, frames);
         }
-        let extra = &mut self.extra;
-        extra.begin_cycle();
-        for (rx, list) in extra.ports.iter_mut().zip(&mut extra.lists) {
-            let Some(rx) = rx else { continue };
-            while let Some(m) = rx.pop() {
-                if let Some(e) = midi::decode(0, m.as_bytes()) {
-                    push_or_count(list, e, &mut dropped);
-                }
-            }
-        }
-        let xruns = self.shared.xruns.load(Relaxed);
-        let (frame_time, sample_rate) = (self.frame_time, self.sample_rate);
-        let (cb, midi_in, midi_out) = (&mut self.cb, &self.midi_in, &mut self.midi_out);
-        let midi_inputs = &self.extra.lists[..];
-        self.bufs.run(
-            self.inputs.iter().map(|b| &b[..frames as usize]),
-            self.outputs.iter_mut().map(|b| &mut b[..frames as usize]),
-            |audio_in, audio_out| {
-                cb(&mut BackendCycle {
-                    frames,
-                    sample_rate,
-                    frame_time,
-                    audio_in,
-                    audio_out,
-                    midi_in,
-                    midi_inputs,
-                    midi_out,
-                    xruns,
-                })
-            },
+        let mut midi = QueuePorts {
+            main: self.midi_in_rx.as_mut(),
+            out: self.midi_out_tx.as_mut(),
+            frame_time: self.driver.frame_time(),
+        };
+        self.driver.run(
+            self.frames,
+            self.sample_rate,
+            &mut midi,
+            &mut self.extra,
+            self.inputs.iter().map(|b| &b[..frames]),
+            self.outputs.iter_mut().map(|b| &mut b[..frames]),
         );
-        if let Some(tx) = &mut self.midi_out_tx {
-            for e in self.midi_out.iter() {
-                let mut bytes = [0; 3];
-                let Some(len) = midi::encode(&e.kind, &mut bytes) else {
-                    dropped += u64::from(midi::is_malformed(&e.kind));
-                    continue;
-                };
-                let msg = RawMessage {
-                    frame: frame_time + u64::from(e.frame),
-                    bytes,
-                    len: len as u8,
-                };
-                if tx.push(msg).is_err() {
-                    dropped += 1;
-                }
-            }
-        }
         if let Some(l) = &mut self.loopback {
-            l.write(&self.outputs, frames as usize);
+            l.write(&self.outputs, frames);
         }
-        self.frame_time += u64::from(frames);
-        self.shared.frames.fetch_add(u64::from(frames), Relaxed);
-        self.shared.midi_dropped.fetch_add(dropped, Relaxed);
-        self.shared.cycles.fetch_add(1, Relaxed);
     }
 }
 

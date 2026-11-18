@@ -177,10 +177,12 @@ pub struct Plugins {
     carried: HashMap<DeviceId, KeptState>,
     /// States of plugins whose device was removed, in case an undo brings it back.
     removed: RemovedStates,
-    /// Plugins that would not hand over their state when they were freed
-    /// ([`detach`](Self::detach), [`retain`](Self::retain)), for the next sync that succeeds
-    /// to report, ahead of its own warnings.
-    pub(crate) unsaved: Vec<Warning>,
+    /// What is said only once, when it happens, for the next sync that succeeds to report
+    /// ahead of its own warnings: plugins that would not load
+    /// ([`ensure`](Self::ensure)), or would not hand over their state when they were freed
+    /// ([`detach`](Self::detach), [`retain`](Self::retain)). A sync the engine refuses has
+    /// its error shown instead, so these wait.
+    pub(crate) owed: Vec<Warning>,
     /// Editors that were open in an earlier session, by their window title, to open again
     /// when the plugin is loaded again.
     reopen: HashMap<DeviceId, String>,
@@ -309,13 +311,12 @@ impl Plugins {
     }
 
     /// The loaded plugin of `d`, loading it first if needed. `None` means bypass it; a
-    /// warning says why, the first time.
+    /// warning ([`owed`](Self::owed)) says why, the first time.
     pub(crate) fn ensure(
         &mut self,
         d: &Device,
         sample_rate: f64,
         max_frames: u32,
-        warnings: &mut Vec<Warning>,
     ) -> Option<&mut Live> {
         let DeviceSource::Plugin { format, id } = &d.source else {
             return None;
@@ -326,7 +327,9 @@ impl Plugins {
             None => true,
         };
         if stale {
-            let slot = self.load(d, format, id, sample_rate, max_frames, warnings);
+            let mut said = Vec::new();
+            let slot = self.load(d, format, id, sample_rate, max_frames, &mut said);
+            self.owed.append(&mut said);
             self.slots.insert(d.id, slot);
         }
         match self.slots.get_mut(&d.id) {
@@ -484,7 +487,7 @@ impl Plugins {
                 if !l.crashed {
                     l.handle.with(|p| p.close_editor());
                 }
-                if let Some(state) = l.state_to_keep(&mut self.unsaved) {
+                if let Some(state) = l.state_to_keep(&mut self.owed) {
                     self.removed.insert(id, state);
                 }
             }
@@ -497,7 +500,7 @@ impl Plugins {
         self.carried.clear();
         self.removed.clear();
         self.reopen.clear();
-        self.unsaved.clear();
+        self.owed.clear();
     }
 
     /// Frees the plugins, keeping the state of each that has one of its own (see
@@ -505,12 +508,12 @@ impl Plugins {
     pub(crate) fn detach(&mut self) -> Plugins {
         let mut carried = std::mem::take(&mut self.carried);
         let mut reopen = std::mem::take(&mut self.reopen);
-        let mut unsaved = std::mem::take(&mut self.unsaved);
+        let mut owed = std::mem::take(&mut self.owed);
         for (id, slot) in self.slots.drain() {
             let Slot::Live(l) = slot else {
                 continue;
             };
-            if let Some(state) = l.state_to_keep(&mut unsaved) {
+            if let Some(state) = l.state_to_keep(&mut owed) {
                 carried.insert(id, state);
             }
             if !l.crashed
@@ -526,7 +529,7 @@ impl Plugins {
             carried,
             removed: std::mem::take(&mut self.removed),
             reopen,
-            unsaved,
+            owed,
         }
     }
 }

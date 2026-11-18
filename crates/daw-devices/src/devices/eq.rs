@@ -240,10 +240,6 @@ impl_device!(ParametricEq, INFO, PARAMS, {
 });
 
 impl Segmented for ParametricEq {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         for i in start..end {
             let g = self.output.tick();

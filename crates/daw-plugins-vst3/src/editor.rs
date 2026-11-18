@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use daw_core::plugin::PluginError;
-use daw_plugin_window::{HostWindow, WindowEvent};
+use daw_plugin_window::HostWindow;
 use vst3::Steinberg::Linux::IRunLoop;
 use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait, ViewType};
 use vst3::Steinberg::{
@@ -118,46 +118,34 @@ impl Editor {
     }
 
     /// Handles window events. Returns false once the user has closed the window.
-    pub fn pump(&mut self) -> bool {
-        let mut open = true;
-        let mut resized = None;
-        while let Some(event) = self.window.poll() {
-            match event {
-                WindowEvent::Closed => {
-                    open = false;
-                    break;
-                }
-                WindowEvent::Resized(w, h) => resized = Some((w as i32, h as i32)),
-                WindowEvent::Other(_) => {}
-            }
-        }
-        if let (Some((w, h)), false) = (resized, self.window.is_fixed()) {
+    pub fn pump(&self) -> bool {
+        let view = &self.view;
+        self.window.pump(|w, h| {
             let mut current = ViewRect {
                 left: 0,
                 top: 0,
                 right: 0,
                 bottom: 0,
             };
+            // A window size is a u16, so it fits.
+            let mut rect = ViewRect {
+                left: 0,
+                top: 0,
+                right: w as i32,
+                bottom: h as i32,
+            };
+            // SAFETY: the view is attached for as long as the editor lives.
             unsafe {
-                self.view.getSize(&mut current);
-                if rect_size(&current) != (w as u32, h as u32) {
-                    let mut rect = ViewRect {
-                        left: 0,
-                        top: 0,
-                        right: w,
-                        bottom: h,
-                    };
-                    if self.view.checkSizeConstraint(&mut rect) != kResultFalse {
-                        self.view.onSize(&mut rect);
-                        let (cw, ch) = rect_size(&rect);
-                        if (cw, ch) != (w as u32, h as u32) {
-                            self.window.resize(cw, ch);
-                        }
-                    }
+                view.getSize(&mut current);
+                if rect_size(&current) != (w, h)
+                    && view.checkSizeConstraint(&mut rect) != kResultFalse
+                {
+                    view.onSize(&mut rect);
+                    return rect_size(&rect);
                 }
             }
-        }
-        open
+            (w, h)
+        })
     }
 }
 

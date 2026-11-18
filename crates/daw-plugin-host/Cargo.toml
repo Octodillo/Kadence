@@ -12,13 +12,13 @@ publish.workspace = true
 daw-core.workspace = true
 daw-plugins = { path = "../daw-plugins" }
 libc = "0.2"
-log = "0.4"
+log.workspace = true
 memmap2 = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-assert_no_alloc.workspace = true
+daw-test-support.workspace = true
 tempfile = "3"
 
 [[bin]]

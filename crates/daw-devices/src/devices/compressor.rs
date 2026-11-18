@@ -7,7 +7,7 @@ use daw_core::event::ParamId;
 use daw_core::meter::PeakMeter;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{db_to_gain, flush};
+use crate::dsp::{Smoother, db_to_gain, decay_coef, flush};
 use crate::events::{Segmented, input, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
@@ -78,6 +78,9 @@ pub struct Compressor {
     release: f32,
     /// Smoothed gain reduction in dB (positive).
     envelope: f32,
+    /// Makeup as a linear gain.
+    makeup: Smoother,
+    mix: Smoother,
     /// Highest gain reduction since the UI last read it.
     gr_meter: Arc<PeakMeter>,
 }
@@ -109,6 +112,8 @@ impl Compressor {
             attack: 0.0,
             release: 0.0,
             envelope: 0.0,
+            makeup: Smoother::new(1.0),
+            mix: Smoother::new(1.0),
             gr_meter: Arc::new(PeakMeter::new()),
         };
         c.prepare(48000.0, 0);
@@ -120,35 +125,41 @@ impl Compressor {
         self.envelope
     }
 
-    /// The highest gain reduction in dB since the last read, for a meter on
-    /// another thread. Grab it before the compressor moves into the engine.
-    pub fn gain_reduction_meter(&self) -> Arc<PeakMeter> {
-        self.gr_meter.clone()
-    }
-
-    fn apply_param(&mut self, _id: ParamId) {
-        let sr = self.sample_rate;
-        self.attack = (-1000.0 / (self.params.get(ATTACK) * sr)).exp() as f32;
-        self.release = (-1000.0 / (self.params.get(RELEASE) * sr)).exp() as f32;
+    // Threshold, ratio and knee need no smoother of their own: they only
+    // shape the gain reduction, which the envelope follower already glides.
+    fn apply_param(&mut self, id: ParamId) {
+        match id {
+            ATTACK | RELEASE => {
+                let sr = self.sample_rate;
+                self.attack = decay_coef(self.params.get(ATTACK), sr);
+                self.release = decay_coef(self.params.get(RELEASE), sr);
+            }
+            MAKEUP => self
+                .makeup
+                .set_target(db_to_gain(self.params.get(MAKEUP)) as f32),
+            MIX => self.mix.set_target(self.params.get_f32(MIX)),
+            _ => {}
+        }
     }
 }
 
 impl_device!(Compressor, INFO, PARAMS, {
+    fn snap_smoothing(&mut self) {
+        self.makeup.reset(self.makeup.target());
+        self.mix.reset(self.mix.target());
+    }
+
+    /// The highest gain reduction in dB since the last read, for a meter on
+    /// another thread. Grab it before the compressor moves into the engine.
     fn gain_reduction_meter(&self) -> Option<Arc<PeakMeter>> {
         Some(self.gr_meter.clone())
     }
 });
 
 impl Segmented for Compressor {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         let p = &self.params;
         let (threshold, ratio, knee) = (p.get_f32(THRESHOLD), p.get_f32(RATIO), p.get_f32(KNEE));
-        let makeup = p.get(MAKEUP);
-        let mix = p.get_f32(MIX);
         let mut most = 0.0f32;
         for i in start..end {
             let (l, r) = (input(ctx, 0, i), input(ctx, 1, i));
@@ -162,7 +173,10 @@ impl Segmented for Compressor {
             };
             self.envelope = flush(reduction + (self.envelope - reduction) * coef);
             most = most.max(self.envelope);
-            let gain = db_to_gain(makeup - self.envelope as f64) as f32;
+            // No silence floor on the reduction alone: with makeup a deep
+            // reduction is still audible, and a floor would cut it to nothing.
+            let gain = 10f32.powf(-self.envelope / 20.0) * self.makeup.tick();
+            let mix = self.mix.tick();
             let g = 1.0 - mix + mix * gain;
             output(ctx, i, l * g, r * g);
         }
@@ -183,6 +197,11 @@ impl Node for Compressor {
     fn prepare(&mut self, sample_rate: f64, _max_frames: u32) {
         self.sample_rate = sample_rate;
         self.apply_param(ATTACK);
+        self.makeup.set_time(10.0, sample_rate);
+        self.mix.set_time(10.0, sample_rate);
+        self.makeup
+            .reset(db_to_gain(self.params.get(MAKEUP)) as f32);
+        self.mix.reset(self.params.get_f32(MIX));
         self.reset();
     }
 

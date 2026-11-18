@@ -58,19 +58,19 @@ Kirigami.Page {
         id: projectMessage
     }
 
-    // Adds a track of `kind` (0 audio, 1 instrument, 2 bus) with a
-    // numbered default name in the user's language.
+    // Adds a track of `kind` (a Tracks.TrackKind) with a numbered default
+    // name in the user's language.
     function addTrack(kind: int): void {
-        const n = Project.nextTrackNumber(kind);
+        const n = Tracks.nextNumber(kind);
         switch (kind) {
-        case 1:
-            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Instrument %1", n));
+        case Tracks.InstrumentTrack:
+            Tracks.add(kind, i18nc("@item default track name, %1 is a number", "Instrument %1", n));
             break;
-        case 2:
-            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Bus %1", n));
+        case Tracks.BusTrack:
+            Tracks.add(kind, i18nc("@item default track name, %1 is a number", "Bus %1", n));
             break;
         default:
-            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Audio %1", n));
+            Tracks.add(kind, i18nc("@item default track name, %1 is a number", "Audio %1", n));
         }
     }
 
@@ -82,18 +82,18 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Audio Track")
             icon.name: "audio-x-generic"
             shortcut: "Ctrl+T"
-            onTriggered: page.addTrack(0)
+            onTriggered: page.addTrack(Tracks.AudioTrack)
         }
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Instrument Track")
             icon.name: "audio-midi"
             shortcut: "Ctrl+Shift+T"
-            onTriggered: page.addTrack(1)
+            onTriggered: page.addTrack(Tracks.InstrumentTrack)
         }
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Bus")
             icon.name: "view-media-equalizer"
-            onTriggered: page.addTrack(2)
+            onTriggered: page.addTrack(Tracks.BusTrack)
         }
     }
 
@@ -187,6 +187,56 @@ Kirigami.Page {
         }
     ]
 
+    // What a track header's context menu does, for the selected track: the
+    // menu's own entries, and the keyboard's way to them whatever has the
+    // focus. Alt+Up and Alt+Down step aside for a focused control that
+    // uses the arrow keys.
+    readonly property bool trackSelected: Project.selectedTrack >= 0 && Project.selectedTrack < Tracks.count
+    readonly property list<Kirigami.Action> trackActions: [
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Rename Track…")
+            icon.name: "edit-rename"
+            shortcut: "F2"
+            enabled: page.visible && page.trackSelected
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: {
+                // The header may be scrolled out of view, where a list has
+                // no item for it.
+                const row = Project.selectedTrack;
+                page.revealTrack(row);
+                headers.forceLayout();
+                headers.itemAtIndex(row)?.rename();
+            }
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Move Track Up")
+            icon.name: "go-up"
+            shortcut: applicationWindow().controlHasArrowKeys ? "" : "Alt+Up"
+            enabled: page.visible && page.trackSelected && Project.selectedTrack > 0
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Tracks.moveTrack(Project.selectedTrack, Project.selectedTrack - 1)
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Move Track Down")
+            icon.name: "go-down"
+            shortcut: applicationWindow().controlHasArrowKeys ? "" : "Alt+Down"
+            enabled: page.visible && page.trackSelected && Project.selectedTrack < Tracks.count - 1
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Tracks.moveTrack(Project.selectedTrack, Project.selectedTrack + 1)
+        },
+        Kirigami.Action {
+            text: i18nc("@action:inmenu", "Delete Track")
+            icon.name: "edit-delete"
+            enabled: page.visible && page.trackSelected
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+            onTriggered: Tracks.remove(Project.selectedTrack)
+        },
+        Kirigami.Action {
+            separator: true
+            displayHint: Kirigami.DisplayHint.AlwaysHide
+        }
+    ]
+
     // QML list literals can't spread lists, so name each entry.
     actions: [
         page.transportActions[0],
@@ -194,6 +244,11 @@ Kirigami.Page {
         page.loopAction,
         page.addTrackAction,
         page.importAction,
+        page.trackActions[0],
+        page.trackActions[1],
+        page.trackActions[2],
+        page.trackActions[3],
+        page.trackActions[4],
         page.editActions[0],
         page.editActions[1],
         page.editActions[2],
@@ -204,20 +259,26 @@ Kirigami.Page {
         page.editActions[7]
     ]
 
+    // Shows a change to the project in the timeline. (The track headers
+    // follow by themselves: see UiClock.) Hidden, the timeline only notes
+    // that it is stale, and draws when it shows again.
+    function refresh(): void {
+        view.refresh();
+    }
+
     // Redraw on any change, and every frame while the playhead moves.
     Connections {
         target: Project
-        function onRevisionChanged() { view.refresh(); }
+        function onRevisionChanged() { page.refresh(); }
     }
     Connections {
         target: Automation
-        function onRevisionChanged() { view.refresh(); }
+        function onRevisionChanged() { page.refresh(); }
     }
-    Timer {
-        interval: 16
-        repeat: true
-        running: Project.playing && page.visible
-        onTriggered: view.refresh()
+    Connections {
+        target: UiClock
+        enabled: page.visible
+        function onFrame() { view.refresh(); }
     }
 
     ColumnLayout {
@@ -283,7 +344,7 @@ Kirigami.Page {
                     Layout.fillHeight: true
                     clip: true
                     interactive: false
-                    model: Project.trackCount
+                    model: Tracks
                     contentY: view.scrollY
                     // Scrolling must not build and destroy a header per
                     // row: reuse the ones that leave the view.
@@ -296,6 +357,7 @@ Kirigami.Page {
                         width: headers.width
                         arrange: view
                         laneSize: page.laneSize
+                        trackActions: page.trackActions
                     }
 
                     // Where a dragged track will land.
@@ -404,126 +466,30 @@ Kirigami.Page {
                     }
                 }
 
-                MouseArea {
+                CanvasPointer {
                     id: pointer
                     anchors.fill: view
-                    acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-                    hoverEnabled: true
-                    preventStealing: true
-                    cursorShape: view.cursorShape
-                    activeFocusOnTab: true
+                    canvas: view
 
-                    // Touch: a finger on empty lane space scrolls the view
-                    // (the clips follow it); on a clip or the ruler it edits
-                    // as a mouse would. Holding still opens the context menu.
-                    // A pen works like a mouse.
-                    property bool panning: false
-                    // Whether the finger has moved further than a tap.
-                    property bool moved: false
-                    property point last
-                    property point start
-
-                    function holdMenu(): void {
-                        if (panning) {
-                            panning = false;
-                        } else {
-                            view.cancelDrag();
-                        }
-                        view.press(start.x, start.y, Qt.RightButton, 0);
-                        view.release(start.x, start.y, 0);
-                    }
-
-                    onPressed: (m) => {
-                        forceActiveFocus();
-                        start = Qt.point(m.x, m.y);
-                        last = start;
-                        moved = false;
-                        // A second finger must be able to take the touch
-                        // over for the pinch; a mouse drag keeps its grab.
-                        preventStealing = !touchPoint.active;
-                        if (touchPoint.active) {
-                            hold.restart();
-                            if (m.button === Qt.LeftButton && view.touchPans(m.x, m.y)) {
-                                panning = true;
-                                return;
-                            }
-                        }
-                        view.press(m.x, m.y, m.button, m.modifiers);
-                    }
-                    onPositionChanged: (m) => {
-                        if (!pressed) {
-                            view.hover(m.x, m.y);
-                            return;
-                        }
-                        if (!moved && Math.hypot(m.x - start.x, m.y - start.y) > Qt.styleHints.startDragDistance) {
-                            moved = true;
-                            hold.stop();
-                        }
-                        if (panning) {
-                            // Follow the finger the touch began with: while a
-                            // second one lands, the mouse position Qt makes
-                            // from the touch can jump between them.
-                            // Once that finger lifts, stop: the other one
-                            // is somewhere else entirely.
-                            if (touchPoint.active) {
-                                const at = touchPoint.point.position;
-                                view.wheel(at.x, at.y, at.x - last.x, at.y - last.y, 0);
-                                last = at;
-                            }
-                        } else {
-                            view.motion(m.x, m.y, m.modifiers);
-                        }
-                    }
-                    onReleased: (m) => {
-                        hold.stop();
-                        if (panning) {
-                            panning = false;
-                            if (!moved) {
-                                // A tap on empty space: select or deselect
-                                // as a click would.
-                                view.press(start.x, start.y, Qt.LeftButton, 0);
-                                view.release(start.x, start.y, 0);
-                            }
-                        } else {
-                            view.release(m.x, m.y, m.modifiers);
-                        }
-                        // The drag may have ended over another clip, or
-                        // off the timeline (no exit comes after release).
-                        if (containsMouse) {
-                            view.hover(m.x, m.y);
-                        } else {
-                            view.hover(-1, -1);
-                        }
-                    }
-                    // Off the timeline: no clip is hovered.
-                    onExited: if (!pressed) view.hover(-1, -1)
                     onDoubleClicked: (m) => view.doubleClick(m.x, m.y, m.modifiers)
-                    onCanceled: {
-                        hold.stop();
-                        panning = false;
-                        view.cancelDrag();
-                    }
                     onWheel: (w) => {
                         page.forwardWheel(w, w.x, w.y);
                         // The content moved under the pointer.
                         view.hover(w.x, w.y);
                     }
-
-                    // Whether the press under way is a finger. Watches only:
-                    // the MouseArea still gets the press, as a mouse event.
-                    PointHandler {
-                        id: touchPoint
-                        acceptedDevices: PointerDevice.TouchScreen
+                    // What a right click would open, for the selection: no
+                    // place on the timeline is the keyboard's.
+                    onMenuKeyPressed: {
+                        const at = Qt.point(Kirigami.Units.gridUnit, view.rulerHeight + Kirigami.Units.gridUnit);
+                        const shape = Automation.pointShape();
+                        if (shape >= 0) {
+                            pointMenu.shape = shape;
+                            pointMenu.popup(view, at.x, at.y);
+                        } else {
+                            (Project.hasSelection ? clipMenu : laneMenu).popup(view, at.x, at.y);
+                        }
                     }
 
-                    // A long press with a finger opens the context menu.
-                    Timer {
-                        id: hold
-                        interval: Qt.styleHints.mousePressAndHoldInterval
-                        onTriggered: pointer.holdMenu()
-                    }
-
-                    Keys.onEscapePressed: view.cancelDrag()
                     Keys.onLeftPressed: Project.nudge(-1)
                     Keys.onRightPressed: Project.nudge(1)
                 }
@@ -569,14 +535,14 @@ Kirigami.Page {
                     id: placeholder
                     anchors.centerIn: view
                     width: Math.min(view.width - Kirigami.Units.gridUnit * 4, Kirigami.Units.gridUnit * 24)
-                    visible: Project.trackCount === 0
+                    visible: Tracks.count === 0
                     icon.name: "view-media-track"
                     text: i18nc("@info:placeholder", "No tracks yet")
                     explanation: i18nc("@info:placeholder", "Add a track, import audio, or drop audio files here.")
                     helpfulAction: Kirigami.Action {
                         text: i18nc("@action:button", "Add Audio Track")
                         icon.name: "list-add"
-                        onTriggered: page.addTrack(0)
+                        onTriggered: page.addTrack(Tracks.AudioTrack)
                     }
 
                     // On a new, untouched project: pick up where you left off.
@@ -642,12 +608,21 @@ Kirigami.Page {
         }
     }
 
+    // Scrolls the track at `row` into view, if it is not.
+    function revealTrack(row: int): void {
+        let top = 0;
+        for (let i = 0; i < row; ++i) {
+            top += view.rowHeight(i);
+        }
+        const shown = view.height - view.rulerHeight;
+        if (top < view.scrollY || top + view.trackHeight > view.scrollY + shown) {
+            view.scrollTo(view.scrollX, top);
+        }
+    }
+
     function forwardWheel(event, x, y): void {
-        // Mice report angles (120 per notch), touchpads pixels.
-        const pixels = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0;
-        const dx = pixels ? event.pixelDelta.x : event.angleDelta.x / 2;
-        const dy = pixels ? event.pixelDelta.y : event.angleDelta.y / 2;
-        view.wheel(x, y, dx, dy, event.modifiers);
+        const by = Wheel.pixels(event);
+        view.wheel(x, y, by.x, by.y, event.modifiers);
         event.accepted = true;
     }
 
@@ -662,15 +637,15 @@ Kirigami.Page {
             enabled: Project.audioSelected
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "Linear")
-                onTriggered: Project.setFadeShape(0)
+                onTriggered: Project.setFadeShape(Project.LinearFade)
             }
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "Equal Power")
-                onTriggered: Project.setFadeShape(1)
+                onTriggered: Project.setFadeShape(Project.EqualPowerFade)
             }
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "S-Curve")
-                onTriggered: Project.setFadeShape(2)
+                onTriggered: Project.setFadeShape(Project.SCurveFade)
             }
         }
         QQC2.MenuItem {
@@ -698,12 +673,12 @@ Kirigami.Page {
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Add Audio Track")
             icon.name: "audio-x-generic"
-            onTriggered: page.addTrack(0)
+            onTriggered: page.addTrack(Tracks.AudioTrack)
         }
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Add Instrument Track")
             icon.name: "audio-midi"
-            onTriggered: page.addTrack(1)
+            onTriggered: page.addTrack(Tracks.InstrumentTrack)
         }
         QQC2.MenuSeparator {}
         QQC2.MenuItem { action: page.importAction }

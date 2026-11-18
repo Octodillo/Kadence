@@ -4,7 +4,7 @@ use daw_arrange::{Button, Env, Pointer, Prim, Snap};
 use daw_core::time::{PPQ, SegmentTempoMap, TickTime};
 use daw_midi::edit::Quantize;
 use daw_midi::grid::Grid;
-use daw_midi::model::new_note;
+use daw_midi::model::{compile_track, new_note};
 use daw_midi::{EditNote, NoteData};
 use daw_model::commands::{AddClip, AddTrack};
 use daw_model::{Clip, ClipContent, ClipId, Document, MidiClip, Note, Project, Track, TrackKind};
@@ -137,6 +137,28 @@ fn layout_areas() {
     assert_eq!(note_name(60, Accidentals::Flats), "C4");
     assert_eq!(note_name(0, Accidentals::Flats), "C-1");
     assert_eq!(note_name(127, Accidentals::Flats), "G9");
+}
+
+#[test]
+fn a_finger_scrolls_from_the_empty_grid_and_edits_everywhere_else() {
+    let rig = Rig::new(vec![n(0, Q, 60)]);
+    let project = rig.doc.project();
+    let pans = |x, y| rig.pr.touch_pans(project, x, y);
+    assert!(pans(rig.x(2 * Q), rig.y(60)), "beside the note");
+    assert!(pans(rig.x(Q / 2), rig.y(64)), "above the note");
+    assert!(!pans(rig.x(Q / 2), rig.y(60)), "on the note");
+    assert!(!pans(rig.x(Q), rig.pr.ruler_height / 2.0), "on the ruler");
+    assert!(!pans(rig.pr.keyboard_width / 2.0, rig.y(60)), "on the keys");
+    let velocity = rig.pr.height - 1.0;
+    assert_eq!(rig.pr.area(rig.x(Q), velocity), Area::Velocity);
+    assert!(!pans(rig.x(Q), velocity), "on the velocity lane");
+    assert!(!pans(1.0, 1.0), "in the corner");
+    // Holding a finger still opens a menu only where a right click would:
+    // not on the keys (the note keeps sounding) or the velocity lane.
+    assert!(rig.pr.has_menu_at(rig.x(2 * Q), rig.y(60)));
+    assert!(!rig.pr.has_menu_at(rig.pr.keyboard_width / 2.0, rig.y(60)));
+    assert!(!rig.pr.has_menu_at(rig.x(Q), velocity));
+    assert!(!rig.pr.has_menu_at(rig.x(Q), rig.pr.ruler_height / 2.0));
 }
 
 #[test]
@@ -731,4 +753,59 @@ fn opening_a_clip_shows_all_its_notes() {
     for key in [48, 60, 84] {
         assert!(visible.contains(&key), "{key} not in {visible:?}");
     }
+}
+
+#[test]
+fn double_click_before_the_clip_is_refused() {
+    let mut r = Rig::new(vec![]);
+    // Half a beat before the clip start, in the dimmed part.
+    let p = Pointer::left(r.x(-Q / 2), r.y(64));
+    let out = r.pr.double_click(&mut r.doc, p);
+    assert!(out.error.is_some());
+    assert!(r.notes().is_empty());
+    assert!(r.pr.selection.is_empty());
+}
+
+#[test]
+fn a_velocity_edit_never_silences_a_note() {
+    let mut r = Rig::new(vec![n(0, Q / 2, 60), n(Q, Q / 2, 62)]);
+    let played = |r: &Rig| {
+        let track = &r.doc.project().tracks[0];
+        compile_track(track, &r.tempo, 48_000.0).len()
+    };
+    // A stem dragged to the very bottom of the lane, and past it.
+    let vel = r.pr.velocity_rect();
+    r.drag((r.x(0), vel.y + 10.0), (r.x(0), vel.bottom() + 20.0));
+    assert!(r.notes()[0].velocity < 0.01);
+    assert_eq!(played(&r), 2);
+    r.pr.select_all(r.doc.project());
+    r.pr.set_velocity(&mut r.doc, 0.0);
+    assert_eq!(played(&r), 2);
+    r.pr.scale_velocity(&mut r.doc, 0.0);
+    assert_eq!(played(&r), 2);
+    for seed in 0..50 {
+        r.pr.humanize(&mut r.doc, seed);
+        assert_eq!(played(&r), 2, "seed {seed}");
+    }
+}
+
+#[test]
+fn notes_sit_on_the_grid_at_any_scroll_and_zoom() {
+    // Fully zoomed in, a tick is about two pixels wide: scrolled by a
+    // fraction of a tick, notes must still start on their grid line.
+    let mut r = Rig::new(vec![n(Q, Q, 60)]);
+    r.pr.view.px_per_beat = 2000.0;
+    r.pr.view.scroll_x = 3700.9;
+    let scene = r.pr.scene(r.doc.project(), &r.env());
+    let x = r.x(Q);
+    let drawn = scene.prims.iter().any(|p| match p {
+        Prim::RoundRect { r, .. } => (r.x - x).abs() < 1e-9 && (r.w - 2000.0).abs() < 1e-9,
+        _ => false,
+    });
+    assert!(drawn, "no note drawn at {x}");
+    // The pointer hits the note from its first pixel on, and not before.
+    r.press(x + 0.1, r.y(60));
+    assert_eq!(r.pr.selection.len(), 1);
+    r.press(x - 0.1, r.y(60));
+    assert!(r.pr.selection.is_empty());
 }

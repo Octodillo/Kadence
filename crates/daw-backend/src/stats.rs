@@ -23,15 +23,33 @@ pub struct BackendStats {
     /// The audio server shut down or kicked us out. The backend is dead and
     /// must be closed and reopened.
     pub server_gone: bool,
-    /// The process callback panicked. The backend keeps running but no
-    /// longer calls it, and outputs silence until the next
-    /// [`start`](crate::AudioBackend::start). (JACK only; the dummy backend's
-    /// `stop` returns an error instead.)
+    /// The process callback panicked. The backend no longer calls it until
+    /// the next [`start`](crate::AudioBackend::start): JACK keeps running
+    /// and outputs silence, the dummy backend's cycles end and its `stop`
+    /// returns an error.
     pub callback_panicked: bool,
-    /// Allocator calls caught inside cycles (debug builds with
-    /// [`RtAllocCounter`](crate::RtAllocCounter) installed; always 0
-    /// otherwise).
-    pub rt_alloc_violations: u64,
+    /// Allocator calls caught inside cycles. `None` when nothing counts
+    /// them, because the binary has not installed
+    /// [`RtAllocCounter`](crate::RtAllocCounter); a test asserting
+    /// `Some(0)` therefore fails if it forgot the allocator.
+    pub rt_alloc_violations: Option<u64>,
+}
+
+/// Whether a backend can still do its job. See
+/// [`AudioBackend::health`](crate::AudioBackend::health).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BackendHealth {
+    /// Nothing has gone wrong since [`open`](crate::AudioBackend::open).
+    #[default]
+    Ok,
+    /// The audio server shut down or kicked us out
+    /// ([`BackendStats::server_gone`]). No more cycles run; the backend
+    /// must be closed and opened again.
+    ServerGone,
+    /// The process callback panicked ([`BackendStats::callback_panicked`]).
+    /// It is not called again until the backend is stopped and started with
+    /// a callback.
+    CallbackPanicked,
 }
 
 /// Counters written by the real-time thread and read by everyone else.
@@ -67,6 +85,17 @@ impl SharedStats {
         self.dsp_load.store(percent.to_bits(), Relaxed);
     }
 
+    /// A lost server comes first: restarting the callback cannot help then.
+    pub fn health(&self) -> BackendHealth {
+        if self.server_gone.load(Relaxed) {
+            BackendHealth::ServerGone
+        } else if self.callback_panicked.load(Relaxed) {
+            BackendHealth::CallbackPanicked
+        } else {
+            BackendHealth::Ok
+        }
+    }
+
     pub fn snapshot(&self) -> BackendStats {
         let load = f32::from_bits(self.dsp_load.load(Relaxed));
         BackendStats {
@@ -81,7 +110,8 @@ impl SharedStats {
             dsp_load: (!load.is_nan()).then_some(load),
             server_gone: self.server_gone.load(Relaxed),
             callback_panicked: self.callback_panicked.load(Relaxed),
-            rt_alloc_violations: self.rt_alloc_violations.load(Relaxed),
+            rt_alloc_violations: crate::RtAllocCounter::counting()
+                .then(|| self.rt_alloc_violations.load(Relaxed)),
         }
     }
 }
@@ -102,6 +132,18 @@ pub(crate) fn current_thread_is_realtime() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_reports_the_failure_that_needs_the_bigger_fix() {
+        let s = SharedStats::new();
+        assert_eq!(s.health(), BackendHealth::Ok);
+        s.callback_panicked.store(true, Relaxed);
+        assert_eq!(s.health(), BackendHealth::CallbackPanicked);
+        s.server_gone.store(true, Relaxed);
+        assert_eq!(s.health(), BackendHealth::ServerGone);
+        s.callback_panicked.store(false, Relaxed);
+        assert_eq!(s.health(), BackendHealth::ServerGone);
+    }
 
     /// rtkit and the portal promote the thread from outside, by TID, after
     /// the first check. The check must see that, so it cannot rely on a

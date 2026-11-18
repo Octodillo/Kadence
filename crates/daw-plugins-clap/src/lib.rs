@@ -24,12 +24,13 @@ mod instance;
 mod ports;
 
 use std::ffi::CString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clack_extensions::audio_ports::PluginAudioPorts;
 use clack_host::prelude::{HostInfo, PluginEntry};
 use daw_core::plugin::{
-    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    ScanBuilder,
 };
 
 pub use instance::{ClapInstance, ClapProcessor};
@@ -48,28 +49,11 @@ impl PluginFormat for ClapFormat {
         PluginFormatKind::Clap
     }
 
-    /// `$CLAP_PATH`, then `~/.clap` and `/usr/lib/clap`, as the CLAP spec lays out.
-    fn default_search_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = std::env::var_os("CLAP_PATH")
-            .map(|p| {
-                // An empty entry (`a::b`, or an empty variable) names no folder.
-                std::env::split_paths(&p)
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(home) = std::env::var_os("HOME") {
-            paths.push(PathBuf::from(home).join(".clap"));
-        }
-        paths.push(PathBuf::from("/usr/lib/clap"));
-        paths
-    }
-
     /// Lists the plugins in one `.clap` file. Each plugin is instantiated briefly to read its
     /// audio ports, so call this in a scanner process that may crash. Plugins that cannot be
-    /// instantiated are left out; when none of the file's plugins can be, the scan fails with the
-    /// first one's error.
-    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+    /// instantiated are reported as skipped; when none of the file's plugins can be, the scan
+    /// fails with the first one's error.
+    fn scan(&self, path: &Path) -> Result<BundleScan, PluginError> {
         scan_file(path)
     }
 
@@ -106,13 +90,12 @@ pub(crate) fn host_info() -> HostInfo {
     .expect("host info has no NUL bytes")
 }
 
-fn scan_file(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+fn scan_file(path: &Path) -> Result<BundleScan, PluginError> {
     let entry = load_entry(path)?;
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| PluginError::Load(format!("{}: no plugin factory", path.display())))?;
-    let mut found = Vec::new();
-    let mut first_error = None;
+    let mut scan = ScanBuilder::default();
     for desc in factory.plugin_descriptors() {
         let Some(id) = desc.id().and_then(|id| id.to_str().ok()) else {
             continue;
@@ -132,18 +115,12 @@ fn scan_file(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
         match main_ports(&entry, id, is_instrument) {
             Ok(ports) => {
                 d.ports = ports;
-                found.push(d);
+                scan.found(d);
             }
-            Err(e) => {
-                eprintln!("clap scan: {id}: {e}");
-                first_error.get_or_insert(e);
-            }
+            Err(e) => scan.skip(e),
         }
     }
-    match first_error {
-        Some(e) if found.is_empty() => Err(e),
-        _ => Ok(found),
-    }
+    scan.finish()
 }
 
 fn lossy(s: Option<&std::ffi::CStr>) -> Option<String> {

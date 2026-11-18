@@ -12,7 +12,7 @@ fails the release if any of them disagrees with the tag:
 - `Cargo.toml` (`[workspace.package] version`) and `Cargo.lock`
   (run `cargo update --workspace` after changing it)
 - `CMakeLists.txt` (`project(kadence VERSION …)`)
-- `packaging/arch/release/PKGBUILD` (`pkgver`; reset `pkgrel` to 1)
+- `packaging/arch/PKGBUILD` (`pkgver`; reset `pkgrel` to 1)
 - `packaging/fedora/kadence.spec` (`Version`, and a new `%changelog` entry)
 - `data/io.github.octodillo.daw.metainfo.xml` (a new `<release>` first in
   `<releases>`, with the release date and a short description)

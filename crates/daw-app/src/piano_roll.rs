@@ -10,16 +10,17 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QString};
-use daw_arrange::Scene;
+use cxx_qt_lib::{QColor, QList, QString, QVariant};
 use daw_midi::edit::{Quantize, QuantizeEnds};
 use daw_pianoroll::Accidentals;
 
-use crate::arrange_view::{cursor_shape, pointer, to_qcolor, to_rgba};
+use crate::automation_bridge::qobject::PointShape;
 use crate::automation_bridge::{shape, shape_index};
-use crate::paint::{self, PaintOp};
+use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
 use crate::session_mixer::strip_row;
 use crate::state;
+use crate::tracks::LaneRow;
+use crate::tracks_bridge::lane_list;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -32,6 +33,8 @@ pub mod qobject {
         type QColor = cxx_qt_lib::QColor;
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qlist.h");
+        type QList_QVariant = cxx_qt_lib::QList<cxx_qt_lib::QVariant>;
     }
 
     #[auto_cxx_name]
@@ -60,6 +63,9 @@ pub mod qobject {
         #[qproperty(f64, lanes_height)]
         #[qproperty(i32, track_index)]
         #[qproperty(i32, lane_count)]
+        /// Those lanes as the `lanes` role of `Tracks` describes them, for
+        /// their labels.
+        #[qproperty(QList_QVariant, lanes)]
         /// Scroll offsets and content size, for the scroll bars.
         #[qproperty(f64, scroll_x)]
         #[qproperty(f64, scroll_y)]
@@ -78,8 +84,14 @@ pub mod qobject {
 
         #[cxx_override]
         unsafe fn paint(self: Pin<&mut PianoRoll>, painter: *mut QPainter);
+        /// Builds the picture, if it is stale and the roll shows: once a
+        /// frame at most, however many changes there were.
+        #[cxx_override]
+        #[cxx_name = "updatePolish"]
+        fn update_polish(self: Pin<&mut PianoRoll>);
 
-        /// Rebuilds the picture from the current state.
+        /// Shows the current state: the properties at once, the picture on
+        /// the next frame.
         #[qinvokable]
         fn refresh(self: Pin<&mut PianoRoll>);
 
@@ -99,6 +111,14 @@ pub mod qobject {
         fn wheel(self: Pin<&mut PianoRoll>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32);
         #[qinvokable]
         fn pinch(self: Pin<&mut PianoRoll>, scale: f64, x: f64);
+        /// Whether a one-finger touch drag from here should scroll the view
+        /// instead of editing (see `PianoRoll::touch_pans`).
+        #[qinvokable]
+        fn touch_pans(self: &PianoRoll, x: f64, y: f64) -> bool;
+        /// Whether a right click here opens a context menu, so that a
+        /// held finger should (see `PianoRoll::has_menu_at`).
+        #[qinvokable]
+        fn has_menu_at(self: &PianoRoll, x: f64, y: f64) -> bool;
         #[qinvokable]
         fn scroll_to(self: Pin<&mut PianoRoll>, x: f64, y: f64);
 
@@ -133,10 +153,12 @@ pub mod qobject {
         fn select_all(self: Pin<&mut PianoRoll>);
         #[qinvokable]
         fn zoom(self: Pin<&mut PianoRoll>, factor: f64);
-        /// The selected automation points' shape (see
-        /// `Automation.pointShape`), or -1.
+        /// The selected automation points' shape, an
+        /// `Automation.PointShape`, or -1.
         #[qinvokable]
         fn point_shape(self: &PianoRoll) -> i32;
+        /// Gives the selected automation points an `Automation.PointShape`
+        /// (an int here: the enum's type belongs to `Automation`).
         #[qinvokable]
         fn set_point_shape(self: Pin<&mut PianoRoll>, shape: i32);
         /// Deletes the selected automation points (never notes).
@@ -150,14 +172,21 @@ pub mod qobject {
         /// point or between points.
         #[qsignal]
         fn lane_menu_requested(self: Pin<&mut PianoRoll>, x: f64, y: f64, on_point: bool);
-        /// The document or view changed through this item.
-        #[qsignal]
-        fn edited(self: Pin<&mut PianoRoll>);
     }
 
     unsafe extern "RustQt" {
         #[inherit]
         fn update(self: Pin<&mut PianoRoll>);
+        #[inherit]
+        fn polish(self: Pin<&mut PianoRoll>);
+        /// The item was shown or hidden (itself or with what holds it).
+        #[inherit]
+        #[qsignal]
+        #[cxx_name = "visibleChanged"]
+        fn visible_changed(self: Pin<&mut PianoRoll>);
+        #[inherit]
+        #[cxx_name = "isVisible"]
+        fn is_visible(self: &PianoRoll) -> bool;
         #[inherit]
         fn width(self: &PianoRoll) -> f64;
         #[inherit]
@@ -184,6 +213,12 @@ pub struct PianoRollRust {
     lanes_height: f64,
     track_index: i32,
     lane_count: i32,
+    lanes: QList<QVariant>,
+    /// What `lanes` was made from.
+    lane_rows: Vec<LaneRow>,
+    /// The view revision and track row `lane_rows` were read at: they are
+    /// read again only when either moves, not on every playing frame.
+    lanes_at: Option<(u64, Option<usize>)>,
     scroll_x: f64,
     scroll_y: f64,
     content_height: f64,
@@ -193,9 +228,7 @@ pub struct PianoRollRust {
     has_selection: bool,
     has_points: bool,
     cursor_shape: i32,
-    ops: Vec<PaintOp>,
-    texts: Vec<String>,
-    waves: Vec<f32>,
+    scene: DisplayList,
     last_press: (f64, f64),
 }
 
@@ -220,6 +253,9 @@ impl Default for PianoRollRust {
             lanes_height: 0.0,
             track_index: -1,
             lane_count: 0,
+            lanes: QList::default(),
+            lane_rows: Vec::new(),
+            lanes_at: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
             content_height: 0.0,
@@ -229,9 +265,7 @@ impl Default for PianoRollRust {
             has_selection: false,
             has_points: false,
             cursor_shape: 0,
-            ops: Vec::new(),
-            texts: Vec::new(),
-            waves: Vec::new(),
+            scene: DisplayList::default(),
             last_press: (0.0, 0.0),
         }
     }
@@ -249,6 +283,12 @@ impl cxx_qt::Constructor<()> for qobject::PianoRoll {
     fn new(_: ()) -> PianoRollRust {
         PianoRollRust::default()
     }
+
+    fn initialize(self: Pin<&mut Self>, _: ()) {
+        // A hidden item keeps a stale picture (see `update_polish`): draw
+        // it afresh when the item shows again.
+        self.on_visible_changed(|item| item.polish()).release();
+    }
 }
 
 impl qobject::PianoRoll {
@@ -256,24 +296,7 @@ impl qobject::PianoRoll {
     /// Called by Qt with a valid painter for the duration of the call.
     unsafe fn paint(self: Pin<&mut Self>, painter: *mut cxx_qt_lib::QPainter) {
         // SAFETY: Qt passes a live, active painter.
-        let Some(painter) = (unsafe { painter.as_mut() }) else {
-            return;
-        };
-        // SAFETY: QPainter is not moved while we hold it.
-        let painter = unsafe { Pin::new_unchecked(painter) };
-        paint::paint_scene(painter, &self.ops, &self.texts, &self.waves);
-    }
-
-    fn palette(&self) -> daw_arrange::Palette {
-        daw_arrange::Palette {
-            background: to_rgba(&self.background_color),
-            alternate_background: to_rgba(&self.alternate_background_color),
-            text: to_rgba(&self.text_color),
-            disabled_text: to_rgba(&self.disabled_text_color),
-            highlight: to_rgba(&self.highlight_color),
-            highlighted_text: to_rgba(&self.highlighted_text_color),
-            negative: to_rgba(&self.negative_color),
-        }
+        unsafe { self.scene.paint(painter) };
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
@@ -290,9 +313,12 @@ impl qobject::PianoRoll {
             lanes_height: f64,
             track_index: i32,
             lane_count: i32,
+            /// The lane rows, when something they show may have changed.
+            lanes: Option<Vec<LaneRow>>,
+            lanes_at: (u64, Option<usize>),
         }
         let (w, h) = (self.width(), self.height());
-        let palette = self.palette();
+        let palette = paint::theme_palette!(self);
         let (rh, kw, vh) = (self.ruler_height, self.keyboard_width, self.velocity_height);
         let (lanes_shown, lh) = (self.lanes_shown, self.lane_height);
         let accidentals = if self.flat_note_names {
@@ -300,7 +326,8 @@ impl qobject::PianoRoll {
         } else {
             Accidentals::Sharps
         };
-        let (scene, shown) = state::with(|s| {
+        let lanes_seen = self.lanes_at;
+        let shown = state::with(|s| {
             s.piano.palette = palette;
             s.piano.ruler_height = rh;
             s.piano.keyboard_width = kw;
@@ -311,11 +338,12 @@ impl qobject::PianoRoll {
             s.piano.resize(w, h);
             s.piano.sync(s.doc.project());
             s.piano.fit_if_pending(s.doc.project());
-            let scene = s.with_piano(|p, doc, env| p.scene(doc.project(), env));
             let p = &s.piano;
             let project = s.doc.project();
             let track = p.track(project);
-            let shown = Shown {
+            let row = p.track_row(project);
+            let lanes_at = (s.view_revision, row);
+            Shown {
                 scroll_x: p.view.scroll_x,
                 scroll_y: p.scroll_y,
                 content_height: 128.0 * p.key_height,
@@ -327,12 +355,13 @@ impl qobject::PianoRoll {
                     .and_then(|t| strip_row(project, t))
                     .map_or(-1, |row| row as i32),
                 lanes_height: p.lanes_height(),
-                track_index: p.track_row(project).map_or(-1, |i| i as i32),
+                track_index: row.map_or(-1, |i| i as i32),
                 lane_count: p.lane_count() as i32,
-            };
-            (scene, shown)
+                lanes: (lanes_seen != Some(lanes_at))
+                    .then(|| row.map(|row| s.lane_rows(row)).unwrap_or_default()),
+                lanes_at,
+            }
         });
-        self.as_mut().store(scene);
         self.as_mut().set_scroll_x(shown.scroll_x);
         self.as_mut().set_scroll_y(shown.scroll_y);
         self.as_mut().set_content_height(shown.content_height);
@@ -345,18 +374,24 @@ impl qobject::PianoRoll {
         self.as_mut().set_lanes_height(shown.lanes_height);
         self.as_mut().set_track_index(shown.track_index);
         self.as_mut().set_lane_count(shown.lane_count);
-        self.update();
+        if let Some(lanes) = shown.lanes {
+            self.as_mut().rust_mut().lanes_at = Some(shown.lanes_at);
+            if lanes != self.lane_rows {
+                self.as_mut().set_lanes(lane_list(&lanes));
+                self.as_mut().rust_mut().lane_rows = lanes;
+            }
+        }
+        self.as_mut().rust_mut().scene.invalidate();
+        self.polish();
     }
 
-    fn store(self: Pin<&mut Self>, scene: Scene) {
-        let mut r = self.rust_mut();
-        let r = &mut *r;
-        r.ops.clear();
-        r.texts.clear();
-        r.waves.clear();
-        for p in scene.prims {
-            r.ops.push(paint::op(p, &mut r.texts, &mut r.waves));
+    fn update_polish(mut self: Pin<&mut Self>) {
+        if !self.scene.wants_scene(self.is_visible()) {
+            return;
         }
+        let scene = state::with(|s| s.with_piano(|p, doc, env| p.scene(doc.project(), env)));
+        self.as_mut().rust_mut().scene.store(scene);
+        self.update();
     }
 
     /// Applies an outcome, then redraws and tells QML.
@@ -372,7 +407,6 @@ impl qobject::PianoRoll {
         });
         if any {
             self.as_mut().refresh();
-            self.as_mut().edited();
         }
         let (px, py) = self.rust().last_press;
         if menu {
@@ -422,6 +456,14 @@ impl qobject::PianoRoll {
         let p = pointer(x, y, 0, modifiers);
         let out = state::with(|s| s.piano.wheel(p, dx, dy));
         self.after(out);
+    }
+
+    fn touch_pans(&self, x: f64, y: f64) -> bool {
+        state::with(|s| s.piano.touch_pans(s.doc.project(), x, y))
+    }
+
+    fn has_menu_at(&self, x: f64, y: f64) -> bool {
+        state::with(|s| s.piano.has_menu_at(x, y))
     }
 
     fn pinch(self: Pin<&mut Self>, scale: f64, x: f64) {
@@ -520,7 +562,8 @@ impl qobject::PianoRoll {
     }
 
     fn set_point_shape(self: Pin<&mut Self>, i: i32) {
-        self.act(|s| s.piano.set_point_shape(&mut s.doc, shape(i)));
+        let to = shape(PointShape { repr: i });
+        self.act(|s| s.piano.set_point_shape(&mut s.doc, to));
     }
 
     fn delete_points(self: Pin<&mut Self>) {

@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use daw_core::atomic_file;
+
 use flacenc::component::BitRepr;
 use flacenc::error::Verify;
 
@@ -38,8 +40,8 @@ impl WavFormat {
         s: f32,
     ) -> hound::Result<()> {
         match self {
-            WavFormat::Pcm16 => w.write_sample(to_int(s, 16) as i16),
-            WavFormat::Pcm24 => w.write_sample(to_int(s, 24)),
+            WavFormat::Pcm16 => w.write_sample(to_int(s, 16, 0.0) as i16),
+            WavFormat::Pcm24 => w.write_sample(to_int(s, 24, 0.0)),
             WavFormat::Float32 => w.write_sample(s),
         }
     }
@@ -53,10 +55,16 @@ pub enum FlacBits {
     B24,
 }
 
-fn to_int(s: f32, bits: u32) -> i32 {
+/// The most audio a WAV file holds. RIFF stores sizes as `u32` and hound does not
+/// check them. The margin covers the header and keeps the RIFF size clear of
+/// `u32::MAX`, which readers take to mean "unknown length".
+pub(crate) const WAV_MAX_DATA_BYTES: u64 = u32::MAX as u64 - (1 << 20);
+
+/// `s` as a `bits`-bit integer, with `noise` LSBs (0 for none) added before rounding.
+fn to_int(s: f32, bits: u32, noise: f32) -> i32 {
     let max = ((1i64 << (bits - 1)) - 1) as f32;
     let min = -((1i64 << (bits - 1)) as f32);
-    (s * (max + 1.0)).round().clamp(min, max) as i32
+    (s * (max + 1.0) + noise).round().clamp(min, max) as i32
 }
 
 fn check(data: &AudioData) -> Result<()> {
@@ -73,21 +81,17 @@ fn check(data: &AudioData) -> Result<()> {
     Ok(())
 }
 
-/// A file being written next to `target` under a temporary name, renamed into place by
-/// [`commit`](Self::commit). Dropped without committing, the temporary file is removed,
-/// so a failure part way (disk full, a cancelled export) leaves any existing file
-/// untouched and no partial file behind.
-struct Replacement {
+/// A file being written under a temporary name and moved into place by
+/// [`commit`](Self::commit), through [`daw_core::atomic_file`]. Dropped without
+/// committing, the temporary file is removed, so a failure part way (disk full, a
+/// cancelled export) leaves any existing file untouched and no partial file behind.
+struct Rewrite {
     /// What the caller asked for, for removing its peak cache.
     path: PathBuf,
-    /// Where the file ends up: `path`, or the file a symlink there points to.
-    target: PathBuf,
-    tmp: PathBuf,
-    permissions: Option<std::fs::Permissions>,
-    done: bool,
+    file: atomic_file::Replacement,
 }
 
-impl Replacement {
+impl Rewrite {
     /// A symlink is followed and its target replaced; an existing file keeps its
     /// permissions, and a read-only one is refused.
     fn begin(path: &Path) -> Result<(Self, File)> {
@@ -107,129 +111,61 @@ impl Replacement {
             Ok(m) => Some(m.permissions()),
             Err(_) => None,
         };
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Short and fixed-length, so a long file name can't push it past NAME_MAX.
-        let tmp = target.with_file_name(format!(".kadence-{}-{n}.tmp", std::process::id()));
-        let file = File::create_new(&tmp).map_err(|e| MediaError::io(&tmp, e))?;
+        let (replacement, file) =
+            atomic_file::Replacement::begin(&target).map_err(|e| MediaError::io(&target, e))?;
+        if let Some(p) = permissions {
+            replacement
+                .restrict(&file, p)
+                .map_err(|e| MediaError::io(replacement.tmp(), e))?;
+        }
         let this = Self {
             path: path.to_owned(),
-            target,
-            tmp,
-            permissions,
-            done: false,
+            file: replacement,
         };
         Ok((this, file))
     }
 
+    /// The temporary file's path, for error messages.
+    fn tmp(&self) -> &Path {
+        self.file.tmp()
+    }
+
     /// Flushes `file` (the one [`begin`](Self::begin) returned, fully written) to disk
     /// and renames it into place. A stale peak cache for the old contents is removed.
-    fn commit(mut self, file: File) -> Result<()> {
-        if let Some(p) = self.permissions.take() {
-            file.set_permissions(p)
-                .map_err(|e| MediaError::io(&self.tmp, e))?;
-        }
-        file.sync_all().map_err(|e| MediaError::io(&self.tmp, e))?;
-        drop(file);
-        std::fs::rename(&self.tmp, &self.target).map_err(|e| MediaError::io(&self.target, e))?;
-        self.done = true;
+    fn commit(self, file: File) -> Result<()> {
+        let target = self.file.target().to_owned();
+        self.file
+            .commit(file)
+            .map_err(|e| MediaError::io(&target, e))?;
         // Same length within the mtime granularity would otherwise look current. The new
         // file is in place either way, so a failed delete is not an error.
-        for p in [&self.path, &self.target] {
+        for p in [&self.path, &target] {
             let _ = std::fs::remove_file(PeakCache::path_for(p));
         }
         Ok(())
     }
 }
 
-impl Drop for Replacement {
-    fn drop(&mut self) {
-        if !self.done {
-            let _ = std::fs::remove_file(&self.tmp);
-        }
-    }
-}
-
-/// Write the file at `path` through a temp file next to it, then rename it into place
-/// (see [`Replacement`]).
-fn replace_file(path: &Path, write: impl FnOnce(&mut BufWriter<File>) -> Result<()>) -> Result<()> {
-    let (replacement, file) = Replacement::begin(path)?;
-    let mut w = BufWriter::new(file);
-    write(&mut w)?;
-    let file = w
-        .into_inner()
-        .map_err(|e| MediaError::io(&replacement.tmp, e.into_error()))?;
-    replacement.commit(file)
-}
-
 /// Write `data` as a WAV file. An existing file is only replaced once the new one is
 /// complete.
 pub fn write_wav(path: impl AsRef<Path>, data: &AudioData, format: WavFormat) -> Result<()> {
-    check(data)?;
-    let spec = format.spec(data.num_channels(), data.sample_rate);
-    let bytes = data.frames() as u64 * data.num_channels() as u64 * spec.bits_per_sample as u64 / 8;
-    // RIFF sizes are u32 (and hound does not check them); leave room for the header.
-    if bytes > u32::MAX as u64 - (1 << 20) {
-        return Err(MediaError::Encode(format!(
-            "{bytes} bytes of audio do not fit in a WAV file (4 GiB limit)"
-        )));
-    }
-    replace_file(path.as_ref(), |out| {
-        let mut w = hound::WavWriter::new(out, spec)?;
-        for i in 0..data.frames() {
-            for plane in &data.channels {
-                format.write_sample(&mut w, plane[i])?;
-            }
-        }
-        w.finalize()?;
-        Ok(())
-    })
+    write_whole(path.as_ref(), data, FileFormat::Wav(format))
 }
 
 /// Write `data` as a FLAC file. An existing file is only replaced once the new one is
 /// complete.
 pub fn write_flac(path: impl AsRef<Path>, data: &AudioData, bits: FlacBits) -> Result<()> {
-    check(data)?;
-    let path = path.as_ref();
-    let bits = match bits {
-        FlacBits::B16 => 16,
-        FlacBits::B24 => 24,
-    };
-    let ch = data.num_channels();
-    let mut samples = Vec::with_capacity(data.frames() * ch);
-    for i in 0..data.frames() {
-        for plane in &data.channels {
-            samples.push(to_int(plane[i], bits as u32));
-        }
-    }
-    let bytes = encode_flac(&samples, ch, bits, data.sample_rate)?;
-    replace_file(path, |out| {
-        out.write_all(&bytes).map_err(|e| MediaError::io(path, e))
-    })
+    write_whole(path.as_ref(), data, FileFormat::Flac(bits))
 }
 
-/// A whole FLAC stream for interleaved `samples` of `bits` bits.
-fn encode_flac(samples: &[i32], channels: usize, bits: usize, rate: u32) -> Result<Vec<u8>> {
-    let config = flacenc::config::Encoder::default()
-        .into_verified()
-        .map_err(|(_, e)| MediaError::Encode(format!("{e:?}")))?;
-    let source = flacenc::source::MemSource::from_samples(samples, channels, bits, rate as usize);
-    let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
-        .map_err(|e| MediaError::Encode(format!("{e:?}")))?;
-    let mut sink = flacenc::bitsink::ByteSink::new();
-    stream
-        .write(&mut sink)
-        .map_err(|e| MediaError::Encode(format!("{e:?}")))?;
-    let mut bytes = sink.as_slice().to_vec();
-    // flacenc records the short final block as the minimum block size. The spec says the
-    // minimum excludes the last block, and Symphonia refuses such streams, so make the
-    // fixed-size stream say min == max as libFLAC does. STREAMINFO follows "fLaC" and
-    // its 4-byte block header, so min is at bytes 8..10 and max at 10..12.
-    if bytes.len() >= 12 && &bytes[..4] == b"fLaC" {
-        let (min, max) = bytes[8..12].split_at_mut(2);
-        min.copy_from_slice(max);
-    }
-    Ok(bytes)
+/// Writes all of `data` through an [`AudioWriter`], without dither.
+fn write_whole(path: &Path, data: &AudioData, format: FileFormat) -> Result<()> {
+    check(data)?;
+    let mut writer =
+        AudioWriter::create(path, format, data.num_channels(), data.sample_rate, false)?;
+    let planes: Vec<&[f32]> = data.channels.iter().map(Vec::as_slice).collect();
+    writer.write(&planes)?;
+    writer.finish()
 }
 
 /// The kind of file an [`AudioWriter`] makes.
@@ -270,13 +206,6 @@ impl Dither {
     fn next(&mut self) -> f32 {
         self.uniform() + self.uniform()
     }
-}
-
-/// `s` as a `bits`-bit integer, with `noise` LSBs added before rounding.
-fn to_int_dithered(s: f32, bits: u32, noise: f32) -> i32 {
-    let max = ((1i64 << (bits - 1)) - 1) as f32;
-    let min = -((1i64 << (bits - 1)) as f32);
-    (s * (max + 1.0) + noise).round().clamp(min, max) as i32
 }
 
 enum Sink {
@@ -420,8 +349,8 @@ impl FlacSink {
 /// succeeds; dropping the writer before that (an error, a cancelled export) leaves no
 /// file behind and any existing one untouched.
 pub struct AudioWriter {
-    replacement: Replacement,
-    /// The file the replacement commits; `sink` writes through a clone of it.
+    rewrite: Rewrite,
+    /// The file the rewrite commits; `sink` writes through a clone of it.
     file: File,
     sink: Sink,
     channels: usize,
@@ -445,12 +374,12 @@ impl AudioWriter {
         if sample_rate == 0 {
             return Err(MediaError::Encode("sample rate is 0".into()));
         }
-        let (replacement, file) = Replacement::begin(path.as_ref())?;
+        let (rewrite, file) = Rewrite::begin(path.as_ref())?;
         let sink = match format {
             FileFormat::Wav(format) => {
                 let clone = file
                     .try_clone()
-                    .map_err(|e| MediaError::io(&replacement.tmp, e))?;
+                    .map_err(|e| MediaError::io(rewrite.tmp(), e))?;
                 let writer = hound::WavWriter::new(
                     BufWriter::new(clone),
                     format.spec(channels, sample_rate),
@@ -464,7 +393,7 @@ impl AudioWriter {
             FileFormat::Flac(bits) => {
                 let clone = file
                     .try_clone()
-                    .map_err(|e| MediaError::io(&replacement.tmp, e))?;
+                    .map_err(|e| MediaError::io(rewrite.tmp(), e))?;
                 let bits = match bits {
                     FlacBits::B16 => 16,
                     FlacBits::B24 => 24,
@@ -475,7 +404,7 @@ impl AudioWriter {
         let dither =
             (dither && format.int_bits().is_some()).then_some(Dither(0x9e37_79b9_7f4a_7c15));
         Ok(Self {
-            replacement,
+            rewrite,
             file,
             sink,
             channels,
@@ -502,7 +431,7 @@ impl AudioWriter {
         if planes.iter().any(|p| p.len() != n) {
             return Err(MediaError::Encode("channels differ in length".into()));
         }
-        let tmp = &self.replacement.tmp;
+        let tmp = self.rewrite.tmp();
         match &mut self.sink {
             Sink::Wav {
                 writer,
@@ -511,9 +440,7 @@ impl AudioWriter {
             } => {
                 let size = u64::from(format.spec(1, 1).bits_per_sample / 8);
                 *bytes += n as u64 * self.channels as u64 * size;
-                // RIFF sizes are u32 (and hound does not check them); leave room for the
-                // header.
-                if *bytes > u32::MAX as u64 - (1 << 20) {
+                if *bytes > WAV_MAX_DATA_BYTES {
                     return Err(MediaError::Encode(format!(
                         "{bytes} bytes of audio do not fit in a WAV file (4 GiB limit)"
                     )));
@@ -527,11 +454,9 @@ impl AudioWriter {
                     for plane in planes {
                         let r = match (&mut self.dither, bits) {
                             (Some(d), 16) => {
-                                writer.write_sample(to_int_dithered(plane[i], 16, d.next()) as i16)
+                                writer.write_sample(to_int(plane[i], 16, d.next()) as i16)
                             }
-                            (Some(d), 24) => {
-                                writer.write_sample(to_int_dithered(plane[i], 24, d.next()))
-                            }
+                            (Some(d), 24) => writer.write_sample(to_int(plane[i], 24, d.next())),
                             _ => format.write_sample(writer, plane[i]),
                         };
                         r.map_err(|e| wav_error(tmp, e))?;
@@ -542,7 +467,7 @@ impl AudioWriter {
                 for i in 0..n {
                     for plane in planes {
                         let noise = self.dither.as_mut().map_or(0.0, Dither::next);
-                        flac.push(to_int_dithered(plane[i], flac.bits, noise))?;
+                        flac.push(to_int(plane[i], flac.bits, noise))?;
                     }
                 }
             }
@@ -554,18 +479,18 @@ impl AudioWriter {
     /// Completes the file and moves it into place.
     pub fn finish(self) -> Result<()> {
         let Self {
-            replacement,
+            rewrite,
             file,
             sink,
             ..
         } = self;
         match sink {
-            Sink::Wav { writer, .. } => writer
-                .finalize()
-                .map_err(|e| wav_error(&replacement.tmp, e))?,
+            Sink::Wav { writer, .. } => {
+                writer.finalize().map_err(|e| wav_error(rewrite.tmp(), e))?
+            }
             Sink::Flac(flac) => flac.finish()?,
         }
-        replacement.commit(file)
+        rewrite.commit(file)
     }
 }
 
@@ -593,11 +518,16 @@ mod replace_tests {
         };
         write_wav(&path, &original, WavFormat::Pcm16).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let err = replace_file(&path, |out| {
-            out.write_all(&[0; 4096]).unwrap();
-            Err(MediaError::Encode("No space left on device".into()))
-        });
-        assert!(err.is_err());
+        // More than a WAV file holds: refused part way, as a full disk would.
+        let mut w = AudioWriter::create(&path, FileFormat::Wav(WavFormat::Pcm16), 1, 48_000, false)
+            .unwrap();
+        w.write(&[&[0.0; 4096]]).unwrap();
+        let Sink::Wav { bytes, .. } = &mut w.sink else {
+            unreachable!()
+        };
+        *bytes = WAV_MAX_DATA_BYTES;
+        assert!(w.write(&[&[0.0; 4096]]).is_err());
+        drop(w);
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let names: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

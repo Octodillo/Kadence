@@ -10,6 +10,7 @@
 //! See `docs/project-format.md` for the bundle layout and JSON schema.
 
 pub mod bundle;
+mod carry;
 pub mod change;
 pub mod command;
 pub mod commands;

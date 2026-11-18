@@ -78,7 +78,7 @@ impl PianoRoll {
     }
 
     /// The open clip's track's row in the project, which names it to the
-    /// app's lane getters and picks its colour.
+    /// app and picks its colour.
     pub fn track_row(&self, project: &Project) -> Option<usize> {
         let track = self.track(project)?;
         project.tracks.iter().position(|t| t.id == track)

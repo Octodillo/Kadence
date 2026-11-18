@@ -12,7 +12,6 @@
 use std::collections::HashSet;
 
 use daw_arrange::automation::{lane_scale, static_value};
-use daw_arrange::rows::{LaneRow, track_rows};
 use daw_model::{AutomationLane, AutomationTarget, LaneId, Project, Track};
 
 use crate::device_panel::{BuiltinParams, ParamDesc};
@@ -24,27 +23,17 @@ use crate::state::AppState;
 /// What a lane automates, as the header words it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LaneKind {
-    Volume = 0,
-    Pan = 1,
-    Send = 2,
-    DeviceParam = 3,
+    Volume,
+    Pan,
+    Send,
+    DeviceParam,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LaneMode {
-    Off = 0,
-    Read = 1,
-    Write = 2,
-}
-
-impl LaneMode {
-    pub fn from_index(i: i32) -> Self {
-        match i {
-            0 => Self::Off,
-            2 => Self::Write,
-            _ => Self::Read,
-        }
-    }
+    Off,
+    Read,
+    Write,
 }
 
 /// A target's name in parts: the kind, the send's target track or the
@@ -147,23 +136,6 @@ impl AppState {
     /// The value lane `lane` of track `track` controls, as it is now.
     pub fn lane_control(&self, track: i32, lane: i32) -> Option<LaneControl> {
         self.target_control(track, self.lane_target(track, lane)?)
-    }
-
-    /// The rows track `track` shows under it when expanded, as the
-    /// timeline lays them out.
-    pub fn track_rows(&self, track: i32) -> Vec<LaneRow> {
-        self.track_at_index(track)
-            .map_or_else(Vec::new, |t| track_rows(t))
-    }
-
-    /// The index among the track's lanes of the lane in row `row`.
-    pub fn row_lane(&self, track: i32, row: i32) -> Option<usize> {
-        let t = self.track_at_index(track)?;
-        let id = self
-            .track_rows(track)
-            .get(usize::try_from(row).ok()?)?
-            .lane?;
-        t.automation.iter().position(|l| l.id == id)
     }
 
     /// See [`begin_control`](Self::begin_control).
@@ -333,24 +305,6 @@ impl AppState {
         self.lanes.params.param(d, param)
     }
 
-    // -----------------------------------------------------------------------
-    // Lanes
-
-    pub fn lane_count(&self, track: i32) -> usize {
-        self.track_at_index(track).map_or(0, |t| t.automation.len())
-    }
-
-    pub fn lane_name(&self, track: i32, lane: i32) -> Option<TargetName> {
-        let t = self.track_at_index(track)?;
-        let l = t.automation.get(usize::try_from(lane).ok()?)?;
-        Some(target_name(
-            self.doc.project(),
-            &self.lanes.params,
-            t,
-            l.target,
-        ))
-    }
-
     pub fn lane_mode(&self, track: i32, lane: i32) -> LaneMode {
         let Some(t) = self.track_at_index(track) else {
             return LaneMode::Read;
@@ -421,11 +375,6 @@ impl AppState {
         };
         let out = self.arrange.add_lane(&mut self.doc, t, target);
         self.apply(out);
-    }
-
-    pub fn lanes_expanded(&self, track: i32) -> bool {
-        self.track_at_index(track)
-            .is_some_and(|t| self.arrange.expanded.contains(&t.id))
     }
 
     pub fn set_lanes_expanded(&mut self, track: i32, on: bool) {
@@ -565,8 +514,9 @@ mod tests {
             // Moving a control makes no lane.
             assert!(s.doc.project().tracks[0].automation.is_empty());
         }
-        assert_eq!(s.track_rows(0).len(), 1);
-        assert_eq!(s.row_lane(0, 0), None);
+        let rows = daw_arrange::rows::track_rows(&s.doc.project().tracks[0]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].lane, None);
 
         // Not on the track: no control, and nothing moves.
         let gone = AutomationTarget::DeviceParam {

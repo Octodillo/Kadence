@@ -38,6 +38,9 @@ Kirigami.Page {
     readonly property bool stripShown: AppSettings.editStripShown
     readonly property bool lanesShown: AppSettings.editLanesShown
     readonly property alias roll: roll
+    // Up and Down belong to a focused fader or combo box before they
+    // transpose (see Main.qml).
+    readonly property bool arrowKeysFree: !applicationWindow().controlHasArrowKeys
     readonly property alias trackStrip: trackStrip
 
     title: roll.hasClip ? i18nc("@title %1 is a clip name", "Edit — %1", roll.clipName)
@@ -76,7 +79,7 @@ Kirigami.Page {
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Transpose Up")
             icon.name: "go-up"
-            shortcut: "Up"
+            shortcut: page.arrowKeysFree ? "Up" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(1)
@@ -84,21 +87,21 @@ Kirigami.Page {
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Transpose Down")
             icon.name: "go-down"
-            shortcut: "Down"
+            shortcut: page.arrowKeysFree ? "Down" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(-1)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Octave Up")
-            shortcut: "Shift+Up"
+            shortcut: page.arrowKeysFree ? "Shift+Up" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(12)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Octave Down")
-            shortcut: "Shift+Down"
+            shortcut: page.arrowKeysFree ? "Shift+Down" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(-12)
@@ -288,11 +291,10 @@ Kirigami.Page {
         target: Project
         function onRevisionChanged() { page.refresh(); }
     }
-    Timer {
-        interval: 16
-        repeat: true
-        running: Project.playing && page.visible
-        onTriggered: roll.refresh()
+    Connections {
+        target: UiClock
+        enabled: page.visible
+        function onFrame() { roll.refresh(); }
     }
     onVisibleChanged: if (visible) page.refresh()
     MeterClock {
@@ -364,43 +366,34 @@ Kirigami.Page {
             Accessible.name: i18nc("@info:accessible", "Piano roll")
         }
 
-        MouseArea {
+        CanvasPointer {
             anchors.fill: roll
+            canvas: roll
+            holds: (x, y) => roll.hasMenuAt(x, y)
             enabled: page.visible && roll.hasClip
-            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-            hoverEnabled: true
-            preventStealing: true
-            cursorShape: roll.cursorShape
-            activeFocusOnTab: true
 
-            onPressed: (m) => {
-                forceActiveFocus();
-                roll.press(m.x, m.y, m.button, m.modifiers);
-            }
-            onPositionChanged: (m) => {
-                if (pressed) {
-                    roll.motion(m.x, m.y, m.modifiers);
-                } else {
-                    roll.hover(m.x, m.y);
-                }
-            }
-            onReleased: (m) => roll.release(m.x, m.y, m.modifiers)
             onDoubleClicked: (m) => {
                 if (m.button === Qt.LeftButton) {
                     roll.doubleClick(m.x, m.y, m.modifiers);
                 }
             }
-            onCanceled: roll.cancelDrag()
             onWheel: (w) => {
-                // Mice report angles (120 per notch), touchpads pixels.
-                const pixels = w.pixelDelta.x !== 0 || w.pixelDelta.y !== 0;
-                const dx = pixels ? w.pixelDelta.x : w.angleDelta.x / 2;
-                const dy = pixels ? w.pixelDelta.y : w.angleDelta.y / 2;
-                roll.wheel(w.x, w.y, dx, dy, w.modifiers);
+                const by = Wheel.pixels(w);
+                roll.wheel(w.x, w.y, by.x, by.y, w.modifiers);
                 w.accepted = true;
             }
+            // What a right click would open, for the selection: no place
+            // on the grid is the keyboard's.
+            onMenuKeyPressed: {
+                const at = Qt.point(roll.keyboardWidth + Kirigami.Units.gridUnit, roll.rulerHeight + Kirigami.Units.gridUnit);
+                if (roll.hasPoints) {
+                    pointMenu.shape = roll.pointShape();
+                    pointMenu.popup(roll, at.x, at.y);
+                } else {
+                    noteMenu.popup(roll, at.x, at.y);
+                }
+            }
 
-            Keys.onEscapePressed: roll.cancelDrag()
             Keys.onLeftPressed: (e) => roll.nudge(-1)
             Keys.onRightPressed: (e) => roll.nudge(1)
         }
@@ -433,11 +426,11 @@ Kirigami.Page {
             clip: true
 
             Repeater {
-                model: roll.hasClip ? roll.laneCount : 0
+                model: roll.hasClip ? roll.lanes : []
 
                 QQC2.Label {
-                    required property int index
-                    readonly property int revision: Project.revision + Automation.revision
+                    // One lane, as the `lanes` role of Tracks describes it.
+                    required property var modelData
                     width: roll.keyboardWidth
                     // Rows share the space when many lanes would not fit.
                     height: roll.lanesHeight / Math.max(1, roll.laneCount)
@@ -446,11 +439,7 @@ Kirigami.Page {
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideRight
                     font: Kirigami.Theme.smallFont
-                    text: revision >= 0 && roll.trackIndex >= 0
-                        ? laneName.text(Automation.laneKind(roll.trackIndex, index),
-                                        Automation.laneDetail(roll.trackIndex, index),
-                                        Automation.laneParam(roll.trackIndex, index))
-                        : ""
+                    text: laneName.text(modelData.kind, modelData.detail, modelData.param)
                     QQC2.ToolTip.text: text
                     QQC2.ToolTip.visible: tip.hovered && truncated
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay

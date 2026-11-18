@@ -1,15 +1,14 @@
-//! `Project`: the QML-facing document. File handling, undo, tracks and the
-//! transport, over [`crate::state`].
+//! `Project`: the QML-facing document. File handling, undo, the selection
+//! and the transport, over [`crate::state`]. The track list is
+//! [`Tracks`](crate::tracks_bridge).
 
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QColor, QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant};
+use cxx_qt_lib::{QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant};
 use daw_core::time::{PPQ, TickTime};
-use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
-use daw_model::{FadeShape, InputChannels, MidiInput, Monitoring, Track, TrackKind};
+use daw_model::{FadeShape, Track};
 
-use crate::instrument;
 use crate::message::{Context, Fields, Message, Reason};
 use crate::qt_lists::string_list;
 use crate::recovery::Candidate;
@@ -21,8 +20,6 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
-        include!("cxx-qt-lib/qcolor.h");
-        type QColor = cxx_qt_lib::QColor;
         include!("cxx-qt-lib/qurl.h");
         type QUrl = cxx_qt_lib::QUrl;
         include!("cxx-qt-lib/qmap.h");
@@ -80,6 +77,8 @@ pub mod qobject {
         NotesDropped,
         ClipsDropped,
         RoutingLoop,
+        NotesUnplayed,
+        LaneSkipped,
         NoInstrumentTrack,
         EngineNotRunning,
         NoMidiPlayer,
@@ -108,6 +107,14 @@ pub mod qobject {
         AlreadyOpen,
     }
 
+    /// The curve of a clip's fade, for `set_fade_shape`.
+    #[qenum(Project)]
+    enum FadeShape {
+        LinearFade,
+        EqualPowerFade,
+        SCurveFade,
+    }
+
     #[auto_cxx_name]
     extern "RustQt" {
         #[qobject]
@@ -115,7 +122,6 @@ pub mod qobject {
         #[qml_singleton]
         /// Changes whenever anything shown about the project changed.
         #[qproperty(i32, revision)]
-        #[qproperty(i32, track_count)]
         #[qproperty(QString, name)]
         #[qproperty(bool, modified)]
         /// Whether the project has a bundle on disk (so Save needs no dialog).
@@ -231,7 +237,8 @@ pub mod qobject {
         #[qinvokable]
         fn collect_files(self: Pin<&mut Project>) -> i32;
 
-        /// Called by a timer: picks up engine position and background work.
+        /// Called by the UI's clock (`UiClock.qml`): picks up engine position
+        /// and background work.
         #[qinvokable]
         fn tick(self: Pin<&mut Project>);
 
@@ -243,8 +250,9 @@ pub mod qobject {
         /// Returns an empty map, or a message map saying why it failed.
         #[qinvokable]
         fn save(self: Pin<&mut Project>) -> QMap_QString_QVariant;
-        /// Saves into a new bundle directory at `url`. Returns an empty map,
-        /// or a message map saying why it failed.
+        /// Saves into a new bundle at `url`, its directory or the project
+        /// file to go in it. Returns an empty map, or a message map saying
+        /// why it failed.
         #[qinvokable]
         fn save_as(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
 
@@ -253,90 +261,9 @@ pub mod qobject {
         #[qinvokable]
         fn redo(self: Pin<&mut Project>);
 
-        /// Adds a track of `kind` (0 audio, 1 instrument, 2 bus) called
-        /// `name`; QML words the default name with `next_track_number`.
-        #[qinvokable]
-        fn add_track(self: Pin<&mut Project>, kind: i32, name: &QString);
-        /// The number for the next default track name of `kind`, as in
-        /// "Audio 3".
-        #[qinvokable]
-        fn next_track_number(self: &Project, kind: i32) -> i32;
-        #[qinvokable]
-        fn remove_track(self: Pin<&mut Project>, index: i32);
-        #[qinvokable]
-        fn track_name(self: &Project, index: i32) -> QString;
-        /// 0 audio, 1 instrument, 2 bus, -1 none.
-        #[qinvokable]
-        fn track_kind(self: &Project, index: i32) -> i32;
-        #[qinvokable]
-        fn track_color(self: &Project, index: i32) -> QColor;
-        #[qinvokable]
-        fn track_muted(self: &Project, index: i32) -> bool;
-        #[qinvokable]
-        fn track_soloed(self: &Project, index: i32) -> bool;
-        /// Armed for recording.
-        #[qinvokable]
-        fn track_armed(self: &Project, index: i32) -> bool;
-        #[qinvokable]
-        fn set_track_armed(self: Pin<&mut Project>, index: i32, armed: bool);
-        /// The first hardware input an audio track records, from 0.
-        #[qinvokable]
-        fn track_input(self: &Project, index: i32) -> i32;
-        /// Whether an audio track records a stereo pair from its input on.
-        #[qinvokable]
-        fn track_input_stereo(self: &Project, index: i32) -> bool;
-        #[qinvokable]
-        fn set_track_input(self: Pin<&mut Project>, index: i32, first: i32, stereo: bool);
-        /// Whether an audio track monitors its input while armed.
-        #[qinvokable]
-        fn track_monitor_auto(self: &Project, index: i32) -> bool;
-        #[qinvokable]
-        fn set_track_monitor_auto(self: Pin<&mut Project>, index: i32, on: bool);
-        /// Hardware inputs the running audio engine has.
-        #[qinvokable]
-        fn input_count(self: &Project) -> i32;
-        #[qinvokable]
-        fn set_track_muted(self: Pin<&mut Project>, index: i32, muted: bool);
-        #[qinvokable]
-        fn set_track_soloed(self: Pin<&mut Project>, index: i32, soloed: bool);
-        /// The MIDI source port an instrument track listens to; empty for
-        /// every input.
-        #[qinvokable]
-        fn track_midi_device(self: &Project, index: i32) -> QString;
-        /// The MIDI channel (0 to 15) an instrument track listens to; -1
-        /// for every channel.
-        #[qinvokable]
-        fn track_midi_channel(self: &Project, index: i32) -> i32;
-        /// Sets which live MIDI an instrument track takes: `device` empty
-        /// for every input, `channel` -1 for every channel.
-        #[qinvokable]
-        fn set_track_midi_input(
-            self: Pin<&mut Project>,
-            index: i32,
-            device: &QString,
-            channel: i32,
-        );
-        #[qinvokable]
-        fn rename_track(self: Pin<&mut Project>, index: i32, name: &QString);
-        /// The name of the track's instrument; empty when it has none.
-        #[qinvokable]
-        fn track_instrument(self: &Project, index: i32) -> QString;
-        /// The id of the track's instrument device, for `DevicePanel.open`;
-        /// empty when it has none.
-        #[qinvokable]
-        fn track_instrument_device(self: &Project, index: i32) -> QString;
-        /// The row in `Instruments` of the track's instrument, or -1.
-        #[qinvokable]
-        fn track_instrument_choice(self: &Project, index: i32) -> i32;
-        /// Swaps the track's instrument for row `choice` of `Instruments`
-        /// at its `revision`.
-        #[qinvokable]
-        fn set_track_instrument(self: Pin<&mut Project>, index: i32, choice: i32, revision: i32);
+        /// Selects the track at `index` of the track list (see `Tracks`).
         #[qinvokable]
         fn select_track(self: Pin<&mut Project>, index: i32);
-        /// Moves the track at `from` to index `to`, as one undo step.
-        #[qinvokable]
-        fn move_track(self: Pin<&mut Project>, from: i32, to: i32);
         /// Imports an audio file at the playhead: the first (`index` 0) on
         /// the selected audio track, the rest on new tracks. Returns false
         /// if it could not; `status` says why.
@@ -393,10 +320,9 @@ pub mod qobject {
         fn zoom(self: Pin<&mut Project>, factor: f64);
         #[qinvokable]
         fn zoom_to_fit(self: Pin<&mut Project>);
-        /// Sets both fades of the selected audio clips to a shape:
-        /// 0 linear, 1 equal power, 2 S-curve.
+        /// Sets both fades of the selected audio clips to a shape.
         #[qinvokable]
-        fn set_fade_shape(self: Pin<&mut Project>, shape: i32);
+        fn set_fade_shape(self: Pin<&mut Project>, shape: FadeShape);
         #[qinvokable]
         fn remove_fades(self: Pin<&mut Project>);
         #[qinvokable]
@@ -411,7 +337,6 @@ pub mod qobject {
 #[derive(Default)]
 pub struct ProjectRust {
     revision: i32,
-    track_count: i32,
     name: QString,
     modified: bool,
     saved_before: bool,
@@ -450,24 +375,6 @@ pub struct ProjectRust {
     /// Whether a count-in was under way at the last refresh; it starts and
     /// ends with the playhead standing still.
     seen_counting_in: bool,
-}
-
-fn kind_index(kind: TrackKind) -> i32 {
-    match kind {
-        TrackKind::Audio => 0,
-        TrackKind::Instrument => 1,
-        TrackKind::Bus => 2,
-        TrackKind::Master => 3,
-    }
-}
-
-/// The `kind` argument of `add_track`.
-fn track_kind(kind: i32) -> TrackKind {
-    match kind {
-        1 => TrackKind::Instrument,
-        2 => TrackKind::Bus,
-        _ => TrackKind::Audio,
-    }
 }
 
 /// The name the window title shows: the project's own, else the bundle's.
@@ -532,6 +439,8 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::NotesDropped => QR::NotesDropped,
         Reason::ClipsDropped => QR::ClipsDropped,
         Reason::RoutingLoop => QR::RoutingLoop,
+        Reason::NotesUnplayed => QR::NotesUnplayed,
+        Reason::LaneSkipped => QR::LaneSkipped,
         Reason::NoInstrumentTrack => QR::NoInstrumentTrack,
         Reason::EngineNotRunning => QR::EngineNotRunning,
         Reason::NoMidiPlayer => QR::NoMidiPlayer,
@@ -641,7 +550,6 @@ impl qobject::Project {
             Some((
                 s.view_revision,
                 playhead.0,
-                p.tracks.len() as i32,
                 shown_name(p, s.doc.bundle()),
                 s.doc.is_modified() || s.has_pending_plugin_changes(),
                 s.doc.bundle().is_some(),
@@ -665,7 +573,6 @@ impl qobject::Project {
         let Some((
             rev,
             pos,
-            tracks,
             name,
             modified,
             saved,
@@ -695,7 +602,6 @@ impl qobject::Project {
             r.seen_counting_in = counting_in;
         }
         let mut this = self.as_mut();
-        this.as_mut().set_track_count(tracks);
         this.as_mut().set_name(QString::from(name.as_str()));
         this.as_mut().set_modified(modified);
         this.as_mut().set_saved_before(saved);
@@ -764,15 +670,7 @@ impl qobject::Project {
 
     /// Runs `f` on the state, then refreshes every property.
     fn edit(self: Pin<&mut Self>, f: impl FnOnce(&mut AppState)) {
-        state::with(|s| {
-            // A button may still be held on the timeline.
-            s.end_drag();
-            // A change made in a plugin's editor comes before this edit.
-            s.flush_plugin_changes();
-            f(s);
-            s.sync();
-            s.touch();
-        });
+        state::with(|s| s.edit(f));
         self.refresh(true);
     }
 
@@ -939,51 +837,31 @@ impl qobject::Project {
             .map_or(0.0, |d| d.as_millis() as f64)
     }
 
-    /// Takes candidate `index` off the list.
-    fn take_candidate(self: Pin<&mut Self>, index: i32) -> Option<Candidate> {
-        let i = usize::try_from(index).ok()?;
-        let mut c = None;
-        self.edit(|s| c = s.take_recovery(i));
-        c
-    }
-
     fn recover_session(mut self: Pin<&mut Self>, index: i32) -> QMap<QMapPair_QString_QVariant> {
-        let Some(c) = self.as_mut().take_candidate(index) else {
+        let Ok(index) = usize::try_from(index) else {
             return QMap::default();
         };
-        match &c.bundle {
-            Some(root) => self.open_with(root, AppState::recover),
-            None => {
-                let mut result = None;
-                self.as_mut().edit(|s| {
-                    if let Err(e) = s.recover_untitled(&c) {
-                        result = Some(e.fields());
-                    }
-                });
-                message_or_empty(result.as_ref())
+        let mut result = None;
+        self.as_mut().edit(|s| {
+            if let Err(e) = s.recover_offered(index) {
+                result = Some(e.fields());
             }
-        }
+        });
+        // Recheck the files on disk even for the same document.
+        self.as_mut().rust_mut().files_seen = None;
+        self.refresh_files();
+        message_or_empty(result.as_ref())
     }
 
-    fn discard_session(mut self: Pin<&mut Self>, index: i32) {
-        let Some(c) = self.as_mut().take_candidate(index) else {
+    fn discard_session(self: Pin<&mut Self>, index: i32) {
+        let Ok(index) = usize::try_from(index) else {
             return;
         };
-        // Another Kadence may have recovered it since it was offered.
-        if let Some(root) = c.bundle.as_ref().filter(|r| crate::recovery::is_locked(r)) {
-            let root = root.clone();
-            self.edit(|s| s.report(Message::AlreadyOpen(root)));
-            return;
-        }
-        if let Err(e) = c.discard() {
-            let path = c.autosave.clone();
-            self.edit(|s| {
-                s.report(Message::File(
-                    Context::Recover,
-                    daw_model::FormatError::Io { path, source: e },
-                ));
-            });
-        }
+        self.edit(|s| {
+            if let Err(e) = s.discard_offered(index) {
+                s.report(e);
+            }
+        });
     }
 
     fn missing_entry(&self, index: i32) -> Option<&daw_model::files::AudioFile> {
@@ -1039,18 +917,14 @@ impl qobject::Project {
         let Some(path) = url.to_local_file() else {
             return message_map(&Message::NotLocalFile(Context::Save).fields());
         };
-        let mut dir = std::path::PathBuf::from(path.to_string());
-        // A file dialog may hand back "Name.kadence"; the bundle is the
-        // directory "Name" around it.
-        if dir.extension().is_some_and(|e| e == "kadence") {
-            dir.set_extension("");
-        }
+        // A file dialog may hand back "Name.kadence": the document works
+        // out which bundle that means.
+        let path = std::path::PathBuf::from(path.to_string());
         let mut result = None;
         self.as_mut().edit(|s| {
-            if let Err(e) = s.save_as(&dir) {
+            if let Err(e) = s.save_as(&path) {
                 result = Some(Message::File(Context::Save, e).fields());
             }
-            s.resync();
         });
         // Files now resolve against the bundle, and may be outside it.
         self.as_mut().rust_mut().files_seen = None;
@@ -1072,252 +946,6 @@ impl qobject::Project {
                 s.report(e.into());
             }
         });
-    }
-
-    fn next_track_number(&self, kind: i32) -> i32 {
-        let kind = track_kind(kind);
-        state::with(|s| {
-            let n = s
-                .doc
-                .project()
-                .tracks
-                .iter()
-                .filter(|t| t.kind == kind)
-                .count();
-            i32::try_from(n + 1).unwrap_or(i32::MAX)
-        })
-    }
-
-    fn add_track(self: Pin<&mut Self>, kind: i32, name: &QString) {
-        let name = name.to_string();
-        self.edit(|s| {
-            let kind = track_kind(kind);
-            let p = s.doc.project();
-            // After the selected track, or at the end.
-            let at = s
-                .arrange
-                .selected_track
-                .and_then(|id| p.track_index(id))
-                .map_or(p.tracks.len(), |i| i + 1);
-            let track = Track::new(kind, name);
-            let id = track.id;
-            let command = instrument::add_track(at, track, s.instruments.default_choice());
-            match s.doc.execute_boxed(command) {
-                Ok(_) => s.arrange.selected_track = Some(id),
-                Err(e) => s.report(e.into()),
-            }
-            s.doc.seal();
-        });
-    }
-
-    fn remove_track(self: Pin<&mut Self>, index: i32) {
-        self.edit(|s| {
-            let Some(id) = track_at(s, index).map(|t| t.id) else {
-                return;
-            };
-            if let Err(e) = s.doc.execute(RemoveTrack::new(id)) {
-                s.report(e.into());
-            }
-            s.doc.seal();
-            if s.arrange.selected_track == Some(id) {
-                s.arrange.selected_track = None;
-            }
-        });
-    }
-
-    fn track_name(&self, index: i32) -> QString {
-        state::with(|s| track_at(s, index).map(|t| QString::from(t.name.as_str())))
-            .unwrap_or_default()
-    }
-
-    fn track_kind(&self, index: i32) -> i32 {
-        state::with(|s| track_at(s, index).map_or(-1, |t| kind_index(t.kind)))
-    }
-
-    fn track_color(&self, index: i32) -> QColor {
-        state::with(|s| {
-            let Some(t) = track_at(s, index) else {
-                return QColor::default();
-            };
-            let c = daw_arrange::track_color(t, index as usize);
-            QColor::from_rgba(i32::from(c.r()), i32::from(c.g()), i32::from(c.b()), 255)
-        })
-    }
-
-    fn track_muted(&self, index: i32) -> bool {
-        state::with(|s| track_at(s, index).is_some_and(|t| t.mute))
-    }
-
-    fn track_soloed(&self, index: i32) -> bool {
-        state::with(|s| track_at(s, index).is_some_and(|t| t.solo))
-    }
-
-    fn set_track_field(self: Pin<&mut Self>, index: i32, field: TrackField) {
-        self.edit(|s| {
-            let Some(id) = track_at(s, index).map(|t| t.id) else {
-                return;
-            };
-            if let Err(e) = s.doc.execute(SetTrack::new(id, field)) {
-                s.report(e.into());
-            }
-            s.doc.seal();
-        });
-    }
-
-    fn track_armed(&self, index: i32) -> bool {
-        state::with(|s| track_at(s, index).is_some_and(|t| t.armed))
-    }
-
-    fn set_track_armed(self: Pin<&mut Self>, index: i32, armed: bool) {
-        self.set_track_field(index, TrackField::Armed(armed));
-    }
-
-    fn track_input(&self, index: i32) -> i32 {
-        state::with(|s| track_at(s, index).map_or(0, |t| i32::from(t.audio_input.channels.first())))
-    }
-
-    fn track_input_stereo(&self, index: i32) -> bool {
-        state::with(|s| {
-            track_at(s, index)
-                .is_some_and(|t| matches!(t.audio_input.channels, InputChannels::Stereo(_)))
-        })
-    }
-
-    fn set_track_input(self: Pin<&mut Self>, index: i32, first: i32, stereo: bool) {
-        let Ok(first) = u16::try_from(first) else {
-            return;
-        };
-        let Some(mut input) = state::with(|s| track_at(s, index).map(|t| t.audio_input)) else {
-            return;
-        };
-        let channels = if stereo {
-            InputChannels::Stereo(first)
-        } else {
-            InputChannels::Mono(first)
-        };
-        if input.channels == channels {
-            return;
-        }
-        input.channels = channels;
-        self.set_track_field(index, TrackField::AudioInput(input));
-    }
-
-    fn track_monitor_auto(&self, index: i32) -> bool {
-        state::with(|s| {
-            track_at(s, index).is_some_and(|t| t.audio_input.monitor == Monitoring::Auto)
-        })
-    }
-
-    fn set_track_monitor_auto(self: Pin<&mut Self>, index: i32, on: bool) {
-        let Some(mut input) = state::with(|s| track_at(s, index).map(|t| t.audio_input)) else {
-            return;
-        };
-        input.monitor = if on {
-            Monitoring::Auto
-        } else {
-            Monitoring::Off
-        };
-        self.set_track_field(index, TrackField::AudioInput(input));
-    }
-
-    fn input_count(&self) -> i32 {
-        state::with(|s| {
-            s.engine
-                .session()
-                .map_or(0, |x| i32::from(x.config().inputs))
-        })
-    }
-
-    fn set_track_muted(self: Pin<&mut Self>, index: i32, muted: bool) {
-        self.set_track_field(index, TrackField::Mute(muted));
-    }
-
-    fn set_track_soloed(self: Pin<&mut Self>, index: i32, soloed: bool) {
-        self.set_track_field(index, TrackField::Solo(soloed));
-    }
-
-    fn track_midi_device(&self, index: i32) -> QString {
-        state::with(|s| {
-            let device = track_at(s, index).and_then(|t| t.midi_input.device.clone());
-            QString::from(device.unwrap_or_default().as_str())
-        })
-    }
-
-    fn track_midi_channel(&self, index: i32) -> i32 {
-        state::with(|s| {
-            track_at(s, index)
-                .and_then(|t| t.midi_input.channel)
-                .map_or(-1, i32::from)
-        })
-    }
-
-    fn set_track_midi_input(self: Pin<&mut Self>, index: i32, device: &QString, channel: i32) {
-        let device = device.to_string();
-        let input = MidiInput {
-            device: (!device.is_empty()).then_some(device),
-            channel: u8::try_from(channel).ok().filter(|&c| c < 16),
-        };
-        if state::with(|s| track_at(s, index).is_none_or(|t| t.midi_input == input)) {
-            return;
-        }
-        self.set_track_field(index, TrackField::MidiInput(input));
-    }
-
-    fn track_instrument(&self, index: i32) -> QString {
-        state::with(|s| {
-            track_at(s, index)
-                .and_then(|t| instrument::instrument_of(t))
-                .map(|d| QString::from(d.name.as_str()))
-        })
-        .unwrap_or_default()
-    }
-
-    fn track_instrument_device(&self, index: i32) -> QString {
-        state::with(|s| {
-            track_at(s, index)
-                .and_then(|t| instrument::instrument_of(t))
-                .map(|d| QString::from(d.id.to_string().as_str()))
-        })
-        .unwrap_or_default()
-    }
-
-    fn track_instrument_choice(&self, index: i32) -> i32 {
-        state::with(|s| {
-            track_at(s, index)
-                .and_then(|t| instrument::instrument_of(t))
-                .and_then(|d| s.instruments.position(&d.source))
-                .and_then(|i| i32::try_from(i).ok())
-                .unwrap_or(-1)
-        })
-    }
-
-    fn set_track_instrument(self: Pin<&mut Self>, index: i32, choice: i32, revision: i32) {
-        // Read before `edit`, which holds the state.
-        let Some(choice) = crate::instruments_bridge::choice_at(choice, revision) else {
-            return;
-        };
-        self.edit(|s| {
-            let choice = &choice;
-            let Some(track) = track_at(s, index) else {
-                return;
-            };
-            let Some(command) = instrument::set_instrument(s.doc.project(), track.id, choice)
-            else {
-                return;
-            };
-            if let Err(e) = s.doc.execute_boxed(command) {
-                s.report(e.into());
-            }
-            s.doc.seal();
-        });
-    }
-
-    fn rename_track(self: Pin<&mut Self>, index: i32, name: &QString) {
-        let name = name.to_string();
-        if name.trim().is_empty() {
-            return;
-        }
-        self.set_track_field(index, TrackField::Name(name));
     }
 
     fn select_track(self: Pin<&mut Self>, index: i32) {
@@ -1498,25 +1126,6 @@ impl qobject::Project {
         });
     }
 
-    fn move_track(self: Pin<&mut Self>, from: i32, to: i32) {
-        self.edit(|s| {
-            let Some(id) = track_at(s, from).map(|t| t.id) else {
-                return;
-            };
-            let count = s.doc.project().tracks.len();
-            let Ok(to) = usize::try_from(to) else {
-                return;
-            };
-            if to >= count || Some(to) == s.doc.project().track_index(id) {
-                return;
-            }
-            if let Err(e) = s.doc.execute(MoveTrack::new(id, to)) {
-                s.report(e.into());
-            }
-            s.doc.seal();
-        });
-    }
-
     fn import_audio(self: Pin<&mut Self>, url: &QUrl, index: i32) -> bool {
         let mut ok = false;
         self.edit(|s| {
@@ -1539,10 +1148,10 @@ impl qobject::Project {
         ok
     }
 
-    fn set_fade_shape(self: Pin<&mut Self>, shape: i32) {
+    fn set_fade_shape(self: Pin<&mut Self>, shape: qobject::FadeShape) {
         let shape = match shape {
-            1 => FadeShape::EqualPower,
-            2 => FadeShape::SCurve,
+            qobject::FadeShape::EqualPowerFade => FadeShape::EqualPower,
+            qobject::FadeShape::SCurveFade => FadeShape::SCurve,
             _ => FadeShape::Linear,
         };
         self.arrange_command(move |a, doc, _| a.set_fade_shape(doc, shape));

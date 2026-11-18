@@ -1,28 +1,31 @@
 //! Contract types and real-time safe building blocks shared by every crate.
 //!
 //! The public signatures in [`time`], [`event`], [`node`] and [`plugin`] are
-//! the Milestone 0 contracts that the parallel work units build against.
-//! Changing one needs a note in the architecture doc and a heads-up to the
-//! threads that depend on it. Adding a helper or a variant does not.
+//! the contracts the other crates build against: changing one needs a note
+//! in the architecture doc. Adding a helper or a variant does not.
 //!
 //! The rest are real-time safe tools: [`queue`] for crossing threads, [`exclusive`] for
 //! sharing one object between the audio thread and the main thread, [`split`] for the
 //! audio-thread half of a plugin built on it,
 //! [`dispose`] for freeing memory off the audio thread, [`denormals`] for the
-//! floating-point mode of audio threads, [`rtlog`] for logging
-//! from it and [`meter`] for peak meters.
+//! floating-point mode of audio threads and [`meter`] for peak meters.
+//! [`logging`] is where every crate's diagnostics go.
+//!
+//! [`atomic_file`] is the one tool here for other threads: how every crate
+//! replaces a file on disk.
 //!
 //! Nothing in this crate depends on Qt or any other UI toolkit.
 
+pub mod atomic_file;
 pub mod denormals;
 pub mod dispose;
 pub mod event;
 pub mod exclusive;
+pub mod logging;
 pub mod meter;
 pub mod node;
 pub mod plugin;
 pub mod queue;
-pub mod rtlog;
 pub mod split;
 mod sync;
 pub mod time;
@@ -30,7 +33,7 @@ pub mod time;
 pub use event::{Event, EventKind, EventList, NoteId, ParamId};
 pub use node::{Node, PortLayout, ProcessContext, TransportLoop, TransportState};
 pub use plugin::{
-    ParamInfo, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
-    PluginProcessor,
+    BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind,
+    PluginInstance, PluginProcessor, ScanBuilder,
 };
 pub use time::{MusicalPosition, PPQ, SampleTime, SegmentTempoMap, TempoMap, TickTime, Timeline};

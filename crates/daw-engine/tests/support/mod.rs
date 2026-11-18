@@ -161,6 +161,35 @@ impl Node for NoteSource {
     }
 }
 
+/// Emits `notes` note-ons at the start of every block.
+pub struct NoteBurst {
+    pub notes: usize,
+}
+
+impl Node for NoteBurst {
+    fn ports(&self) -> PortLayout {
+        PortLayout {
+            event_out: true,
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        for _ in 0..self.notes {
+            let kind = EventKind::NoteOn {
+                channel: 0,
+                key: 60,
+                velocity: 1.0,
+                note_id: -1,
+            };
+            // As every node does: what does not fit is dropped.
+            let _ = ctx.events_out.push(Event { frame: 0, kind });
+        }
+    }
+}
+
 /// Outputs how many events arrived at each frame.
 pub struct EventProbe;
 

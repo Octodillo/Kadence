@@ -19,6 +19,7 @@ pub mod dsp;
 mod events;
 pub mod param;
 mod state;
+mod voices;
 
 pub use devices::compressor::Compressor;
 pub use devices::delay::Delay;

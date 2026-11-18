@@ -11,24 +11,25 @@
 //!   real-time pace or as fast as possible. Tests use it.
 //!
 //! The callback runs on the real-time thread. It must not allocate, lock, log
-//! or do I/O. In debug builds, when the binary installs [`RtAllocCounter`] as
+//! or do I/O. When the binary installs [`RtAllocCounter`] as
 //! its global allocator, allocations in a cycle show up in
 //! [`BackendStats::rt_alloc_violations`].
 
 mod alloc;
+mod connect;
 mod cycle;
 mod dummy;
 mod jack_backend;
 mod link_log;
-pub mod midi;
 mod stats;
 
 pub use alloc::RtAllocCounter;
+pub use connect::{MAIN_MIDI_INPUT, MAIN_MIDI_OUTPUT, connect_physical};
 pub use cycle::BackendCycle;
 pub(crate) use cycle::{MidiInputs, MidiInputsControl, midi_inputs};
 pub use dummy::{DummyBackend, DummySystem, MidiInjector, MidiTap, Pacing};
 pub use jack_backend::JackBackend;
-pub use stats::BackendStats;
+pub use stats::{BackendHealth, BackendStats};
 
 /// Most MIDI input ports [`AudioBackend::add_midi_input`] adds at once.
 pub const MAX_MIDI_INPUTS: usize = 32;
@@ -62,10 +63,6 @@ pub struct BackendConfig {
     /// server may refuse or change it later. Callbacks must read
     /// [`BackendCycle::frames`] every cycle, never assume a fixed size.
     pub buffer_size: Option<u32>,
-    /// Connect our ports to the system's physical ports after starting:
-    /// the speakers, the microphone and every MIDI device. Off by default,
-    /// so nothing is heard unless asked for.
-    pub auto_connect: bool,
     /// Capacity of the MIDI in and MIDI out event lists, per cycle. Events
     /// beyond it are dropped and counted in [`BackendStats::midi_dropped`].
     pub midi_capacity: usize,
@@ -81,7 +78,6 @@ impl Default for BackendConfig {
             midi_output: false,
             sample_rate: None,
             buffer_size: None,
-            auto_connect: false,
             midi_capacity: 1024,
         }
     }
@@ -168,9 +164,17 @@ pub trait AudioBackend: Send {
     /// still hold it, so don't rely on its drop to signal anything.
     fn start(&mut self, cb: ProcessCallback) -> Result<(), BackendError>;
 
+    /// Ends the callback and keeps the backend open.
+    ///
+    /// If the audio system fails to stop (JACK: deactivation fails, as it
+    /// can once the server is gone), the backend is left closed, as after
+    /// [`close`](Self::close), and the error says so. A callback that
+    /// panicked is no such failure: [`health`](Self::health) reports it.
     fn stop(&mut self) -> Result<(), BackendError>;
 
     /// Stop if running, then unregister ports and disconnect from the server.
+    /// The backend is closed afterwards even when this returns an error,
+    /// which then only tells what went wrong on the way.
     fn close(&mut self) -> Result<(), BackendError>;
 
     fn is_running(&self) -> bool;
@@ -193,6 +197,21 @@ pub trait AudioBackend: Send {
     /// Counters shared with the real-time thread. Cheap; safe to poll from a
     /// UI timer.
     fn stats(&self) -> BackendStats;
+
+    /// Whether the backend still works, since the last
+    /// [`open`](Self::open): the two failures a running backend cannot
+    /// report any other way, because they happen on the audio system's
+    /// threads. Poll it from a UI timer; it only reads flags those threads
+    /// set, and never waits for them.
+    ///
+    /// The backend does not recover by itself. After
+    /// [`ServerGone`](BackendHealth::ServerGone), [`close`](Self::close) it
+    /// and open one again; after
+    /// [`CallbackPanicked`](BackendHealth::CallbackPanicked),
+    /// [`stop`](Self::stop) and [`start`](Self::start) clear it. A server
+    /// that changes its sample rate is not a failure: compare
+    /// [`sample_rate`](Self::sample_rate) with the rate you built for.
+    fn health(&self) -> BackendHealth;
 
     /// Registers another MIDI input port, `name` on this client, while open
     /// or running, so MIDI from different sources stays apart. Its events
@@ -257,35 +276,28 @@ pub fn port_short_name(name: &str) -> String {
     }
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
-        "midi_in".into()
+        MAIN_MIDI_INPUT.into()
     } else {
         trimmed.to_owned()
     }
 }
 
-/// Runs one cycle body under the debug-build allocation guard, and counts any
-/// allocation it catches in [`BackendStats::rt_alloc_violations`]. It only
-/// counts: printing from the real-time thread would cost more than the
-/// allocation it reports.
+/// Runs one cycle body under the allocation guard, and counts any allocation
+/// it catches in [`BackendStats::rt_alloc_violations`]. It only counts:
+/// printing from the real-time thread would cost more than the allocation it
+/// reports. Without [`RtAllocCounter`] installed nothing is ever caught, and
+/// the guard costs two thread-local reads a cycle.
 #[inline]
 pub(crate) fn rt_guard<R>(shared: &stats::SharedStats, f: impl FnOnce() -> R) -> R {
-    #[cfg(debug_assertions)]
-    {
-        let before = alloc::violations();
-        let r = alloc::forbid(f);
-        let caught = alloc::violations().wrapping_sub(before);
-        if caught > 0 {
-            shared
-                .rt_alloc_violations
-                .fetch_add(caught, std::sync::atomic::Ordering::Relaxed);
-        }
-        r
+    let before = alloc::violations();
+    let r = alloc::forbid(f);
+    let caught = alloc::violations().wrapping_sub(before);
+    if caught > 0 {
+        shared
+            .rt_alloc_violations
+            .fetch_add(caught, std::sync::atomic::Ordering::Relaxed);
     }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = shared;
-        f()
-    }
+    r
 }
 
 #[cfg(test)]
@@ -296,7 +308,7 @@ mod tests {
     fn short_names_are_capped_in_bytes_on_a_char_boundary() {
         assert_eq!(port_short_name("seq out"), "seq out");
         assert_eq!(port_short_name("a:b"), "a-b");
-        assert_eq!(port_short_name("  "), "midi_in");
+        assert_eq!(port_short_name("  "), crate::MAIN_MIDI_INPUT);
         let wide = "🎹".repeat(40);
         let short = port_short_name(&wide);
         assert!(short.len() <= 64, "{} bytes", short.len());

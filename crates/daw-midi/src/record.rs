@@ -6,7 +6,8 @@
 //! into a [`Recorder`] on a timer (its [`Recorder::notes`] and
 //! [`Recorder::held`] let the UI draw the take as it grows), call
 //! [`Recorder::finish`] when recording stops, convert with [`to_clip_notes`]
-//! and plan the edit with [`merge_take`].
+//! and add the notes to the clip with
+//! [`take_command`](crate::model::take_command).
 //!
 //! A loop wrap or locate while keys are held ends those notes at the jump
 //! and starts them again where playback continues, so a held chord carries
@@ -14,10 +15,10 @@
 
 use std::ops::Range;
 
-use daw_core::event::{EventKind, NoteId};
+use daw_core::event::{EventKind, NoteId, midi};
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 
-use crate::note::{EditNote, NoteData};
+use crate::note::NoteData;
 use crate::player::Captured;
 
 /// A recorded note on the timeline, in samples.
@@ -94,20 +95,12 @@ fn edge(kind: &EventKind) -> Option<Edge> {
             note_id,
             ..
         } => Some(Edge::OffAny { channel, note_id }),
-        EventKind::Midi([status, key, vel]) => {
-            let channel = status & 0x0f;
-            let key = key & 0x7f;
-            match status & 0xf0 {
-                0x90 if vel & 0x7f > 0 => Some(Edge::On {
-                    channel,
-                    key,
-                    velocity: (vel & 0x7f) as f32 / 127.0,
-                    note_id: -1,
-                }),
-                0x80 | 0x90 => Some(Edge::Off { channel, key }),
-                _ => None,
-            }
-        }
+        // Raw MIDI is read by the one codec: a note in it comes back as a note event, and
+        // anything else (malformed bytes included) is no edge.
+        EventKind::Midi(raw) => match midi::decode_padded(raw)? {
+            EventKind::Midi(_) => None,
+            decoded => edge(&decoded),
+        },
         EventKind::ParamValue { .. } => None,
     }
 }
@@ -259,44 +252,6 @@ pub fn to_clip_notes(
         .collect()
 }
 
-/// How a take combines with the notes already in the clip.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum TakeMode {
-    /// Keep the existing notes and add the take.
-    #[default]
-    Overdub,
-    /// Remove existing notes that start inside the recorded range first.
-    Replace,
-}
-
-/// The edit a take makes: notes to remove (indices into the existing
-/// notes) and notes to add.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TakePlan {
-    pub remove: Vec<usize>,
-    pub add: Vec<NoteData>,
-}
-
-/// Plans merging `take` into a clip. `range` is the clip-relative span
-/// that was recorded over, used by [`TakeMode::Replace`].
-pub fn merge_take<N: EditNote>(
-    existing: &[N],
-    take: Vec<NoteData>,
-    mode: TakeMode,
-    range: Range<TickTime>,
-) -> TakePlan {
-    let remove = match mode {
-        TakeMode::Overdub => Vec::new(),
-        TakeMode::Replace => existing
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| range.contains(&n.data().start))
-            .map(|(i, _)| i)
-            .collect(),
-    };
-    TakePlan { remove, add: take }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,6 +372,21 @@ mod tests {
     }
 
     #[test]
+    fn malformed_raw_midi_is_no_note() {
+        let mut r = Recorder::new();
+        let midi = |time, b: [u8; 3]| Captured::Event {
+            time: SampleTime(time),
+            kind: EventKind::Midi(b),
+        };
+        r.feed(midi(0, [0x90, 60, 100]));
+        // Not the note off its masked velocity would make it, and not a note on.
+        r.feed(midi(5, [0x90, 60, 0x80]));
+        r.feed(midi(6, [0x90, 0xC1, 100]));
+        r.feed(midi(9, [0x80, 60, 0]));
+        assert_eq!(spans(&r.finish(None)), [(0, 9, 60)]);
+    }
+
+    #[test]
     fn held_notes_carry_across_a_loop_wrap() {
         let mut r = Recorder::new();
         r.feed(on(900, 60, 0.5));
@@ -440,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_and_merges() {
+    fn converts_to_clip_notes() {
         let tempo = SegmentTempoMap::new(120.0);
         let notes = [
             RecordedNote {
@@ -466,26 +436,6 @@ mod tests {
         );
         assert_eq!((data[0].start.0, data[0].length.0), (PPQ / 2, PPQ / 2));
         assert_eq!((data[1].start.0, data[1].length.0), (0, PPQ * 3 / 4));
-
-        let existing = [
-            NoteData::new(0, 10, 50, 1.0),
-            NoteData::new(PPQ, 10, 50, 1.0),
-        ];
-        let plan = merge_take(
-            &existing,
-            data.clone(),
-            TakeMode::Replace,
-            TickTime(0)..TickTime(PPQ),
-        );
-        assert_eq!(plan.remove, [0]);
-        assert_eq!(plan.add, data);
-        let plan = merge_take(
-            &existing,
-            data,
-            TakeMode::Overdub,
-            TickTime(0)..TickTime(PPQ),
-        );
-        assert!(plan.remove.is_empty());
     }
 
     #[test]

@@ -44,6 +44,7 @@ fn a_module_is_entered_once_however_many_threads_load_it() {
                     let d = Vst3Format
                         .scan(&bundle)
                         .unwrap()
+                        .plugins
                         .pop()
                         .expect("testgain scans");
                     let p = Vst3Format.instantiate(&d, 48_000.0, 64).unwrap();
@@ -60,7 +61,7 @@ fn a_module_is_entered_once_however_many_threads_load_it() {
     assert_eq!((entries, exits), (1, 0));
 
     // Shutdown exits only modules no instance uses, and a later load enters them again.
-    let d = Vst3Format.scan(&bundle).unwrap().pop().unwrap();
+    let d = Vst3Format.scan(&bundle).unwrap().plugins.pop().unwrap();
     let p = Vst3Format.instantiate(&d, 48_000.0, 64).unwrap();
     daw_plugins_vst3::shutdown();
     assert_eq!(counts(), [1, 0, 0], "exited a module in use");

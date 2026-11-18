@@ -11,10 +11,10 @@ use std::time::Instant;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QList, QString, QUrl};
-use daw_arrange::{Button, Cursor, Hit, Pointer, Rgba, Scene};
+use daw_arrange::Hit;
 
 use crate::message::{Context, Message};
-use crate::paint::{self, PaintOp};
+use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
 use crate::state;
 
 #[cxx_qt::bridge]
@@ -67,8 +67,14 @@ pub mod qobject {
 
         #[cxx_override]
         unsafe fn paint(self: Pin<&mut ArrangeView>, painter: *mut QPainter);
+        /// Builds the picture, if it is stale and the view shows: once a
+        /// frame at most, however many changes there were.
+        #[cxx_override]
+        #[cxx_name = "updatePolish"]
+        fn update_polish(self: Pin<&mut ArrangeView>);
 
-        /// Rebuilds the picture from the current state.
+        /// Shows the current state: the properties at once, the picture on
+        /// the next frame.
         #[qinvokable]
         fn refresh(self: Pin<&mut ArrangeView>);
 
@@ -144,14 +150,21 @@ pub mod qobject {
         /// A clip was double-clicked: open it in the editor.
         #[qsignal]
         fn clip_activated(self: Pin<&mut ArrangeView>);
-        /// The document or view changed through this item.
-        #[qsignal]
-        fn edited(self: Pin<&mut ArrangeView>);
     }
 
     unsafe extern "RustQt" {
         #[inherit]
         fn update(self: Pin<&mut ArrangeView>);
+        #[inherit]
+        fn polish(self: Pin<&mut ArrangeView>);
+        /// The item was shown or hidden (itself or with what holds it).
+        #[inherit]
+        #[qsignal]
+        #[cxx_name = "visibleChanged"]
+        fn visible_changed(self: Pin<&mut ArrangeView>);
+        #[inherit]
+        #[cxx_name = "isVisible"]
+        fn is_visible(self: &ArrangeView) -> bool;
         #[inherit]
         fn width(self: &ArrangeView) -> f64;
         #[inherit]
@@ -179,10 +192,7 @@ pub struct ArrangeViewRust {
     cursor_shape: i32,
     gain_dragging: bool,
     dragged_gain: f64,
-    /// The last scene, flattened for the painter.
-    ops: Vec<PaintOp>,
-    texts: Vec<String>,
-    waves: Vec<f32>,
+    scene: DisplayList,
     /// Where the last press was, for placing a context menu.
     last_press: (f64, f64),
     /// What refreshes and paints cost since `take_costs`.
@@ -219,9 +229,7 @@ impl Default for ArrangeViewRust {
             cursor_shape: 0,
             gain_dragging: false,
             dragged_gain: 0.0,
-            ops: Vec::new(),
-            texts: Vec::new(),
-            waves: Vec::new(),
+            scene: DisplayList::default(),
             last_press: (0.0, 0.0),
             costs: Costs::default(),
         }
@@ -240,51 +248,11 @@ impl cxx_qt::Constructor<()> for qobject::ArrangeView {
     fn new(_: ()) -> ArrangeViewRust {
         ArrangeViewRust::default()
     }
-}
 
-pub(crate) fn to_qcolor(c: Rgba) -> QColor {
-    QColor::from_rgba(
-        i32::from(c.r()),
-        i32::from(c.g()),
-        i32::from(c.b()),
-        i32::from(c.a()),
-    )
-}
-
-pub(crate) fn to_rgba(c: &QColor) -> Rgba {
-    let ch = |v: i32| v.clamp(0, 255) as u32;
-    Rgba(ch(c.alpha()) << 24 | ch(c.red()) << 16 | ch(c.green()) << 8 | ch(c.blue()))
-}
-
-// Qt::KeyboardModifier and Qt::MouseButton values.
-const SHIFT: i32 = 0x0200_0000;
-const CTRL: i32 = 0x0400_0000;
-const ALT: i32 = 0x0800_0000;
-
-pub(crate) fn pointer(x: f64, y: f64, button: i32, modifiers: i32) -> Pointer {
-    Pointer {
-        x,
-        y,
-        button: match button {
-            2 => Button::Right,
-            4 => Button::Middle,
-            _ => Button::Left,
-        },
-        shift: modifiers & SHIFT != 0,
-        ctrl: modifiers & CTRL != 0,
-        alt: modifiers & ALT != 0,
-    }
-}
-
-/// Qt::CursorShape values.
-pub(crate) fn cursor_shape(c: Cursor) -> i32 {
-    match c {
-        Cursor::Arrow => 0,
-        Cursor::Move => 17,
-        Cursor::ResizeHorizontal => 6,
-        Cursor::ResizeVertical => 5,
-        Cursor::Pointing => 13,
-        Cursor::Crosshair => 2,
+    fn initialize(self: Pin<&mut Self>, _: ()) {
+        // A hidden item keeps a stale picture (see `update_polish`): draw
+        // it afresh when the item shows again.
+        self.on_visible_changed(|item| item.polish()).release();
     }
 }
 
@@ -292,14 +260,11 @@ impl qobject::ArrangeView {
     /// # Safety
     /// Called by Qt with a valid painter for the duration of the call.
     unsafe fn paint(mut self: Pin<&mut Self>, painter: *mut cxx_qt_lib::QPainter) {
-        // SAFETY: Qt passes a live, active painter.
-        let Some(painter) = (unsafe { painter.as_mut() }) else {
-            return;
-        };
-        // SAFETY: QPainter is not moved while we hold it.
-        let painter = unsafe { Pin::new_unchecked(painter) };
         let start = Instant::now();
-        paint::paint_scene(painter, &self.ops, &self.texts, &self.waves);
+        // SAFETY: Qt passes a live, active painter.
+        if !unsafe { self.scene.paint(painter) } {
+            return;
+        }
         let costs = &mut self.as_mut().rust_mut().costs;
         costs.paint_ms += millis_since(start);
         costs.paints += 1;
@@ -319,25 +284,13 @@ impl qobject::ArrangeView {
         out
     }
 
-    fn palette(&self) -> daw_arrange::Palette {
-        daw_arrange::Palette {
-            background: to_rgba(&self.background_color),
-            alternate_background: to_rgba(&self.alternate_background_color),
-            text: to_rgba(&self.text_color),
-            disabled_text: to_rgba(&self.disabled_text_color),
-            highlight: to_rgba(&self.highlight_color),
-            highlighted_text: to_rgba(&self.highlighted_text_color),
-            negative: to_rgba(&self.negative_color),
-        }
-    }
-
     fn refresh(mut self: Pin<&mut Self>) {
         let start = Instant::now();
         let (w, h) = (self.width(), self.height());
-        let palette = self.palette();
+        let palette = paint::theme_palette!(self);
         let ruler = self.ruler_height;
         let lane_height = self.lane_height;
-        let (scene, geometry) = state::with(|s| {
+        let (sx, sy, cw, ch, th) = state::with(|s| {
             s.arrange.palette = palette;
             s.arrange.ruler_height = ruler;
             // Unclamped (but never zero), so rows stay level with the lane
@@ -345,42 +298,42 @@ impl qobject::ArrangeView {
             s.arrange.lane_height = lane_height.max(1.0);
             let project = s.doc.project().clone();
             s.arrange.resize(&project, w, h);
-            s.arrange.peaks.poll();
-            let scene = s.with_arrange(|a, doc, env| a.scene(doc.project(), env));
             let a = &s.arrange;
-            let geometry = (
+            (
                 a.view.scroll_x,
                 a.scroll_y,
                 a.content_width(&project),
                 a.content_height(&project),
                 a.track_height,
-            );
-            (scene, geometry)
+            )
         });
-        self.as_mut().store(scene);
-        // Not the setters below: they run QML bindings (the headers follow
-        // the scroll position).
-        let costs = &mut self.as_mut().rust_mut().costs;
-        costs.refresh_ms += millis_since(start);
-        costs.refreshes += 1;
-        let (sx, sy, cw, ch, th) = geometry;
         self.as_mut().set_scroll_x(sx);
         self.as_mut().set_scroll_y(sy);
         self.as_mut().set_content_width(cw);
         self.as_mut().set_content_height(ch);
         self.as_mut().set_track_height(th);
-        self.update();
+        let mut rust = self.as_mut().rust_mut();
+        // The setters too: they run QML bindings (the headers follow the
+        // scroll position).
+        rust.costs.refresh_ms += millis_since(start);
+        rust.scene.invalidate();
+        self.polish();
     }
 
-    fn store(self: Pin<&mut Self>, scene: Scene) {
-        let mut r = self.rust_mut();
-        let r = &mut *r;
-        r.ops.clear();
-        r.texts.clear();
-        r.waves.clear();
-        for p in scene.prims {
-            r.ops.push(paint::op(p, &mut r.texts, &mut r.waves));
+    fn update_polish(mut self: Pin<&mut Self>) {
+        if !self.scene.wants_scene(self.is_visible()) {
+            return;
         }
+        let start = Instant::now();
+        let scene = state::with(|s| {
+            s.arrange.peaks.poll();
+            s.with_arrange(|a, doc, env| a.scene(doc.project(), env))
+        });
+        let mut rust = self.as_mut().rust_mut();
+        rust.scene.store(scene);
+        rust.costs.refresh_ms += millis_since(start);
+        rust.costs.refreshes += 1;
+        self.update();
     }
 
     /// Applies an outcome, then redraws and tells QML.
@@ -398,7 +351,6 @@ impl qobject::ArrangeView {
         }
         if any {
             self.as_mut().refresh();
-            self.as_mut().edited();
         }
         if open {
             self.as_mut().clip_activated();
@@ -568,7 +520,6 @@ impl qobject::ArrangeView {
             }
         });
         self.as_mut().refresh();
-        self.as_mut().edited();
         ok
     }
 }

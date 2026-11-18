@@ -1,14 +1,14 @@
 //! Golden renders of small graphs. Each is checked twice: against an
 //! expected signal computed here with the same float operations, and
-//! bit-for-bit against a file in `tests/golden/`. Set `DAW_BLESS=1` to
-//! rewrite the files after an intended change.
+//! bit-for-bit against a file in `tests/golden/`; see
+//! `daw_test_support::golden` for rewriting the files after an intended
+//! change.
 
 mod support;
 
-use std::path::PathBuf;
-
 use daw_engine::nodes::Strip;
 use daw_engine::{CompiledGraph, GraphDesc, NodeKind, RenderOptions, render};
+use daw_test_support::{golden, golden_dir};
 use support::{Delay, Sine};
 
 const FRAMES: usize = 1000;
@@ -22,18 +22,9 @@ fn opts(block_size: u32) -> RenderOptions {
     }
 }
 
+#[track_caller]
 fn check_golden(name: &str, samples: &[f32]) {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(format!("{name}.f32"));
-    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    if std::env::var_os("DAW_BLESS").is_some() {
-        std::fs::write(&path, &bytes).unwrap();
-        return;
-    }
-    let golden = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("{}: {e} (run with DAW_BLESS=1)", path.display()));
-    assert!(golden == bytes, "{name} differs from {}", path.display());
+    golden::check(golden_dir!(), name, &[samples], golden::Match::Exact);
 }
 
 fn assert_bits_eq(actual: &[f32], expected: &[f32]) {

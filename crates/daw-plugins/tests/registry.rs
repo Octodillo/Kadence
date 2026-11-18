@@ -1,5 +1,5 @@
-//! Registry, scanner and cache tests. The end-to-end ones run the real `daw-plugin-scan` binary
-//! on the CLAP test plugin.
+//! Registry, scanner and cache tests. The end-to-end ones run the `daw-plugin-scan` binary on
+//! the CLAP test plugin.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +60,9 @@ fn sh(script: &str) -> Scanner {
     Scanner::new("sh", ["-c", script, "sh"])
 }
 
+/// What a scanner prints for a bundle that loads and holds no plugins.
+const NO_PLUGINS: &str = r#"{"plugins":[]}"#;
+
 /// A plugin folder with the test plugin in a vendor subdirectory and a file that is not a plugin.
 fn plugin_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -98,6 +101,111 @@ fn candidates_are_found_without_descending_into_bundles() {
 }
 
 #[test]
+fn bundles_reached_through_links_are_found_once() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugins");
+    std::fs::create_dir_all(root.join("vendor")).unwrap();
+    std::fs::write(root.join("vendor/one.clap"), "").unwrap();
+    // A link back to the root, one to a sibling directory, and a second name for the bundle.
+    symlink(&root, root.join("vendor/all")).unwrap();
+    symlink(root.join("vendor"), root.join("zz-vendor")).unwrap();
+    symlink(root.join("vendor/one.clap"), root.join("zz-one.clap")).unwrap();
+    symlink(root.join("missing.clap"), root.join("broken.clap")).unwrap();
+    // A second search path that is the first one again.
+    let alias = dir.path().join("alias");
+    symlink(&root, &alias).unwrap();
+
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Clap, &[root.clone(), alias.clone()]),
+        vec![root.join("vendor/one.clap")]
+    );
+    // The first path that leads to a bundle names it.
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Clap, &[alias.clone(), root]),
+        vec![alias.join("vendor/one.clap")]
+    );
+}
+
+/// A link to a bundle is the bundle, whatever the link is called: it is not walked as a plain
+/// directory, which would hide the bundle when its own name comes up.
+#[test]
+fn a_link_without_the_extension_does_not_hide_its_bundle() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugins");
+    std::fs::create_dir_all(root.join("Synth.vst3/Contents")).unwrap();
+    // Sorts before the bundle's own name.
+    symlink(root.join("Synth.vst3"), root.join("Current")).unwrap();
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Vst3, std::slice::from_ref(&root)),
+        vec![root.join("Current")]
+    );
+    // A search path that is such a link, ahead of the one that holds the bundle.
+    assert_eq!(
+        find_candidates(
+            &PluginFormatKind::Vst3,
+            &[root.join("Current"), root.clone()]
+        ),
+        vec![root.join("Current")]
+    );
+}
+
+/// A directory first reached too deep (through a link) for its bundles to be in range is
+/// walked again when it comes up nearer the root.
+#[test]
+fn a_directory_cut_short_through_a_link_is_walked_again_nearer_the_root() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugins");
+    std::fs::create_dir_all(root.join("a/b/c/d/e/f")).unwrap();
+    std::fs::create_dir_all(root.join("z/x/y")).unwrap();
+    std::fs::write(root.join("z/x/y/p.clap"), "").unwrap();
+    symlink(root.join("z"), root.join("a/b/c/d/e/f/l")).unwrap();
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Clap, std::slice::from_ref(&root)),
+        vec![root.join("z/x/y/p.clap")]
+    );
+}
+
+#[test]
+fn a_bundles_time_follows_its_links_once() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let later = |seconds| std::time::SystemTime::now() + Duration::from_secs(seconds);
+    let touch = |path: &Path, at| {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(at).unwrap();
+    };
+    // A bundle whose contents live elsewhere, as versioned installs do.
+    let contents = dir.path().join("synth-1.2/Contents");
+    std::fs::create_dir_all(contents.join("x86_64-linux")).unwrap();
+    std::fs::write(contents.join("x86_64-linux/Synth.so"), "").unwrap();
+    let bundle = dir.path().join("Synth.vst3");
+    std::fs::create_dir(&bundle).unwrap();
+    symlink(&contents, bundle.join("Contents")).unwrap();
+    // Links back up the tree end the walk instead of looping.
+    symlink(&bundle, contents.join("loop")).unwrap();
+    symlink(dir.path(), contents.join("up")).unwrap();
+    let before = daw_plugins::modified_time(&bundle).unwrap();
+
+    // A change behind the linked directory counts, also when the bundle is reached by a link.
+    touch(&contents.join("x86_64-linux/Synth.so"), later(60));
+    let changed = daw_plugins::modified_time(&bundle).unwrap();
+    assert!(changed > before);
+    let alias = dir.path().join("Alias.vst3");
+    symlink(&bundle, &alias).unwrap();
+    assert_eq!(daw_plugins::modified_time(&alias), Some(changed));
+
+    // So does a linked file's target.
+    let shared = dir.path().join("shared.so");
+    std::fs::write(&shared, "").unwrap();
+    touch(&shared, later(120));
+    symlink(&shared, contents.join("x86_64-linux/shared.so")).unwrap();
+    assert!(daw_plugins::modified_time(&bundle).unwrap() > changed);
+}
+
+#[test]
 fn scanner_child_describes_the_plugin() {
     let dir = plugin_dir();
     let found = scanner()
@@ -106,6 +214,8 @@ fn scanner_child_describes_the_plugin() {
             &dir.path().join("Vendor/test.clap"),
         )
         .unwrap();
+    assert!(found.skipped.is_empty(), "{:?}", found.skipped);
+    let found = found.plugins;
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].id, "org.daw.test.gain");
     assert_eq!(found[0].ports, (2, 2));
@@ -123,6 +233,30 @@ fn a_crashing_scanner_is_reported_not_fatal() {
 fn a_hanging_scanner_is_killed() {
     let err = sh("sleep 10")
         .with_timeout(Duration::from_millis(200))
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap_err();
+    assert!(matches!(err, ScanError::TimedOut(_)), "{err}");
+}
+
+/// A plugin that hangs as the scanner exits has already had its result written.
+#[test]
+fn a_scanner_that_hangs_after_a_complete_result_keeps_it() {
+    // Long enough for a loaded machine to start `sh` and print: these scans end at the timeout.
+    let patient = Duration::from_secs(3);
+    let found = sh(&format!("echo '{NO_PLUGINS}'; sleep 60"))
+        .with_timeout(patient)
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap();
+    assert!(found.plugins.is_empty());
+    match sh(r#"printf '{"load_failed":"boom"}'; sleep 60"#)
+        .with_timeout(patient)
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+    {
+        Err(ScanError::LoadFailed(why)) => assert_eq!(why, "boom"),
+        other => panic!("expected a load failure, got {other:?}"),
+    }
+    let err = sh(r#"printf '{"plugins":['; sleep 60"#)
+        .with_timeout(Duration::from_millis(300))
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap_err();
     assert!(matches!(err, ScanError::TimedOut(_)), "{err}");
@@ -258,11 +392,11 @@ fn scan_child_ignores_other_arguments() {
 #[test]
 fn a_helper_process_holding_the_pipe_cannot_hang_the_scan() {
     let start = std::time::Instant::now();
-    let found = sh("sleep 10 & echo '[]'")
+    let found = sh(&format!("sleep 10 & echo '{NO_PLUGINS}'"))
         .with_timeout(Duration::from_secs(5))
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap();
-    assert!(found.is_empty());
+    assert!(found.plugins.is_empty());
     assert!(start.elapsed() < Duration::from_secs(3));
 }
 
@@ -368,19 +502,11 @@ fn earlier_search_paths_win_for_duplicate_plugins() {
 /// LV2 goes through the same out-of-process scan, when mda-lv2 is installed.
 #[test]
 fn registry_scans_and_instantiates_lv2() {
-    let Some(mda) = daw_plugins_lv2::format()
-        .default_search_paths()
-        .into_iter()
-        .map(|d| d.join("mda.lv2"))
-        .find(|b| b.is_dir())
-    else {
-        assert!(
-            std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
-            "mda-lv2 must be installed"
-        );
-        eprintln!("skipped: mda-lv2 not installed");
+    let dirs = daw_plugins_lv2::format().default_search_paths();
+    let Some(dir) = daw_test_support::lv2::find_bundles(dirs, &["mda.lv2"]) else {
         return;
     };
+    let mda = dir.join("mda.lv2");
     let dir = tempfile::tempdir().unwrap();
     let mut registry = default_registry();
     registry.set_search_paths(PluginFormatKind::Clap, Vec::new());
@@ -405,11 +531,11 @@ fn registry_scans_and_instantiates_lv2() {
 #[test]
 fn a_scanner_that_crashes_after_a_complete_result_keeps_it() {
     // Plugins often crash in exit-time destructors, after the result is already written.
-    let found = sh("echo '[]'; kill -SEGV $$")
+    let found = sh(&format!("echo '{NO_PLUGINS}'; kill -SEGV $$"))
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap();
-    assert!(found.is_empty());
-    let err = sh("printf '[{'; kill -SEGV $$")
+    assert!(found.plugins.is_empty());
+    let err = sh(r#"printf '{"plugins":['; kill -SEGV $$"#)
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap_err();
     assert!(matches!(err, ScanError::Crashed(_)), "{err}");
@@ -450,11 +576,99 @@ fn bundles_without_plugins_are_retried_with_failures() {
     let mut registry = clap_only_registry();
     registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
     let mut cache = ScanCache::new();
-    registry.scan(&sh("echo '[]'"), &mut cache);
+    registry.scan(&sh(&format!("echo '{NO_PLUGINS}'")), &mut cache);
     assert_eq!(cache.len(), 1);
     cache.forget_failures();
     assert!(cache.is_empty());
     let report = registry.scan(&scanner(), &mut cache);
     assert_eq!((report.scanned, report.failed.len()), (1, 0));
     assert_eq!(registry.plugins().len(), 1);
+}
+
+/// A bundle that loads but cannot describe one of its plugins lists the others, reports the
+/// skipped one as a failure, and is scanned again by "rescan failed plugins".
+#[test]
+fn skipped_plugins_are_reported_and_retried() {
+    let dir = plugin_dir();
+    let bundle = dir.path().join("Vendor/test.clap");
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    let partial = concat!(
+        r#"{"plugins":[{"format":"Clap","id":"a","name":"A","vendor":"","#,
+        r#""path":"/x.clap","is_instrument":false,"ports":[2,2]}],"#,
+        r#""skipped":["B: no licence"]}"#
+    );
+    let report = registry.scan(&sh(&format!("echo '{partial}'")), &mut cache);
+    assert_eq!(registry.plugins().len(), 1);
+    assert_eq!(
+        report.failed,
+        [(bundle.clone(), "B: no licence".to_owned())]
+    );
+
+    // From the cache, the skipped plugin is still reported.
+    let report = registry.scan(&sh("exit 1"), &mut cache);
+    assert_eq!((report.cached, report.failed.len()), (1, 1));
+
+    cache.forget_failures();
+    assert!(cache.is_empty(), "a partial result is retried");
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!((report.scanned, report.failed.len()), (1, 0));
+    assert!(
+        registry
+            .find(&PluginFormatKind::Clap, "org.daw.test.gain")
+            .is_some()
+    );
+}
+
+/// A bundle replaced while its scan ran is scanned again: the first result may be the old
+/// file's, and must not be cached under the new file's time.
+#[test]
+fn a_bundle_replaced_during_its_scan_is_scanned_again() {
+    let dir = plugin_dir();
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    // The scanner's arguments are `--scan clap <bundle>`. The first scan finds the bundle
+    // replaced under it; the second, of the new file, says so.
+    let marker = tempfile::tempdir().unwrap();
+    let replaced_once = sh(&format!(
+        r#"if [ -e "{marker}" ]; then printf '{{"load_failed":"the new file"}}'; exit 65; fi
+           : > "{marker}"; touch -d 2030-01-01 "$3"; echo '{NO_PLUGINS}'"#,
+        marker = marker.path().join("scanned").display()
+    ));
+    let report = registry.scan(&replaced_once, &mut cache);
+    assert_eq!(report.scanned, 1);
+    assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+    assert!(report.failed[0].1.contains("the new file"));
+
+    // The second result is cached as the new file's.
+    let report = registry.scan(&sh("exit 1"), &mut cache);
+    assert_eq!((report.scanned, report.cached), (0, 1));
+    assert!(report.failed[0].1.contains("the new file"));
+}
+
+/// A plugin that writes into its own bundle whenever it is loaded is still cached, or it would
+/// be loaded at every start.
+#[test]
+fn a_bundle_that_changes_itself_when_loaded_is_cached() {
+    let dir = plugin_dir();
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    let counter = tempfile::NamedTempFile::new().unwrap();
+    // Each load leaves the bundle with a later time than the last.
+    let self_modifying = sh(&format!(
+        r#"echo x >> "{counter}"; touch -d "2030-01-0$(wc -l < "{counter}" | tr -d ' ')" "$3"
+           echo '{NO_PLUGINS}'"#,
+        counter = counter.path().display()
+    ));
+    let report = registry.scan(&self_modifying, &mut cache);
+    assert_eq!(report.scanned, 1);
+    assert_eq!(cache.len(), 1);
+    let report = registry.scan(&sh("exit 1"), &mut cache);
+    assert_eq!((report.scanned, report.cached), (0, 1));
 }

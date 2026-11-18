@@ -234,7 +234,7 @@ fn collect_copies_external_files_into_the_bundle() {
     );
     write(&fx.root.join("audio/inside.wav"), b"inside");
 
-    let collected = files::collect_files(doc.project(), doc.bundle().unwrap())
+    let collected = files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true)
         .unwrap()
         .unwrap();
     assert_eq!(collected.copies.len(), 3);
@@ -270,7 +270,7 @@ fn collect_copies_external_files_into_the_bundle() {
 
     // Nothing left outside.
     assert!(
-        files::collect_files(doc.project(), doc.bundle().unwrap())
+        files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true)
             .unwrap()
             .is_none()
     );
@@ -296,7 +296,7 @@ fn failed_collect_removes_the_copies_it_made() {
             // Running as root: permissions don't stop the read.
             return;
         }
-        let err = files::collect_files(doc.project(), doc.bundle().unwrap());
+        let err = files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true);
         assert!(matches!(err, Err(FormatError::Io { .. })));
         let left: Vec<_> = fs::read_dir(fx.root.join("audio")).unwrap().collect();
         assert!(left.is_empty(), "copies left behind: {left:?}");
@@ -333,4 +333,181 @@ fn recovered_document_rewrites_its_own_autosave() {
     assert!(untitled.is_modified());
     // No bundle to autosave into; the app keeps that one itself.
     assert!(!untitled.autosave().unwrap());
+}
+
+#[test]
+fn collect_leaves_out_what_is_not_audio() {
+    let fx = fixture();
+    let kick = fx.outside.join("kick.wav");
+    let secret = fx.outside.join("id_ed25519");
+    write(&kick, b"kick");
+    write(&secret, b"secret");
+    let mut doc = saved(&fx, project_with(&[kick, secret.clone()]));
+    let is_audio = |p: &Path| p.extension().is_some();
+    let collected = files::collect_files(doc.project(), doc.bundle().unwrap(), is_audio)
+        .unwrap()
+        .unwrap();
+    assert_eq!(collected.copies, [fx.root.join("audio/kick.wav")]);
+    doc.execute(collected.command).unwrap();
+    // The clip still names the file; nothing of it is in the bundle.
+    assert_eq!(sources(doc.project())[1], secret);
+    assert!(!fx.root.join("audio/id_ed25519").exists());
+    assert!(
+        files::collect_files(doc.project(), doc.bundle().unwrap(), is_audio)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn save_as_copies_only_what_is_really_in_the_audio_folder() {
+    use std::os::unix::fs::symlink;
+    let fx = fixture();
+    let secret = fx.outside.join("id_ed25519");
+    write(&secret, b"secret");
+    let mut doc = saved(&fx, project_with(&["audio/tone.wav".into()]));
+    let audio = fx.root.join("audio");
+    write(&audio.join("real.wav"), b"real");
+    symlink(&secret, audio.join("tone.wav")).unwrap();
+    symlink("../../Samples/id_ed25519", audio.join("near.wav")).unwrap();
+    symlink("real.wav", audio.join("alias.wav")).unwrap();
+    symlink("nowhere.wav", audio.join("dangling.wav")).unwrap();
+    symlink(&fx.outside, audio.join("folder")).unwrap();
+
+    let new = fx.outside.join("deeper/Copy");
+    doc.save_as(&new).unwrap();
+    let new_audio = new.join("audio");
+    assert_eq!(fs::read(new_audio.join("real.wav")).unwrap(), b"real");
+    for name in ["tone.wav", "near.wav"] {
+        let copy = new_audio.join(name);
+        // Still a link to the same file, not a copy of what is in it.
+        assert!(copy.symlink_metadata().unwrap().is_symlink(), "{name}");
+        assert_eq!(fs::read(&copy).unwrap(), b"secret", "{name}");
+    }
+    // A link to a file of the folder is that file: it must not go on
+    // pointing into the old bundle.
+    let alias = new_audio.join("alias.wav");
+    assert!(alias.symlink_metadata().unwrap().is_file());
+    assert_eq!(fs::read(alias).unwrap(), b"real");
+    for name in ["dangling.wav", "folder"] {
+        assert!(new_audio.join(name).symlink_metadata().is_err(), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn save_as_copies_nothing_through_a_linked_audio_folder() {
+    let fx = fixture();
+    write(&fx.outside.join("id_ed25519"), b"secret");
+    write(&fx.outside.join("unused.wav"), b"unused");
+    let mut doc = saved(&fx, project_with(&["audio/id_ed25519".into()]));
+    fs::remove_dir(fx.root.join("audio")).unwrap();
+    std::os::unix::fs::symlink(&fx.outside, fx.root.join("audio")).unwrap();
+    let new = fx._tmp.path().join("Copy");
+    doc.save_as(&new).unwrap();
+    // The folder is not walked, and the file a clip plays through it comes
+    // across as a link to it, as a linked file would.
+    assert!(new.join("audio/unused.wav").symlink_metadata().is_err());
+    let played = new.join("audio/id_ed25519");
+    assert!(played.symlink_metadata().unwrap().is_symlink());
+    assert_eq!(fs::read(played).unwrap(), b"secret");
+}
+
+#[test]
+fn save_as_brings_every_file_of_the_bundle_that_plays() {
+    let fx = fixture();
+    let sources: Vec<PathBuf> = [
+        "audio/take.wav",
+        "audio/drums/kick.wav",
+        "samples/one/snare.wav",
+        "samples/../audio/drums/kick.wav",
+    ]
+    .map(PathBuf::from)
+    .into();
+    let outside = fx.outside.join("far.wav");
+    write(&outside, b"far");
+    let mut all = sources.clone();
+    all.push(outside.clone());
+    all.push("../Samples/far.wav".into());
+    let mut doc = saved(&fx, project_with(&all));
+    let content = |s: &Path| s.file_name().unwrap().as_encoded_bytes().to_vec();
+    for s in &sources {
+        write(&fx.root.join(s), &content(s));
+    }
+    // In audio/ but played by nothing, and elsewhere and played by nothing.
+    write(&fx.root.join("audio/old/unused.wav"), b"unused");
+    write(&fx.root.join("notes/lyrics.txt"), b"la");
+
+    let new = fx._tmp.path().join("Song v2");
+    doc.save_as(&new).unwrap();
+    assert_eq!(doc.bundle().unwrap().root(), new);
+    assert!(files::missing_audio(doc.project(), doc.bundle()).is_empty());
+    for s in &sources[..3] {
+        let copy = new.join(s);
+        assert!(copy.symlink_metadata().unwrap().is_file(), "{s:?}");
+        assert_eq!(fs::read(copy).unwrap(), content(s));
+    }
+    assert_eq!(
+        fs::read(new.join("audio/old/unused.wav")).unwrap(),
+        b"unused"
+    );
+    assert!(!new.join("notes").exists());
+    assert!(!new.join("far.wav").exists());
+}
+
+#[test]
+fn save_as_leaves_the_project_files_and_backups_behind() {
+    let fx = fixture();
+    // A project from someone else can name anything as a clip's source.
+    let named: Vec<PathBuf> = [
+        "Song.kadence",
+        "Song.KADENCE.autosave",
+        "backups/Song-0000000000000001.kadence",
+        "backups/old.wav",
+    ]
+    .map(PathBuf::from)
+    .into();
+    let mut doc = saved(&fx, project_with(&named));
+    for n in &named[1..] {
+        write(&fx.root.join(n), b"{}");
+    }
+    let new = fx._tmp.path().join("Other");
+    doc.save_as(&new).unwrap();
+    for n in &named {
+        assert!(new.join(n).symlink_metadata().is_err(), "{n:?}");
+    }
+    // Still one project file, so the bundle opens.
+    assert_eq!(Document::open(&new).unwrap().project(), doc.project());
+}
+
+#[test]
+fn failed_save_as_takes_back_the_folders_it_made() {
+    let fx = fixture();
+    let mut doc = saved(
+        &fx,
+        project_with(&["audio/drums/kick.wav".into(), "samples/snare.wav".into()]),
+    );
+    write(&fx.root.join("audio/drums/kick.wav"), b"kick");
+    write(&fx.root.join("samples/snare.wav"), b"snare");
+
+    // A file of that name is already where one would go: refused before
+    // anything is copied.
+    let taken = fx._tmp.path().join("Taken");
+    write(&taken.join("samples/snare.wav"), b"theirs");
+    assert!(doc.save_as(&taken).is_err());
+    assert_eq!(
+        fs::read(taken.join("samples/snare.wav")).unwrap(),
+        b"theirs"
+    );
+    assert!(!taken.join("audio/drums").exists());
+
+    // The copy fails part-way: a folder cannot be made where a file is.
+    let blocked = fx._tmp.path().join("Blocked");
+    write(&blocked.join("samples"), b"a file");
+    assert!(doc.save_as(&blocked).is_err());
+    assert!(!blocked.join("audio/drums").exists(), "left half a copy");
+    assert_eq!(fs::read(blocked.join("samples")).unwrap(), b"a file");
+    assert_eq!(doc.bundle().unwrap().root(), fx.root);
+    assert!(!blocked.join("Blocked.kadence").exists());
 }
