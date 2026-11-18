@@ -6,9 +6,10 @@
 //! changed bundles are loaded again. The UI polls the catalog on its timer: [`poll`] picks up
 //! a finished scan, [`progress`] says how far a running one got.
 //!
-//! Hand the result to the session with
-//! [`Session::set_known_plugins`](crate::Session::set_known_plugins), so its loader finds
-//! plugins in the user's folders too and does not scan again.
+//! The catalog is the only thing that scans. Hand its result to the session with
+//! [`Session::set_known_plugins`](crate::Session::set_known_plugins) and to an export's
+//! loader (see [`SandboxLoader`](crate::SandboxLoader)): loaders look nowhere themselves, so
+//! playback and exports find exactly the plugins listed here.
 //!
 //! [`poll`]: PluginCatalog::poll
 //! [`progress`]: PluginCatalog::progress
@@ -264,9 +265,7 @@ impl PluginCatalog {
     }
 
     pub fn find(&self, format: &PluginFormatKind, id: &str) -> Option<&PluginDescriptor> {
-        self.plugins
-            .iter()
-            .find(|d| d.format == *format && d.id == id)
+        self.plugins.iter().find(|d| d.is(format, id))
     }
 
     /// What the last scan could not load: whole bundles, and plugins skipped in bundles that

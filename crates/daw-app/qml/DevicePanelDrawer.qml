@@ -193,7 +193,8 @@ Kirigami.OverlayDrawer {
             readonly property string status: DevicePanel.pluginStatus
             visible: status !== "" && status !== "running"
             type: status === "crashed" || status === "failed" ? Kirigami.MessageType.Error
-                                                               : Kirigami.MessageType.Warning
+                  : status === "waiting" ? Kirigami.MessageType.Information
+                                         : Kirigami.MessageType.Warning
             text: {
                 switch (status) {
                 case "crashed":
@@ -204,6 +205,8 @@ Kirigami.OverlayDrawer {
                     return DevicePanel.pluginError
                            ? i18nc("@info %1 is the plugin's own error message", "The plugin couldn't be loaded, so it is bypassed: %1", DevicePanel.pluginError)
                            : i18nc("@info", "The plugin couldn't be loaded, so it is bypassed.");
+                case "waiting":
+                    return i18nc("@info", "Kadence is still looking for the installed plugins. This one is bypassed until it is found.");
                 case "unavailable":
                     return i18nc("@info", "Plugins can't be loaded right now, so this one is bypassed.");
                 }

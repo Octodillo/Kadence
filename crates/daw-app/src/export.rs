@@ -125,9 +125,17 @@ impl AppState {
             format: request.format,
             dither: request.dither,
         };
+        // The export finds the plugins playback does: the catalog's. Before
+        // the first scan ends that list is empty, and the file would be
+        // written with every plugin bypassed.
+        if !self.plugins.has_scanned() && self.uses_plugins() {
+            return Err(Message::Export(ExportProblem::PluginsNotScanned));
+        }
         // A plugin's live state can be newer than the document's.
         self.store_plugin_states();
-        let loader = self.engine.export_plugin_loader();
+        let loader = self
+            .engine
+            .export_plugin_loader(self.plugins.plugins().to_vec());
         let job = ExportJob::start(
             self.doc.snapshot(),
             Some(self.media_root()),
@@ -178,8 +186,18 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::path::Path;
+    use std::rc::Rc;
+
+    use daw_core::plugin::{BundleScan, PluginDescriptor, PluginFormatKind};
+    use daw_model::commands::AddDevice;
+    use daw_model::{Device, DeviceSource};
+    use daw_plugins::Scanner;
+    use daw_session::catalog::PluginCatalog;
+
     use super::*;
-    use crate::engine::EngineHandle;
+    use crate::engine::{EngineHandle, StubEngine};
     use crate::message::{Context, Reason};
     use crate::state;
 
@@ -366,5 +384,108 @@ mod tests {
             assert_eq!(f.reason, Reason::ExportCancelled);
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         });
+    }
+
+    /// A plugin as a scan describes it.
+    fn reverb() -> PluginDescriptor {
+        PluginDescriptor {
+            format: PluginFormatKind::Clap,
+            id: "org.example.reverb".into(),
+            name: "Reverb".into(),
+            vendor: "Example".into(),
+            path: "/plugins/reverb.clap".into(),
+            is_instrument: false,
+            ports: (2, 2),
+        }
+    }
+
+    /// A catalog whose scan of `dir` finds [`reverb`] and loads nothing: its
+    /// scanner is a shell that prints what a real one would.
+    fn catalog_finding_reverb(dir: &Path) -> PluginCatalog {
+        let found = dir.join("scan.json");
+        let scan = BundleScan::complete(vec![reverb()]);
+        std::fs::write(&found, serde_json::to_string(&scan).unwrap()).unwrap();
+        let folder = dir.join("plugins");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("reverb.clap"), "").unwrap();
+        let print = format!("cat '{}'", found.display());
+        PluginCatalog::new(Scanner::new("sh", ["-c", print.as_str(), "sh"]))
+            .with_folders(PluginFormatKind::Clap, vec![folder])
+            .with_folders(PluginFormatKind::Vst3, Vec::new())
+            .with_folders(PluginFormatKind::Lv2, Vec::new())
+    }
+
+    /// The demo with [`reverb`] on its master, a catalog that can find it,
+    /// and what the engine's exports are told to load from.
+    fn state_using_reverb(dir: &Path) -> (AppState, Rc<RefCell<Vec<Vec<PluginDescriptor>>>>) {
+        let engine = StubEngine::default();
+        let exports_knew = engine.exports_knew.clone();
+        let mut s = AppState::with_engine(Box::new(engine));
+        s.plugins = catalog_finding_reverb(dir);
+        s.replace_document(crate::demo::build().unwrap());
+        assert!(!s.uses_plugins());
+        let master = s.doc.project().master.id;
+        let d = reverb();
+        let source = DeviceSource::Plugin {
+            format: d.format,
+            id: d.id,
+        };
+        s.doc
+            .execute(AddDevice {
+                track: master,
+                index: 0,
+                device: Device::new("Reverb", source),
+            })
+            .unwrap();
+        assert!(s.uses_plugins());
+        (s, exports_knew)
+    }
+
+    #[test]
+    fn a_project_with_plugins_is_not_exported_before_the_plugins_are_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, exports_knew) = state_using_reverb(dir.path());
+        let export =
+            |s: &mut AppState| s.start_export(dir.path().join("mix"), &request(Range::Song));
+
+        // No scan yet, then one still running: the export would bypass the
+        // plugin, so it does not start.
+        for scanning in [false, true] {
+            if scanning {
+                s.start_plugin_scan(Vec::new());
+            }
+            // The scan may have ended already; then this is the next step's.
+            if !s.plugins.has_scanned() {
+                let refused = export(&mut s).unwrap_err();
+                assert_eq!(refused.fields().reason, Reason::ExportPluginScan);
+                assert!(s.export.is_none() && exports_knew.borrow().is_empty());
+            }
+        }
+
+        // Polled here, not through tick_plugins: the session has no use for
+        // a plugin that is not there to load.
+        while !s.plugins.has_scanned() {
+            s.plugins.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        export(&mut s).unwrap();
+        finish(&mut s);
+        // The export loads from the catalog's list, as playback does.
+        let knew = exports_knew.borrow();
+        let ids = |list: &[PluginDescriptor]| list.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
+        assert_eq!(knew.len(), 1);
+        assert_eq!(ids(&knew[0]), [reverb().id]);
+        assert_eq!(ids(&knew[0]), ids(s.plugins.plugins()));
+    }
+
+    #[test]
+    fn a_project_without_plugins_exports_before_the_plugins_are_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = AppState::with_engine(Box::new(StubEngine::default()));
+        s.replace_document(crate::demo::build().unwrap());
+        assert!(!s.plugins.has_scanned());
+        s.start_export(dir.path().join("mix"), &request(Range::Song))
+            .unwrap();
+        assert!(matches!(finish(&mut s), Message::Exported { .. }));
     }
 }

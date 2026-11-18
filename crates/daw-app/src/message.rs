@@ -122,6 +122,9 @@ pub enum Reason {
     EmptyRange,
     /// Another export is still running.
     ExportBusy,
+    /// The project uses plugins and the scan for the installed ones has not
+    /// finished.
+    ExportPluginScan,
     /// The audio could not be encoded; `detail`.
     EncodeFailed,
     /// Audio files could not be read fast enough; `number` reads timed out.
@@ -229,6 +232,9 @@ pub enum ExportProblem {
     NoLoop,
     EmptyRange,
     Busy,
+    /// The project uses plugins, and the first scan for the installed ones
+    /// has not finished: the export could not load them.
+    PluginsNotScanned,
     /// The file name ends in `.wav` or `.flac` but the other format was
     /// chosen; the extension it has.
     WrongExtension(String),
@@ -308,6 +314,7 @@ fn export_fields(p: &ExportProblem) -> Fields {
         ExportProblem::NoLoop => new(R::NoLoop),
         ExportProblem::EmptyRange => new(R::EmptyRange),
         ExportProblem::Busy => new(R::ExportBusy),
+        ExportProblem::PluginsNotScanned => new(R::ExportPluginScan),
         ExportProblem::WrongExtension(ext) => new(R::WrongExtension).detail(ext),
         ExportProblem::Thread(e) => new(R::EncodeFailed).detail(e),
         ExportProblem::Failed(e) => match e {

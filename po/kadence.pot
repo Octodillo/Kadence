@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 17:40+0000\n"
+"POT-Creation-Date: 2026-11-18 18:30+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1045,6 +1045,13 @@ msgstr ""
 #: crates/daw-app/qml/DevicePanelDrawer.qml
 msgctxt "@info"
 msgid "The plugin couldn't be loaded, so it is bypassed."
+msgstr ""
+
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@info"
+msgid ""
+"Kadence is still looking for the installed plugins. This one is bypassed "
+"until it is found."
 msgstr ""
 
 #: crates/daw-app/qml/DevicePanelDrawer.qml
@@ -2710,6 +2717,13 @@ msgstr ""
 #: crates/daw-app/qml/ProjectMessageText.qml
 msgctxt "@info"
 msgid "Another export is still running."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info"
+msgid ""
+"Kadence is still looking for the installed plugins, which this project uses. "
+"Export again in a moment."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml

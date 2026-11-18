@@ -32,7 +32,7 @@ use daw_app::mixer::{Control, StripId};
 use daw_app::session_mixer::SessionMixer;
 use daw_arrange::{Arrange, PointShape, Pointer};
 use daw_core::event::EventList;
-use daw_core::plugin::PluginFormatKind;
+use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
 use daw_core::time::{PPQ, SampleTime, TickTime};
 use daw_engine::EngineConfig;
 use daw_media::{AudioData, FileFormat, FlacBits, WavFormat, decode_file, write_wav};
@@ -441,22 +441,26 @@ fn plugin_binaries() -> &'static (PathBuf, PathBuf) {
     })
 }
 
-/// A plugin loader that finds only the test plugin, set up for playback or,
-/// with [`offline_sandbox`], for an export, as the app's engine sets up its
-/// own.
+/// A plugin loader that knows only the test plugin, from a scan of its
+/// folder as the app's catalog would run it, set up for playback or, with
+/// [`offline_sandbox`], for an export, as the app's engine sets up its own.
 fn plugin_loader(adjust: fn(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
+    static KNOWN: OnceLock<Vec<PluginDescriptor>> = OnceLock::new();
     let (plugins, host) = plugin_binaries();
-    let mut config = SandboxConfig::new(HostLauncher::new(host, Vec::<String>::new()));
+    let launcher = HostLauncher::new(host, Vec::<String>::new());
+    let known = KNOWN.get_or_init(|| {
+        launcher
+            .scanner()
+            .scan(&PluginFormatKind::Clap, &plugins.join("test-gain.clap"))
+            .expect("the test plugin scans")
+            .plugins
+    });
+    let mut config = SandboxConfig::new(launcher);
     // CI machines are slow and the host is a debug build. An export's
     // offline_sandbox replaces this with the hang timeout.
     config.process_timeout = Some(Duration::from_secs(5));
     config.rt_priority = None;
-    let mut loader = SandboxLoader::new(adjust(config));
-    let registry = loader.registry_mut();
-    registry.set_search_paths(PluginFormatKind::Clap, vec![plugins.clone()]);
-    registry.set_search_paths(PluginFormatKind::Lv2, vec![]);
-    registry.set_search_paths(PluginFormatKind::Vst3, vec![]);
-    loader
+    SandboxLoader::new(adjust(config)).with_known(known.clone())
 }
 
 /// The whole song, from the top to the end of its last clip as Export
