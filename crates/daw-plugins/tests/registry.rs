@@ -127,37 +127,82 @@ fn bundles_reached_through_links_are_found_once() {
     );
 }
 
+/// A link to a bundle is the bundle, whatever the link is called: it is not walked as a plain
+/// directory, which would hide the bundle when its own name comes up.
 #[test]
-fn a_bundles_time_ignores_what_its_links_lead_to() {
+fn a_link_without_the_extension_does_not_hide_its_bundle() {
     use std::os::unix::fs::symlink;
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugins");
+    std::fs::create_dir_all(root.join("Synth.vst3/Contents")).unwrap();
+    // Sorts before the bundle's own name.
+    symlink(root.join("Synth.vst3"), root.join("Current")).unwrap();
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Vst3, std::slice::from_ref(&root)),
+        vec![root.join("Current")]
+    );
+    // A search path that is such a link, ahead of the one that holds the bundle.
+    assert_eq!(
+        find_candidates(
+            &PluginFormatKind::Vst3,
+            &[root.join("Current"), root.clone()]
+        ),
+        vec![root.join("Current")]
+    );
+}
+
+/// A directory first reached too deep (through a link) for its bundles to be in range is
+/// walked again when it comes up nearer the root.
+#[test]
+fn a_directory_cut_short_through_a_link_is_walked_again_nearer_the_root() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugins");
+    std::fs::create_dir_all(root.join("a/b/c/d/e/f")).unwrap();
+    std::fs::create_dir_all(root.join("z/x/y")).unwrap();
+    std::fs::write(root.join("z/x/y/p.clap"), "").unwrap();
+    symlink(root.join("z"), root.join("a/b/c/d/e/f/l")).unwrap();
+    assert_eq!(
+        find_candidates(&PluginFormatKind::Clap, std::slice::from_ref(&root)),
+        vec![root.join("z/x/y/p.clap")]
+    );
+}
+
+#[test]
+fn a_bundles_time_follows_its_links_once() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let later = |seconds| std::time::SystemTime::now() + Duration::from_secs(seconds);
+    let touch = |path: &Path, at| {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(at).unwrap();
+    };
+    // A bundle whose contents live elsewhere, as versioned installs do.
+    let contents = dir.path().join("synth-1.2/Contents");
+    std::fs::create_dir_all(contents.join("x86_64-linux")).unwrap();
+    std::fs::write(contents.join("x86_64-linux/Synth.so"), "").unwrap();
     let bundle = dir.path().join("Synth.vst3");
-    std::fs::create_dir_all(bundle.join("Contents")).unwrap();
-    std::fs::write(bundle.join("Contents/Synth.so"), "").unwrap();
+    std::fs::create_dir(&bundle).unwrap();
+    symlink(&contents, bundle.join("Contents")).unwrap();
+    // Links back up the tree end the walk instead of looping.
+    symlink(&bundle, contents.join("loop")).unwrap();
+    symlink(dir.path(), contents.join("up")).unwrap();
     let before = daw_plugins::modified_time(&bundle).unwrap();
 
-    // A link out of the bundle, to a directory holding something newer.
-    let outside = dir.path().join("outside");
-    std::fs::create_dir(&outside).unwrap();
-    let later = std::time::SystemTime::now() + Duration::from_secs(60);
-    let touch = |path: &Path| {
-        let file = std::fs::File::options().write(true).open(path).unwrap();
-        file.set_modified(later).unwrap();
-    };
-    std::fs::write(outside.join("newer"), "").unwrap();
-    touch(&outside.join("newer"));
-    symlink(&outside, bundle.join("Contents/up")).unwrap();
-    symlink(&bundle, bundle.join("Contents/loop")).unwrap();
-    let linked = daw_plugins::modified_time(&bundle).unwrap();
-    assert!(linked < before + Duration::from_secs(30).as_nanos());
-
-    // A change inside the bundle counts, also when the bundle is reached through a link.
-    touch(&bundle.join("Contents/Synth.so"));
+    // A change behind the linked directory counts, also when the bundle is reached by a link.
+    touch(&contents.join("x86_64-linux/Synth.so"), later(60));
+    let changed = daw_plugins::modified_time(&bundle).unwrap();
+    assert!(changed > before);
     let alias = dir.path().join("Alias.vst3");
     symlink(&bundle, &alias).unwrap();
-    let changed = daw_plugins::modified_time(&bundle).unwrap();
-    assert!(changed > linked);
     assert_eq!(daw_plugins::modified_time(&alias), Some(changed));
+
+    // So does a linked file's target.
+    let shared = dir.path().join("shared.so");
+    std::fs::write(&shared, "").unwrap();
+    touch(&shared, later(120));
+    symlink(&shared, contents.join("x86_64-linux/shared.so")).unwrap();
+    assert!(daw_plugins::modified_time(&bundle).unwrap() > changed);
 }
 
 #[test]
@@ -196,19 +241,21 @@ fn a_hanging_scanner_is_killed() {
 /// A plugin that hangs as the scanner exits has already had its result written.
 #[test]
 fn a_scanner_that_hangs_after_a_complete_result_keeps_it() {
-    let found = sh(&format!("echo '{NO_PLUGINS}'; sleep 10"))
-        .with_timeout(Duration::from_millis(300))
+    // Long enough for a loaded machine to start `sh` and print: these scans end at the timeout.
+    let patient = Duration::from_secs(3);
+    let found = sh(&format!("echo '{NO_PLUGINS}'; sleep 60"))
+        .with_timeout(patient)
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap();
     assert!(found.plugins.is_empty());
-    match sh(r#"printf '{"load_failed":"boom"}'; sleep 10"#)
-        .with_timeout(Duration::from_millis(300))
+    match sh(r#"printf '{"load_failed":"boom"}'; sleep 60"#)
+        .with_timeout(patient)
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
     {
         Err(ScanError::LoadFailed(why)) => assert_eq!(why, "boom"),
         other => panic!("expected a load failure, got {other:?}"),
     }
-    let err = sh(r#"printf '{"plugins":['; sleep 10"#)
+    let err = sh(r#"printf '{"plugins":['; sleep 60"#)
         .with_timeout(Duration::from_millis(300))
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap_err();
@@ -575,8 +622,8 @@ fn skipped_plugins_are_reported_and_retried() {
     );
 }
 
-/// A bundle replaced while its scan ran is not cached under the new file's time with the old
-/// file's result.
+/// A bundle replaced while its scan ran is scanned again: the first result may be the old
+/// file's, and must not be cached under the new file's time.
 #[test]
 fn a_bundle_replaced_during_its_scan_is_scanned_again() {
     let dir = plugin_dir();
@@ -584,14 +631,44 @@ fn a_bundle_replaced_during_its_scan_is_scanned_again() {
     registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
     let mut cache = ScanCache::new();
 
-    // The scanner's arguments are `--scan clap <bundle>`.
-    let replacing = sh(&format!("touch -d 2030-01-01 \"$3\"; echo '{NO_PLUGINS}'"));
-    let report = registry.scan(&replacing, &mut cache);
+    // The scanner's arguments are `--scan clap <bundle>`. The first scan finds the bundle
+    // replaced under it; the second, of the new file, says so.
+    let marker = tempfile::tempdir().unwrap();
+    let replaced_once = sh(&format!(
+        r#"if [ -e "{marker}" ]; then printf '{{"load_failed":"the new file"}}'; exit 65; fi
+           : > "{marker}"; touch -d 2030-01-01 "$3"; echo '{NO_PLUGINS}'"#,
+        marker = marker.path().join("scanned").display()
+    ));
+    let report = registry.scan(&replaced_once, &mut cache);
     assert_eq!(report.scanned, 1);
-    assert!(cache.is_empty(), "the stale result was cached");
+    assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+    assert!(report.failed[0].1.contains("the new file"));
 
-    let report = registry.scan(&scanner(), &mut cache);
-    assert_eq!((report.scanned, report.cached), (1, 0));
-    assert_eq!(registry.plugins().len(), 1);
+    // The second result is cached as the new file's.
+    let report = registry.scan(&sh("exit 1"), &mut cache);
+    assert_eq!((report.scanned, report.cached), (0, 1));
+    assert!(report.failed[0].1.contains("the new file"));
+}
+
+/// A plugin that writes into its own bundle whenever it is loaded is still cached, or it would
+/// be loaded at every start.
+#[test]
+fn a_bundle_that_changes_itself_when_loaded_is_cached() {
+    let dir = plugin_dir();
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    let counter = tempfile::NamedTempFile::new().unwrap();
+    // Each load leaves the bundle with a later time than the last.
+    let self_modifying = sh(&format!(
+        r#"echo x >> "{counter}"; touch -d "2030-01-0$(wc -l < "{counter}" | tr -d ' ')" "$3"
+           echo '{NO_PLUGINS}'"#,
+        counter = counter.path().display()
+    ));
+    let report = registry.scan(&self_modifying, &mut cache);
+    assert_eq!(report.scanned, 1);
     assert_eq!(cache.len(), 1);
+    let report = registry.scan(&sh("exit 1"), &mut cache);
+    assert_eq!((report.scanned, report.cached), (0, 1));
 }

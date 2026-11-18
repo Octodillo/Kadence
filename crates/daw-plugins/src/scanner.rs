@@ -193,7 +193,7 @@ fn exited_normally(status: ExitStatus) -> bool {
 
 /// The scanner's exit code when it cannot scan at all: bad arguments, a format it was built
 /// without, or no way to set up its output. Not the plugin's fault, so not cached.
-const EXIT_UNSUPPORTED: u8 = 64;
+pub const EXIT_UNSUPPORTED: u8 = 64;
 
 /// The scanner's exit code when the bundle did not load. Its output is a [`LoadFailure`].
 const EXIT_LOAD_FAILED: u8 = 65;
@@ -245,7 +245,7 @@ pub fn run_scan_child(
         return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
     // Plugins may print to stdout while loading. Point file descriptor 1 at stderr for the
-    // scan and write the result to the real stdout, which is restored afterwards.
+    // scan and write the result to the real stdout.
     let Some(redirect) = StdoutRedirect::to_stderr() else {
         return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
@@ -264,12 +264,13 @@ pub fn run_scan_child(
     if redirect.write_result(&json).is_err() {
         return Some(ExitCode::FAILURE);
     }
-    // SAFETY: `_exit` ends the process at once. The result is written and flushed, and nothing
-    // else here needs to run first.
+    // SAFETY: `_exit` ends the process at once. The result is written (straight to the
+    // descriptor, so nothing is left in a buffer), and nothing else here needs to run first.
     unsafe { libc::_exit(i32::from(code)) }
 }
 
-/// Holds the real stdout while descriptor 1 points at stderr. Dropping it restores stdout.
+/// Holds the real stdout while descriptor 1 points at stderr. Dropping it restores stdout,
+/// which a scan that reports its result never gets to: it exits first.
 struct StdoutRedirect {
     saved: OwnedFd,
 }
@@ -296,8 +297,7 @@ impl StdoutRedirect {
 
     fn write_result(&self, data: &[u8]) -> std::io::Result<()> {
         let mut out = std::fs::File::from(self.saved.try_clone()?);
-        out.write_all(data)?;
-        out.flush()
+        out.write_all(data)
     }
 }
 

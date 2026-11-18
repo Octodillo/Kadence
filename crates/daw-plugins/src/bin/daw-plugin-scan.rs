@@ -9,6 +9,6 @@ fn main() -> ExitCode {
     let registry = daw_plugins::default_registry();
     daw_plugins::run_scan_child(&registry, std::env::args_os().skip(1)).unwrap_or_else(|| {
         eprintln!("usage: daw-plugin-scan --scan <clap|lv2|vst3> <bundle>");
-        ExitCode::FAILURE
+        ExitCode::from(daw_plugins::EXIT_UNSUPPORTED)
     })
 }

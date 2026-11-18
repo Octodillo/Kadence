@@ -11,7 +11,7 @@ use daw_core::plugin::{
 
 use crate::cache::{CacheEntry, ScanCache, modified_time};
 use crate::candidates::find_candidates;
-use crate::scanner::Scanner;
+use crate::scanner::{ScanError, Scanner};
 
 /// What one bundle's scan found, or why it failed.
 type BundleResult = Result<BundleScan, String>;
@@ -174,18 +174,13 @@ impl PluginRegistry {
         let results = scan_parallel(scanner, &jobs, &|| {
             progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
         });
-        for (job, result) in jobs.into_iter().zip(results) {
-            report.scanned += 1;
+        report.scanned = jobs.len();
+        for (job, result) in scan_changed_again(scanner, jobs, results) {
             let cacheable = result
                 .as_ref()
                 .map_or_else(|e| e.is_plugin_fault(), |_| true);
             let result = result.map_err(|e| e.to_string());
-            // A bundle replaced while it was scanned gave the result of neither version for
-            // certain, so it is left out of the cache and scanned again next time.
-            if cacheable
-                && let Some(mtime_ns) = job.mtime_ns
-                && modified_time(&job.bundle) == Some(mtime_ns)
-            {
+            if cacheable && let Some(mtime_ns) = job.mtime_ns {
                 cache.insert(
                     job.bundle,
                     CacheEntry {
@@ -225,17 +220,48 @@ impl PluginRegistry {
 struct Job {
     kind: PluginFormatKind,
     bundle: PathBuf,
-    /// The bundle's modification time when the scan was planned.
+    /// The bundle's modification time when its scan was planned.
     mtime_ns: Option<u128>,
     /// The slot the result fills.
     slot: usize,
+}
+
+/// The scans' results, each with the modification time its bundle had when it was scanned.
+///
+/// A bundle that changed while it was scanned gave the result of neither version for certain,
+/// so it is scanned once more. One that has changed again by then is changing itself as it
+/// loads (a plugin that keeps a licence or its state in its bundle): that result stands, as of
+/// the time the scan left the bundle with, or the bundle would be loaded at every start.
+fn scan_changed_again(
+    scanner: &Scanner,
+    jobs: Vec<Job>,
+    results: Vec<Result<BundleScan, ScanError>>,
+) -> Vec<(Job, Result<BundleScan, ScanError>)> {
+    let mut settled = Vec::new();
+    let mut changed = Vec::new();
+    for (mut job, result) in jobs.into_iter().zip(results) {
+        match modified_time(&job.bundle) {
+            Some(now) if job.mtime_ns != Some(now) => {
+                job.mtime_ns = Some(now);
+                changed.push(job);
+            }
+            // Unchanged, or gone: nothing to scan again.
+            _ => settled.push((job, result)),
+        }
+    }
+    let results = scan_parallel(scanner, &changed, &|| {});
+    for (mut job, result) in changed.into_iter().zip(results) {
+        job.mtime_ns = modified_time(&job.bundle);
+        settled.push((job, result));
+    }
+    settled
 }
 
 fn scan_parallel(
     scanner: &Scanner,
     todo: &[Job],
     finished: &(dyn Fn() + Sync),
-) -> Vec<Result<BundleScan, crate::ScanError>> {
+) -> Vec<Result<BundleScan, ScanError>> {
     let next = Mutex::new(0usize);
     let results: Vec<Mutex<Option<_>>> = todo.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
