@@ -259,6 +259,12 @@ Rectangle {
         acceptedButtons: Qt.RightButton
         onTapped: laneMenu.popup()
     }
+    // The keyboard's way to the same menu, from any of the lane's controls.
+    Keys.forwardTo: [menuKey]
+    MenuKey {
+        id: menuKey
+        onRequested: laneMenu.popup(laneHeader, Kirigami.Units.gridUnit, laneHeader.height)
+    }
     // Touch screens have no right button: hold a finger instead.
     TapHandler {
         acceptedDevices: PointerDevice.TouchScreen

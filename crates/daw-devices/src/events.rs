@@ -1,6 +1,6 @@
 //! Event plumbing shared by the devices.
 
-use daw_core::event::{EventKind, NoteId, ParamId};
+use daw_core::event::{EventKind, NoteId, ParamId, midi};
 use daw_core::node::ProcessContext;
 
 /// Note-related messages after normalizing contract events and raw MIDI.
@@ -50,25 +50,19 @@ pub(crate) fn note(kind: &EventKind) -> Option<Note> {
             key: key.map(|k| k.min(127)),
             id: note_id,
         }),
-        EventKind::Midi([status, d1, d2]) => match status & 0xF0 {
-            // Data bytes never have bit 7 set; such a message is corrupt.
-            0x80 | 0x90 if (d1 | d2) & 0x80 != 0 => None,
-            0x90 if d2 > 0 => Some(Note::On {
-                key: d1 & 0x7F,
-                velocity: (d2 & 0x7F) as f32 / 127.0,
-                id: -1,
-            }),
-            0x80 | 0x90 => Some(Note::Off {
-                key: Some(d1 & 0x7F),
-                id: -1,
-            }),
-            0xB0 if d1 == 120 => Some(Note::SoundOff),
-            0xB0 if d1 == 123 => Some(Note::AllOff),
-            0xE0 => {
-                let v = (((d2 as i32 & 0x7F) << 7) | (d1 as i32 & 0x7F)) - 8192;
-                Some(Note::Bend(v as f32 / 8192.0))
-            }
-            _ => None,
+        // Raw MIDI is read by the one codec: a note in it comes back as a
+        // note event, and a malformed message as nothing.
+        EventKind::Midi(raw) => match midi::decode_padded(raw)? {
+            EventKind::Midi([status, d1, d2]) => match status & 0xF0 {
+                0xB0 if d1 == 120 => Some(Note::SoundOff),
+                0xB0 if d1 == 123 => Some(Note::AllOff),
+                0xE0 => {
+                    let v = ((i32::from(d2) << 7) | i32::from(d1)) - 8192;
+                    Some(Note::Bend(v as f32 / 8192.0))
+                }
+                _ => None,
+            },
+            decoded => note(&decoded),
         },
         EventKind::ParamValue { .. } => None,
     }
@@ -268,5 +262,9 @@ mod tests {
         assert_eq!(note(&EventKind::Midi([0x90, 60, 0x80])), None);
         assert_eq!(note(&EventKind::Midi([0x90, 0xBC, 100])), None);
         assert_eq!(note(&EventKind::Midi([0x80, 60, 0xFF])), None);
+        // The same rule for every message, not only notes.
+        assert_eq!(note(&EventKind::Midi([0xE0, 0, 0xC0])), None);
+        assert_eq!(note(&EventKind::Midi([0xB0, 123, 0x80])), None);
+        assert_eq!(note(&EventKind::Midi([0x40, 123, 0])), None);
     }
 }

@@ -19,11 +19,9 @@ use crate::{MediaError, PeakCache, Result, WavFormat};
 const DRAIN_INTERVAL: Duration = Duration::from_millis(10);
 const HEADER_EVERY: Duration = Duration::from_secs(1);
 
-/// Largest data chunk written to one file. RIFF stores sizes as `u32` and hound does
-/// not check them, so a take is split into several files well before 4 GiB. The
-/// margin covers the header and keeps the RIFF size clear of `u32::MAX`, which
-/// readers take to mean "unknown length".
-const MAX_DATA_BYTES: u64 = u32::MAX as u64 - (1 << 20);
+/// Largest data chunk written to one file: a take is split into several files well
+/// before the 4 GiB a WAV file holds.
+const MAX_DATA_BYTES: u64 = crate::write::WAV_MAX_DATA_BYTES;
 
 struct Shared {
     stop: AtomicBool,

@@ -1,6 +1,6 @@
 //! The plugin sandbox host: `daw-plugin-host --plugin-host <socket>` loads one plugin and runs
-//! it for the process that opened `<socket>`. It also scans, like `daw-plugin-scan`:
-//! `daw-plugin-host --scan <format> <bundle>`.
+//! it for the process that opened `<socket>`. It also scans (see
+//! [`daw_plugins::run_scan_child`]): `daw-plugin-host --scan <format> <bundle>`.
 
 use std::process::ExitCode;
 

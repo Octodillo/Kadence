@@ -11,8 +11,12 @@
 //! floating-point mode of audio threads and [`meter`] for peak meters.
 //! [`logging`] is where every crate's diagnostics go.
 //!
+//! [`atomic_file`] is the one tool here for other threads: how every crate
+//! replaces a file on disk.
+//!
 //! Nothing in this crate depends on Qt or any other UI toolkit.
 
+pub mod atomic_file;
 pub mod denormals;
 pub mod dispose;
 pub mod event;

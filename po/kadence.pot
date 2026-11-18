@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 08:14+0000\n"
+"POT-Creation-Date: 2026-11-18 09:24+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -140,6 +140,26 @@ msgstr ""
 #: crates/daw-app/qml/ArrangePage.qml
 msgctxt "@action:inmenu"
 msgid "Zoom to Fit"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml
+msgctxt "@action:inmenu"
+msgid "Rename Track…"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml
+msgctxt "@action:inmenu"
+msgid "Move Track Up"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml
+msgctxt "@action:inmenu"
+msgid "Move Track Down"
+msgstr ""
+
+#: crates/daw-app/qml/ArrangePage.qml
+msgctxt "@action:inmenu"
+msgid "Delete Track"
 msgstr ""
 
 #: crates/daw-app/qml/ArrangePage.qml
@@ -3129,27 +3149,7 @@ msgstr ""
 
 #: crates/daw-app/qml/TrackHeader.qml
 msgctxt "@action:inmenu"
-msgid "Rename…"
-msgstr ""
-
-#: crates/daw-app/qml/TrackHeader.qml
-msgctxt "@action:inmenu"
-msgid "Move Up"
-msgstr ""
-
-#: crates/daw-app/qml/TrackHeader.qml
-msgctxt "@action:inmenu"
-msgid "Move Down"
-msgstr ""
-
-#: crates/daw-app/qml/TrackHeader.qml
-msgctxt "@action:inmenu"
 msgid "Show Automation"
-msgstr ""
-
-#: crates/daw-app/qml/TrackHeader.qml
-msgctxt "@action:inmenu"
-msgid "Delete Track"
 msgstr ""
 
 #: crates/daw-app/qml/TransportBar.qml

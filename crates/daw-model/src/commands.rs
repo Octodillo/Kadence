@@ -147,6 +147,13 @@ impl Command for SetProjectName {
     }
 }
 
+/// Trades the project's tempo and meter map for `tempo`: both doing and
+/// undoing [`SetTempo`] and [`SetTimeSignature`].
+fn swap_tempo(project: &mut Project, tempo: &mut TempoData) -> ChangeSet {
+    mem::swap(&mut project.tempo, tempo);
+    ChangeSet::one(Change::Tempo)
+}
+
 /// Replaces the tempo and meter map.
 #[derive(Debug)]
 pub struct SetTempo {
@@ -160,13 +167,11 @@ impl Command for SetTempo {
 
     fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         self.tempo.validate()?;
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 
     fn merge(&mut self, next: &dyn Command) -> bool {
@@ -188,13 +193,11 @@ impl Command for SetTimeSignature {
 
     fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         self.tempo.validate()?;
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 }
 

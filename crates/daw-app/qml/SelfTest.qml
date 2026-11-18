@@ -104,6 +104,14 @@ Item {
             check(header.edgeChange(12, 0, 2, 1, 3, 192, 500) === 4 && header.edgeChange(12, 0, 1, 2, 3, 192, 500) === 4,
                   "in a short timeline, the sizes above a dragged edge share the movement");
             check(header.edgeChange(-30, 10, 1, 1, 10, 2000, 500) === -20, "an edge scrolls to the top, then shares the rest");
+            // What the header's menu does is also a page action on the
+            // selected track, for the keyboard.
+            check(Project.selectedTrack === 0 && arrange.trackActions[0].enabled, "a new track is selected");
+            arrange.trackActions[0].trigger();
+            check(header.renaming, "Rename Track opens the selected track's name");
+            header.dismiss();
+            check(!header.renaming && !arrange.trackActions[1].enabled && !arrange.trackActions[2].enabled,
+                  "an only track has nowhere to move");
             // Double-click the first lane: a one-bar MIDI clip appears.
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
@@ -717,7 +725,7 @@ Item {
             check(!Project.modified, "without the take nothing is unsaved");
         },
         () => {
-            settingsPage = window.openSettings();
+            settingsPage = window.openSettings(SettingsPage.Tab.General);
             check(settingsPage !== null, "open settings");
         },
         () => {

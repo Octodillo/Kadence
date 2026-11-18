@@ -81,7 +81,7 @@ pub fn external_audio(project: &Project, bundle: &Bundle) -> Vec<AudioFile> {
 /// `path` relative to `root` if it is inside it, written with `/`. Compares
 /// the paths as written, after removing `.` and `..`, so it never touches
 /// the disk.
-fn relative_inside(root: &Path, path: &Path) -> Option<PathBuf> {
+pub(crate) fn relative_inside(root: &Path, path: &Path) -> Option<PathBuf> {
     let root = normalize(root);
     let path = normalize(path);
     let rest = path.strip_prefix(&root).ok()?;
@@ -163,8 +163,8 @@ pub struct Collected {
     pub copies: Vec<PathBuf>,
 }
 
-/// Removes files [`collect_files`] made. Each was a new file, so nothing of
-/// the user's is lost.
+/// Removes files that [`collect_files`] or a Save As made. Each was a new
+/// file, so nothing of the user's is lost.
 pub fn remove_copies(copies: &[PathBuf]) {
     for c in copies {
         let _ = std::fs::remove_file(c);

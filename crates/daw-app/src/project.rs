@@ -251,8 +251,9 @@ pub mod qobject {
         /// Returns an empty map, or a message map saying why it failed.
         #[qinvokable]
         fn save(self: Pin<&mut Project>) -> QMap_QString_QVariant;
-        /// Saves into a new bundle directory at `url`. Returns an empty map,
-        /// or a message map saying why it failed.
+        /// Saves into a new bundle at `url`, its directory or the project
+        /// file to go in it. Returns an empty map, or a message map saying
+        /// why it failed.
         #[qinvokable]
         fn save_as(self: Pin<&mut Project>, url: &QUrl) -> QMap_QString_QVariant;
 
@@ -918,15 +919,12 @@ impl qobject::Project {
         let Some(path) = url.to_local_file() else {
             return message_map(&Message::NotLocalFile(Context::Save).fields());
         };
-        let mut dir = std::path::PathBuf::from(path.to_string());
-        // A file dialog may hand back "Name.kadence"; the bundle is the
-        // directory "Name" around it.
-        if dir.extension().is_some_and(|e| e == "kadence") {
-            dir.set_extension("");
-        }
+        // A file dialog may hand back "Name.kadence": the document works
+        // out which bundle that means.
+        let path = std::path::PathBuf::from(path.to_string());
         let mut result = None;
         self.as_mut().edit(|s| {
-            if let Err(e) = s.save_as(&dir) {
+            if let Err(e) = s.save_as(&path) {
                 result = Some(Message::File(Context::Save, e).fields());
             }
         });

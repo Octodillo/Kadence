@@ -74,8 +74,13 @@ audio it uses, so it can be copied or backed up as one. **New Project**
 (Ctrl+S) and **Save As…** (Ctrl+Shift+S) are in the main menu, with
 **Open Recent**.
 
-- Every save keeps the previous ten versions in the project's `backups`
-  folder.
+- Saving keeps the ten versions before it in the project's `backups`
+  folder. Saving again without a change adds nothing to it.
+- **Save As…** makes a new project folder and copies the project's audio
+  into it. Choosing the open project's own file there just saves it.
+- Don't move or rename a project's folder while the project is open:
+  Kadence then can't save into it, and says so. Move it back, save, and
+  close the project first.
 - While a project has unsaved changes, Kadence keeps a recovery copy (you
   can turn this off in **General** settings). After a crash, Kadence offers
   to **Recover** it the next time you open the project.
@@ -118,6 +123,10 @@ signature, and the metronome.
 - **Bus**, to group tracks or share an effect such as reverb.
 
 Right-click a track header to rename, move, delete or show its automation.
+On a touch screen, hold a finger on it; from the keyboard, press Menu or
+Shift+F10 on a focused header or timeline. The page menu also has **Rename
+Track…** (F2), **Move Track Up** and **Down** (Alt+Up, Alt+Down) and **Delete
+Track** for the selected track.
 **M** mutes a track and **S** solos it.
 
 ## Recording
@@ -177,6 +186,9 @@ Double-click a MIDI clip to open it on the **Edit** page.
   way. **Humanize**, **Legato** and **Fix Overlaps** are in the same menu.
 - Up and Down transpose by a semitone, Shift+Up and Shift+Down by an
   octave.
+- On a touch screen, a finger on the empty grid scrolls and two fingers
+  zoom; a finger on a note moves it, and holding still opens the menu.
+  From the keyboard, Menu or Shift+F10 opens it.
 - **Flats** on the toolbar, also in the General settings, names the black
   keys as flats (B♭) instead of sharps (A♯).
 
