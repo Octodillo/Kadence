@@ -44,9 +44,6 @@ jobs:
           tool: cargo-nextest
       - name: rustfmt
         run: cargo fmt --all --check
-      - name: translation template
-        # po/kadence.pot must offer translators every message in the sources.
-        run: po/extract-messages.sh --check
       - name: clippy
         run: cargo clippy --workspace --exclude daw-app --all-targets -- -D warnings
       - name: clippy (release)
@@ -88,6 +85,11 @@ jobs:
         run: ci/pipewire-jack-tests.sh
       - name: doc tests
         run: cargo test --workspace --exclude daw-app --doc
+      - name: translation template
+        # po/kadence.pot must offer translators every message in the sources.
+        # Last and always, so a stale template does not hide the results above.
+        if: always()
+        run: po/extract-messages.sh --check
 
   licenses:
     name: cargo deny (licenses, sources)

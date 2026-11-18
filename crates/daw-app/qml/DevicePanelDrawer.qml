@@ -54,7 +54,6 @@ Kirigami.OverlayDrawer {
         }
     }
 
-
     Connections {
         target: DevicePanel
         function onActiveChanged(): void {

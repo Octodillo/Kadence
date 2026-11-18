@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-17 17:56+0000\n"
+"POT-Creation-Date: 2026-11-18 04:00+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1554,6 +1554,16 @@ msgid "Show the automation lanes of the clip's track under the notes"
 msgstr ""
 
 #: crates/daw-app/qml/EditPage.qml
+msgctxt "@action:button"
+msgid "Flats"
+msgstr ""
+
+#: crates/daw-app/qml/EditPage.qml
+msgctxt "@info:tooltip"
+msgid "Name the black keys as flats (B♭) instead of sharps (A♯)"
+msgstr ""
+
+#: crates/daw-app/qml/EditPage.qml
 msgctxt "@info:accessible"
 msgid "Piano roll"
 msgstr ""
@@ -1848,6 +1858,11 @@ msgstr ""
 #: crates/daw-app/qml/GeneralSettings.qml
 msgctxt "@option:check"
 msgid "Play keys and notes as they are pressed or moved"
+msgstr ""
+
+#: crates/daw-app/qml/GeneralSettings.qml
+msgctxt "@option:check"
+msgid "Name the black keys as flats (B♭) instead of sharps (A♯)"
 msgstr ""
 
 #: crates/daw-app/qml/GeneralSettings.qml
@@ -2433,8 +2448,8 @@ msgstr ""
 #: crates/daw-app/qml/PluginBrowser.qml
 msgctxt "@info:placeholder"
 msgid ""
-"Kadence looks for CLAP, VST3 and LV2 plugins in their usual folders. Add "
-"other folders in the plugin settings."
+"Kadence looks for CLAP, VST3 and LV2 plugins. The plugin settings list the "
+"folders it searches, and you can add others there."
 msgstr ""
 
 #: crates/daw-app/qml/PluginBrowser.qml
@@ -2488,13 +2503,18 @@ msgid ""
 msgstr ""
 
 #: crates/daw-app/qml/PluginSettings.qml
+msgctxt "@label folders searched for plugins"
+msgid "Searched folders:"
+msgstr ""
+
+#: crates/daw-app/qml/PluginSettings.qml
 msgctxt "@label"
 msgid "Other folders:"
 msgstr ""
 
 #: crates/daw-app/qml/PluginSettings.qml
-msgctxt "@info"
-msgid "None. CLAP, VST3 and LV2 plugins are found in their usual folders."
+msgctxt "@info no folders were added to the plugin search"
+msgid "None"
 msgstr ""
 
 #: crates/daw-app/qml/PluginSettings.qml
@@ -2672,7 +2692,7 @@ msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml
 msgctxt "@info %1 is a file path"
-msgid "“%1” could not be read, so its clips are silent."
+msgid "“%1” could not be read, so it plays as silence."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml
@@ -2690,6 +2710,18 @@ msgctxt "@info %1 is a track name"
 msgid ""
 "An output or send of “%1” would feed its sound back into itself, so it is "
 "left out."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info %1 is a track name"
+msgid ""
+"No device on “%1” plays notes, so its notes are silent. Add an instrument to "
+"the track."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info %1 is a device name"
+msgid "“%1” cannot be automated while it plays, so its automation is left out."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml

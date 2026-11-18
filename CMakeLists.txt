@@ -67,11 +67,7 @@ add_custom_target(third_party_licenses ALL DEPENDS ${THIRD_PARTY_LICENSES})
 # proxies starting at once race to install the toolchain's components.
 add_dependencies(third_party_licenses cargo_build)
 if(KADENCE_INSTALL_LICENSES)
-    install(FILES ${THIRD_PARTY_LICENSES} DESTINATION ${KADENCE_LICENSE_DIR})
-endif()
-
-if(KADENCE_INSTALL_LICENSES)
-    install(FILES LICENSE DESTINATION ${KADENCE_LICENSE_DIR})
+    install(FILES LICENSE ${THIRD_PARTY_LICENSES} DESTINATION ${KADENCE_LICENSE_DIR})
 endif()
 
 install(FILES data/${APP_ID}.desktop DESTINATION ${KDE_INSTALL_APPDIR})
