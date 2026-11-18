@@ -91,8 +91,10 @@ pub(crate) fn releases(key: Option<u8>, id: NoteId, voice_key: u8, voice_id: Not
 
 /// A device whose processing is split at incoming event frames, so every
 /// event (parameter change or note) takes effect sample-accurately.
-pub(crate) trait Segmented {
-    fn param_event(&mut self, param: ParamId, value: f64);
+pub(crate) trait Segmented: crate::Device {
+    fn param_event(&mut self, param: ParamId, value: f64) {
+        self.set_param(param, value);
+    }
     fn note_event(&mut self, _note: Note) {}
     /// Render frames `start..end` of the buffer.
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize);

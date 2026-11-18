@@ -42,26 +42,20 @@ pub const DIVISIONS: &[(&str, f64)] = &[
     ("1/16 triplet", 1.0 / 6.0),
 ];
 
-const DIVISION_LABELS: &[&str] = &[
-    "1/1",
-    "1/2",
-    "1/4",
-    "1/8",
-    "1/16",
-    "1/32",
-    "1/2 dotted",
-    "1/4 dotted",
-    "1/8 dotted",
-    "1/16 dotted",
-    "1/2 triplet",
-    "1/4 triplet",
-    "1/8 triplet",
-    "1/16 triplet",
-];
+/// The names in [`DIVISIONS`], for the parameter's choices.
+const DIVISION_LABELS: [&str; DIVISIONS.len()] = {
+    let mut labels = [""; DIVISIONS.len()];
+    let mut i = 0;
+    while i < labels.len() {
+        labels[i] = DIVISIONS[i].0;
+        i += 1;
+    }
+    labels
+};
 
 pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::toggle(SYNC, "sync", "Tempo Sync", true),
-    ParamSpec::choice(DIVISION, "division", "Division", DIVISION_LABELS, 2),
+    ParamSpec::choice(DIVISION, "division", "Division", &DIVISION_LABELS, 2),
     ParamSpec::new(
         TIME,
         "time",
@@ -167,10 +161,6 @@ impl_device!(Delay, INFO, PARAMS, {
 });
 
 impl Segmented for Delay {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         let time = self.delay_samples(ctx.transport.bpm) as f32;
         if self.snap_time {
@@ -257,10 +247,6 @@ mod tests {
 
     #[test]
     fn division_lengths() {
-        assert_eq!(DIVISIONS.len(), DIVISION_LABELS.len());
-        for (d, l) in DIVISIONS.iter().zip(DIVISION_LABELS) {
-            assert_eq!(d.0, *l);
-        }
         let mut d = Delay::new();
         d.prepare(48000.0, 64);
         assert_eq!(d.delay_samples(120.0), 24000.0);
