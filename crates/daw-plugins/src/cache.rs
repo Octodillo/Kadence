@@ -1,12 +1,14 @@
 //! The JSON scan cache.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use daw_core::plugin::{BundleScan, PluginFormatKind};
 use serde::{Deserialize, Serialize};
+
+use crate::candidates::MAX_DEPTH;
 
 /// The scan result for one bundle.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,10 +67,12 @@ impl ScanCache {
         daw_core::atomic_file::write(path, None, &serde_json::to_vec_pretty(self)?)
     }
 
-    /// The cached entry for `bundle`, if it is still current.
-    pub fn get(&self, bundle: &Path) -> Option<&CacheEntry> {
-        let entry = self.entries.get(bundle)?;
-        (Some(entry.mtime_ns) == modified_time(bundle)).then_some(entry)
+    /// The cached entry for `bundle`, if it was scanned when the bundle's [`modified_time`]
+    /// was `mtime_ns`. Pass the bundle's time now.
+    pub fn get(&self, bundle: &Path, mtime_ns: u128) -> Option<&CacheEntry> {
+        self.entries
+            .get(bundle)
+            .filter(|entry| entry.mtime_ns == mtime_ns)
     }
 
     pub fn insert(&mut self, bundle: PathBuf, entry: CacheEntry) {
@@ -111,27 +115,28 @@ impl Default for ScanCache {
     }
 }
 
-/// The latest modification time of `path` or, for a bundle directory, of anything inside it.
+/// The latest modification time of `path` or, for a bundle directory, of anything inside it
+/// ([`MAX_DEPTH`] directories deep), in nanoseconds since the Unix epoch.
+///
+/// Symbolic links are followed: the bundle itself may be one, and so may files and directories
+/// in it, as when a bundle's contents live in a versioned directory elsewhere. Each directory
+/// is looked at once, so a link back up the tree ends the walk there.
 pub fn modified_time(path: &Path) -> Option<u128> {
-    fn mtime(path: &Path) -> Option<u128> {
-        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-        Some(
-            modified
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
-        )
-    }
-    fn newest(path: &Path, depth: usize) -> Option<u128> {
-        let mut best = mtime(path)?;
-        if depth < 8 && path.is_dir() {
+    fn newest(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>) -> Option<u128> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok()?;
+        let mut best = modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        if metadata.is_dir() && depth < MAX_DEPTH && seen.insert(path.canonicalize().ok()?) {
             for entry in std::fs::read_dir(path).ok()?.flatten() {
-                if let Some(t) = newest(&entry.path(), depth + 1) {
+                if let Some(t) = newest(&entry.path(), depth + 1, seen) {
                     best = best.max(t);
                 }
             }
         }
         Some(best)
     }
-    newest(path, 0)
+    newest(path, 0, &mut HashSet::new())
 }

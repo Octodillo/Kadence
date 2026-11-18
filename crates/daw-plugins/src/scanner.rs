@@ -91,16 +91,6 @@ impl Scanner {
         Ok(Self::new(std::env::current_exe()?, Vec::<OsString>::new()))
     }
 
-    /// A scanner that runs the `daw-plugin-scan` binary installed next to the current executable.
-    pub fn sibling() -> std::io::Result<Self> {
-        let exe = std::env::current_exe()?;
-        let dir = exe.parent().unwrap_or(Path::new("."));
-        Ok(Self::new(
-            dir.join("daw-plugin-scan"),
-            Vec::<OsString>::new(),
-        ))
-    }
-
     /// How long one bundle may take before its scanner is killed. Default 30 s.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -172,31 +162,38 @@ impl Scanner {
         // Before the wait, while the group's id cannot have been reused.
         crate::process::kill_group(&child);
         let status = child.wait().map_err(ScanError::Spawn)?;
-        if timed_out {
-            return Err(ScanError::TimedOut(self.timeout));
-        }
-        if status.code() == Some(i32::from(EXIT_UNSUPPORTED)) {
+        // The exit status, or `None` for a scanner killed at the timeout.
+        let status = (!timed_out).then_some(status);
+        if status.and_then(|s| s.code()) == Some(i32::from(EXIT_UNSUPPORTED)) {
             return Err(ScanError::Unsupported);
         }
-        // The scanner has exited, so everything it wrote is in the pipe; whether EOF arrives
+        // The scanner is gone, so everything it wrote is in the pipe; whether EOF arrives
         // depends only on other holders of the pipe.
         let _ = eof_rx.recv_timeout(Duration::from_millis(500));
         let out = out.lock().unwrap();
-        // Plugins often crash at exit, in destructors that run after the result was written, so
-        // a complete result counts even from a scanner that crashed.
-        let exited = status.success() || status.code() == Some(i32::from(EXIT_LOAD_FAILED));
-        match serde_json::from_slice(&out) {
-            Ok(ScanOutput::Found(found)) => Ok(found),
-            Ok(ScanOutput::Failed(f)) => Err(ScanError::LoadFailed(f.load_failed)),
-            Err(e) if exited => Err(ScanError::BadOutput(e.to_string())),
-            Err(_) => Err(ScanError::Crashed(status)),
+        // The scanner writes its result in one piece once the scan is over. Plugins often crash
+        // or hang after that, in code that runs as the process exits, so a complete result
+        // counts however the scanner ended.
+        match (serde_json::from_slice(&out), status) {
+            (Ok(ScanOutput::Found(found)), _) => Ok(found),
+            (Ok(ScanOutput::Failed(f)), _) => Err(ScanError::LoadFailed(f.load_failed)),
+            (Err(_), None) => Err(ScanError::TimedOut(self.timeout)),
+            (Err(e), Some(status)) if exited_normally(status) => {
+                Err(ScanError::BadOutput(e.to_string()))
+            }
+            (Err(_), Some(status)) => Err(ScanError::Crashed(status)),
         }
     }
 }
 
+/// Whether the scanner ended with one of its own exit codes, not a crash.
+fn exited_normally(status: ExitStatus) -> bool {
+    status.success() || status.code() == Some(i32::from(EXIT_LOAD_FAILED))
+}
+
 /// The scanner's exit code when it cannot scan at all: bad arguments, a format it was built
 /// without, or no way to set up its output. Not the plugin's fault, so not cached.
-const EXIT_UNSUPPORTED: u8 = 64;
+pub const EXIT_UNSUPPORTED: u8 = 64;
 
 /// The scanner's exit code when the bundle did not load. Its output is a [`LoadFailure`].
 const EXIT_LOAD_FAILED: u8 = 65;
@@ -216,10 +213,15 @@ enum ScanOutput {
 }
 
 /// The child side of a scan. If `args` (without the program name) are
-/// `--scan <format> <bundle>`, scans the bundle with `registry`'s format, prints the
-/// [`BundleScan`] as JSON to stdout and returns `Some` exit code. A bundle that does not load prints
-/// `{"load_failed": <reason>}` instead and exits with code 65. Otherwise returns `None`, so an application
-/// can call this first thing in `main` and carry on normally when it is not a scan.
+/// `--scan <format> <bundle>`, scans the bundle with `registry`'s format and prints the
+/// [`BundleScan`] as JSON to stdout; a bundle that does not load prints
+/// `{"load_failed": <reason>}` instead, with exit code 65. Otherwise returns `None`, so an
+/// application can call this first thing in `main` and carry on normally when it is not a scan.
+///
+/// Once the result is written the process ends here, without running exit-time code: the
+/// plugin's library is still loaded, and its static destructors and `atexit` handlers often
+/// crash or hang. `Some` exit code comes back only when there was no scan to report: bad
+/// arguments, a format this build lacks, or a result that could not be written.
 pub fn run_scan_child(
     registry: &PluginRegistry,
     args: impl IntoIterator<Item = OsString>,
@@ -243,35 +245,32 @@ pub fn run_scan_child(
         return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
     // Plugins may print to stdout while loading. Point file descriptor 1 at stderr for the
-    // scan and write the result to the real stdout, which is restored afterwards.
+    // scan and write the result to the real stdout.
     let Some(redirect) = StdoutRedirect::to_stderr() else {
         return Some(ExitCode::from(EXIT_UNSUPPORTED));
     };
     let (json, code) = match format.scan(Path::new(bundle)) {
-        Ok(found) => (
-            serde_json::to_vec(&found).expect("a scan serializes"),
-            ExitCode::SUCCESS,
-        ),
+        Ok(found) => (serde_json::to_vec(&found).expect("a scan serializes"), 0),
         Err(e) => {
             let failure = LoadFailure {
                 load_failed: e.reason(),
             };
             (
                 serde_json::to_vec(&failure).expect("a string serializes"),
-                ExitCode::from(EXIT_LOAD_FAILED),
+                EXIT_LOAD_FAILED,
             )
         }
     };
-    let written = redirect.write_result(&json);
-    drop(redirect);
-    Some(if written.is_ok() {
-        code
-    } else {
-        ExitCode::FAILURE
-    })
+    if redirect.write_result(&json).is_err() {
+        return Some(ExitCode::FAILURE);
+    }
+    // SAFETY: `_exit` ends the process at once. The result is written (straight to the
+    // descriptor, so nothing is left in a buffer), and nothing else here needs to run first.
+    unsafe { libc::_exit(i32::from(code)) }
 }
 
-/// Holds the real stdout while descriptor 1 points at stderr. Dropping it restores stdout.
+/// Holds the real stdout while descriptor 1 points at stderr. Dropping it restores stdout,
+/// which a scan that reports its result never gets to: it exits first.
 struct StdoutRedirect {
     saved: OwnedFd,
 }
@@ -298,8 +297,7 @@ impl StdoutRedirect {
 
     fn write_result(&self, data: &[u8]) -> std::io::Result<()> {
         let mut out = std::fs::File::from(self.saved.try_clone()?);
-        out.write_all(data)?;
-        out.flush()
+        out.write_all(data)
     }
 }
 
