@@ -21,6 +21,7 @@ mod cycle;
 mod dummy;
 mod jack_backend;
 mod link_log;
+mod listening;
 mod stats;
 
 pub use alloc::RtAllocCounter;
@@ -29,6 +30,7 @@ pub use cycle::BackendCycle;
 pub(crate) use cycle::{MidiInputs, MidiInputsControl, midi_inputs};
 pub use dummy::{DummyBackend, DummySystem, MidiInjector, MidiTap, Pacing};
 pub use jack_backend::JackBackend;
+pub use listening::server_listening;
 pub use stats::{BackendHealth, BackendStats};
 
 /// Most MIDI input ports [`AudioBackend::add_midi_input`] adds at once.

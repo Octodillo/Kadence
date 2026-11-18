@@ -249,25 +249,12 @@ impl AudioHost {
     }
 
     /// Whether this host runs silent for want of an audio server and one
-    /// answers now, so a [`restart`](Self::restart) would bring sound back.
-    /// Asks the server; without one that is a refused connection.
+    /// seems to be there now, so a [`restart`](Self::restart) would bring
+    /// sound back. Only looks for the server's socket
+    /// ([`daw_backend::server_listening`]), so it never blocks; the restart
+    /// tells whether the server really takes a client.
     pub fn server_appeared(&self) -> bool {
-        if self.kind != HostKind::Silent || !self.config.use_server {
-            return false;
-        }
-        let mut probe = JackBackend::new();
-        let answered = probe
-            .open(BackendConfig {
-                client_name: format!("{}-probe", self.config.client_name),
-                audio_inputs: 0,
-                audio_outputs: 0,
-                midi_input: false,
-                midi_output: false,
-                ..Default::default()
-            })
-            .is_ok();
-        let _ = probe.close();
-        answered
+        self.kind == HostKind::Silent && self.config.use_server && daw_backend::server_listening()
     }
 
     /// Gives each source in `sources` (full port names, see
