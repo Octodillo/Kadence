@@ -21,7 +21,7 @@ use daw_session::catalog::PluginCatalog;
 
 use crate::engine::{EngineHandle, default_engine};
 use crate::message::{Context, Fields, Message};
-use crate::recovery::{self, Candidate, DirLock, Scratch};
+use crate::recovery::{self, Candidate, DirLock, Scratch, TempFolder};
 use crate::settings::{self, MemoryStore, MidiSettings, SettingsStore};
 
 pub struct AppState {
@@ -60,6 +60,10 @@ pub struct AppState {
     /// Counts documents opened, so views can tell a new document from an
     /// edit (document revisions start over).
     pub doc_serial: u64,
+    /// Whether each file outside the bundle opened as audio when it was
+    /// last tried, so counting them doesn't open every file on every edit.
+    /// Emptied with each new document.
+    opens_as_audio: std::collections::HashMap<PathBuf, bool>,
     /// Plugin devices that reported a state change, and when they last did.
     /// The change is recorded once the plugin has been quiet a moment, so a
     /// knob turned in its editor is one undo step.
@@ -99,6 +103,9 @@ pub struct AppState {
     /// Where a never-saved project autosaves; `None` until the session
     /// starts, or if the folder could not be made.
     scratch: Option<Scratch>,
+    /// Stands in for `scratch` as the unsaved project's folder while there
+    /// is none.
+    unsaved_fallback: TempFolder,
     /// The (`doc_serial`, revision) last written to `scratch`.
     scratch_saved: Option<(u64, u64)>,
     /// Held on the open bundle so other Kadence windows know it is in use.
@@ -148,6 +155,13 @@ pub fn with<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
     })
 }
 
+/// Whether `file` is audio this program can read. Collect Files copies
+/// nothing else: a project from someone else can name any file as a clip's
+/// source.
+fn opens_as_audio(file: &Path) -> bool {
+    Decoder::open(file).is_ok()
+}
+
 /// What the user calls a device: its name, or for an unnamed one its plugin
 /// or kind.
 fn device_label(d: &daw_model::Device) -> String {
@@ -155,6 +169,24 @@ fn device_label(d: &daw_model::Device) -> String {
         (_, false) => d.name.clone(),
         (daw_model::DeviceSource::Plugin { id, .. }, true) => id.clone(),
         (daw_model::DeviceSource::Builtin { kind }, true) => kind.clone(),
+    }
+}
+
+/// What the views need to know about playback and the open bundle. Takes
+/// the state's fields one by one, so the caller can hand out a view and the
+/// document next to it.
+fn view_env<'a>(
+    engine: &'a dyn EngineHandle,
+    fallback_tempo: &'a SegmentTempoMap,
+    root: &'a Path,
+) -> Env<'a> {
+    let session = engine.session();
+    Env {
+        tempo: session.map_or(fallback_tempo, |s| s.tempo()),
+        sample_rate: session.map_or(48_000.0, |s| s.sample_rate()),
+        root: Some(root),
+        playhead: session.map_or(TickTime(0), |s| s.position()),
+        loop_range: session.and_then(|s| s.loop_range()),
     }
 }
 
@@ -187,6 +219,7 @@ impl AppState {
             follow_playhead: true,
             fallback_tempo: SegmentTempoMap::default(),
             doc_serial: 0,
+            opens_as_audio: std::collections::HashMap::new(),
             plugin_changes: std::collections::HashMap::new(),
             plugin_values_epoch: 0,
             editor_title_format: "%1 — %2".into(),
@@ -202,6 +235,7 @@ impl AppState {
             settings: Box::new(MemoryStore::default()),
             recent: Vec::new(),
             scratch: None,
+            unsaved_fallback: TempFolder::new(),
             scratch_saved: None,
             bundle_lock: None,
             recovery: Vec::new(),
@@ -219,10 +253,10 @@ impl AppState {
         if self.synced == Some(revision) {
             return;
         }
-        let root = self.doc.bundle().map(|b| b.root().to_path_buf());
+        let root = self.media_root();
         let snapshot = self.doc.snapshot();
         if let Some(session) = self.engine.session_mut() {
-            session.set_root(root);
+            session.set_root(Some(root));
             if let Err(e) = session.sync(&snapshot) {
                 self.status = Some(Message::Playback(e).fields());
             } else if let Some(w) = session.warnings().first() {
@@ -434,7 +468,6 @@ impl AppState {
     /// once per revision and retried quietly every few seconds, in case it
     /// was passing (a full disk that was cleared).
     pub fn autosave(&mut self) {
-        const RETRY: Duration = Duration::from_secs(10);
         if self.shut_down {
             return;
         }
@@ -448,15 +481,30 @@ impl AppState {
             self.autosave_scratch();
             return;
         }
-        let revision = self.doc.revision();
-        let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
-        if let Some((r, at)) = self.autosave_failed
-            && r == revision
-            && at.elapsed() < RETRY
-        {
+        if self.autosave_retry_waits() {
             return;
         }
-        match self.doc.autosave() {
+        let result = self.doc.autosave();
+        self.autosave_tried(result);
+    }
+
+    /// Lets the next timer tick autosave, however recent the last one was.
+    pub(crate) fn autosave_soon(&mut self) {
+        self.last_autosave = None;
+    }
+
+    /// Whether the autosave of this revision failed a moment ago and should
+    /// not be tried again yet.
+    fn autosave_retry_waits(&self) -> bool {
+        const RETRY: Duration = Duration::from_secs(10);
+        matches!(self.autosave_failed,
+            Some((revision, at)) if revision == self.doc.revision() && at.elapsed() < RETRY)
+    }
+
+    /// Takes note of how an autosave went; `Ok(true)` when it wrote one.
+    fn autosave_tried(&mut self, result: Result<bool, FormatError>) {
+        let revision = self.doc.revision();
+        match result {
             Ok(wrote) => {
                 self.autosave_failed = None;
                 // The next one waits a whole interval after this one.
@@ -465,6 +513,7 @@ impl AppState {
                 }
             }
             Err(e) => {
+                let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
                 self.autosave_failed = Some((revision, Instant::now()));
                 if !failed_here {
                     self.report(Message::File(Context::Autosave, e));
@@ -514,20 +563,11 @@ impl AppState {
     /// [`AppState::autosave`] for a project with no bundle: into the scratch
     /// folder, removed again when the project is back to unmodified.
     fn autosave_scratch(&mut self) {
-        const RETRY: Duration = Duration::from_secs(10);
         let Some(scratch) = &self.scratch else {
             return;
         };
         let at = (self.doc_serial, self.doc.revision());
-        if self.scratch_saved == Some(at) {
-            return;
-        }
-        let revision = self.doc.revision();
-        let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
-        if let Some((r, when)) = self.autosave_failed
-            && r == revision
-            && when.elapsed() < RETRY
-        {
+        if self.scratch_saved == Some(at) || self.autosave_retry_waits() {
             return;
         }
         let result = if self.doc.is_modified() {
@@ -538,20 +578,11 @@ impl AppState {
                 source: e,
             })
         };
-        match result {
-            Ok(()) => {
-                self.scratch_saved = Some(at);
-                self.autosave_failed = None;
-                // The next one waits a whole interval after this one.
-                self.last_autosave = Some(Instant::now());
-            }
-            Err(e) => {
-                self.autosave_failed = Some((revision, Instant::now()));
-                if !failed_here {
-                    self.report(Message::File(Context::Autosave, e));
-                }
-            }
+        if result.is_ok() {
+            self.scratch_saved = Some(at);
         }
+        // Writing or removing: either way the folder is as it should be.
+        self.autosave_tried(result.map(|()| true));
     }
 
     /// Hands over the user's config and the scratch folder, and lists the
@@ -563,14 +594,66 @@ impl AppState {
         self.recent = settings::load_recent(self.settings.as_ref());
         // Look before making our own folder, so it is not offered.
         self.recovery = recovery::find(recovery_base, &self.recent);
+        let stand_in = self.unsaved_root().to_path_buf();
         self.scratch = recovery_base.and_then(|b| Scratch::create(b).ok());
         self.scratch_saved = None;
-        self.touch();
+        // An unsaved project's audio is looked for in the scratch folder
+        // now: what was recorded before there was one comes along.
+        if self.scratch.is_some() && recovery::bring_audio(&stand_in, self.unsaved_root()).is_ok() {
+            let _ = std::fs::remove_dir_all(recovery::audio_dir(&stand_in));
+        }
+        self.resync();
     }
 
-    /// Takes unsaved work `index` off the offer.
-    pub fn take_recovery(&mut self, index: usize) -> Option<Candidate> {
-        (index < self.recovery.len()).then(|| self.recovery.remove(index))
+    /// Opens unsaved work `index` in place of the current project. It stays
+    /// on offer if that fails, to try again, unless another Kadence has
+    /// taken it meanwhile.
+    pub fn recover_offered(&mut self, index: usize) -> Result<(), Message> {
+        let Some(candidate) = self.recovery.get(index).cloned() else {
+            return Ok(());
+        };
+        let result = match &candidate.bundle {
+            Some(root) => self.recover(root),
+            None => self.recover_untitled(&candidate),
+        };
+        self.settle_offer(&candidate, result)
+    }
+
+    /// Deletes unsaved work `index`. It stays on offer if that fails, unless
+    /// another Kadence has recovered it since it was offered here: then it
+    /// is that one's to keep.
+    pub fn discard_offered(&mut self, index: usize) -> Result<(), Message> {
+        let Some(candidate) = self.recovery.get(index).cloned() else {
+            return Ok(());
+        };
+        let result = match candidate.in_use() {
+            Some(dir) => Err(Message::AlreadyOpen(dir)),
+            None => candidate.discard().map_err(|e| {
+                Message::File(
+                    Context::Recover,
+                    FormatError::Io {
+                        path: candidate.autosave.clone(),
+                        source: e,
+                    },
+                )
+            }),
+        };
+        self.settle_offer(&candidate, result)
+    }
+
+    /// Takes `candidate` off the offer once it is dealt with: recovered or
+    /// discarded here, open in another Kadence, or gone since (another
+    /// Kadence recovered it and saved or dropped it).
+    fn settle_offer(
+        &mut self,
+        candidate: &Candidate,
+        result: Result<(), Message>,
+    ) -> Result<(), Message> {
+        if matches!(result, Ok(()) | Err(Message::AlreadyOpen(_))) || candidate.is_gone() {
+            self.recovery.retain(|c| c != candidate);
+            self.touch();
+        }
+        result
     }
 
     /// At a clean exit, after the user saved or chose to discard: drop the
@@ -584,15 +667,18 @@ impl AppState {
         }
     }
 
-    /// Deletes the open document's autosave if it has unsaved changes: the
-    /// user chose to drop them.
+    /// Deletes the open document's autosave: the user chose to drop its
+    /// unsaved changes, or it has none.
     fn discard_autosave(&mut self) {
-        if !self.doc.is_modified() {
-            return;
-        }
         match self.doc.bundle() {
-            Some(b) => {
+            Some(b) if self.doc.is_modified() => {
                 let _ = b.discard_autosave();
+            }
+            // Back at the saved state, by undo: the timer may not have come
+            // round to removing the autosave of the edits taken back, which
+            // would be offered as unsaved work.
+            Some(_) => {
+                let _ = self.doc.autosave();
             }
             None => {
                 if let Some(s) = &self.scratch {
@@ -603,9 +689,32 @@ impl AppState {
         self.scratch_saved = None;
     }
 
+    /// The folder a project with no bundle lives in until it is saved: the
+    /// scratch folder, which holds its autosave and the audio recorded into
+    /// it.
+    fn unsaved_root(&self) -> &Path {
+        self.scratch
+            .as_ref()
+            .map_or(self.unsaved_fallback.dir(), Scratch::dir)
+    }
+
+    /// The folder the project's relative audio paths are inside: its
+    /// bundle, or for a project that was never saved the folder it lives in
+    /// until then.
+    pub fn media_root(&self) -> PathBuf {
+        self.bundle_root()
+            .unwrap_or_else(|| self.unsaved_root().to_path_buf())
+    }
+
+    /// Deletes the audio recorded into a project that had no bundle, once
+    /// it is saved (the bundle has it) or dropped.
+    fn remove_unsaved_audio(&self) {
+        let _ = std::fs::remove_dir_all(recovery::audio_dir(self.unsaved_root()));
+    }
+
     /// Puts the open bundle first in the recent list.
     fn remember(&mut self) {
-        if let Some(root) = self.root() {
+        if let Some(root) = self.bundle_root() {
             self.recent = settings::add_recent(self.settings.as_mut(), &root);
         }
     }
@@ -617,7 +726,7 @@ impl AppState {
 
     /// Locks the open bundle, letting go of the one before.
     fn relock(&mut self) {
-        let root = self.root().map(|r| canonical(&r));
+        let root = self.bundle_root().map(|r| canonical(&r));
         if self.bundle_lock.as_ref().map(|l| l.dir()) == root.as_deref() {
             return;
         }
@@ -750,7 +859,7 @@ impl AppState {
         self.view_revision += 1;
     }
 
-    pub fn root(&self) -> Option<PathBuf> {
+    pub fn bundle_root(&self) -> Option<PathBuf> {
         self.doc.bundle().map(|b| b.root().to_path_buf())
     }
 
@@ -766,52 +875,25 @@ impl AppState {
         self.engine.session().map_or(48_000.0, |s| s.sample_rate())
     }
 
-    /// Calls `f` with the arrange view, the document and an [`Env`].
-    /// Ends an arrange drag in progress before an edit from elsewhere (undo,
-    /// a menu), so the drag doesn't merge with it or touch what it removed.
     /// Ends the drags in progress in the arrange view and the piano roll
-    /// before another edit.
+    /// before an edit from elsewhere (undo, a menu), so a drag doesn't merge
+    /// with it or touch what it removed.
     pub fn end_drag(&mut self) {
         self.arrange.end_drag(&mut self.doc);
         self.piano.end_drag(&mut self.doc);
     }
 
+    /// Calls `f` with the arrange view, the document and an [`Env`].
     pub fn with_arrange<R>(&mut self, f: impl FnOnce(&mut Arrange, &mut Document, &Env) -> R) -> R {
-        let root = self.root();
-        let playhead = self.playhead();
-        let loop_range = self.loop_range();
-        let sample_rate = self.sample_rate();
-        let tempo = self
-            .engine
-            .session()
-            .map_or(&self.fallback_tempo, |s| s.tempo());
-        let env = Env {
-            tempo,
-            sample_rate,
-            root: root.as_deref(),
-            playhead,
-            loop_range,
-        };
+        let root = self.media_root();
+        let env = view_env(self.engine.as_ref(), &self.fallback_tempo, &root);
         f(&mut self.arrange, &mut self.doc, &env)
     }
 
     /// Calls `f` with the piano roll, the document and an [`Env`].
     pub fn with_piano<R>(&mut self, f: impl FnOnce(&mut PianoRoll, &mut Document, &Env) -> R) -> R {
-        let root = self.root();
-        let playhead = self.playhead();
-        let loop_range = self.loop_range();
-        let sample_rate = self.sample_rate();
-        let tempo = self
-            .engine
-            .session()
-            .map_or(&self.fallback_tempo, |s| s.tempo());
-        let env = Env {
-            tempo,
-            sample_rate,
-            root: root.as_deref(),
-            playhead,
-            loop_range,
-        };
+        let root = self.media_root();
+        let env = view_env(self.engine.as_ref(), &self.fallback_tempo, &root);
         f(&mut self.piano, &mut self.doc, &env)
     }
 
@@ -929,22 +1011,33 @@ impl AppState {
     }
 
     /// Recovers a project that was never saved from the autosave a crashed
-    /// Kadence left in its scratch folder, and removes that folder.
+    /// Kadence left in its scratch folder, and takes that folder over: the
+    /// audio recorded into the project is in there, and the work stays in
+    /// one place that goes away when it is saved or discarded.
     pub fn recover_untitled(&mut self, candidate: &Candidate) -> Result<(), Message> {
+        let dir = candidate.autosave.parent().unwrap_or(Path::new(""));
+        // Before reading: not ours to take while another Kadence holds it,
+        // whatever it has done with the autosave since.
+        let adopted = match Scratch::adopt(dir) {
+            Ok(Some(adopted)) => adopted,
+            Ok(None) => return Err(Message::AlreadyOpen(dir.to_path_buf())),
+            Err(e) => {
+                let failed = FormatError::Io {
+                    path: dir.to_path_buf(),
+                    source: e,
+                };
+                return Err(Message::File(Context::Recover, failed));
+            }
+        };
         let project = daw_model::bundle::read_project(&candidate.autosave)
             .map_err(|e| Message::File(Context::Recover, e))?;
         self.replace_document(Document::recovered(project));
-        // Take over its folder, so the work stays in one place and goes
-        // away when it is saved or discarded.
-        if let Some(adopted) = candidate
-            .autosave
-            .parent()
-            .and_then(|d| Scratch::adopt(d).ok().flatten())
-            && let Some(own) = self.scratch.replace(adopted)
-        {
+        if let Some(own) = self.scratch.replace(adopted) {
             own.remove();
         }
         self.scratch_saved = None;
+        // The project's audio is looked for in the adopted folder now.
+        self.resync();
         self.autosave_scratch();
         Ok(())
     }
@@ -958,18 +1051,37 @@ impl AppState {
 
     /// Saves into a new bundle at `dir`. A take in progress ends first and
     /// is saved with the rest: its files belong with the project it was
-    /// started in.
+    /// started in. The audio recorded so far comes along, so the bundle
+    /// holds what the project plays.
     pub fn save_as(&mut self, dir: &Path) -> Result<(), FormatError> {
         self.stop_recording();
         self.store_plugin_states();
         let was_untitled = self.doc.bundle().is_none();
-        self.doc.save_as(dir)?;
-        if was_untitled && let Some(s) = &self.scratch {
-            let _ = s.discard();
+        // A bundle's audio is copied by the document; an unsaved project's
+        // is brought in from the folder it lived in.
+        let brought = if was_untitled {
+            // Refuses a folder that already holds a project before anything
+            // is put into it.
+            daw_model::Bundle::create(dir)?;
+            recovery::bring_audio(self.unsaved_root(), dir)?
+        } else {
+            Vec::new()
+        };
+        if let Err(e) = self.doc.save_as(dir) {
+            recovery::take_back_audio(&brought, dir);
+            return Err(e);
         }
-        self.scratch_saved = None;
         self.relock();
         self.remember();
+        // Relative audio paths are inside the new bundle now.
+        self.resync();
+        if was_untitled {
+            self.remove_unsaved_audio();
+            if let Some(s) = &self.scratch {
+                let _ = s.discard();
+            }
+        }
+        self.scratch_saved = None;
         Ok(())
     }
 
@@ -977,9 +1089,11 @@ impl AppState {
     /// dropped, with their autosave and any take still being recorded:
     /// callers end the take and ask the user first.
     pub fn replace_document(&mut self, doc: Document) {
-        // A take belongs to the document it was recorded for.
+        // A take belongs to the document it was recorded for, and so does
+        // the audio recorded while it had no bundle.
         self.discard_recording();
         self.discard_autosave();
+        self.remove_unsaved_audio();
         if let Some(s) = self.engine.session_mut() {
             let _ = s.stop();
             let _ = s.locate(TickTime(0));
@@ -987,12 +1101,16 @@ impl AppState {
             // The new document's plugins start from its own saved state, even where it
             // has the same devices (reopening a project).
             s.clear_plugins();
+            // And its audio files are looked at afresh: one that could not be read last
+            // time, or was replaced since, may be there now.
+            s.reload_media();
         }
         self.doc = doc;
         self.autosave_failed = None;
         // Changes of the old document's plugins, whose editors closed with them.
         self.plugin_changes.clear();
         self.doc_serial += 1;
+        self.opens_as_audio.clear();
         self.arrange.selection.clear();
         self.arrange.hovered = None;
         self.arrange.lanes.clear_selection();
@@ -1007,15 +1125,33 @@ impl AppState {
 
     /// The audio files clips play that are not on disk.
     pub fn missing_files(&self) -> Vec<daw_model::files::AudioFile> {
-        daw_model::files::missing_audio(self.doc.project(), self.doc.bundle())
+        let root = self.media_root();
+        let mut files = daw_model::files::audio_files(self.doc.project(), self.doc.bundle());
+        for f in &mut files {
+            // Left relative when there is no bundle to resolve it against.
+            if f.path.is_relative() {
+                f.path = root.join(&f.path);
+            }
+        }
+        files.retain(|f| !f.exists());
+        files
     }
 
     /// How many files clips play from outside the bundle, which Collect
-    /// Files would copy in. 0 without a bundle.
-    pub fn external_file_count(&self) -> usize {
-        self.doc.bundle().map_or(0, |b| {
-            daw_model::files::external_audio(self.doc.project(), b).len()
-        })
+    /// Files would copy in: those that open as audio. 0 without a bundle.
+    pub fn external_file_count(&mut self) -> usize {
+        let Some(bundle) = self.doc.bundle() else {
+            return 0;
+        };
+        let seen = &mut self.opens_as_audio;
+        daw_model::files::external_audio(self.doc.project(), bundle)
+            .into_iter()
+            .filter(|f| {
+                *seen
+                    .entry(f.path.clone())
+                    .or_insert_with(|| opens_as_audio(&f.path))
+            })
+            .count()
     }
 
     /// Points the clips playing the missing file `source` at `file`, and
@@ -1045,15 +1181,16 @@ impl AppState {
         Ok(changes.len())
     }
 
-    /// Copies every file clips play from outside the bundle into it.
-    /// Returns how many files were copied.
+    /// Copies every file clips play from outside the bundle into it, if it
+    /// opens as audio. Returns how many files were copied.
     pub fn collect_files(&mut self) -> Result<usize, Message> {
         let bundle = self
             .doc
             .bundle()
             .ok_or(Message::File(Context::Collect, FormatError::NoBundle))?;
-        let Some(collected) = daw_model::files::collect_files(self.doc.project(), bundle)
-            .map_err(|e| Message::File(Context::Collect, e))?
+        let Some(collected) =
+            daw_model::files::collect_files(self.doc.project(), bundle, opens_as_audio)
+                .map_err(|e| Message::File(Context::Collect, e))?
         else {
             return Ok(0);
         };

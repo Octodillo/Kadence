@@ -99,7 +99,7 @@ impl self_test::TestHelper {
             }
             Err(e) => {
                 // Test-only; the self test reports the failure.
-                eprintln!("demo project: {e}");
+                log::error!("demo project: {e}");
                 false
             }
         })
@@ -121,7 +121,7 @@ impl self_test::TestHelper {
                 true
             }
             Err(e) => {
-                eprintln!("stress project: {e}");
+                log::error!("stress project: {e}");
                 false
             }
         })
@@ -192,7 +192,7 @@ impl self_test::TestHelper {
         match files_test() {
             Ok(dir) => QString::from(dir.display().to_string().as_str()),
             Err(e) => {
-                eprintln!("files test: {e}");
+                log::error!("files test: {e}");
                 QString::default()
             }
         }
@@ -210,7 +210,7 @@ impl self_test::TestHelper {
             Ok(())
         })();
         if let Err(e) = result {
-            eprintln!("recovery test: {e}");
+            log::error!("recovery test: {e}");
             return false;
         }
         crate::state::with(|s| {

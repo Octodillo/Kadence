@@ -507,6 +507,7 @@ dependencies = [
  "daw-session",
  "daw-test-support",
  "libc",
+ "log",
  "tempfile",
  "uuid",
 ]
@@ -548,6 +549,7 @@ name = "daw-core"
 version = "0.1.0"
 dependencies = [
  "daw-test-support",
+ "log",
  "loom",
  "proptest",
  "serde",
@@ -680,6 +682,7 @@ dependencies = [
  "daw-plugin-window",
  "daw-test-support",
  "libc",
+ "log",
 ]
 
 [[package]]

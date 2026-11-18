@@ -278,39 +278,91 @@ impl Document {
     }
 }
 
+/// How [`copy_dir_files`] brings one entry across.
+enum Carry {
+    /// Copy the file's content.
+    Copy,
+    /// Make a link to this file.
+    Link(PathBuf),
+}
+
 /// Copies the files in `from` into `to`, refusing before copying anything if
 /// a file of the same name is already there, since clips may use it. Returns
 /// the files it made. On failure it removes them again, so a retry into the
 /// same folder isn't refused over a half-finished copy.
+///
+/// A bundle from someone else can hold a link to any file on this machine,
+/// and the copy may be shared back, so only what is really in `from` is
+/// copied. A link to a file elsewhere is made again as a link to that file;
+/// a link to another file in `from` is copied as that file, since its
+/// content is in the folder anyway. If `from` is itself a link, nothing is
+/// copied.
 fn copy_dir_files(from: &Path, to: &Path) -> Result<Vec<PathBuf>, FormatError> {
-    if !from.is_dir() {
+    if !from.symlink_metadata().is_ok_and(|m| m.is_dir()) {
         return Ok(Vec::new());
     }
     std::fs::create_dir_all(to).map_err(FormatError::io(to))?;
     let mut copies = Vec::new();
     for entry in std::fs::read_dir(from).map_err(FormatError::io(from))? {
-        let path = entry.map_err(FormatError::io(from))?.path();
-        if path.is_file() {
-            let dest = to.join(path.file_name().expect("files have names"));
-            if dest.exists() {
-                return Err(FormatError::io(dest)(
-                    std::io::ErrorKind::AlreadyExists.into(),
-                ));
-            }
-            copies.push((path, dest));
+        let entry = entry.map_err(FormatError::io(from))?;
+        let path = entry.path();
+        // Of the entry itself: a link is not followed.
+        let kind = entry.file_type().map_err(FormatError::io(&path))?;
+        let carry = if kind.is_file() {
+            Carry::Copy
+        } else if let Some(carry) = kind.is_symlink().then(|| carry_link(from, &path)).flatten() {
+            carry
+        } else {
+            continue;
+        };
+        let dest = to.join(entry.file_name());
+        if dest.symlink_metadata().is_ok() {
+            return Err(FormatError::io(dest)(
+                std::io::ErrorKind::AlreadyExists.into(),
+            ));
         }
+        copies.push((path, dest, carry));
     }
     let mut made = Vec::with_capacity(copies.len());
-    for (path, dest) in copies {
+    for (path, dest, carry) in copies {
         // Pushed first: a failed copy can leave part of the file behind.
         made.push(dest);
         let dest = made.last().expect("just pushed");
-        if let Err(e) = std::fs::copy(&path, dest) {
+        let carried = match carry {
+            Carry::Copy => std::fs::copy(&path, dest).map(drop),
+            Carry::Link(target) => link(&target, dest),
+        };
+        if let Err(e) = carried {
             remove_files(&made);
             return Err(FormatError::io(dest)(e));
         }
     }
     Ok(made)
+}
+
+/// How to bring the link at `path`, an entry of `from`, across: `None` to
+/// leave it out, when it does not lead to a file.
+fn carry_link(from: &Path, path: &Path) -> Option<Carry> {
+    let target = path.canonicalize().ok().filter(|t| t.is_file())?;
+    let inside = from
+        .canonicalize()
+        .is_ok_and(|from| target.parent() == Some(&from));
+    Some(if inside {
+        Carry::Copy
+    } else {
+        Carry::Link(target)
+    })
+}
+
+#[cfg(unix)]
+fn link(target: &Path, dest: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, dest)
+}
+
+/// Where links can't be made, the entry is refused rather than copied.
+#[cfg(not(unix))]
+fn link(_target: &Path, _dest: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// Removes files [`copy_dir_files`] made. Each was checked not to exist

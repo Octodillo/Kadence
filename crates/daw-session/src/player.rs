@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
 use daw_core::node::{Node, PortLayout, ProcessContext};
@@ -23,6 +23,8 @@ use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::SampleTime;
 use daw_media::{AudioData, ClipReader, DiskStreamer, MediaError, ReadStatus};
 use daw_model::{ClipId, FadeShape};
+
+use crate::media::{Seen, Stamp};
 
 /// Output channels of every player (tracks are stereo).
 pub const PLAYER_CHANNELS: u16 = 2;
@@ -42,26 +44,45 @@ const NOWHERE: i64 = i64::MIN;
 
 /// The loop range, shared between the session and every player so the
 /// players can prepare for the wrap. `end <= start` means no loop.
+///
+/// The two ends are read as the pair they were set as: each
+/// [`set`](Self::set) writes the slot readers are not pointed at and then
+/// points them to it. One writer (the session's thread), any number of
+/// readers.
 #[derive(Debug, Default)]
 pub struct LoopPoints {
-    start: AtomicI64,
-    end: AtomicI64,
+    /// `(start, end)`, twice. The low bit of `version` says which is current.
+    slots: [[AtomicI64; 2]; 2],
+    version: AtomicU32,
 }
 
 impl LoopPoints {
     pub fn set(&self, range: Option<(SampleTime, SampleTime)>) {
         let (s, e) = range.map_or((0, 0), |(s, e)| (s.0, e.0));
-        // Clear the end first so a reader never sees a new start with an old end
-        // that makes a bogus range for one block.
-        self.end.store(0, Ordering::Relaxed);
-        self.start.store(s, Ordering::Relaxed);
-        self.end.store(e, Ordering::Release);
+        // Sequentially consistent throughout: a reader's second look at
+        // the version must come after any write to the slot it read.
+        let next = self.version.load(Ordering::SeqCst).wrapping_add(1);
+        let slot = &self.slots[(next & 1) as usize];
+        slot[0].store(s, Ordering::SeqCst);
+        slot[1].store(e, Ordering::SeqCst);
+        self.version.store(next, Ordering::SeqCst);
     }
 
     pub fn get(&self) -> Option<(i64, i64)> {
-        let e = self.end.load(Ordering::Acquire);
-        let s = self.start.load(Ordering::Relaxed);
-        (e > s).then_some((s, e))
+        loop {
+            let version = self.version.load(Ordering::SeqCst);
+            let slot = &self.slots[(version & 1) as usize];
+            let (s, e) = (
+                slot[0].load(Ordering::SeqCst),
+                slot[1].load(Ordering::SeqCst),
+            );
+            // The slot read is written again only by the second `set` after
+            // `version`, and the first one moves the version on: unchanged,
+            // the pair is whole. Otherwise read the newer one.
+            if self.version.load(Ordering::SeqCst) == version {
+                return (e > s).then_some((s, e));
+            }
+        }
     }
 }
 
@@ -105,6 +126,9 @@ pub enum ClipSource {
 pub struct PlayClip {
     pub id: ClipId,
     pub path: PathBuf,
+    /// Which version of the file at `path` the clip was made from, `None`
+    /// if there was no file.
+    pub stamp: Option<Stamp>,
     /// Timeline span `[start, end)`.
     pub start: i64,
     pub end: i64,
@@ -203,6 +227,13 @@ impl ClipSet {
     pub fn is_empty(&self) -> bool {
         self.clips.is_empty()
     }
+
+    /// The files that could not be read, as they were then.
+    pub fn unread(&self) -> Vec<Seen> {
+        let missing = |c: &&PlayClip| matches!(c.source, ClipSource::Missing);
+        let clips = self.clips.iter().filter(missing);
+        clips.map(|c| (c.path.clone(), c.stamp)).collect()
+    }
 }
 
 /// A render to a file that players take part in: see [`player`].
@@ -249,17 +280,23 @@ pub fn player(
 pub struct PlayerHandle {
     tx: Producer<Box<ClipSet>>,
     garbage: Collector<Box<ClipSet>>,
-    /// Ids and stream paths of the last set sent, in order.
-    sent: Vec<(ClipId, Option<PathBuf>)>,
+    /// Ids and streamed files of the last set sent, in order.
+    sent: Vec<(ClipId, Option<Seen>)>,
 }
 
 impl PlayerHandle {
-    /// Whether a clip with this id and path was streamed in the last set, so
-    /// the new set can reuse its readers instead of opening the file again.
-    pub fn has_stream(&self, id: ClipId, path: &std::path::Path) -> bool {
-        self.sent
-            .iter()
-            .any(|(i, p)| *i == id && p.as_deref() == Some(path))
+    /// Whether a clip with this id was streamed from this version of the
+    /// file in the last set, so the new set can reuse its readers instead
+    /// of opening the file again.
+    pub fn has_stream(&self, id: ClipId, path: &std::path::Path, stamp: Option<Stamp>) -> bool {
+        self.stream(id, path, stamp).is_some()
+    }
+
+    /// Where in the last set that clip is.
+    fn stream(&self, id: ClipId, path: &std::path::Path, stamp: Option<Stamp>) -> Option<usize> {
+        self.sent.iter().position(|(i, file)| {
+            *i == id && matches!(file, Some((p, s)) if p == path && *s == stamp)
+        })
     }
 
     /// Sends a new set of clips. Clips whose source is `Stream(None)` take
@@ -272,10 +309,7 @@ impl PlayerHandle {
             .clips
             .iter()
             .map(|c| match c.source {
-                ClipSource::Stream(None) => self
-                    .sent
-                    .iter()
-                    .position(|(i, p)| *i == c.id && p.as_deref() == Some(&c.path)),
+                ClipSource::Stream(None) => self.stream(c.id, &c.path, c.stamp),
                 _ => None,
             })
             .collect();
@@ -284,7 +318,7 @@ impl PlayerHandle {
             .iter()
             .map(|c| {
                 let streamed = matches!(c.source, ClipSource::Stream(_));
-                (c.id, streamed.then(|| c.path.clone()))
+                (c.id, streamed.then(|| (c.path.clone(), c.stamp)))
             })
             .collect();
         match self.tx.push(Box::new(set)) {
@@ -522,5 +556,42 @@ impl Node for AudioClipPlayer {
     fn reset(&mut self) {
         self.expected = None;
         self.parked_at = NOWHERE;
+    }
+}
+
+#[cfg(test)]
+mod loop_points_tests {
+    use super::*;
+
+    #[test]
+    fn a_reader_sees_the_ends_of_one_set() {
+        let points = LoopPoints::default();
+        assert_eq!(points.get(), None);
+        points.set(Some((SampleTime(10), SampleTime(20))));
+        assert_eq!(points.get(), Some((10, 20)));
+        points.set(None);
+        assert_eq!(points.get(), None);
+
+        // Every range set is 10 long; a mix of two would not be.
+        let done = AtomicBool::new(false);
+        let reads = AtomicU32::new(0);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    if let Some((s, e)) = points.get() {
+                        assert_eq!(e - s, 10, "torn: {s}..{e}");
+                    }
+                    reads.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            // Until the reader has surely been reading alongside.
+            let mut i = 0;
+            while i < 200_000 || reads.load(Ordering::Relaxed) < 100_000 {
+                points.set(Some((SampleTime(i * 7), SampleTime(i * 7 + 10))));
+                i += 1;
+            }
+            done.store(true, Ordering::Relaxed);
+            reader.join().unwrap();
+        });
     }
 }

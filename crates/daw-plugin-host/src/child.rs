@@ -44,14 +44,18 @@ pub fn run_host_child(
 ) -> Option<ExitCode> {
     let args: Vec<OsString> = args.into_iter().collect();
     let pos = args.iter().position(|a| a == HOST_ARG)?;
+    // This process is a plugin host, whatever binary it was started from.
+    daw_core::logging::init("kadence-plugin-host");
     let Some(socket) = args.get(pos + 1) else {
-        eprintln!("usage: {HOST_ARG} <socket>");
+        log::error!("usage: {HOST_ARG} <socket>");
         return Some(ExitCode::from(2));
     };
     // A panic anywhere (the plugin's adapter, a poisoned lock) must end the process, so the
     // application sees a crash rather than a host that stopped answering.
+    // Printed rather than logged, like the default hook: a panic must be seen
+    // whatever the log level.
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("daw-plugin-host: {info}");
+        eprintln!("kadence-plugin-host: {info}");
         std::process::abort();
     }));
     exit_with_parent();
@@ -60,7 +64,7 @@ pub fn run_host_child(
     let stream = match UnixStream::connect(Path::new(socket)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("daw-plugin-host: cannot connect to {socket:?}: {e}");
+            log::error!("cannot connect to {socket:?}: {e}");
             return Some(ExitCode::FAILURE);
         }
     };
@@ -83,7 +87,7 @@ pub fn run_host_child(
     Some(match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("daw-plugin-host: {e}");
+            log::error!("{e}");
             ExitCode::FAILURE
         }
     })
@@ -560,8 +564,8 @@ fn set_realtime(priority: i32) {
     let err =
         unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) };
     if err != 0 {
-        eprintln!(
-            "daw-plugin-host: real-time priority {priority} not granted ({}); audio may glitch",
+        log::warn!(
+            "real-time priority {priority} not granted ({}); audio may glitch",
             std::io::Error::from_raw_os_error(err)
         );
     }

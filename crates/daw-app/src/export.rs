@@ -128,8 +128,14 @@ impl AppState {
         // A plugin's live state can be newer than the document's.
         self.store_plugin_states();
         let loader = self.engine.export_plugin_loader();
-        let job = ExportJob::start(self.doc.snapshot(), self.root(), loader, path, settings)
-            .map_err(|e| Message::Export(ExportProblem::Thread(e)))?;
+        let job = ExportJob::start(
+            self.doc.snapshot(),
+            Some(self.media_root()),
+            loader,
+            path,
+            settings,
+        )
+        .map_err(|e| Message::Export(ExportProblem::Thread(e)))?;
         self.export = Some(job);
         Ok(())
     }

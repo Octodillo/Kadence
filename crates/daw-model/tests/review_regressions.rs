@@ -748,3 +748,141 @@ fn a_backup_at_the_last_time_stamp_fails_the_save_instead_of_piling_up() {
     doc.save().unwrap();
     assert_eq!(b.load().unwrap().tracks[0].name, "v0");
 }
+
+fn audio_clip_at(start: i64, length: i64) -> Clip {
+    Clip::new(
+        "c",
+        daw_core::time::TickTime(start),
+        daw_core::time::TickTime(length),
+        ClipContent::Audio(AudioClip::new("audio/a.wav", daw_core::time::SampleTime(0))),
+    )
+}
+
+/// `project` as JSON with `edit` applied, loaded again.
+fn reloaded(
+    project: &Project,
+    edit: impl Fn(&mut serde_json::Value),
+) -> Result<Project, FormatError> {
+    let mut json: serde_json::Value =
+        serde_json::from_str(&bundle::to_json(project).unwrap()).unwrap();
+    edit(&mut json);
+    bundle::from_json(&json.to_string())
+}
+
+#[test]
+fn a_project_file_with_times_out_of_range_does_not_load() {
+    use daw_core::time::TickTime;
+    use serde_json::json;
+    let (mut p, id) = project_with_track();
+    let mut h = UndoStack::new(8);
+    h.execute(&mut p, Box::new(AddClip::new(id, audio_clip_at(0, 960))))
+        .unwrap();
+    let midi = Track::new(TrackKind::Instrument, "I");
+    let midi_id = midi.id;
+    h.execute(&mut p, Box::new(AddTrack::new(1, midi))).unwrap();
+    let mut notes = MidiClip::default();
+    notes
+        .notes
+        .push(Note::new(TickTime(0), TickTime(10), 60, 1.0));
+    let clip = Clip::new("m", TickTime(0), TickTime(960), ClipContent::Midi(notes));
+    h.execute(&mut p, Box::new(AddClip::new(midi_id, clip)))
+        .unwrap();
+    let mut lane = AutomationLane::new(AutomationTarget::Volume);
+    lane.points.push(AutomationPoint::new(TickTime(0), 0.0));
+    h.execute(&mut p, Box::new(AddLane { track: id, lane }))
+        .unwrap();
+    assert!(reloaded(&p, |_| {}).is_ok());
+
+    let over = MAX_PROJECT_TICK.0 + 1;
+    let audio = "/project/tracks/0/clips/0";
+    let note = "/project/tracks/1/clips/0/content/notes/0";
+    let cases = [
+        (format!("{audio}/start"), json!(i64::MAX)),
+        (format!("{audio}/length"), json!(i64::MAX)),
+        (format!("{audio}/start"), json!(over)),
+        (format!("{audio}/length"), json!(over)),
+        (
+            format!("{audio}/content/offset"),
+            json!(MAX_AUDIO_OFFSET.0 + 1),
+        ),
+        (format!("{audio}/content/source"), json!("")),
+        (format!("{audio}/content/fade_in/length"), json!(over)),
+        (format!("{note}/start"), json!(over)),
+        (format!("{note}/length"), json!(over)),
+        (
+            "/project/tracks/0/automation/0/points/0/tick".into(),
+            json!(over),
+        ),
+        (
+            "/project/tracks/0/automation/0/points/0/tick".into(),
+            json!(i64::MIN),
+        ),
+        ("/project/tempo/tempos/0/bpm".into(), json!(1e-300)),
+        ("/project/tempo/tempos/0/bpm".into(), json!(1e300)),
+    ];
+    for (path, value) in cases {
+        let loaded = reloaded(&p, |json| {
+            *json
+                .pointer_mut(&path)
+                .unwrap_or_else(|| panic!("no {path}")) = value.clone();
+        });
+        assert!(loaded.is_err(), "{path} = {value} loaded");
+    }
+    let mut far = p.clone();
+    far.tempo.tempos.push(TempoPoint {
+        tick: TickTime(over),
+        ..far.tempo.tempos[0].clone()
+    });
+    assert!(far.validate().is_err());
+    // The furthest values allowed are fine.
+    audio_clip_at(MAX_PROJECT_TICK.0, MAX_PROJECT_TICK.0)
+        .check()
+        .unwrap();
+}
+
+#[test]
+fn edits_hold_clips_to_what_a_project_file_may_say() {
+    use daw_core::time::TickTime;
+    let (mut p, id) = project_with_track();
+    let mut h = UndoStack::new(8);
+    let clip = audio_clip_at(0, 960);
+    let cid = clip.id;
+    h.execute(&mut p, Box::new(AddClip::new(id, clip))).unwrap();
+    let before = p.clone();
+    let far = TickTime(MAX_PROJECT_TICK.0 + 1);
+    let refused: Vec<Box<dyn Command>> = vec![
+        Box::new(MoveClip::new(cid, id, far)),
+        Box::new(SetClip::new(cid, ClipField::Length(far))),
+        Box::new(SetClip::new(cid, ClipField::Length(TickTime(0)))),
+        Box::new(SetClip::new(cid, ClipField::AudioSource("".into()))),
+        Box::new(SetClip::new(
+            cid,
+            ClipField::AudioOffset(daw_core::time::SampleTime(MAX_AUDIO_OFFSET.0 + 1)),
+        )),
+        Box::new(SetClip::new(
+            cid,
+            ClipField::FadeIn(Fade::new(far, FadeShape::default())),
+        )),
+    ];
+    for cmd in refused {
+        assert!(h.execute(&mut p, cmd).is_err());
+        // A refused edit leaves the clip as it was.
+        assert_eq!(p, before);
+    }
+    h.execute(&mut p, Box::new(MoveClip::new(cid, id, MAX_PROJECT_TICK)))
+        .unwrap();
+}
+
+#[test]
+fn a_bus_armed_for_recording_does_not_load() {
+    let (mut p, _) = project_with_track();
+    let mut bus = Track::new(TrackKind::Bus, "B");
+    bus.armed = true;
+    let mut h = UndoStack::new(8);
+    assert!(
+        h.execute(&mut p, Box::new(AddTrack::new(1, bus.clone())))
+            .is_err()
+    );
+    p.tracks.push(bus.into());
+    assert!(p.validate().is_err());
+}

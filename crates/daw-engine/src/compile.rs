@@ -482,16 +482,6 @@ impl CompiledGraph {
         self.steps[self.master].n_out
     }
 
-    /// Calls `reset` on every node and clears every delay line.
-    pub fn reset(&mut self) {
-        for s in &mut self.steps {
-            s.node.reset();
-        }
-        for d in &mut self.delays {
-            d.reset();
-        }
-    }
-
     /// Cuts off what is still sounding: resets every node marked with
     /// [`GraphDesc::set_tail`] and clears every delay line, so reverb and
     /// delay tails and held voices stop at once. Other nodes (players,
@@ -529,8 +519,8 @@ impl CompiledGraph {
 
     /// Runs every node once for `frames` samples (at most `max_frames`).
     /// `audio_in[ch][offset..offset + frames]` feeds the input node.
-    /// Returns how many automation events found no room in a node's event
-    /// list. RT-safe.
+    /// Returns what did not fit a node's event list and was dropped.
+    /// RT-safe.
     pub(crate) fn process(
         &mut self,
         transport: &TransportState,
@@ -538,10 +528,10 @@ impl CompiledGraph {
         audio_in: &[&[f32]],
         offset: usize,
         external: &[EventList],
-    ) -> usize {
+    ) -> Dropped {
         debug_assert!(frames <= self.max_frames);
         let mf = self.max_frames;
-        let mut dropped = 0;
+        let mut dropped = Dropped::default();
         let Self { steps, delays, .. } = self;
         for i in 0..steps.len() {
             let (done, rest) = steps.split_at_mut(i);
@@ -580,8 +570,9 @@ impl CompiledGraph {
                 }
             }
 
-            // Events that don't fit are dropped: a full list must not
-            // allocate.
+            // Events that don't fit are dropped, since a full list must not
+            // allocate; the list counts them, and each kind is read off it
+            // once its events are in.
             step.events_in.clear();
             for e in step.params.iter() {
                 let _ = step.events_in.push(*e);
@@ -602,7 +593,7 @@ impl CompiledGraph {
                 // `in_latency` samples ago; before project start the lane
                 // holds its first value.
                 let now = transport.position.0 - i64::from(step.in_latency);
-                dropped += emit_automation(
+                dropped.params += emit_automation(
                     &mut step.automation,
                     now,
                     frames,
@@ -611,6 +602,7 @@ impl CompiledGraph {
                     lane_changes(mf),
                 );
             }
+            dropped.params += step.events_in.take_overflow();
             for list in step.external_events.lists(external) {
                 for e in list.iter() {
                     let _ = step.events_in.push(*e);
@@ -621,6 +613,7 @@ impl CompiledGraph {
                     let _ = step.events_in.push(*e);
                 }
             }
+            dropped.events += step.events_in.take_overflow();
 
             let mut ins: [&[f32]; MAX_CHANNELS] = [&[]; MAX_CHANNELS];
             for (slot, ch) in ins.iter_mut().zip(step.inputs.chunks_exact(mf)) {
@@ -642,6 +635,9 @@ impl CompiledGraph {
                 events_out: &mut step.events_out,
             };
             step.node.process(&mut ctx);
+            // What the node had no room to send on: a clip's notes, a
+            // plugin's MIDI output.
+            dropped.events += step.events_out.take_overflow();
             if let Some(meter) = &step.meter {
                 for (ch, out) in step.outputs.chunks_exact(mf).enumerate() {
                     meter.update(ch, &out[..frames]);
@@ -652,10 +648,28 @@ impl CompiledGraph {
     }
 }
 
-/// Pushes what `lanes` do in the block of `frames` samples starting at `now`
-/// and returns how many events did not fit. `reserve` slots of `out` are
-/// left free for the notes still to come, as far as that leaves every lane
-/// its own `own` changes. RT-safe.
+/// What one block could not deliver because a node's event list was full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Dropped {
+    /// Parameter changes, queued or from automation.
+    pub params: u64,
+    /// Notes and other events: into a node from outside or from another
+    /// node, and out of a node that made more than its output list holds.
+    pub events: u64,
+}
+
+impl std::ops::AddAssign for Dropped {
+    fn add_assign(&mut self, other: Self) {
+        self.params += other.params;
+        self.events += other.events;
+    }
+}
+
+/// Pushes what `lanes` do in the block of `frames` samples starting at `now`.
+/// `reserve` slots of `out` are left free for the notes still to come, as far
+/// as that leaves every lane its own `own` changes. Returns how many changes
+/// were held back for that; those `out` had no room for at all are in its
+/// own [overflow count](EventList::take_overflow). RT-safe.
 fn emit_automation(
     lanes: &mut [Lane],
     now: i64,
@@ -663,16 +677,14 @@ fn emit_automation(
     out: &mut EventList,
     reserve: usize,
     own: usize,
-) -> usize {
-    let mut dropped = 0;
+) -> u64 {
+    let mut held_back = 0;
     // Every lane's value at the start of the block goes first: whatever is
     // dropped below, no parameter is left behind for longer than a block.
     for lane in lanes.iter_mut() {
         lane.sent = 0;
-        if let Some(value) = lane.points.value_at(SampleTime(now))
-            && out.push(param_event(lane.param, 0, value)).is_err()
-        {
-            dropped += 1;
+        if let Some(value) = lane.points.value_at(SampleTime(now)) {
+            let _ = out.push(param_event(lane.param, 0, value));
         }
     }
     // What the lanes may use between them beyond their own changes.
@@ -690,21 +702,22 @@ fn emit_automation(
         let to = next_grid(from + 1).min(end);
         for lane in lanes.iter_mut() {
             for (t, value) in lane.points.changes(from, (to - from) as usize) {
-                let fits = lane.sent < own || spare > 0;
+                if lane.sent >= own && spare == 0 {
+                    held_back += 1;
+                    continue;
+                }
                 let event = param_event(lane.param, (t - now) as usize, value);
-                if fits && out.push(event).is_ok() {
+                if out.push(event).is_ok() {
                     if lane.sent >= own {
                         spare -= 1;
                     }
                     lane.sent += 1;
-                } else {
-                    dropped += 1;
                 }
             }
         }
         from = to - 1;
     }
-    dropped
+    held_back
 }
 
 /// The keyed nodes of `steps` and the delay lines between them.

@@ -7,6 +7,8 @@
 #   packaging/flatpak/cargo-sources.py
 #   flatpak-builder --user --install --force-clean build-flatpak \
 #       packaging/flatpak/io.github.octodillo.daw.yml
+#
+# CI builds and smoke-tests it with ci/flatpak-package.sh.
 id: io.github.octodillo.daw
 runtime: org.kde.Platform
 # KDE 6.11 is built on freedesktop 25.08. The SDK extensions and the plugin
@@ -26,13 +28,21 @@ finish-args:
   # exception for having both; plugin GUIs are the reason.
   - --socket=x11
   - --device=dri
-  # Audio and MIDI go through PipeWire's JACK interface. The PulseAudio
-  # socket covers systems where PipeWire's socket isn't exposed.
+  # Audio and MIDI go through PipeWire's JACK interface, the only audio
+  # path Kadence has.
   - --filesystem=xdg-run/pipewire-0
-  - --socket=pulseaudio
-  # Projects and samples usually live here; anything else goes through the
-  # file chooser portal.
+  # A project is a folder (Name.kadence next to audio/ and backups/), but
+  # Save As and Open ask for the .kadence file, and for a file the chooser
+  # portal grants only that file: Save As could not create the folder and
+  # Open could not read the audio next to the file. So the places people
+  # keep projects are granted outright: the home directory, the music folder
+  # in case it lives elsewhere, and removable drives. That is a wide grant
+  # (see packaging/README.md).
+  - --filesystem=home
   - --filesystem=xdg-music
+  - --filesystem=/run/media
+  - --filesystem=/media
+  - --filesystem=/mnt
   # Plugins installed in the user's home, read only.
   - --filesystem=~/.clap:ro
   - --filesystem=~/.lv2:ro

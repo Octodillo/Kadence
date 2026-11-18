@@ -6,7 +6,7 @@ use daw_core::event::{Event, EventList, ParamId};
 use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::{SampleTime, SegmentTempoMap, Timeline};
 
-use crate::compile::{CompileError, CompiledGraph};
+use crate::compile::{CompileError, CompiledGraph, Dropped};
 use crate::graph::{GraphDesc, LiveNodes, NodeId, NodeKey};
 use crate::meter::NodeMeter;
 use crate::transport::{LoopRange, Transport, TransportCommand};
@@ -92,7 +92,9 @@ struct Shared {
     counting_in: AtomicBool,
     latency: AtomicU32,
     swaps: AtomicU64,
-    dropped: AtomicU64,
+    cycles: AtomicU64,
+    dropped_params: AtomicU64,
+    dropped_events: AtomicU64,
     /// Timelines a dropped controller still held. The audio thread may
     /// still swap them in, so they live until the processor is dropped.
     orphans: Mutex<Vec<Arc<Timeline>>>,
@@ -348,11 +350,33 @@ impl EngineController {
         self.shared.swaps.load(Ordering::Relaxed)
     }
 
+    /// How many cycles the audio thread has finished: calls of
+    /// [`process`](EngineProcessor::process) that played something. Each
+    /// takes the commands sent before it started and empties every node's
+    /// queue of parameter changes, so what was sent while this said `n` has
+    /// been through once it says `n + 2`.
+    pub fn cycles(&self) -> u64 {
+        self.shared.cycles.load(Ordering::Relaxed)
+    }
+
     /// Parameter changes dropped because a node's queue was full, the node
     /// was not in the running graph, it has no event input, or automation
     /// had more changes in one block than fit the node's event list.
     pub fn dropped_params(&self) -> u64 {
-        self.shared.dropped.load(Ordering::Relaxed)
+        self.shared.dropped_params.load(Ordering::Relaxed)
+    }
+
+    /// Notes and other events dropped because an event list was full: more
+    /// in one block than [`EngineConfig::event_capacity`], whether coming in
+    /// from outside, passing from one node to the next, or made by a node
+    /// (a clip's notes, a plugin's MIDI output). A dropped note-off leaves
+    /// its note sounding, so a count that moves is worth reporting.
+    ///
+    /// Not counted: lists a node keeps to itself, such as the events held
+    /// for a plugin that could not be reached for a block, and those inside
+    /// a sandboxed plugin's own process.
+    pub fn dropped_events(&self) -> u64 {
+        self.shared.dropped_events.load(Ordering::Relaxed)
     }
 
     fn send(&mut self, cmd: Command) -> Result<(), EngineError> {
@@ -423,6 +447,7 @@ impl EngineProcessor {
     ) {
         self.drain_commands();
         let mut offset = 0;
+        let mut dropped = Dropped::default();
         while offset < frames {
             let len = self
                 .transport
@@ -434,23 +459,22 @@ impl EngineProcessor {
             let overflow = self.external.len() - 1;
             for (i, events) in sources.iter().enumerate() {
                 let list = &mut self.external[i.min(overflow)];
-                for e in events.iter() {
+                let in_block = events.iter().filter_map(|e| {
                     let f = e.frame as usize;
-                    if f >= offset && (f < offset + len || last) {
-                        let frame = (f - offset).min(len - 1) as u32;
-                        let _ = list.push(Event { frame, ..*e });
-                    }
+                    (f >= offset && (f < offset + len || last)).then(|| Event {
+                        frame: (f - offset).min(len - 1) as u32,
+                        ..*e
+                    })
+                });
+                for e in in_block {
+                    let _ = list.push(e);
                 }
+                dropped.events += list.take_overflow();
             }
             let state = self.transport.state();
             match self.graph.as_deref_mut() {
                 Some(g) => {
-                    let dropped = g.process(&state, len, audio_in, offset, &self.external);
-                    if dropped > 0 {
-                        self.shared
-                            .dropped
-                            .fetch_add(dropped as u64, Ordering::Relaxed);
-                    }
+                    dropped += g.process(&state, len, audio_in, offset, &self.external);
                     let channels = g.output_channels();
                     for (ch, out) in audio_out.iter_mut().enumerate() {
                         let out = &mut out[offset..offset + len];
@@ -469,6 +493,20 @@ impl EngineProcessor {
             }
             self.transport.advance(len);
             offset += len;
+        }
+        if frames > 0 {
+            self.shared.cycles.fetch_add(1, Ordering::Release);
+        }
+        // Only written when something was lost, to keep the cache line quiet.
+        if dropped.params > 0 {
+            self.shared
+                .dropped_params
+                .fetch_add(dropped.params, Ordering::Relaxed);
+        }
+        if dropped.events > 0 {
+            self.shared
+                .dropped_events
+                .fetch_add(dropped.events, Ordering::Relaxed);
         }
         self.shared
             .position
@@ -523,7 +561,7 @@ impl EngineProcessor {
                         .as_deref_mut()
                         .is_some_and(|g| g.queue_param(node, param, value));
                     if !queued {
-                        self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                        self.shared.dropped_params.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }

@@ -60,7 +60,7 @@ impl Default for HostConfig {
             sample_rate: 48_000,
             buffer_size: 256,
             use_server: true,
-            client_name: "Kadence".into(),
+            client_name: daw_core::plugin::HOST_NAME.into(),
             auto_connect: true,
         }
     }
@@ -97,6 +97,9 @@ struct MidiLink {
     /// Connected as far as we know; cleared when the source goes away, so
     /// it is connected again when it comes back.
     connected: bool,
+    /// The last attempt to connect was refused. Attempts repeat about once a
+    /// second, so only the first refusal in a row is logged.
+    refused: bool,
 }
 
 /// A backend with a session running on it.
@@ -288,6 +291,7 @@ impl AudioHost {
             source: source.to_owned(),
             port,
             connected: false,
+            refused: false,
         })
     }
 
@@ -303,6 +307,7 @@ impl AudioHost {
             if !here {
                 changed |= link.connected;
                 link.connected = false;
+                link.refused = false;
                 continue;
             }
             // Connect even when we think it is: the source may have gone
@@ -314,14 +319,17 @@ impl AudioHost {
                 // Made already (by a session manager, or before a restart).
                 Err(BackendError::Connection { reason, .. }) if reason.contains("already") => {}
                 Err(e) => {
-                    log::warn!(
-                        "could not connect {} to {}: {e}",
-                        link.source,
-                        link.port.name
-                    );
+                    if !std::mem::replace(&mut link.refused, true) {
+                        log::warn!(
+                            "could not connect {} to {}: {e}",
+                            link.source,
+                            link.port.name
+                        );
+                    }
                     continue;
                 }
             }
+            link.refused = false;
             link.connected = true;
             changed |= !was;
         }

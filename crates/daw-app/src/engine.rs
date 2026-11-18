@@ -216,11 +216,7 @@ fn sandbox_loader(
 /// Where plugin scan results are kept, shared by the session's loader and
 /// the plugin browser's scan.
 pub(crate) fn plugin_cache_file() -> Option<PathBuf> {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .map(|dir| dir.join("kadence").join("plugins.json"))
+    crate::paths::cache_dir().map(|dir| dir.join("plugins.json"))
 }
 
 /// The client name of a quiet run, set by [`use_quiet_audio`].

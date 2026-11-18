@@ -34,7 +34,11 @@ multiple-versions = "allow"
 wildcards = "deny"
 allow-wildcard-paths = true
 
+# `cargo deny check advisories` runs weekly (packaging.yml) and before a
+# release is built (release.yml), not on pull requests. An advisory that does
+# not apply to Kadence goes here, as { id = "RUSTSEC-…", reason = "…" }.
 [advisories]
+yanked = "deny"
 ignore = []
 
 [sources]

@@ -279,7 +279,7 @@ impl ClapInstance {
     fn deactivate(&mut self) {
         if self.active && self.audio.is_none() {
             // Deactivating needs the audio half, which the host must `join` first.
-            eprintln!(
+            log::error!(
                 "{}: deactivated while its audio half is out; leaking it",
                 self.descriptor.id
             );
@@ -535,7 +535,7 @@ impl Node for ClapInstance {
     fn prepare(&mut self, sample_rate: f64, max_frames: u32) {
         if let Err(e) = self.try_prepare(sample_rate, max_frames) {
             // `Node::prepare` cannot fail; an inactive plugin outputs silence.
-            eprintln!("{e}");
+            log::error!("{}: {e}", self.descriptor.id);
         }
     }
 
