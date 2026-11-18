@@ -149,7 +149,16 @@ fn a_finger_scrolls_from_the_empty_grid_and_edits_everywhere_else() {
     assert!(!pans(rig.x(Q / 2), rig.y(60)), "on the note");
     assert!(!pans(rig.x(Q), rig.pr.ruler_height / 2.0), "on the ruler");
     assert!(!pans(rig.pr.keyboard_width / 2.0, rig.y(60)), "on the keys");
-    assert!(!pans(rig.x(Q), 599.0), "on the velocity lane");
+    let velocity = rig.pr.height - 1.0;
+    assert_eq!(rig.pr.area(rig.x(Q), velocity), Area::Velocity);
+    assert!(!pans(rig.x(Q), velocity), "on the velocity lane");
+    assert!(!pans(1.0, 1.0), "in the corner");
+    // Holding a finger still opens a menu only where a right click would:
+    // not on the keys (the note keeps sounding) or the velocity lane.
+    assert!(rig.pr.has_menu_at(rig.x(2 * Q), rig.y(60)));
+    assert!(!rig.pr.has_menu_at(rig.pr.keyboard_width / 2.0, rig.y(60)));
+    assert!(!rig.pr.has_menu_at(rig.x(Q), velocity));
+    assert!(!rig.pr.has_menu_at(rig.x(Q), rig.pr.ruler_height / 2.0));
 }
 
 #[test]

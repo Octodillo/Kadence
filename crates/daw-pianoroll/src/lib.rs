@@ -930,6 +930,12 @@ impl PianoRoll {
         self.area(x, y) == Area::Notes && self.hit(project, x, y).is_none()
     }
 
+    /// Whether a right click at `(x, y)` asks for a context menu: on the
+    /// grid and on the automation lanes.
+    pub fn has_menu_at(&self, x: f64, y: f64) -> bool {
+        matches!(self.area(x, y), Area::Notes | Area::Lanes)
+    }
+
     pub fn pinch(&mut self, scale: f64, x: f64) -> Outcome {
         self.view.zoom_at(scale, x - self.keyboard_width);
         self.clamp_scroll();

@@ -183,6 +183,7 @@ Double-click a MIDI clip to open it on the **Edit** page.
   octave.
 - On a touch screen, a finger on the empty grid scrolls and two fingers
   zoom; a finger on a note moves it, and holding still opens the menu.
+  From the keyboard, Menu or Shift+F10 opens it.
 - **Flats** on the toolbar, also in the General settings, names the black
   keys as flats (B♭) instead of sharps (A♯).
 

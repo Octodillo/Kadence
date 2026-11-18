@@ -369,6 +369,7 @@ Kirigami.Page {
         CanvasPointer {
             anchors.fill: roll
             canvas: roll
+            holds: (x, y) => roll.hasMenuAt(x, y)
             enabled: page.visible && roll.hasClip
 
             onDoubleClicked: (m) => {

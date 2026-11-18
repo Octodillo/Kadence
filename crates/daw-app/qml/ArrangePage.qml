@@ -188,7 +188,9 @@ Kirigami.Page {
     ]
 
     // What a track header's context menu does, for the selected track: the
-    // keyboard's way to it, whatever has the focus.
+    // menu's own entries, and the keyboard's way to them whatever has the
+    // focus. Alt+Up and Alt+Down step aside for a focused control that
+    // uses the arrow keys.
     readonly property bool trackSelected: Project.selectedTrack >= 0 && Project.selectedTrack < Tracks.count
     readonly property list<Kirigami.Action> trackActions: [
         Kirigami.Action {
@@ -209,7 +211,7 @@ Kirigami.Page {
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Move Track Up")
             icon.name: "go-up"
-            shortcut: "Alt+Up"
+            shortcut: applicationWindow().controlHasArrowKeys ? "" : "Alt+Up"
             enabled: page.visible && page.trackSelected && Project.selectedTrack > 0
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Tracks.moveTrack(Project.selectedTrack, Project.selectedTrack - 1)
@@ -217,7 +219,7 @@ Kirigami.Page {
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Move Track Down")
             icon.name: "go-down"
-            shortcut: "Alt+Down"
+            shortcut: applicationWindow().controlHasArrowKeys ? "" : "Alt+Down"
             enabled: page.visible && page.trackSelected && Project.selectedTrack < Tracks.count - 1
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: Tracks.moveTrack(Project.selectedTrack, Project.selectedTrack + 1)
@@ -355,6 +357,7 @@ Kirigami.Page {
                         width: headers.width
                         arrange: view
                         laneSize: page.laneSize
+                        trackActions: page.trackActions
                     }
 
                     // Where a dragged track will land.

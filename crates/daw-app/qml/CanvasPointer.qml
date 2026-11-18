@@ -6,16 +6,22 @@ import QtQuick
 // piano roll): lay it over the `canvas` it serves. A mouse or pen edits. A
 // finger scrolls where `canvas.touchPans` says the space is empty and edits
 // elsewhere; a tap there is a click, holding still asks for the context
-// menu as a right click does, and a second finger can take the touch over
-// for a pinch. Menu or Shift+F10 emits `menuKeyPressed`.
+// menu as a right click does (where `holds` says there is one), and a
+// second finger can take the touch over for a pinch. Menu or Shift+F10
+// emits `menuKeyPressed`.
 //
 // The canvas provides press, motion, release, hover, cancelDrag, wheel,
-// touchPans and cursorShape. Users add what differs: the wheel, double
-// clicks and their own keys.
+// touchPans and cursorShape (an ArrangeView or a PianoRoll; QML has no
+// type for the pair). Users add what differs: the wheel, double clicks and
+// their own keys.
 MouseArea {
     id: pointer
 
     required property Item canvas
+    // Whether holding a finger still at (x, y) asks for the context menu.
+    // Where there is none, a held finger goes on with what it does (a key
+    // sounding, a bar about to be dragged).
+    property var holds: (x, y) => true
     signal menuKeyPressed()
 
     acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
@@ -50,7 +56,9 @@ MouseArea {
         // pinch; a mouse drag keeps its grab.
         preventStealing = !touchPoint.active;
         if (touchPoint.active) {
-            hold.restart();
+            if (holds(m.x, m.y)) {
+                hold.restart();
+            }
             if (m.button === Qt.LeftButton && canvas.touchPans(m.x, m.y)) {
                 panning = true;
                 return;
@@ -101,6 +109,13 @@ MouseArea {
         } else {
             canvas.hover(-1, -1);
         }
+    }
+    // A double tap is the canvas's own gesture from its second press on
+    // (it may go on as a drag), not a scroll or a held finger. Users handle
+    // the double click itself.
+    onDoubleClicked: {
+        hold.stop();
+        panning = false;
     }
     // Off the canvas: nothing is hovered.
     onExited: if (!pressed) canvas.hover(-1, -1)

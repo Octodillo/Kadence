@@ -42,6 +42,9 @@ Column {
     required property ArrangeView arrange
     // The automation lanes' height (see ArrangePage).
     required property LayoutSize laneSize
+    // The page's actions on the selected track, for the header's menu:
+    // rename, move up, move down, delete.
+    required property list<Kirigami.Action> trackActions
     readonly property int laneCount: lanes.length
 
     // How much each of `r` sizes in this row (the track, or the lanes down
@@ -79,8 +82,11 @@ Column {
     onTrackIdChanged: dismiss()
 
     readonly property bool renaming: nameField.visible
-    // Opens the name for editing.
+    // Opens the name for editing; again while it is open changes nothing.
     function rename(): void {
+        if (renaming) {
+            return;
+        }
         nameField.text = row.name;
         nameField.visible = true;
         nameField.forceActiveFocus();
@@ -377,23 +383,11 @@ Column {
         LazyMenu {
             id: menu
             menu: QQC2.Menu {
-                QQC2.MenuItem {
-                    text: i18nc("@action:inmenu", "Rename…")
-                    icon.name: "edit-rename"
-                    onTriggered: row.rename()
-                }
-                QQC2.MenuItem {
-                    text: i18nc("@action:inmenu", "Move Up")
-                    icon.name: "go-up"
-                    enabled: header.index > 0
-                    onTriggered: Tracks.moveTrack(header.index, header.index - 1)
-                }
-                QQC2.MenuItem {
-                    text: i18nc("@action:inmenu", "Move Down")
-                    icon.name: "go-down"
-                    enabled: header.index < Tracks.count - 1
-                    onTriggered: Tracks.moveTrack(header.index, header.index + 1)
-                }
+                // The header's track is the selected one whenever this
+                // menu opens, so these are the page's actions on it.
+                QQC2.MenuItem { action: row.trackActions[0] }
+                QQC2.MenuItem { action: row.trackActions[1] }
+                QQC2.MenuItem { action: row.trackActions[2] }
                 QQC2.MenuSeparator {}
                 AddLaneMenu {
                     track: header.index
@@ -404,11 +398,7 @@ Column {
                     onTriggered: Automation.setExpanded(header.index, !row.expanded)
                 }
                 QQC2.MenuSeparator {}
-                QQC2.MenuItem {
-                    text: i18nc("@action:inmenu", "Delete Track")
-                    icon.name: "edit-delete"
-                    onTriggered: Tracks.remove(header.index)
-                }
+                QQC2.MenuItem { action: row.trackActions[3] }
             }
         }
 
