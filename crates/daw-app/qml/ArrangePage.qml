@@ -206,7 +206,7 @@ Kirigami.Page {
 
     // Shows a change to the project in the timeline. (The track headers
     // follow by themselves: see UiClock.) Hidden, the timeline only notes
-    // that it is stale and draws when the page is shown.
+    // that it is stale, and draws when it shows again.
     function refresh(): void {
         view.refresh();
     }
@@ -225,7 +225,6 @@ Kirigami.Page {
         enabled: page.visible
         function onFrame() { view.refresh(); }
     }
-    onVisibleChanged: if (visible) page.refresh()
 
     ColumnLayout {
         anchors.fill: parent

@@ -12,9 +12,12 @@ import io.github.octodillo.daw
 // their own.
 //
 // Each beat, in order: the project (engine position, peak loading,
-// autosave), the plugin scan, a running export, then `ticked` for views.
+// autosave), the plugin scan, a running export, then `ticked` for views;
+// on every third beat `slow`, and about once a second the MIDI devices.
 // While the transport runs the clock also beats `frame` at the display's
 // pace, after the beat's own work, so a view draws what the beat read.
+//
+// It runs from its first use, which is the pages' own (they listen to it).
 QtObject {
     id: clock
 
@@ -28,36 +31,42 @@ QtObject {
     // views that draw the playhead.
     signal frame()
 
-    // Starts the clock; the application window does, once. (A singleton
-    // exists only from its first use.)
-    function start(): void {
-        timer.start();
-    }
-
+    // A beat in milliseconds, and how many beats make the slower turns.
     readonly property int beat: 33
-    readonly property int slowBeat: 100
+    readonly property int slowBeats: 3
+    readonly property int midiBeats: 30
 
     property Timer timer: Timer {
+        // Counted, not timed: the wall clock can step back, and the beat
+        // must go on.
+        property int triggers: 0
+        property int beats: 0
         property double lastBeat: Date.now()
-        property double lastSlow: lastBeat
-        interval: Project.playing ? 16 : clock.beat
+        // Twice a beat while playing, for `frame`.
+        interval: Project.playing ? Math.floor(clock.beat / 2) : clock.beat
         repeat: true
-        onRunningChanged: lastBeat = lastSlow = Date.now()
+        running: true
         onTriggered: {
-            const now = Date.now();
-            // A little early counts: timers fire to the millisecond.
-            if (now - lastBeat >= clock.beat - 3) {
-                const seconds = (now - lastBeat) / 1000;
+            ++triggers;
+            if (!Project.playing || triggers % 2 === 0) {
+                const now = Date.now();
+                // Never backwards, and no leap after a stall or a clock
+                // change: meters fall by this much.
+                const seconds = Math.min(Math.max(now - lastBeat, 0), 250) / 1000;
                 lastBeat = now;
+                ++beats;
                 Project.tick();
                 Plugins.tick();
                 if (Exporter.running) {
                     Exporter.poll();
                 }
                 clock.ticked(seconds);
-                if (now - lastSlow >= clock.slowBeat - 3) {
-                    lastSlow = now;
+                if (beats % clock.slowBeats === 0) {
                     clock.slow();
+                }
+                // MIDI devices plugged in or out.
+                if (beats % clock.midiBeats === 0) {
+                    AppSettings.refreshMidi();
                 }
             }
             if (Project.playing) {
@@ -67,7 +76,9 @@ QtObject {
     }
 
     // The track list follows the project whoever changed it and whichever
-    // page is showing, before any view redraws for the same change.
+    // page is showing. (Before the pages redraw for the same change, as
+    // long as they are made after the clock, which their listening to it
+    // sees to; a late header would only lag the timeline by a frame.)
     property Connections projectChanges: Connections {
         target: Project
         function onRevisionChanged() { Tracks.sync(); }

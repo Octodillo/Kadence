@@ -157,6 +157,11 @@ pub mod qobject {
         fn update(self: Pin<&mut ArrangeView>);
         #[inherit]
         fn polish(self: Pin<&mut ArrangeView>);
+        /// The item was shown or hidden (itself or with what holds it).
+        #[inherit]
+        #[qsignal]
+        #[cxx_name = "visibleChanged"]
+        fn visible_changed(self: Pin<&mut ArrangeView>);
         #[inherit]
         #[cxx_name = "isVisible"]
         fn is_visible(self: &ArrangeView) -> bool;
@@ -243,6 +248,12 @@ impl cxx_qt::Constructor<()> for qobject::ArrangeView {
     fn new(_: ()) -> ArrangeViewRust {
         ArrangeViewRust::default()
     }
+
+    fn initialize(self: Pin<&mut Self>, _: ()) {
+        // A hidden item keeps a stale picture (see `update_polish`): draw
+        // it afresh when the item shows again.
+        self.on_visible_changed(|item| item.polish()).release();
+    }
 }
 
 impl qobject::ArrangeView {
@@ -274,6 +285,7 @@ impl qobject::ArrangeView {
     }
 
     fn refresh(mut self: Pin<&mut Self>) {
+        let start = Instant::now();
         let (w, h) = (self.width(), self.height());
         let palette = paint::theme_palette!(self);
         let ruler = self.ruler_height;
@@ -300,7 +312,11 @@ impl qobject::ArrangeView {
         self.as_mut().set_content_width(cw);
         self.as_mut().set_content_height(ch);
         self.as_mut().set_track_height(th);
-        self.as_mut().rust_mut().scene.invalidate();
+        let mut rust = self.as_mut().rust_mut();
+        // The setters too: they run QML bindings (the headers follow the
+        // scroll position).
+        rust.costs.refresh_ms += millis_since(start);
+        rust.scene.invalidate();
         self.polish();
     }
 

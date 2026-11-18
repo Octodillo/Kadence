@@ -417,14 +417,6 @@ Kirigami.ApplicationWindow {
         onConfigureRequested: root.openSettings()
     }
 
-    // MIDI devices plugged in or out.
-    Timer {
-        interval: 1000
-        repeat: true
-        running: true
-        onTriggered: AppSettings.refreshMidi()
-    }
-
     Kirigami.Action {
         id: separatorAction
         separator: true
@@ -601,9 +593,6 @@ Kirigami.ApplicationWindow {
             i18nc("@title:window a plugin's own editor; %1 is the device, %2 its track", "%1 — %2", "%1", "%2"),
             i18nc("@title name of the master bus", "Master"));
         notifyEngineError();
-        // Engine position, peak loading, autosave, plugin scan progress:
-        // UiClock says what is polled and in which order.
-        UiClock.start();
         // The self test must not touch the user's recent list or autosaves.
         if (!smokeTest && screenshotDir === "") {
             Project.startSession();

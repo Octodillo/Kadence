@@ -760,7 +760,7 @@ impl AppState {
     }
 
     /// Runs the plugins' main-thread work and frees what the audio thread
-    /// is done with. Called by the UI's refresh timer, about 60 times a
+    /// is done with. Called on the UI clock's beat, about 30 times a
     /// second.
     pub fn tick_engine(&mut self) {
         let Some(session) = self.engine.session_mut() else {

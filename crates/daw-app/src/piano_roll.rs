@@ -171,6 +171,11 @@ pub mod qobject {
         fn update(self: Pin<&mut PianoRoll>);
         #[inherit]
         fn polish(self: Pin<&mut PianoRoll>);
+        /// The item was shown or hidden (itself or with what holds it).
+        #[inherit]
+        #[qsignal]
+        #[cxx_name = "visibleChanged"]
+        fn visible_changed(self: Pin<&mut PianoRoll>);
         #[inherit]
         #[cxx_name = "isVisible"]
         fn is_visible(self: &PianoRoll) -> bool;
@@ -269,6 +274,12 @@ impl cxx_qt::Constructor<()> for qobject::PianoRoll {
 
     fn new(_: ()) -> PianoRollRust {
         PianoRollRust::default()
+    }
+
+    fn initialize(self: Pin<&mut Self>, _: ()) {
+        // A hidden item keeps a stale picture (see `update_polish`): draw
+        // it afresh when the item shows again.
+        self.on_visible_changed(|item| item.polish()).release();
     }
 }
 

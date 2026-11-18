@@ -160,7 +160,7 @@ Rectangle {
             // a key press is a gesture of its own.
             function move(): void {
                 Automation.setLanePosition(laneHeader.track, laneHeader.lane, value);
-                laneHeader.value = Automation.laneControl(laneHeader.track, laneHeader.lane).value;
+                laneHeader.readValue();
             }
             onMoved: {
                 if (pressed) {
