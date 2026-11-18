@@ -125,11 +125,13 @@ impl LaneScale {
 /// automated and their ranges. Built-in devices and plugins describe their
 /// parameters differently, so the arrange view asks through this.
 pub trait ParamCatalog: Send + Sync {
-    /// The parameters of `device` that can be automated, in display order.
+    /// The parameters of `device` to offer a new lane for, in display
+    /// order. (A lane can exist for one that is not offered.)
     fn automatable(&self, device: &Device) -> Vec<ParamId>;
     /// The range of one parameter, if `device` has it.
     fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale>;
-    /// The value a parameter has when the device doesn't store one.
+    /// The value a parameter has when the document doesn't store one: the
+    /// device's own, or its default.
     fn default_value(&self, device: &Device, param: ParamId) -> Option<f64>;
 }
 

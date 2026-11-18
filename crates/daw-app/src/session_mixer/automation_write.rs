@@ -37,7 +37,8 @@ fn tolerance(control: Control) -> f64 {
     }
 }
 
-/// What the device panel knows about a parameter it starts recording: the
+/// What a control (in the device panel or a lane's header) knows about a
+/// parameter it starts recording: the
 /// value it shows (a plugin's own value, when the document holds none) and
 /// how far a take of it may stray, from the parameter's range.
 #[derive(Clone, Copy, Debug, PartialEq)]
