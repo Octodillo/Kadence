@@ -20,8 +20,10 @@ pub struct Strip {
 }
 
 impl Strip {
-    /// Linear gain, 0 to 4 (+12 dB).
+    /// Linear gain, 0 to [`MAX_GAIN`](Self::MAX_GAIN).
     pub const GAIN: ParamId = 0;
+    /// The most a strip amplifies: 4, about +12 dB.
+    pub const MAX_GAIN: f32 = 4.0;
     /// Balance, -1 (left) to 1 (right). Only on stereo track and bus strips.
     pub const PAN: ParamId = 1;
     /// 0 or 1. Only on track and bus strips.
@@ -71,7 +73,7 @@ impl Strip {
     /// every bus the strip feeds.
     pub fn set_gain(&mut self, gain: f32) {
         if !gain.is_nan() {
-            self.gain = gain.clamp(0.0, 4.0);
+            self.gain = gain.clamp(0.0, Self::MAX_GAIN);
         }
     }
 
@@ -91,7 +93,7 @@ impl Strip {
             id: Self::GAIN,
             name: "Gain".into(),
             min: 0.0,
-            max: 4.0,
+            max: f64::from(Self::MAX_GAIN),
             default: 1.0,
             automatable: true,
         }];

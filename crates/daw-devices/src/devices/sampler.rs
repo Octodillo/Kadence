@@ -17,7 +17,7 @@ use std::sync::Arc;
 use daw_core::event::{NoteId, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Adsr, Smoother, db_to_gain};
+use crate::dsp::{Adsr, DEVICE_FLOOR_DB, Smoother, device_gain};
 use crate::events::{Note, Segmented, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::state::{self, StateError};
@@ -46,7 +46,15 @@ pub const MODE_KEY_MAPPED: f64 = 1.0;
 
 pub(crate) static PARAMS: &[ParamSpec] = &[
     ParamSpec::choice(MODE, "mode", "Mode", &["One-shot", "Key-mapped"], 1),
-    ParamSpec::new(GAIN, "gain", "Gain", -70.0, 12.0, 0.0, ParamUnit::Decibels),
+    ParamSpec::new(
+        GAIN,
+        "gain",
+        "Gain",
+        DEVICE_FLOOR_DB,
+        12.0,
+        0.0,
+        ParamUnit::Decibels,
+    ),
     ParamSpec::new(
         ATTACK,
         "attack",
@@ -84,7 +92,7 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
 pub const MAX_SAMPLE_SAMPLES: u64 = 600 * 48_000 * 2;
 /// The range a zone's gain is held to, in dB. A saved state can hold any
 /// number; nothing useful lies outside this.
-const ZONE_GAIN_DB: (f32, f32) = (-70.0, 24.0);
+const ZONE_GAIN_DB: (f32, f32) = (DEVICE_FLOOR_DB as f32, 24.0);
 const VOICES: usize = 32;
 const POOL: usize = VOICES + voices::SPARE_VOICES;
 
@@ -350,7 +358,7 @@ impl Sampler {
             }
             GAIN => self
                 .gain
-                .set_target(db_to_gain(self.params.get(GAIN)) as f32),
+                .set_target(device_gain(self.params.get(GAIN)) as f32),
             TUNE => self.tune = (self.params.get(TUNE) / 12.0).exp2(),
             _ => {}
         }
@@ -373,7 +381,7 @@ impl Sampler {
         };
         let rate = source_rate / self.sample_rate * (semis / 12.0).exp2();
         let sens = self.params.get_f32(VELOCITY);
-        let gain = db_to_gain(zone.gain_db as f64) as f32 * (1.0 - sens + sens * velocity);
+        let gain = device_gain(zone.gain_db as f64) as f32 * (1.0 - sens + sens * velocity);
 
         let (a, r) = (self.params.get(ATTACK), self.params.get(RELEASE));
         let v = self.voices.start(VOICES);
@@ -586,7 +594,7 @@ impl Node for Sampler {
         self.sample_rate = sample_rate;
         self.voices.set_sample_rate(sample_rate);
         self.gain.set_time(10.0, sample_rate);
-        self.gain.reset(db_to_gain(self.params.get(GAIN)) as f32);
+        self.gain.reset(device_gain(self.params.get(GAIN)) as f32);
         self.reset();
     }
 

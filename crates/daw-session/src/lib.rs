@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use daw_core::level;
 use daw_core::meter::PeakMeter;
 use daw_core::plugin::PluginError;
 use daw_core::time::{SampleTime, TempoMap, TickTime};
@@ -1182,7 +1183,7 @@ impl Session {
     /// by `to_value`. The engine only steps or ramps in straight lines, so
     /// curved segments are played as short straight pieces, and so is
     /// every ramp on a level (drawn in dB from
-    /// [`LEVEL_FLOOR_DB`](daw_model::LEVEL_FLOOR_DB) up, which the engine
+    /// [`FADER_FLOOR_DB`](level::FADER_FLOOR_DB) up, which the engine
     /// would otherwise ramp in linear gain). What plays then follows the
     /// line the arrange view draws.
     pub fn playback_lane(
@@ -1540,13 +1541,11 @@ impl Session {
     }
 }
 
-/// Linear strip gain for a fader in dB, within the strip's range.
-pub fn db_to_gain(db: f64) -> f64 {
-    if db <= -144.0 {
-        0.0
-    } else {
-        10f64.powf(db / 20.0).min(4.0)
-    }
+/// Linear strip gain for a stored level in dB: silent at
+/// [`SILENCE_DB`](level::SILENCE_DB), and never above the strip's range.
+pub fn strip_gain(db: f64) -> f64 {
+    level::db_to_gain_above(db, level::SILENCE_DB)
+        .min(f64::from(daw_engine::nodes::Strip::MAX_GAIN))
 }
 
 /// How warnings name a plugin.
@@ -1562,4 +1561,18 @@ fn same_clips(old: Option<&Vec<Arc<daw_model::Clip>>>, new: &[Arc<daw_model::Cli
     old.is_some_and(|old| {
         old.len() == new.len() && old.iter().zip(new).all(|(a, b)| Arc::ptr_eq(a, b))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_gain_is_silent_at_the_stored_silence_and_stays_in_the_strips_range() {
+        assert_eq!(strip_gain(level::SILENCE_DB), 0.0);
+        assert_eq!(strip_gain(f64::NAN), 0.0);
+        assert!(strip_gain(level::SILENCE_DB + 1.0) > 0.0);
+        assert_eq!(strip_gain(0.0), 1.0);
+        assert_eq!(strip_gain(20.0), 4.0);
+    }
 }

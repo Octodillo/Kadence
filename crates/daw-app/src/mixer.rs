@@ -10,6 +10,8 @@
 //! and metered from the running session. The Mix page reaches it through
 //! [`AppMixer`](crate::session_mixer::AppMixer).
 
+use daw_core::level;
+
 /// A strip's track id, as a number.
 pub type StripId = u128;
 
@@ -54,7 +56,8 @@ pub struct StripInfo {
     pub id: StripId,
     pub name: String,
     pub kind: StripKind,
-    /// Fader level; [`SILENT_DB`] or lower is silence.
+    /// Fader level; [`FADER_FLOOR_DB`](level::FADER_FLOOR_DB) or lower is
+    /// silence.
     pub volume_db: f64,
     /// Balance, -1 (left) to 1 (right).
     pub pan: f64,
@@ -97,21 +100,8 @@ pub struct EffectChoice {
     pub name: String,
 }
 
-/// Fader positions at or below this are silence.
-pub const SILENT_DB: f64 = -60.0;
-/// Top of the fader.
-pub const MAX_DB: f64 = 6.0;
-
-/// Fader dB to linear gain.
-pub fn db_to_gain(db: f64) -> f64 {
-    if db <= SILENT_DB {
-        0.0
-    } else {
-        daw_devices::dsp::db_to_gain(db.min(MAX_DB))
-    }
-}
-
-/// What a meter shows: positions from 0 (-60 dB and below) to 1 (+6 dB).
+/// What a meter shows: positions on the fader scale
+/// ([`level::fader_position`]).
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct MeterDisplay {
     pub level: [f64; 2],
@@ -136,11 +126,10 @@ pub const HOLD_S: f64 = 1.5;
 
 /// A linear peak as a meter position.
 pub fn meter_position(linear: f32) -> f64 {
-    if linear <= 0.0 {
-        return 0.0;
-    }
-    let db = 20.0 * f64::from(linear).log10();
-    ((db - SILENT_DB) / (MAX_DB - SILENT_DB)).clamp(0.0, 1.0)
+    level::fader_position(level::gain_to_db_above(
+        f64::from(linear),
+        level::FADER_FLOOR_DB,
+    ))
 }
 
 impl MeterBallistics {
@@ -148,7 +137,7 @@ impl MeterBallistics {
         self.shown.resize(levels.len(), MeterDisplay::default());
         self.held_for.resize(levels.len(), [0.0; 2]);
         let fall = FALL_DB_PER_S * seconds.max(0.0);
-        let fall_pos = fall / (MAX_DB - SILENT_DB);
+        let fall_pos = fall / level::FADER_SPAN_DB;
         for ((shown, held_for), l) in self.shown.iter_mut().zip(&mut self.held_for).zip(levels) {
             for (ch, held) in held_for.iter_mut().enumerate() {
                 let level = meter_position(l.peak[ch])

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use daw_core::event::{EventKind, EventList};
+use daw_core::level::SILENCE_DB;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{
     ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
@@ -388,7 +389,7 @@ fn pre_fader_sends_ignore_the_fader() {
     let mut rig = Rig::new();
     let bus = rig.bus("Monitor");
     let send = rig.send(rig.track, bus);
-    rig.set(rig.track, TrackField::VolumeDb(-144.0));
+    rig.set(rig.track, TrackField::VolumeDb(SILENCE_DB));
     assert_eq!(during(&rig.play(BEAT)), 0.0, "post-fader follows the fader");
 
     rig.doc
@@ -407,7 +408,7 @@ fn a_bus_without_devices_has_a_pre_fader_signal() {
     let group = rig.bus("Group");
     let aux = rig.bus("Aux");
     rig.set(rig.track, TrackField::Output(TrackOutput::Bus(group)));
-    rig.set(group, TrackField::VolumeDb(-144.0));
+    rig.set(group, TrackField::VolumeDb(SILENCE_DB));
     let send = rig.send(group, aux);
     rig.doc
         .execute(SetSend {
@@ -531,7 +532,7 @@ fn an_instrument_track_syncs_with_a_first_device_that_takes_no_events() {
         rig.session.warnings()
     );
     // An edit after it still reaches the engine.
-    rig.set(rig.track, TrackField::VolumeDb(-144.0));
+    rig.set(rig.track, TrackField::VolumeDb(SILENCE_DB));
     assert_eq!(during(&rig.play(BEAT)), 0.0);
 
     // The notes go to the first device that does take them.
@@ -617,7 +618,7 @@ fn mute_and_solo_silence_pre_fader_sends() {
     let bus = rig.bus("Reverb");
     let send = rig.pre_fader_send(rig.track, bus);
     // Only the send is heard.
-    rig.set(rig.track, TrackField::VolumeDb(-144.0));
+    rig.set(rig.track, TrackField::VolumeDb(SILENCE_DB));
     assert!(close(during(&rig.play(BEAT)), 0.5));
 
     rig.set(rig.track, TrackField::Mute(true));
@@ -654,7 +655,7 @@ fn a_pre_fader_send_carries_the_monitored_input() {
     let mut rig = Rig::with(2, &[0.5]);
     let cue = rig.bus("Cue");
     rig.pre_fader_send(rig.track, cue);
-    rig.set(rig.track, TrackField::VolumeDb(-144.0));
+    rig.set(rig.track, TrackField::VolumeDb(SILENCE_DB));
     rig.set(rig.track, TrackField::Armed(true));
     rig.set(
         rig.track,

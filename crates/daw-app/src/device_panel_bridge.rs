@@ -204,7 +204,7 @@ pub struct DevicePanelRust {
 
 impl qobject::DevicePanel {
     fn silent_db(&self) -> f64 {
-        daw_devices::dsp::MIN_DB
+        daw_devices::dsp::DEVICE_FLOOR_DB
     }
 
     fn params(&self) -> &[ParamView] {
