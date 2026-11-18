@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use daw_model::{
     AutomationTarget, Bundle, Device, DeviceId, DeviceSource, Document, Project, TrackKind,
 };
+use daw_plugin_host::Realtime;
 use daw_session::PluginStatus;
 
 use crate::double_click::Clicks;
@@ -861,6 +862,13 @@ impl AppDevicePanel {
     pub fn plugin_status(&self) -> Option<PluginStatus> {
         let device = self.inner.device()?;
         crate::state::with(|s| s.engine.session()?.plugin_status(device))
+    }
+
+    /// How the audio thread of the open device's sandboxed plugin is
+    /// scheduled, `None` without one.
+    pub fn plugin_realtime(&self) -> Option<Realtime> {
+        let device = self.inner.device()?;
+        crate::state::with(|s| s.engine.session()?.plugin_realtime(device))
     }
 
     /// Restarts the open device's crashed plugin with its state; it plays

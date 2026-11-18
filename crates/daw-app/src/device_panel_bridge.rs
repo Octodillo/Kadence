@@ -10,6 +10,7 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QUrl, QVariant, QVector};
+use daw_plugin_host::Realtime;
 use daw_session::PluginStatus;
 
 use crate::device_panel::{AppDevicePanel, DeviceView, ParamView};
@@ -85,6 +86,9 @@ pub mod qobject {
         /// The sampler's sample is not where the project says it is, so
         /// the sampler is silent.
         #[qproperty(bool, sample_missing, READ, NOTIFY)]
+        /// The device's sandboxed plugin got no real-time priority, so its
+        /// audio may drop out while the computer is busy.
+        #[qproperty(bool, plugin_not_realtime, READ, NOTIFY)]
         type DevicePanel = super::DevicePanelRust;
 
         fn silent_db(self: &DevicePanel) -> f64;
@@ -216,6 +220,7 @@ pub struct DevicePanelRust {
     sampler: bool,
     sample_name: QString,
     sample_missing: bool,
+    plugin_not_realtime: bool,
     /// The panel's revision when `view` was read.
     revision: u64,
     view: Option<DeviceView>,
@@ -342,6 +347,11 @@ impl qobject::DevicePanel {
         if self.plugin_status != status {
             self.as_mut().rust_mut().plugin_status = status;
             self.as_mut().plugin_status_changed();
+        }
+        let not_realtime = self.panel.plugin_realtime() == Some(Realtime::Refused);
+        if self.plugin_not_realtime != not_realtime {
+            self.as_mut().rust_mut().plugin_not_realtime = not_realtime;
+            self.as_mut().plugin_not_realtime_changed();
         }
     }
 

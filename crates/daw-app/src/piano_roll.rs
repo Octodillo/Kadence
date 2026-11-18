@@ -11,12 +11,13 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QList, QString, QVariant};
+use daw_arrange::Input;
 use daw_midi::edit::{Quantize, QuantizeEnds};
 use daw_pianoroll::{Accidentals, PianoRoll as Roll};
 
 use crate::automation_bridge::qobject::PointShape;
 use crate::automation_bridge::{shape, shape_index};
-use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
+use crate::paint::{self, DisplayList, cursor_shape, pointer, route, to_qcolor};
 use crate::session_mixer::strip_row;
 use crate::state;
 use crate::tracks::HeaderRow;
@@ -418,34 +419,30 @@ impl qobject::PianoRoll {
         }
     }
 
+    /// Hands pointer input to the piano roll and shows what came of it.
+    fn input(self: Pin<&mut Self>, input: Input) {
+        self.after(route::<Roll>(input));
+    }
+
     fn press(mut self: Pin<&mut Self>, x: f64, y: f64, button: i32, modifiers: i32) {
         self.as_mut().rust_mut().last_press = (x, y);
-        let p = pointer(x, y, button, modifiers);
-        let out = state::with(|s| s.with_view(|pr: &mut Roll, doc, env| pr.press(doc, env, p)));
-        self.after(out);
+        self.input(Input::Press(pointer(x, y, button, modifiers)));
     }
 
     fn motion(self: Pin<&mut Self>, x: f64, y: f64, modifiers: i32) {
-        let p = pointer(x, y, 1, modifiers);
-        let out = state::with(|s| s.piano.motion(&mut s.doc, p));
-        self.after(out);
+        self.input(Input::Motion(pointer(x, y, 1, modifiers)));
     }
 
     fn release(self: Pin<&mut Self>, x: f64, y: f64, modifiers: i32) {
-        let p = pointer(x, y, 1, modifiers);
-        let out = state::with(|s| s.piano.release(&mut s.doc, p));
-        self.after(out);
+        self.input(Input::Release(pointer(x, y, 1, modifiers)));
     }
 
     fn double_click(self: Pin<&mut Self>, x: f64, y: f64, modifiers: i32) {
-        let p = pointer(x, y, 1, modifiers);
-        let out = state::with(|s| s.piano.double_click(&mut s.doc, p));
-        self.after(out);
+        self.input(Input::DoubleClick(pointer(x, y, 1, modifiers)));
     }
 
     fn cancel_drag(self: Pin<&mut Self>) {
-        let out = state::with(|s| s.piano.cancel(&mut s.doc));
-        self.after(out);
+        self.input(Input::Cancel);
     }
 
     fn hover(mut self: Pin<&mut Self>, x: f64, y: f64) {
@@ -454,13 +451,12 @@ impl qobject::PianoRoll {
     }
 
     fn wheel(self: Pin<&mut Self>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32) {
-        let p = pointer(x, y, 0, modifiers);
-        let out = state::with(|s| s.piano.wheel(p, dx, dy));
-        self.after(out);
+        let at = pointer(x, y, 0, modifiers);
+        self.input(Input::Wheel { at, dx, dy });
     }
 
     fn touch_pans(&self, x: f64, y: f64) -> bool {
-        state::with(|s| s.piano.touch_pans(s.doc.project(), x, y))
+        paint::touch_pans::<Roll>(x, y)
     }
 
     fn has_menu_at(&self, x: f64, y: f64) -> bool {
@@ -468,16 +464,11 @@ impl qobject::PianoRoll {
     }
 
     fn pinch(self: Pin<&mut Self>, scale: f64, x: f64) {
-        let out = state::with(|s| s.piano.pinch(scale, x));
-        self.after(out);
+        self.input(Input::Pinch { scale, x });
     }
 
     fn scroll_to(self: Pin<&mut Self>, x: f64, y: f64) {
-        state::with(|s| {
-            s.piano.view.scroll_x = x.max(0.0);
-            s.piano.scroll_y = y.max(0.0);
-            s.touch();
-        });
+        paint::scroll_to::<Roll>(x, y);
         self.refresh();
     }
 

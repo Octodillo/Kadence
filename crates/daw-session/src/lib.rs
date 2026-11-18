@@ -48,6 +48,7 @@ use daw_engine::{
     NodeKey, NodeMeter,
 };
 use daw_model::{ClipId, DeviceId, LaneId, ProjectSnapshot, SendId, TrackId};
+use daw_plugin_host::Realtime;
 
 pub use build::METRONOME_KEY;
 pub use build::effective_mutes;
@@ -136,6 +137,13 @@ pub enum Warning {
     /// is reloaded.
     #[error("plugin {plugin} of {device} crashed; it is bypassed")]
     PluginCrashed { device: String, plugin: String },
+    /// The system grants the sandboxed plugins' hosts no real-time priority, neither directly
+    /// nor through RealtimeKit or the desktop portal: one was refused and none got it. Plugin
+    /// audio may then drop out while the machine is busy. Said once, as it is about the
+    /// system, not one plugin. A host refused while others got it is RealtimeKit's rationing,
+    /// which this does not say; [`Session::plugin_realtime`] tells each plugin's.
+    #[error("plugin hosts get no real-time priority; their audio may drop out")]
+    PluginsNotRealtime,
     /// A plugin would not hand over its state (or take back the one it
     /// handed over before audio restarted or its device was removed), so
     /// the project keeps the one it had and what was changed in the plugin
@@ -745,6 +753,9 @@ impl Session {
                 }
             }
         }
+        if self.plugins.says_not_realtime() {
+            news.push(Warning::PluginsNotRealtime);
+        }
         // States a plugin could not be asked about before (busy, or its host
         // down): now that it runs, it takes or refuses them.
         let due: Vec<(DeviceId, daw_model::StateBlob)> = self
@@ -849,6 +860,13 @@ impl Session {
     /// devices not synced yet.
     pub fn plugin_status(&self, device: DeviceId) -> Option<PluginStatus> {
         self.plugins.status(device)
+    }
+
+    /// How the audio thread of a device's sandboxed plugin is scheduled.
+    /// `None` for built-in devices, plugins that are not loaded and plugins
+    /// without a sandbox.
+    pub fn plugin_realtime(&self, device: DeviceId) -> Option<Realtime> {
+        Some(self.plugins.live(device)?.monitor.as_ref()?.realtime())
     }
 
     /// The sandbox of a device's plugin: its process, and how late its
