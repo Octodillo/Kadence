@@ -16,14 +16,14 @@ QQC2.ComboBox {
         i18ncp("@item:inlistbox count-in length", "%1 bar", "%1 bars", 1),
         i18ncp("@item:inlistbox count-in length", "%1 bar", "%1 bars", 2)
     ]
-    currentIndex: Project.countInBars
-    onActivated: (index) => Project.setCountIn(index)
+    currentIndex: Transport.countInBars
+    onActivated: (index) => Transport.setCountIn(index)
     Accessible.name: i18nc("@label:listbox", "Count-in before recording")
 
     // Using the box replaces the binding above; follow the project (the
     // other count-in box, undo) from here.
     Connections {
-        target: Project
-        function onCountInBarsChanged() { box.currentIndex = Project.countInBars; }
+        target: Transport
+        function onCountInBarsChanged() { box.currentIndex = Transport.countInBars; }
     }
 }

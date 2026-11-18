@@ -130,7 +130,7 @@ Column {
         opacity: row.ListView.view && row.ListView.view.dragFrom === index ? 0.5 : 1
         padding: 0
         leftPadding: 0
-        onClicked: Project.selectTrack(index)
+        onClicked: Arrangement.selectTrack(index)
 
         Accessible.name: row.name
 
@@ -187,7 +187,7 @@ Column {
                     onActiveChanged: {
                         const list = row.ListView.view;
                         if (active) {
-                            Project.selectTrack(header.index);
+                            Arrangement.selectTrack(header.index);
                             list.dragFrom = header.index;
                             list.dragTo = header.index;
                         } else {
@@ -431,7 +431,7 @@ Column {
         TapHandler {
             acceptedButtons: Qt.RightButton
             onTapped: {
-                Project.selectTrack(header.index);
+                Arrangement.selectTrack(header.index);
                 menu.popup();
             }
         }
@@ -440,7 +440,7 @@ Column {
         MenuKey {
             id: menuKey
             onRequested: {
-                Project.selectTrack(header.index);
+                Arrangement.selectTrack(header.index);
                 menu.popup(header, Kirigami.Units.gridUnit, header.height);
             }
         }
@@ -448,7 +448,7 @@ Column {
         TapHandler {
             acceptedDevices: PointerDevice.TouchScreen
             onLongPressed: {
-                Project.selectTrack(header.index);
+                Arrangement.selectTrack(header.index);
                 // Under the finger: a touch doesn't move the mouse cursor.
                 menu.popup(parent, point.position.x, point.position.y);
             }

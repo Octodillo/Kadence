@@ -15,14 +15,14 @@ StripFrame {
 
     title: i18nc("@title metronome channel strip", "Metronome")
     subtitle: i18nc("@label strip type", "Click")
-    dimmed: !Project.metronome
+    dimmed: !Transport.metronome
     slack: fader.height - fader.Layout.minimumHeight
 
     // The button sets its own value when used, which replaces a plain
     // binding; follow the project (the transport bar's button) from here.
     Connections {
-        target: Project
-        function onMetronomeChanged() { onButton.checked = Project.metronome; }
+        target: Transport
+        function onMetronomeChanged() { onButton.checked = Transport.metronome; }
     }
 
     // Where the channels have their effects.
@@ -83,15 +83,15 @@ StripFrame {
         id: onButton
         Layout.fillWidth: true
         checkable: true
-        checked: Project.metronome
+        checked: Transport.metronome
         icon.name: "chronometer"
-        text: Project.metronome ? i18nc("@action:button metronome is on", "On")
-                                : i18nc("@action:button metronome is off", "Off")
+        text: Transport.metronome ? i18nc("@action:button metronome is on", "On")
+                                  : i18nc("@action:button metronome is off", "Off")
         Accessible.name: i18nc("@action:button", "Metronome")
         QQC2.ToolTip.text: i18nc("@info:tooltip", "Metronome: click on every beat while playing")
         QQC2.ToolTip.visible: hovered
         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-        onToggled: Project.setMetronomeEnabled(checked)
+        onToggled: Transport.setMetronomeEnabled(checked)
     }
 
     // Where the other strips choose their output.

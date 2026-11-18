@@ -172,6 +172,8 @@ fn main() {
         "src/ffi.rs",
         "src/test_helper.rs",
         "src/project.rs",
+        "src/transport_bridge.rs",
+        "src/arrangement_bridge.rs",
         "src/export_bridge.rs",
         "src/arrange_view.rs",
         "src/piano_roll.rs",

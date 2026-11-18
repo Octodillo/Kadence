@@ -12,9 +12,9 @@ import io.github.octodillo.daw
 // their own.
 //
 // Each beat, in order: the project (engine position, peak loading,
-// autosave), the plugin scan, a running export, then `ticked` for views;
-// on every third beat `slow`, and about once a second the audio engine's
-// health and the MIDI devices.
+// autosave), the transport (the playhead), the plugin scan, a running
+// export, then `ticked` for views; on every third beat `slow`, and about
+// once a second the audio engine's health and the MIDI devices.
 // While the transport runs the clock also beats `frame` at the display's
 // pace, after the beat's own work, so a view draws what the beat read.
 //
@@ -26,9 +26,10 @@ QtObject {
     id: clock
 
     // The project changed, whoever changed it (`Project.revision` or
-    // `Automation.revision` moved). The track list has followed already,
-    // so a view that listens here lays out against the tracks and lanes
-    // as they are now. Views redraw from this, not from the two revisions.
+    // `Automation.revision` moved). Tracks, Transport and Arrangement have
+    // followed already, so a view that listens here lays out against the
+    // tracks, lanes and selection as they are now. Views redraw from this,
+    // not from the two revisions.
     signal revised()
 
     // About 30 times a second: `seconds` since the last one. For meters
@@ -53,12 +54,12 @@ QtObject {
         property int beats: 0
         property double lastBeat: Date.now()
         // Twice a beat while playing, for `frame`.
-        interval: Project.playing ? Math.floor(clock.beat / 2) : clock.beat
+        interval: Transport.playing ? Math.floor(clock.beat / 2) : clock.beat
         repeat: true
         running: true
         onTriggered: {
             ++triggers;
-            if (!Project.playing || triggers % 2 === 0) {
+            if (!Transport.playing || triggers % 2 === 0) {
                 const now = Date.now();
                 // Never backwards, and no leap after a stall or a clock
                 // change: meters fall by this much.
@@ -66,6 +67,7 @@ QtObject {
                 lastBeat = now;
                 ++beats;
                 Project.tick();
+                Transport.sync();
                 Plugins.tick();
                 if (Exporter.running) {
                     Exporter.poll();
@@ -82,16 +84,20 @@ QtObject {
                     AppSettings.refreshMidi();
                 }
             }
-            if (Project.playing) {
+            if (Transport.playing) {
                 clock.frame();
             }
         }
     }
 
-    // A change is shown in this order: the track list first, then
-    // everything that listens to `revised`.
+    // A change is shown in this order: the track list, the transport and
+    // the arrangement, then everything that listens to `revised`. Transport
+    // and Arrangement follow the project only through here (and Transport
+    // on every beat as well).
     function revise(): void {
         Tracks.sync();
+        Transport.sync();
+        Arrangement.sync();
         clock.revised();
     }
     property Connections projectChanges: Connections {
@@ -102,10 +108,18 @@ QtObject {
         target: Automation
         function onRevisionChanged() { clock.revise(); }
     }
-    // An edit in a track header shows everywhere at once, not on the next
-    // beat.
+    // An edit made through another bridge shows everywhere at once, not on
+    // the next beat: the project's revision moves, and `revise` follows.
     property Connections trackEdits: Connections {
         target: Tracks
-        function onEdited() { Project.tick(); }
+        function onEdited() { Project.sync(); }
+    }
+    property Connections transportEdits: Connections {
+        target: Transport
+        function onEdited() { Project.sync(); }
+    }
+    property Connections arrangementEdits: Connections {
+        target: Arrangement
+        function onEdited() { Project.sync(); }
     }
 }

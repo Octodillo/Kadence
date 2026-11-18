@@ -48,10 +48,10 @@ Kirigami.Page {
         text: i18nc("@action:button", "Loop")
         icon.name: "media-repeat-all"
         checkable: true
-        checked: Project.looping
+        checked: Transport.looping
         shortcut: "Ctrl+L"
         tooltip: i18nc("@info:tooltip", "Loop the selection, or four bars from the playhead. Shift-drag in the ruler to set the loop.")
-        onTriggered: Project.toggleLoop()
+        onTriggered: Transport.toggleLoop()
     }
 
     ProjectMessageText {
@@ -117,7 +117,7 @@ Kirigami.Page {
         ]
         onAccepted: {
             for (let i = 0; i < selectedFiles.length; ++i) {
-                Project.importAudio(selectedFiles[i], i);
+                Arrangement.importAudio(selectedFiles[i], i);
             }
         }
     }
@@ -131,23 +131,23 @@ Kirigami.Page {
             shortcut: "Ctrl+E"
             enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Project.splitAtPlayhead()
+            onTriggered: Arrangement.splitAtPlayhead()
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Duplicate")
             icon.name: "edit-duplicate"
             shortcut: "Ctrl+D"
-            enabled: page.visible && Project.hasSelection
+            enabled: page.visible && Arrangement.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Project.duplicateSelection()
+            onTriggered: Arrangement.duplicateSelection()
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Delete")
             icon.name: "edit-delete"
             shortcut: StandardKey.Delete
-            enabled: page.visible && Project.hasSelection
+            enabled: page.visible && Arrangement.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Project.deleteSelection()
+            onTriggered: Arrangement.deleteSelection()
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Select All")
@@ -155,7 +155,7 @@ Kirigami.Page {
             shortcut: StandardKey.SelectAll
             enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Project.selectAll()
+            onTriggered: Arrangement.selectAll()
         },
         Kirigami.Action {
             separator: true
@@ -167,7 +167,7 @@ Kirigami.Page {
             shortcut: StandardKey.ZoomIn
             enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Project.zoom(1.5)
+            onTriggered: Arrangement.zoom(1.5)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Zoom Out")
@@ -175,7 +175,7 @@ Kirigami.Page {
             shortcut: StandardKey.ZoomOut
             enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Project.zoom(1 / 1.5)
+            onTriggered: Arrangement.zoom(1 / 1.5)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Zoom to Fit")
@@ -183,7 +183,7 @@ Kirigami.Page {
             shortcut: "Ctrl+0"
             enabled: page.visible
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Project.zoomToFit()
+            onTriggered: Arrangement.zoomToFit()
         }
     ]
 
@@ -191,7 +191,7 @@ Kirigami.Page {
     // menu's own entries, and the keyboard's way to them whatever has the
     // focus. Alt+Up and Alt+Down step aside for a focused control that
     // uses the arrow keys.
-    readonly property bool trackSelected: Project.selectedTrack >= 0 && Project.selectedTrack < Tracks.count
+    readonly property bool trackSelected: Arrangement.selectedTrack >= 0 && Arrangement.selectedTrack < Tracks.count
     readonly property list<Kirigami.Action> trackActions: [
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Rename Track…")
@@ -202,7 +202,7 @@ Kirigami.Page {
             onTriggered: {
                 // The header may be scrolled out of view, where a list has
                 // no item for it.
-                const row = Project.selectedTrack;
+                const row = Arrangement.selectedTrack;
                 page.revealTrack(row);
                 headers.forceLayout();
                 headers.itemAtIndex(row)?.rename();
@@ -212,24 +212,24 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Move Track Up")
             icon.name: "go-up"
             shortcut: applicationWindow().controlHasArrowKeys ? "" : "Alt+Up"
-            enabled: page.visible && page.trackSelected && Project.selectedTrack > 0
+            enabled: page.visible && page.trackSelected && Arrangement.selectedTrack > 0
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Tracks.moveTrack(Project.selectedTrack, Project.selectedTrack - 1)
+            onTriggered: Tracks.moveTrack(Arrangement.selectedTrack, Arrangement.selectedTrack - 1)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Move Track Down")
             icon.name: "go-down"
             shortcut: applicationWindow().controlHasArrowKeys ? "" : "Alt+Down"
-            enabled: page.visible && page.trackSelected && Project.selectedTrack < Tracks.count - 1
+            enabled: page.visible && page.trackSelected && Arrangement.selectedTrack < Tracks.count - 1
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Tracks.moveTrack(Project.selectedTrack, Project.selectedTrack + 1)
+            onTriggered: Tracks.moveTrack(Arrangement.selectedTrack, Arrangement.selectedTrack + 1)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Delete Track")
             icon.name: "edit-delete"
             enabled: page.visible && page.trackSelected
             displayHint: Kirigami.DisplayHint.AlwaysHide
-            onTriggered: Tracks.remove(Project.selectedTrack)
+            onTriggered: Tracks.remove(Arrangement.selectedTrack)
         },
         Kirigami.Action {
             separator: true
@@ -490,12 +490,12 @@ Kirigami.Page {
                             pointMenu.shape = shape;
                             pointMenu.popup(view, at.x, at.y);
                         } else {
-                            (Project.hasSelection ? clipMenu : laneMenu).popup(view, at.x, at.y);
+                            (Arrangement.hasSelection ? clipMenu : laneMenu).popup(view, at.x, at.y);
                         }
                     }
 
-                    Keys.onLeftPressed: Project.nudge(-1)
-                    Keys.onRightPressed: Project.nudge(1)
+                    Keys.onLeftPressed: Arrangement.nudge(-1)
+                    Keys.onRightPressed: Arrangement.nudge(1)
                 }
 
                 // The clip gain while its handle is dragged.
@@ -635,33 +635,33 @@ Kirigami.Page {
         QQC2.MenuItem { action: page.editActions[0] }
         QQC2.MenuItem { action: page.editActions[1] }
         QQC2.MenuItem { action: page.editActions[2] }
-        QQC2.MenuSeparator { visible: Project.audioSelected }
+        QQC2.MenuSeparator { visible: Arrangement.audioSelected }
         QQC2.Menu {
             title: i18nc("@title:menu", "Fade Shape")
-            enabled: Project.audioSelected
+            enabled: Arrangement.audioSelected
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "Linear")
-                onTriggered: Project.setFadeShape(Project.LinearFade)
+                onTriggered: Arrangement.setFadeShape(Arrangement.LinearFade)
             }
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "Equal Power")
-                onTriggered: Project.setFadeShape(Project.EqualPowerFade)
+                onTriggered: Arrangement.setFadeShape(Arrangement.EqualPowerFade)
             }
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "S-Curve")
-                onTriggered: Project.setFadeShape(Project.SCurveFade)
+                onTriggered: Arrangement.setFadeShape(Arrangement.SCurveFade)
             }
         }
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Remove Fades")
-            enabled: Project.audioSelected
-            onTriggered: Project.removeFades()
+            enabled: Arrangement.audioSelected
+            onTriggered: Arrangement.removeFades()
         }
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Reset Clip Gain")
             icon.name: "edit-reset"
-            enabled: Project.audioSelected
-            onTriggered: Project.resetClipGain()
+            enabled: Arrangement.audioSelected
+            onTriggered: Arrangement.resetClipGain()
         }
     }
 

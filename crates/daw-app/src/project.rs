@@ -1,18 +1,21 @@
-//! `Project`: the QML-facing document. File handling, undo, the selection
-//! and the transport, over [`crate::state`]. The track list is
-//! [`Tracks`](crate::tracks_bridge).
+//! `Project`: the QML-facing document's lifecycle: opening, saving,
+//! recovering and relinking it, undo, and the status line, over
+//! [`crate::state`]. Its `revision` is the one every view follows.
+//!
+//! The rest of what QML sees of the project has bridges of its own: the
+//! track list is [`Tracks`](crate::tracks_bridge), playback and tempo
+//! [`Transport`](crate::transport_bridge), and the timeline's edit commands
+//! [`Arrangement`](crate::arrangement_bridge).
 
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant};
-use daw_core::time::{PPQ, TickTime};
-use daw_model::{FadeShape, Track};
 
 use crate::message::{Context, Fields, Message, Reason};
 use crate::qt_lists::string_list;
 use crate::recovery::Candidate;
-use crate::settings::{self, ClickSettings, KConfigStore};
+use crate::settings::{self, KConfigStore};
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]
@@ -110,14 +113,6 @@ pub mod qobject {
         AlreadyOpen,
     }
 
-    /// The curve of a clip's fade, for `set_fade_shape`.
-    #[qenum(Project)]
-    enum FadeShape {
-        LinearFade,
-        EqualPowerFade,
-        SCurveFade,
-    }
-
     #[auto_cxx_name]
     extern "RustQt" {
         #[qobject]
@@ -133,31 +128,6 @@ pub mod qobject {
         #[qproperty(bool, can_redo)]
         #[qproperty(QString, undo_text)]
         #[qproperty(QString, redo_text)]
-        #[qproperty(bool, playing)]
-        /// Takes are being recorded.
-        #[qproperty(bool, recording)]
-        #[qproperty(bool, looping)]
-        /// Bar.beat of the playhead, like "12.3".
-        #[qproperty(QString, position_text)]
-        /// Minutes:seconds of the playhead.
-        #[qproperty(QString, time_text)]
-        /// The tempo in effect at the playhead, in beats per minute.
-        #[qproperty(f64, bpm)]
-        /// The time signature in effect at the playhead.
-        #[qproperty(i32, meter_numerator)]
-        #[qproperty(i32, meter_denominator)]
-        /// The click sounds while playing.
-        #[qproperty(bool, metronome)]
-        /// The click's level in dB.
-        #[qproperty(f64, metronome_volume)]
-        /// Bars counted in before recording, 0 for none.
-        #[qproperty(i32, count_in_bars)]
-        /// A count-in is under way.
-        #[qproperty(bool, counting_in)]
-        #[qproperty(bool, has_selection)]
-        /// The selection holds an audio clip (for clip gain and fades).
-        #[qproperty(bool, audio_selected)]
-        #[qproperty(i32, selected_track)]
         /// The last error or warning, as a message map (see
         /// `message_map`); empty when there is none. QML words it.
         #[qproperty(QMap_QString_QVariant, status)]
@@ -244,6 +214,11 @@ pub mod qobject {
         /// and background work.
         #[qinvokable]
         fn tick(self: Pin<&mut Project>);
+        /// Shows an edit made through another bridge (`Tracks`,
+        /// `Transport`, `Arrangement`): moves `revision` if the state
+        /// changed. Called by the UI's clock.
+        #[qinvokable]
+        fn sync(self: Pin<&mut Project>);
 
         #[qinvokable]
         fn new_project(self: Pin<&mut Project>);
@@ -264,72 +239,6 @@ pub mod qobject {
         #[qinvokable]
         fn redo(self: Pin<&mut Project>);
 
-        /// Selects the track at `index` of the track list (see `Tracks`).
-        #[qinvokable]
-        fn select_track(self: Pin<&mut Project>, index: i32);
-        /// Imports an audio file at the playhead: the first (`index` 0) on
-        /// the selected audio track, the rest on new tracks. Returns false
-        /// if it could not; `status` says why.
-        #[qinvokable]
-        fn import_audio(self: Pin<&mut Project>, url: &QUrl, index: i32) -> bool;
-
-        #[qinvokable]
-        fn toggle_play(self: Pin<&mut Project>);
-        /// Stops playback; effects and instruments ring out.
-        #[qinvokable]
-        fn stop(self: Pin<&mut Project>);
-        /// Stops playback and recording and cuts off everything still
-        /// sounding: effect tails, held voices, plugins.
-        #[qinvokable]
-        fn stop_all_sound(self: Pin<&mut Project>);
-        /// Starts recording every armed track (with none armed, MIDI on the
-        /// open clip's track, or the selected or first instrument track),
-        /// or stops and keeps the takes.
-        #[qinvokable]
-        fn toggle_record(self: Pin<&mut Project>);
-        #[qinvokable]
-        fn go_to_start(self: Pin<&mut Project>);
-        /// Sets the tempo at the playhead. Calls in a row are one undo step.
-        #[qinvokable]
-        fn set_tempo(self: Pin<&mut Project>, bpm: f64);
-        /// Sets the time signature at the playhead; the denominator is
-        /// rounded down to a power of two.
-        #[qinvokable]
-        fn set_time_signature(self: Pin<&mut Project>, numerator: i32, denominator: i32);
-        #[qinvokable]
-        fn set_metronome_enabled(self: Pin<&mut Project>, enabled: bool);
-        /// Saves the setting only when `save`, so a slider can save once it
-        /// is let go.
-        #[qinvokable]
-        fn set_metronome_level(self: Pin<&mut Project>, volume_db: f64, save: bool);
-        #[qinvokable]
-        fn set_count_in(self: Pin<&mut Project>, bars: i32);
-        /// Turns looping on (over the selection, or the four bars from the
-        /// playhead) or off.
-        #[qinvokable]
-        fn toggle_loop(self: Pin<&mut Project>);
-
-        #[qinvokable]
-        fn delete_selection(self: Pin<&mut Project>);
-        #[qinvokable]
-        fn duplicate_selection(self: Pin<&mut Project>);
-        #[qinvokable]
-        fn split_at_playhead(self: Pin<&mut Project>);
-        #[qinvokable]
-        fn select_all(self: Pin<&mut Project>);
-        #[qinvokable]
-        fn nudge(self: Pin<&mut Project>, direction: i32);
-        #[qinvokable]
-        fn zoom(self: Pin<&mut Project>, factor: f64);
-        #[qinvokable]
-        fn zoom_to_fit(self: Pin<&mut Project>);
-        /// Sets both fades of the selected audio clips to a shape.
-        #[qinvokable]
-        fn set_fade_shape(self: Pin<&mut Project>, shape: FadeShape);
-        #[qinvokable]
-        fn remove_fades(self: Pin<&mut Project>);
-        #[qinvokable]
-        fn reset_clip_gain(self: Pin<&mut Project>);
         #[qinvokable]
         fn clear_status(self: Pin<&mut Project>);
     }
@@ -347,21 +256,6 @@ pub struct ProjectRust {
     can_redo: bool,
     undo_text: QString,
     redo_text: QString,
-    playing: bool,
-    recording: bool,
-    looping: bool,
-    position_text: QString,
-    time_text: QString,
-    bpm: f64,
-    meter_numerator: i32,
-    meter_denominator: i32,
-    metronome: bool,
-    metronome_volume: f64,
-    count_in_bars: i32,
-    counting_in: bool,
-    has_selection: bool,
-    audio_selected: bool,
-    selected_track: i32,
     status: QMap<QMapPair_QString_QVariant>,
     recent_projects: QStringList,
     missing_count: i32,
@@ -374,10 +268,6 @@ pub struct ProjectRust {
     files_seen: Option<(u64, u64)>,
     /// Last view revision copied into the properties.
     seen: u64,
-    seen_position: i64,
-    /// Whether a count-in was under way at the last refresh; it starts and
-    /// ends with the playhead standing still.
-    seen_counting_in: bool,
 }
 
 /// The name the window title shows: the project's own, else the bundle's.
@@ -387,12 +277,6 @@ fn shown_name(p: &daw_model::Project, bundle: Option<&daw_model::Bundle>) -> Str
         return p.name.clone();
     }
     bundle.map(|b| b.name().to_owned()).unwrap_or_default()
-}
-
-fn track_at(s: &AppState, index: i32) -> Option<&std::sync::Arc<Track>> {
-    usize::try_from(index)
-        .ok()
-        .and_then(|i| s.doc.project().tracks.get(i))
 }
 
 /// A message as QML sees it: `context` and `reason` (the qenums above),
@@ -505,141 +389,64 @@ fn message_or_empty(fields: Option<&Fields>) -> QMap<QMapPair_QString_QVariant> 
 
 impl cxx_qt::Initialize for qobject::Project {
     fn initialize(self: Pin<&mut Self>) {
-        let click = settings::load_click_settings(&KConfigStore);
-        state::with(|s| s.set_click(click));
         self.refresh(true);
     }
 }
 
 impl qobject::Project {
-    /// Copies state into the properties: everything when `all` or when the
-    /// view revision moved, the playhead always.
+    /// Copies state into the properties when `all` or when the view
+    /// revision moved.
     fn refresh(mut self: Pin<&mut Self>, all: bool) {
+        // What the properties show, read while the state is borrowed.
+        struct Shown {
+            revision: u64,
+            name: String,
+            modified: bool,
+            saved_before: bool,
+            can_undo: bool,
+            can_redo: bool,
+            undo_text: String,
+            redo_text: String,
+            status: Option<Fields>,
+        }
         let seen = self.seen;
-        let seen_position = self.seen_position;
-        let seen_counting_in = self.seen_counting_in;
-        let snapshot = state::with(|s| {
+        let shown = state::with(|s| {
             s.sync();
-            let playhead = s.playhead();
-            let counting_in = s.is_counting_in();
-            let changed = all
-                || s.view_revision != seen
-                || playhead.0 != seen_position
-                || counting_in != seen_counting_in;
-            if !changed {
+            if !all && s.view_revision == seen {
                 return None;
             }
-            let p = s.doc.project();
             let h = s.doc.history();
-            // Bars and beats as the engine counts them (what the metronome
-            // clicks), else from the document.
-            let (bar, beat) = match s.engine.session() {
-                Some(x) => {
-                    let m = x.music();
-                    (m.bar, m.bar_beat().floor() as i64)
-                }
-                None => {
-                    let bb = s.arrange.meter(p).bar_beat(playhead);
-                    (bb.bar, bb.beat)
-                }
-            };
-            let tempo = s.tempo_at_playhead();
-            let click = s.click();
-            let secs = s.engine.session().map_or(0.0, |x| {
-                x.ticks_to_samples(playhead).0 as f64 / x.sample_rate()
-            });
-            let selected = s
-                .arrange
-                .selected_track
-                .and_then(|id| p.track_index(id))
-                .map_or(-1, |i| i as i32);
-            Some((
-                s.view_revision,
-                playhead.0,
-                shown_name(p, s.doc.bundle()),
-                s.doc.is_modified() || s.has_pending_plugin_changes(),
-                s.doc.bundle().is_some(),
-                h.can_undo(),
-                h.can_redo(),
-                h.undo_label().unwrap_or_default(),
-                h.redo_label().unwrap_or_default(),
-                s.engine.is_playing(),
-                s.loop_range().is_some(),
-                format!("{}.{}", bar + 1, beat + 1),
-                format!("{}:{:04.1}", (secs / 60.0).floor() as i64, secs % 60.0),
-                s.arrange.clips_selected(p) || s.arrange.lanes.points_selected(p),
-                s.arrange.audio_selected(p),
-                selected,
-                s.status.clone(),
-                tempo,
-                click,
-                counting_in,
-            ))
+            Some(Shown {
+                revision: s.view_revision,
+                name: shown_name(s.doc.project(), s.doc.bundle()),
+                modified: s.doc.is_modified() || s.has_pending_plugin_changes(),
+                saved_before: s.doc.bundle().is_some(),
+                can_undo: h.can_undo(),
+                can_redo: h.can_redo(),
+                undo_text: h.undo_label().unwrap_or_default(),
+                redo_text: h.redo_label().unwrap_or_default(),
+                status: s.status.clone(),
+            })
         });
-        let Some((
-            rev,
-            pos,
-            name,
-            modified,
-            saved,
-            can_undo,
-            can_redo,
-            undo_text,
-            redo_text,
-            playing,
-            looping,
-            position,
-            time,
-            has_selection,
-            audio_selected,
-            selected,
-            status,
-            (bpm, numerator, denominator),
-            click,
-            counting_in,
-        )) = snapshot
-        else {
+        let Some(shown) = shown else {
             return;
         };
-        {
-            let mut r = self.as_mut().rust_mut();
-            r.seen = rev;
-            r.seen_position = pos;
-            r.seen_counting_in = counting_in;
-        }
+        self.as_mut().rust_mut().seen = shown.revision;
         let mut this = self.as_mut();
-        this.as_mut().set_name(QString::from(name.as_str()));
-        this.as_mut().set_modified(modified);
-        this.as_mut().set_saved_before(saved);
-        this.as_mut().set_can_undo(can_undo);
-        this.as_mut().set_can_redo(can_redo);
+        this.as_mut().set_name(QString::from(shown.name.as_str()));
+        this.as_mut().set_modified(shown.modified);
+        this.as_mut().set_saved_before(shown.saved_before);
+        this.as_mut().set_can_undo(shown.can_undo);
+        this.as_mut().set_can_redo(shown.can_redo);
         this.as_mut()
-            .set_undo_text(QString::from(undo_text.as_str()));
+            .set_undo_text(QString::from(shown.undo_text.as_str()));
         this.as_mut()
-            .set_redo_text(QString::from(redo_text.as_str()));
-        this.as_mut().set_playing(playing);
+            .set_redo_text(QString::from(shown.redo_text.as_str()));
         this.as_mut()
-            .set_recording(state::with(|s| s.is_recording()));
-        this.as_mut().set_looping(looping);
-        this.as_mut()
-            .set_position_text(QString::from(position.as_str()));
-        this.as_mut().set_time_text(QString::from(time.as_str()));
-        this.as_mut().set_bpm(bpm);
-        this.as_mut().set_meter_numerator(i32::from(numerator));
-        this.as_mut().set_meter_denominator(i32::from(denominator));
-        this.as_mut().set_metronome(click.metronome.enabled);
-        this.as_mut()
-            .set_metronome_volume(click.metronome.volume_db);
-        this.as_mut()
-            .set_count_in_bars(i32::try_from(click.count_in_bars).unwrap_or(0));
-        this.as_mut().set_counting_in(counting_in);
-        this.as_mut().set_has_selection(has_selection);
-        this.as_mut().set_audio_selected(audio_selected);
-        this.as_mut().set_selected_track(selected);
-        this.as_mut().set_status(message_or_empty(status.as_ref()));
+            .set_status(message_or_empty(shown.status.as_ref()));
         this.as_mut().refresh_files();
         // Last, so QML that reacts to it sees the other values already.
-        this.set_revision((rev % i32::MAX as u64) as i32);
+        this.set_revision((shown.revision % i32::MAX as u64) as i32);
     }
 
     /// The recent list, and the missing and external files when the
@@ -715,6 +522,10 @@ impl qobject::Project {
             }
             s.autosave();
         });
+        self.refresh(false);
+    }
+
+    fn sync(self: Pin<&mut Self>) {
         self.refresh(false);
     }
 
@@ -806,7 +617,7 @@ impl qobject::Project {
     fn start_session(self: Pin<&mut Self>) {
         self.edit(|s| {
             s.start_session(
-                Box::new(crate::settings::KConfigStore),
+                Box::new(KConfigStore),
                 crate::recovery::default_base().as_deref(),
             );
             s.start_plugin_scan(settings::load_plugin_folders(&KConfigStore));
@@ -953,223 +764,6 @@ impl qobject::Project {
                 s.report(e.into());
             }
         });
-    }
-
-    fn select_track(self: Pin<&mut Self>, index: i32) {
-        self.edit(|s| {
-            s.arrange.selected_track = track_at(s, index).map(|t| t.id);
-        });
-    }
-
-    fn toggle_play(self: Pin<&mut Self>) {
-        self.edit(|s| {
-            if s.is_recording() {
-                s.stop_recording();
-            } else if s.engine.is_playing() {
-                s.engine.stop();
-            } else {
-                s.engine.play();
-            }
-        });
-    }
-
-    fn stop(self: Pin<&mut Self>) {
-        self.edit(|s| {
-            s.stop_recording();
-            s.engine.stop();
-        });
-    }
-
-    fn stop_all_sound(self: Pin<&mut Self>) {
-        self.edit(|s| {
-            s.stop_recording();
-            s.silence();
-        });
-    }
-
-    fn toggle_record(self: Pin<&mut Self>) {
-        self.edit(|s| {
-            if s.is_recording() {
-                s.stop_recording();
-            } else if let Err(e) = s.start_recording() {
-                s.report(e);
-            }
-        });
-    }
-
-    fn go_to_start(self: Pin<&mut Self>) {
-        self.edit(|s| {
-            if let Some(session) = s.engine.session_mut() {
-                let _ = session.locate(TickTime(0));
-            }
-            s.arrange.view.scroll_x = 0.0;
-        });
-    }
-
-    fn set_tempo(self: Pin<&mut Self>, bpm: f64) {
-        self.edit(|s| {
-            if let Err(e) = s.set_bpm(bpm) {
-                s.report(e.into());
-            }
-        });
-    }
-
-    fn set_time_signature(self: Pin<&mut Self>, numerator: i32, denominator: i32) {
-        let to_u8 = |n: i32| u8::try_from(n.clamp(0, 255)).unwrap_or(0);
-        self.edit(|s| {
-            if let Err(e) = s.set_meter(to_u8(numerator), to_u8(denominator)) {
-                s.report(e.into());
-            }
-        });
-    }
-
-    /// Changes the click settings with `f` and applies them, saving them
-    /// when `save`.
-    fn change_click(self: Pin<&mut Self>, save: bool, f: impl FnOnce(&mut ClickSettings)) {
-        self.edit(|s| {
-            let mut click = s.click();
-            f(&mut click);
-            s.set_click(click);
-            if save {
-                settings::save_click_settings(&mut KConfigStore, &s.click());
-            }
-        });
-    }
-
-    fn set_metronome_enabled(self: Pin<&mut Self>, enabled: bool) {
-        self.change_click(true, |c| c.metronome.enabled = enabled);
-    }
-
-    fn set_metronome_level(self: Pin<&mut Self>, volume_db: f64, save: bool) {
-        self.change_click(save, |c| c.metronome.volume_db = volume_db);
-    }
-
-    fn set_count_in(self: Pin<&mut Self>, bars: i32) {
-        self.change_click(true, |c| {
-            c.count_in_bars = u32::try_from(bars).unwrap_or(0);
-        });
-    }
-
-    fn toggle_loop(self: Pin<&mut Self>) {
-        self.edit(|s| {
-            let playhead = s.playhead();
-            let p = s.doc.project();
-            let looping = s.loop_range().is_some();
-            let sel = p
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .filter(|c| s.arrange.selection.contains(&c.id));
-            let (lo, hi) = sel.fold((i64::MAX, i64::MIN), |(lo, hi), c| {
-                (lo.min(c.start.0), hi.max(c.start.0 + c.length.0))
-            });
-            let bar = s.arrange.meter(p).bar_at(playhead);
-            let bars = (bar.start, TickTime(bar.start.0 + 4 * bar.len.max(PPQ)));
-            let Some(session) = s.engine.session_mut() else {
-                return;
-            };
-            if looping {
-                let _ = session.set_loop(None);
-                return;
-            }
-            // The selected clips, or four bars from the playhead when
-            // nothing is selected or the selection is too short to loop.
-            if lo < hi {
-                let _ = session.set_loop(Some((TickTime(lo), TickTime(hi))));
-            }
-            if session.loop_range().is_none() {
-                let _ = session.set_loop(Some(bars));
-            }
-        });
-    }
-
-    fn arrange_command(
-        self: Pin<&mut Self>,
-        f: impl FnOnce(
-            &mut daw_arrange::Arrange,
-            &mut daw_model::Document,
-            &daw_arrange::Env,
-        ) -> daw_arrange::Outcome,
-    ) {
-        self.edit(|s| {
-            let out = s.with_view(f);
-            s.apply(out);
-        });
-    }
-
-    fn delete_selection(self: Pin<&mut Self>) {
-        self.arrange_command(|a, doc, _| a.delete_selection(doc));
-    }
-
-    fn duplicate_selection(self: Pin<&mut Self>) {
-        self.arrange_command(|a, doc, _| a.duplicate_selection(doc));
-    }
-
-    fn split_at_playhead(self: Pin<&mut Self>) {
-        self.arrange_command(|a, doc, env| a.split_at(doc, env, env.playhead));
-    }
-
-    fn select_all(self: Pin<&mut Self>) {
-        self.arrange_command(|a, doc, _| a.select_all(doc.project()));
-    }
-
-    fn nudge(self: Pin<&mut Self>, direction: i32) {
-        self.arrange_command(|a, doc, _| a.nudge(doc, i64::from(direction.signum())));
-    }
-
-    fn zoom(self: Pin<&mut Self>, factor: f64) {
-        self.edit(|s| {
-            let w = s.arrange.width;
-            let x = s.arrange.view.tick_to_x(s.playhead());
-            let anchor = if (0.0..=w).contains(&x) { x } else { w / 2.0 };
-            s.arrange.view.zoom_at(factor, anchor);
-        });
-    }
-
-    fn zoom_to_fit(self: Pin<&mut Self>) {
-        self.edit(|s| {
-            let p = s.doc.project().clone();
-            s.arrange.zoom_to_fit(&p);
-        });
-    }
-
-    fn import_audio(self: Pin<&mut Self>, url: &QUrl, index: i32) -> bool {
-        let mut ok = false;
-        self.edit(|s| {
-            let Some(path) = url.to_local_file() else {
-                s.report(Message::NotLocalFile(Context::Import));
-                return;
-            };
-            let path = std::path::PathBuf::from(path.to_string());
-            let track = if index == 0 {
-                s.arrange.selected_track
-            } else {
-                None
-            };
-            let at = s.playhead();
-            match s.import_audio(&path, track, at) {
-                Ok(()) => ok = true,
-                Err(m) => s.report(m),
-            }
-        });
-        ok
-    }
-
-    fn set_fade_shape(self: Pin<&mut Self>, shape: qobject::FadeShape) {
-        let shape = match shape {
-            qobject::FadeShape::EqualPowerFade => FadeShape::EqualPower,
-            qobject::FadeShape::SCurveFade => FadeShape::SCurve,
-            _ => FadeShape::Linear,
-        };
-        self.arrange_command(move |a, doc, _| a.set_fade_shape(doc, shape));
-    }
-
-    fn remove_fades(self: Pin<&mut Self>) {
-        self.arrange_command(|a, doc, _| a.remove_fades(doc));
-    }
-
-    fn reset_clip_gain(self: Pin<&mut Self>) {
-        self.arrange_command(|a, doc, _| a.reset_clip_gain(doc));
     }
 
     fn clear_status(self: Pin<&mut Self>) {

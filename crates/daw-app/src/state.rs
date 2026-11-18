@@ -2,9 +2,9 @@
 //! document, the audio engine and the two painted views of it, the arrange
 //! view and the piano roll.
 //!
-//! It lives in a thread-local on the GUI thread. Every bridge object
-//! (`Engine`, `Project`, `ArrangeView`, `PianoRoll`) runs its invokables there and reaches
-//! the state through [`with`]. Nothing here is a Qt type.
+//! It lives in a thread-local on the GUI thread. Every bridge object runs
+//! its invokables there and reaches the state through [`with`]. Nothing
+//! here is a Qt type.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -405,8 +405,13 @@ impl AppState {
     fn record_plugin_changes(&mut self, reported: Vec<daw_model::DeviceId>) {
         const QUIET: Duration = Duration::from_millis(300);
         let now = Instant::now();
+        let none_pending = self.plugin_changes.is_empty();
         for device in reported {
             self.plugin_changes.insert(device, now);
+        }
+        // Unsaved from the first report on, not only once it is recorded.
+        if none_pending && !self.plugin_changes.is_empty() {
+            self.touch();
         }
         if self.plugin_changes.is_empty() {
             return;

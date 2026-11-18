@@ -150,13 +150,13 @@ Rectangle {
     // A playing lane moves its control.
     Connections {
         target: UiClock
-        enabled: rowHeader.following && Project.playing && rowHeader.visible
+        enabled: rowHeader.following && Transport.playing && rowHeader.visible
         function onTicked() { rowHeader.readValue(); }
     }
     // So does moving the playhead while stopped.
     Connections {
-        target: Project
-        enabled: rowHeader.following && !Project.playing
+        target: Transport
+        enabled: rowHeader.following && !Transport.playing
         function onPositionTextChanged() {
             rowHeader.readValue();
         }
