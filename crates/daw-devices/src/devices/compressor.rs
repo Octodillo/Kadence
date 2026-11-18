@@ -7,7 +7,7 @@ use daw_core::event::ParamId;
 use daw_core::meter::PeakMeter;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Smoother, db_to_gain, flush};
+use crate::dsp::{Smoother, db_to_gain, decay_coef, flush};
 use crate::events::{Segmented, input, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
@@ -125,20 +125,14 @@ impl Compressor {
         self.envelope
     }
 
-    /// The highest gain reduction in dB since the last read, for a meter on
-    /// another thread. Grab it before the compressor moves into the engine.
-    pub fn gain_reduction_meter(&self) -> Arc<PeakMeter> {
-        self.gr_meter.clone()
-    }
-
     // Threshold, ratio and knee need no smoother of their own: they only
     // shape the gain reduction, which the envelope follower already glides.
     fn apply_param(&mut self, id: ParamId) {
         match id {
             ATTACK | RELEASE => {
                 let sr = self.sample_rate;
-                self.attack = (-1000.0 / (self.params.get(ATTACK) * sr)).exp() as f32;
-                self.release = (-1000.0 / (self.params.get(RELEASE) * sr)).exp() as f32;
+                self.attack = decay_coef(self.params.get(ATTACK), sr);
+                self.release = decay_coef(self.params.get(RELEASE), sr);
             }
             MAKEUP => self
                 .makeup
@@ -155,16 +149,14 @@ impl_device!(Compressor, INFO, PARAMS, {
         self.mix.reset(self.mix.target());
     }
 
+    /// The highest gain reduction in dB since the last read, for a meter on
+    /// another thread. Grab it before the compressor moves into the engine.
     fn gain_reduction_meter(&self) -> Option<Arc<PeakMeter>> {
         Some(self.gr_meter.clone())
     }
 });
 
 impl Segmented for Compressor {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         let p = &self.params;
         let (threshold, ratio, knee) = (p.get_f32(THRESHOLD), p.get_f32(RATIO), p.get_f32(KNEE));

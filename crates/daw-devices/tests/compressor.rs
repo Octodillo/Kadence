@@ -40,8 +40,9 @@ fn steady_state_follows_the_static_curve() {
     assert!((c.gain_reduction_db() - (in_db - expected)).abs() < 0.1);
 
     // The meter holds the highest reduction until read, then resets.
-    let meter = c.gain_reduction_meter();
-    assert!(Device::gain_reduction_meter(&c).is_some_and(|m| std::sync::Arc::ptr_eq(&m, &meter)));
+    let meter = c
+        .gain_reduction_meter()
+        .expect("a compressor has the meter");
     assert!(meter.take() >= c.gain_reduction_db() - 1e-6);
     assert_eq!(meter.take(), 0.0);
     let utility = daw_devices::create("daw.utility").expect("utility exists");

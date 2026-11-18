@@ -210,10 +210,6 @@ impl_device!(Reverb, INFO, PARAMS, {
 });
 
 impl Segmented for Reverb {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         let feedback = self.params.get_f32(SIZE) * ROOM_SCALE + ROOM_OFFSET;
         let damp = self.params.get_f32(DAMPING) * DAMP_SCALE;
