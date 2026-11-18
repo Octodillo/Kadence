@@ -144,7 +144,7 @@ impl qobject::Instruments {
     }
 
     fn row_of(&self, format: &QString, plugin: &QString) -> i32 {
-        let Some(format) = daw_plugins::kind_from_name(&format.to_string()) else {
+        let Ok(format) = format.to_string().parse() else {
             return -1;
         };
         let source = daw_model::DeviceSource::Plugin {

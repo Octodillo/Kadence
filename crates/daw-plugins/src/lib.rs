@@ -18,6 +18,4 @@ mod scanner;
 pub use cache::{CacheEntry, ScanCache, modified_time};
 pub use candidates::{bundle_extension, find_candidates};
 pub use registry::{PluginRegistry, ScanReport, default_registry};
-pub use scanner::{
-    EXIT_UNSUPPORTED, ScanError, Scanner, kind_from_name, kind_name, run_scan_child,
-};
+pub use scanner::{EXIT_UNSUPPORTED, ScanError, Scanner, run_scan_child};

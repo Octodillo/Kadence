@@ -4,7 +4,7 @@
 //! Each row is a plugin that passes the current filter. The model starts a
 //! background scan when QML first uses it; `tick` picks up its progress and
 //! results. Plugin names, vendors and scan failures are the plugins' own
-//! text; the format names (CLAP, VST3, LV2) are not translated.
+//! text; the format names (`formats`) are not translated.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -74,7 +74,13 @@ pub mod qobject {
         #[qproperty(QStringList, failure_reasons)]
         /// Folders the user added to the search.
         #[qproperty(QStringList, extra_folders)]
+        /// The formats' names as users know them, in the order a browser
+        /// lists them; `setFilter` and `formatFolders` number them from 1.
+        /// They never change.
+        #[qproperty(QStringList, formats, READ = formats, CONSTANT)]
         type Plugins = super::PluginsRust;
+
+        fn formats(self: &Plugins) -> QStringList;
 
         /// Picks up scan progress and results. Called by the UI's clock.
         #[qinvokable]
@@ -85,7 +91,8 @@ pub mod qobject {
         fn rescan(self: Pin<&mut Plugins>);
 
         /// Shows plugins whose name or vendor holds every word of `text`,
-        /// of `format` (0 any, 1 CLAP, 2 VST3, 3 LV2) and of `kind`.
+        /// of `format` (0 any, else a format of `formats` counted from 1)
+        /// and of `kind`.
         #[qinvokable]
         fn set_filter(self: Pin<&mut Plugins>, text: &QString, format: i32, kind: PluginKind);
 
@@ -96,11 +103,6 @@ pub mod qobject {
 
         #[qinvokable]
         fn remove_folder(self: Pin<&mut Plugins>, index: i32);
-
-        /// The formats' names, in the order `setFilter` and `formatFolders`
-        /// number them from 1.
-        #[qinvokable]
-        fn format_names(self: &Plugins) -> QStringList;
 
         /// The folders searched for a format (numbered as in `setFilter`,
         /// from 1) before the added ones, in search order, with the home
@@ -183,15 +185,6 @@ fn same_rows(a: &[PluginDescriptor], b: &[PluginDescriptor]) -> bool {
         )
     };
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| key(x) == key(y))
-}
-
-/// A format's name as users know it.
-pub fn format_label(format: &PluginFormatKind) -> &'static str {
-    match format {
-        PluginFormatKind::Clap => "CLAP",
-        PluginFormatKind::Vst3 => "VST3",
-        PluginFormatKind::Lv2 => "LV2",
-    }
 }
 
 /// The format `Plugins.setFilter` numbers `format`: [`FORMATS`] from 1.
@@ -382,19 +375,15 @@ impl qobject::Plugins {
         string_list(shown_folders(&folders, home.as_deref(), Path::is_dir))
     }
 
-    fn format_names(&self) -> QStringList {
-        string_list(FORMATS.iter().map(|f| format_label(f).to_owned()))
+    fn formats(&self) -> QStringList {
+        string_list(FORMATS.iter().map(|f| f.display_name().to_owned()))
     }
 
     fn plugin_at(&self, row: i32) -> QStringList {
         let Some(p) = usize::try_from(row).ok().and_then(|r| self.rows.get(r)) else {
             return QStringList::default();
         };
-        string_list([
-            daw_plugins::kind_name(&p.format).to_owned(),
-            p.id.clone(),
-            p.name.clone(),
-        ])
+        string_list([p.format.as_str().to_owned(), p.id.clone(), p.name.clone()])
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
@@ -408,8 +397,8 @@ impl qobject::Plugins {
         match role {
             Role::Name => text(&p.name),
             Role::Vendor => text(&p.vendor),
-            Role::Format => text(format_label(&p.format)),
-            Role::FormatId => text(daw_plugins::kind_name(&p.format)),
+            Role::Format => text(p.format.display_name()),
+            Role::FormatId => text(p.format.as_str()),
             Role::PluginId => text(&p.id),
             Role::Instrument => QVariant::from(&p.is_instrument),
         }

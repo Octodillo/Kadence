@@ -24,6 +24,44 @@ pub enum PluginFormatKind {
     Vst3,
 }
 
+impl PluginFormatKind {
+    /// The format's name wherever one is written down or passed along: the
+    /// scanner's command line, QML's `formatId`, and the extension of the
+    /// format's bundles.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Clap => "clap",
+            Self::Lv2 => "lv2",
+            Self::Vst3 => "vst3",
+        }
+    }
+
+    /// The format's name as users know it. Not translated: it is a name.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Clap => "CLAP",
+            Self::Lv2 => "LV2",
+            Self::Vst3 => "VST3",
+        }
+    }
+}
+
+/// Not the [`as_str`](PluginFormatKind::as_str) of any format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownPluginFormat;
+
+impl std::str::FromStr for PluginFormatKind {
+    type Err = UnknownPluginFormat;
+
+    /// The format whose [`as_str`](Self::as_str) is `name`.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        [Self::Clap, Self::Lv2, Self::Vst3]
+            .into_iter()
+            .find(|kind| kind.as_str() == name)
+            .ok_or(UnknownPluginFormat)
+    }
+}
+
 /// What a scan finds out about one plugin.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginDescriptor {
@@ -244,6 +282,23 @@ pub trait PluginFormat: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_format_is_found_again_by_its_name() {
+        for kind in [
+            PluginFormatKind::Clap,
+            PluginFormatKind::Lv2,
+            PluginFormatKind::Vst3,
+        ] {
+            assert_eq!(kind.as_str().parse(), Ok(kind.clone()));
+            // The display name is for people, not a name to parse.
+            assert_eq!(
+                kind.display_name().parse::<PluginFormatKind>(),
+                Err(UnknownPluginFormat)
+            );
+        }
+        assert_eq!("".parse::<PluginFormatKind>(), Err(UnknownPluginFormat));
+    }
 
     fn plugin(id: &str) -> PluginDescriptor {
         PluginDescriptor {

@@ -411,8 +411,8 @@ impl qobject::Mixer {
         plugin: &QString,
         name: &QString,
     ) -> bool {
-        let format = daw_plugins::kind_from_name(&format.to_string());
-        let (Some(id), Some(format)) = (self.strip_id(row), format) else {
+        let format = format.to_string().parse();
+        let (Some(id), Ok(format)) = (self.strip_id(row), format) else {
             return false;
         };
         let added = self.as_mut().rust_mut().mixer.add_plugin_insert(

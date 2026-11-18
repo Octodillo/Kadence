@@ -54,7 +54,7 @@ Kirigami.FormLayout {
 
         Repeater {
             // CLAP, VST3 and LV2: names, so not translated.
-            model: Plugins.formatNames()
+            model: Plugins.formats
             delegate: ColumnLayout {
                 id: formatGroup
                 required property int index

@@ -5,13 +5,10 @@ use std::path::{Path, PathBuf};
 
 use daw_core::plugin::PluginFormatKind;
 
-/// The file or directory extension of one plugin bundle of `kind`.
+/// The file or directory extension of one plugin bundle of `kind`: every
+/// format's is its name.
 pub fn bundle_extension(kind: &PluginFormatKind) -> &'static str {
-    match kind {
-        PluginFormatKind::Clap => "clap",
-        PluginFormatKind::Lv2 => "lv2",
-        PluginFormatKind::Vst3 => "vst3",
-    }
+    kind.as_str()
 }
 
 /// Every bundle of `kind` under `roots`, each once. Roots keep their order, so earlier search

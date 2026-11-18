@@ -83,8 +83,9 @@ Kirigami.Dialog {
             QQC2.ComboBox {
                 id: formatBox
                 Accessible.name: i18nc("@label:listbox", "Plugin format")
-                // Order matches Plugins.setFilter. CLAP, VST3 and LV2 are names.
-                model: [i18nc("@item:inlistbox plugin format filter", "All Formats"), "CLAP", "VST3", "LV2"]
+                // Index 0 is every format, then `Plugins.formats` from 1,
+                // as `Plugins.setFilter` numbers them.
+                model: [i18nc("@item:inlistbox plugin format filter", "All Formats")].concat(Array.from(Plugins.formats))
                 onActivated: browser.refilter()
             }
         }

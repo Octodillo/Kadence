@@ -453,7 +453,7 @@ Item {
             test.waits = 0;
             check(Plugins.hasScanned, "plugin scan finished");
             // What the plugin settings list: a group of folders per format.
-            check(Plugins.formatNames().join(" ") === "CLAP VST3 LV2", "the plugin formats are named");
+            check(Plugins.formats.join(" ") === "CLAP VST3 LV2", "the plugin formats are named");
             check(Plugins.formatFolders(0).length === 0 && Plugins.formatFolders(4).length === 0,
                   "only the three formats have folders");
             shoot(window.title, "plugin-browser");
