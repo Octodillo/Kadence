@@ -3,20 +3,21 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
-use daw_core::event::EventList;
 use jack::{
     AudioIn, AudioOut, Client, ClientOptions, ClientStatus, Control, Frames, LatencyType, MidiIn,
     MidiOut, NotificationHandler, Port, PortFlags, ProcessHandler, ProcessScope, RawMidi,
 };
 
-use crate::cycle::{PortBuffers, encode_or_count, push_midi_or_count};
+use crate::cycle::{CycleDriver, MidiPorts};
 use crate::link_log::{Link, LinkLog, OwnChange};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendHealth, BackendStats, Latency,
-    PortDirection, PortFilter, PortInfo, PortKind, ProcessCallback,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, BackendStats, Latency, PortDirection,
+    PortFilter, PortInfo, PortKind, ProcessCallback,
 };
-use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
+use crate::{
+    MAIN_MIDI_INPUT, MAIN_MIDI_OUTPUT, MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs,
+};
 
 /// Cycles `stop` lets pass first, so link notifications already on their
 /// way (a patchbay's change just before) arrive.
@@ -48,9 +49,6 @@ pub struct JackBackend {
     log: Arc<LinkLog>,
     /// Links of ours made or removed while running, until `log` has them.
     recent: Vec<OwnChange>,
-    /// Auto-connect has run since `open`. Later starts restore `links`
-    /// instead, so ports the user unplugged stay unplugged.
-    auto_connected: bool,
     /// Adds and removes the ports of [`AudioBackend::add_midi_input`].
     extra: Option<MidiInputsControl<Port<MidiIn>>>,
     /// Make the next `start` fail the way `jack_activate` failing does.
@@ -196,13 +194,13 @@ impl JackBackend {
         v.extend((1..=cfg.audio_inputs).map(|i| (format!("{me}:audio_in_{i}"), false)));
         v.extend((1..=cfg.audio_outputs).map(|i| (format!("{me}:audio_out_{i}"), true)));
         if cfg.midi_input {
-            v.push((format!("{me}:midi_in"), false));
+            v.push((format!("{me}:{MAIN_MIDI_INPUT}"), false));
         }
         if cfg.midi_output {
             v.push((format!("{me}:midi_out"), true));
         }
         if let Some(extra) = &self.extra {
-            v.extend(extra.names().map(|(_, n)| (n.to_owned(), false)));
+            v.extend(extra.ports().into_iter().map(|p| (p.name, false)));
         }
         v
     }
@@ -269,41 +267,6 @@ impl JackBackend {
         [from, to]
             .iter()
             .any(|n| client.port_by_name(n).is_some_and(|p| client.is_mine(&p)))
-    }
-
-    fn auto_connect(&mut self, client: &Client, cfg: &BackendConfig) {
-        let me = client.name();
-        let physical = |ty, dir| client.ports(None, Some(ty), PortFlags::IS_PHYSICAL | dir);
-        let ours = |prefix: &str, n: u16| -> Vec<String> {
-            (1..=n).map(|i| format!("{me}:{prefix}_{i}")).collect()
-        };
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        pairs.extend(
-            ours("audio_out", cfg.audio_outputs)
-                .into_iter()
-                .zip(physical(AUDIO_TYPE, PortFlags::IS_INPUT)),
-        );
-        pairs.extend(
-            physical(AUDIO_TYPE, PortFlags::IS_OUTPUT)
-                .into_iter()
-                .zip(ours("audio_in", cfg.audio_inputs)),
-        );
-        if cfg.midi_input {
-            let midi_in = format!("{me}:midi_in");
-            pairs.extend(
-                physical(MIDI_TYPE, PortFlags::IS_OUTPUT)
-                    .into_iter()
-                    .map(|p| (p, midi_in.clone())),
-            );
-        }
-        for (from, to) in pairs {
-            let mark = self.log.begin_change(&mut self.recent);
-            // Already-connected pairs (WirePlumber may link us first) are fine.
-            match client.connect_ports_by_name(&from, &to) {
-                Ok(()) => self.note_change(true, (from, to), mark),
-                Err(e) => log::debug!("auto-connect {from} -> {to}: {e}"),
-            }
-        }
     }
 }
 
@@ -383,15 +346,15 @@ impl AudioBackend for JackBackend {
         if cfg.midi_input {
             ports.midi_in = Some(
                 client
-                    .register_port("midi_in", MidiIn::default())
-                    .map_err(port_err("midi_in".into()))?,
+                    .register_port(MAIN_MIDI_INPUT, MidiIn::default())
+                    .map_err(port_err(MAIN_MIDI_INPUT.into()))?,
             );
         }
         if cfg.midi_output {
             ports.midi_out = Some(
                 client
-                    .register_port("midi_out", MidiOut::default())
-                    .map_err(port_err("midi_out".into()))?,
+                    .register_port(MAIN_MIDI_OUTPUT, MidiOut::default())
+                    .map_err(port_err(MAIN_MIDI_OUTPUT.into()))?,
             );
         }
 
@@ -402,7 +365,6 @@ impl AudioBackend for JackBackend {
         self.cfg = Some(cfg);
         self.extra = Some(extra_control);
         self.links.clear();
-        self.auto_connected = false;
         Ok(())
     }
 
@@ -417,13 +379,9 @@ impl AudioBackend for JackBackend {
         };
         let cfg = self.cfg.clone().ok_or(BackendError::NotOpen)?;
         let processor = Processor {
-            bufs: PortBuffers::new(ports.audio_in.len(), ports.audio_out.len()),
             ports,
-            midi_in: EventList::with_capacity(cfg.midi_capacity),
-            midi_out: EventList::with_capacity(cfg.midi_capacity),
-            cb,
+            driver: CycleDriver::new(cb, &cfg, self.shared.clone()),
             shared: self.shared.clone(),
-            frame_time: 0,
             rt_check_in: 0,
             panicked: false,
         };
@@ -473,13 +431,9 @@ impl AudioBackend for JackBackend {
         // may or may not show in it, but its notification is in the log.
         self.log
             .add_snapshot(self.live_links(active.as_client(), &cfg));
-        if cfg.auto_connect && !self.auto_connected {
-            self.auto_connect(active.as_client(), &cfg);
-            self.auto_connected = true;
-        }
         for (from, to) in std::mem::take(&mut self.links) {
             let client = active.as_client();
-            // Auto-connect or the session manager may have made it already.
+            // The session manager may have made it already.
             let made = client
                 .port_by_name(&from)
                 .is_some_and(|p| p.is_connected_to(&to).unwrap_or(false));
@@ -643,9 +597,8 @@ impl AudioBackend for JackBackend {
         self.unregister_removed();
         let client = client_of(&self.state)?;
         let extra = self.extra.as_mut().ok_or(BackendError::NotOpen)?;
-        let slot = extra.free_slot().ok_or_else(|| {
-            BackendError::Config(format!("at most {} MIDI inputs", crate::MAX_MIDI_INPUTS))
-        })?;
+        // Before a port is registered for nothing.
+        extra.check_room()?;
         let port = client
             .register_port(name, MidiIn::default())
             .map_err(|_| BackendError::Port(name.into()))?;
@@ -656,14 +609,15 @@ impl AudioBackend for JackBackend {
                 return Err(BackendError::Other(e.to_string()));
             }
         };
-        if let Err(port) = extra.add(slot, full.clone(), port) {
-            let _ = client.unregister_port(port);
-            return Err(BackendError::Other(
-                "the audio thread has not caught up with earlier port changes".into(),
-            ));
-        }
+        let added = match extra.add(full, port) {
+            Ok(added) => added,
+            Err((e, port)) => {
+                let _ = client.unregister_port(port);
+                return Err(e);
+            }
+        };
         self.apply_extra_now();
-        Ok(MidiInputPort { slot, name: full })
+        Ok(added)
     }
 
     fn collect_removed(&mut self) {
@@ -672,16 +626,7 @@ impl AudioBackend for JackBackend {
 
     fn remove_midi_input(&mut self, slot: usize) -> Result<(), BackendError> {
         let extra = self.extra.as_mut().ok_or(BackendError::NotOpen)?;
-        let name = extra
-            .names()
-            .find(|&(s, _)| s == slot)
-            .map(|(_, n)| n.to_owned())
-            .ok_or_else(|| BackendError::Config(format!("no MIDI input in slot {slot}")))?;
-        if !extra.remove(slot) {
-            return Err(BackendError::Other(
-                "the audio thread has not caught up with earlier port changes".into(),
-            ));
-        }
+        let name = extra.remove(slot)?;
         // Links saved while stopped would fail to come back.
         self.links.retain(|(a, b)| *a != name && *b != name);
         self.log.forget_port(&name);
@@ -691,15 +636,9 @@ impl AudioBackend for JackBackend {
     }
 
     fn midi_inputs(&self) -> Vec<MidiInputPort> {
-        self.extra.as_ref().map_or_else(Vec::new, |extra| {
-            extra
-                .names()
-                .map(|(slot, name)| MidiInputPort {
-                    slot,
-                    name: name.to_owned(),
-                })
-                .collect()
-        })
+        self.extra
+            .as_ref()
+            .map_or_else(Vec::new, MidiInputsControl::ports)
     }
 
     fn stats(&self) -> BackendStats {
@@ -796,12 +735,8 @@ impl NotificationHandler for Notifications {
 
 struct Processor {
     ports: Ports,
-    bufs: PortBuffers,
-    midi_in: EventList,
-    midi_out: EventList,
-    cb: ProcessCallback,
+    driver: CycleDriver,
     shared: Arc<SharedStats>,
-    frame_time: u64,
     /// Cycles until the next real-time scheduling check; `u32::MAX` once
     /// the thread is known to be real-time.
     rt_check_in: u32,
@@ -863,72 +798,54 @@ impl Processor {
         } else if self.rt_check_in != u32::MAX {
             self.rt_check_in -= 1;
         }
-        let frames = ps.n_frames();
-        let mut dropped = 0;
-        self.midi_in.clear();
-        self.midi_out.clear();
-        if let Some(port) = &self.ports.midi_in {
-            for m in port.iter(ps) {
-                push_midi_or_count(&mut self.midi_in, m.time, m.bytes, &mut dropped);
-            }
-        }
-        let extra = &mut self.ports.extra;
-        extra.begin_cycle();
-        for (port, list) in extra.ports.iter().zip(&mut extra.lists) {
-            let Some(port) = port else { continue };
-            for m in port.iter(ps) {
-                push_midi_or_count(list, m.time, m.bytes, &mut dropped);
-            }
-        }
-
-        let frame_time = self.frame_time;
-        let sample_rate = f64::from(self.shared.sample_rate.load(Relaxed));
-        let xruns = self.shared.xruns.load(Relaxed);
-        let (cb, midi_in, midi_out) = (&mut self.cb, &self.midi_in, &mut self.midi_out);
-        let midi_inputs = &self.ports.extra.lists[..];
-        self.bufs.run(
-            self.ports.audio_in.iter().map(|p| p.as_slice(ps)),
-            self.ports.audio_out.iter_mut().map(|p| p.as_mut_slice(ps)),
-            |audio_in, audio_out| {
-                cb(&mut BackendCycle {
-                    frames,
-                    sample_rate,
-                    frame_time,
-                    audio_in,
-                    audio_out,
-                    midi_in,
-                    midi_inputs,
-                    midi_out,
-                    xruns,
-                })
-            },
+        let ports = &mut self.ports;
+        let mut midi = ScopePorts {
+            ps,
+            main: ports.midi_in.as_ref(),
+            // Creating the writer clears the buffer, so also without events.
+            writer: ports.midi_out.as_mut().map(|port| port.writer(ps)),
+        };
+        self.driver.run(
+            ps.n_frames(),
+            f64::from(self.shared.sample_rate.load(Relaxed)),
+            &mut midi,
+            &mut ports.extra,
+            ports.audio_in.iter().map(|p| p.as_slice(ps)),
+            ports.audio_out.iter_mut().map(|p| p.as_mut_slice(ps)),
         );
+    }
+}
 
-        if let Some(port) = &mut self.ports.midi_out {
-            let mut writer = port.writer(ps);
-            for e in self.midi_out.iter() {
-                let Some((bytes, len)) = encode_or_count(&e.kind, &mut dropped) else {
-                    continue;
-                };
-                let time = e.frame.min(frames.saturating_sub(1));
-                if writer
-                    .write(&RawMidi {
-                        time,
-                        bytes: &bytes[..len],
-                    })
-                    .is_err()
-                {
-                    dropped += 1;
-                }
-            }
-        }
+/// JACK's MIDI ports within one process scope.
+struct ScopePorts<'a> {
+    ps: &'a ProcessScope,
+    main: Option<&'a Port<MidiIn>>,
+    writer: Option<jack::MidiWriter<'a>>,
+}
 
-        self.frame_time += u64::from(frames);
-        self.shared.frames.fetch_add(u64::from(frames), Relaxed);
-        self.shared.cycles.fetch_add(1, Relaxed);
-        if dropped > 0 {
-            self.shared.midi_dropped.fetch_add(dropped, Relaxed);
+impl MidiPorts for ScopePorts<'_> {
+    type Input = Port<MidiIn>;
+
+    fn read_main(&mut self, each: &mut dyn FnMut(u32, &[u8])) {
+        for m in self.main.iter().flat_map(|port| port.iter(self.ps)) {
+            each(m.time, m.bytes);
         }
+    }
+
+    fn read(&mut self, port: &mut Self::Input, each: &mut dyn FnMut(u32, &[u8])) {
+        for m in port.iter(self.ps) {
+            each(m.time, m.bytes);
+        }
+    }
+
+    fn has_output(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    fn write(&mut self, frame: u32, bytes: &[u8]) -> bool {
+        self.writer
+            .as_mut()
+            .is_some_and(|w| w.write(&RawMidi { time: frame, bytes }).is_ok())
     }
 }
 

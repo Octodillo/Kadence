@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use daw_backend::{
     AudioBackend, BackendConfig, BackendError, BackendHealth, DummyBackend, Latency, Pacing,
-    PortDirection, PortFilter, PortKind,
+    PortDirection, PortFilter, PortKind, connect_physical,
 };
 use daw_core::event::{Event, EventKind};
 
@@ -19,7 +19,6 @@ fn cfg(frames: u32) -> BackendConfig {
         midi_output: true,
         sample_rate: Some(48_000),
         buffer_size: Some(frames),
-        auto_connect: false,
         midi_capacity: 16,
     }
 }
@@ -116,6 +115,75 @@ fn midi_in_is_decoded_and_midi_out_is_encoded() {
     assert_eq!(out.as_bytes(), &[0x81, 60, 0]);
     assert_eq!(out.frame % 32, 5);
     b.stop().unwrap();
+}
+
+#[test]
+fn midi_out_past_the_period_goes_out_on_its_last_frame() {
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(1);
+    b.open(cfg(32)).unwrap();
+    let mut tap = b.midi_tap();
+    b.start(Box::new(|c| {
+        let kind = EventKind::Midi([0xB0, 7, 100]);
+        c.midi_out.push(Event { frame: 100, kind }).unwrap();
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(1, WAIT));
+    b.stop().unwrap();
+    assert_eq!(tap.try_recv().map(|m| m.frame), Some(31));
+}
+
+#[test]
+fn without_a_midi_output_nothing_is_sent_or_counted() {
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(1);
+    b.open(BackendConfig {
+        midi_output: false,
+        ..cfg(32)
+    })
+    .unwrap();
+    let mut tap = b.midi_tap();
+    b.start(Box::new(|c| {
+        for kind in [
+            EventKind::Midi([0xB0, 7, 100]),
+            EventKind::Midi([0xF0, 1, 2]),
+        ] {
+            c.midi_out.push(Event { frame: 0, kind }).unwrap();
+        }
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(1, WAIT));
+    b.stop().unwrap();
+    assert!(tap.try_recv().is_none());
+    assert_eq!(b.stats().midi_dropped, 0);
+}
+
+#[test]
+fn an_added_input_named_like_the_main_one_is_not_auto_connected() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(BackendConfig {
+        midi_input: false,
+        ..cfg(32)
+    })
+    .unwrap();
+    b.add_midi_input(daw_backend::MAIN_MIDI_INPUT).unwrap();
+    connect_physical(&mut b, true);
+    assert!(
+        b.connections().iter().all(|(_, to)| !to.contains("midi")),
+        "{:?}",
+        b.connections()
+    );
+}
+
+#[test]
+fn midi_inputs_are_refused_once_every_slot_is_taken() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    for n in 0..daw_backend::MAX_MIDI_INPUTS {
+        b.add_midi_input(&format!("in {n}")).unwrap();
+    }
+    assert!(matches!(
+        b.add_midi_input("one more"),
+        Err(BackendError::Config(_))
+    ));
 }
 
 #[test]
@@ -253,13 +321,20 @@ fn ports_list_and_connect() {
 }
 
 #[test]
-fn auto_connect_wires_physical_ports() {
+fn connect_physical_wires_physical_ports() {
     let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(1);
-    b.open(BackendConfig {
-        auto_connect: true,
-        ..cfg(64)
-    })
-    .unwrap();
+    b.open(cfg(64)).unwrap();
+    // An added input is the caller's to connect, and a program's audio is
+    // not hardware.
+    b.add_midi_input("keys").unwrap();
+    b.system()
+        .add_port("synth:out", PortKind::Audio, PortDirection::Output, false);
+    // A program's MIDI output is not hardware and stays unconnected.
+    b.system()
+        .add_port("seq:out", PortKind::Midi, PortDirection::Output, false);
+    connect_physical(&mut b, true);
+    // Again changes nothing.
+    connect_physical(&mut b, true);
     b.start(Box::new(|_| {})).unwrap();
     let mut c: Vec<_> = b
         .connections()
