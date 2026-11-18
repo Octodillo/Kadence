@@ -267,14 +267,7 @@ impl AppState {
         self.synced = Some(revision);
         // Plugins load as the session takes the document: from here the
         // lanes know their parameters.
-        let session = self.engine.session();
-        self.lanes.params.set_plugins(
-            self.doc
-                .project()
-                .all_tracks()
-                .flat_map(|t| t.devices.iter()),
-            |device| session?.plugin_params(device),
-        );
+        self.refresh_lane_params();
         self.prune_lane_modes();
         self.apply_click();
         self.view_revision += 1;

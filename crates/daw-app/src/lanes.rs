@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Instant;
 
 use daw_arrange::automation::{lane_scale, static_value};
 use daw_arrange::{LaneScale, ParamCatalog};
@@ -23,7 +24,7 @@ use daw_model::{
     AutomationLane, AutomationTarget, Device, DeviceId, DeviceSource, LaneId, Project, Track,
 };
 
-use crate::device_panel::{BuiltinParams, ParamDesc};
+use crate::device_panel::{BuiltinParams, PLUGIN_REREAD, ParamDesc};
 use crate::message::Message;
 use crate::mixer::{Control, StripId};
 use crate::session_mixer::{ParamStart, strip_id};
@@ -63,71 +64,123 @@ pub struct TargetName {
 /// unit.
 ///
 /// A plugin that is not loaded (missing, or no audio engine) is unknown
-/// here: its lanes keep the plain 0 to 1 scale and show the parameter's
-/// number until it loads.
+/// here, and so is a parameter whose range a lane can't be drawn along
+/// (not finite, or empty). Their lanes show the parameter's number on a
+/// plain 0 to 1 scale, and their header control is locked
+/// ([`LaneControl::editable`]): a value set along a guessed scale would be
+/// wrong once the plugin is back.
 #[derive(Debug, Default)]
 pub struct LaneParams {
     builtin: BuiltinParams,
     /// Behind a lock only because the views hold the catalog as a shared
     /// `Send + Sync` object; it is written on the thread that reads it.
-    plugins: RwLock<HashMap<DeviceId, Arc<[ParamDesc]>>>,
+    plugins: RwLock<HashMap<DeviceId, PluginLanes>>,
+}
+
+/// One loaded plugin, as the lanes know it.
+#[derive(Debug, Default)]
+struct PluginLanes {
+    /// How many parameters the plugin described, and those among them a
+    /// lane can show.
+    described: usize,
+    params: HashMap<ParamId, ParamDesc>,
+    /// The plugin's own values for parameters the document doesn't store,
+    /// where they were read ([`LaneParams::set_value`]).
+    values: HashMap<ParamId, f64>,
+}
+
+impl PluginLanes {
+    fn new(infos: &[daw_core::plugin::ParamInfo]) -> Self {
+        Self {
+            described: infos.len(),
+            params: infos
+                .iter()
+                .map(ParamDesc::from_info)
+                .filter(ParamDesc::has_range)
+                .map(|p| (p.id, p))
+                .collect(),
+            values: HashMap::new(),
+        }
+    }
+
+    /// Whether this is still what `infos` describes. A plugin's parameters
+    /// stay as they are while it is loaded (and there may be thousands), so
+    /// they are described again only when they differ.
+    fn describes(&self, infos: &[daw_core::plugin::ParamInfo]) -> bool {
+        self.described == infos.len()
+            && infos.iter().all(|i| match self.params.get(&i.id) {
+                Some(p) => p.describes(i),
+                // Left out for its range: still left out?
+                None => !(i.min.is_finite() && i.max.is_finite() && i.min != i.max),
+            })
+    }
 }
 
 impl LaneParams {
-    fn plugin(&self, device: &Device) -> Option<Arc<[ParamDesc]>> {
+    /// Runs `f` on one parameter of a loaded plugin.
+    fn with_plugin<R>(
+        &self,
+        device: &Device,
+        param: ParamId,
+        f: impl FnOnce(&ParamDesc, Option<f64>) -> R,
+    ) -> Option<R> {
         if matches!(device.source, DeviceSource::Builtin { .. }) {
             return None;
         }
-        self.plugins
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&device.id)
-            .cloned()
+        let plugins = self.plugins.read().unwrap_or_else(PoisonError::into_inner);
+        let plugin = plugins.get(&device.id)?;
+        Some(f(
+            plugin.params.get(&param)?,
+            plugin.values.get(&param).copied(),
+        ))
     }
 
     /// One parameter of `device`, if it is known.
     pub fn param(&self, device: &Device, param: ParamId) -> Option<ParamDesc> {
         self.builtin
             .param(device, param)
-            .or_else(|| self.plugin(device)?.iter().find(|p| p.id == param).cloned())
+            .or_else(|| self.with_plugin(device, param, |p, _| p.clone()))
     }
 
     /// The name of a parameter, for headers.
     pub fn name(&self, device: &Device, param: ParamId) -> Option<String> {
-        self.param(device, param).map(|p| p.name)
+        match self.builtin.name(device, param) {
+            Some(name) => Some(name.to_owned()),
+            None => self.with_plugin(device, param, |p, _| p.name.clone()),
+        }
     }
 
     /// Takes the parameters of the loaded plugins among `devices`:
     /// `describe` gives a loaded plugin's, as the session does. Plugins no
-    /// longer among them are forgotten. Returns true if anything a lane
-    /// shows changed.
+    /// longer among them are forgotten, with their values.
     pub fn set_plugins<'a>(
         &self,
         devices: impl Iterator<Item = &'a Device>,
         describe: impl Fn(DeviceId) -> Option<&'a [daw_core::plugin::ParamInfo]>,
-    ) -> bool {
+    ) {
         let mut plugins = self.plugins.write().unwrap_or_else(PoisonError::into_inner);
-        let mut changed = false;
-        let mut next = HashMap::new();
+        let mut known = std::mem::take(&mut *plugins);
         for device in devices {
             let Some(infos) = describe(device.id) else {
                 continue;
             };
-            // A plugin's parameters stay as they are while it is loaded
-            // (there may be thousands): describe them again only if they
-            // differ.
-            let kept = plugins.remove(&device.id).filter(|known| {
-                known.len() == infos.len() && known.iter().zip(infos).all(|(d, i)| d.describes(i))
-            });
-            let descs = kept.unwrap_or_else(|| {
-                changed = true;
-                infos.iter().map(ParamDesc::from_info).collect()
-            });
-            next.insert(device.id, descs);
+            let plugin = known
+                .remove(&device.id)
+                .filter(|p| p.describes(infos))
+                .unwrap_or_else(|| PluginLanes::new(infos));
+            plugins.insert(device.id, plugin);
         }
-        changed |= !plugins.is_empty();
-        *plugins = next;
-        changed
+    }
+
+    /// Notes the value a loaded plugin itself holds for a parameter the
+    /// document doesn't store: what its lane rests at.
+    pub fn set_value(&self, device: DeviceId, param: ParamId, value: f64) {
+        let mut plugins = self.plugins.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(p) = plugins.get_mut(&device)
+            && value.is_finite()
+        {
+            p.values.insert(param, value);
+        }
     }
 }
 
@@ -140,11 +193,16 @@ impl ParamCatalog for LaneParams {
     }
 
     fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
-        self.param(device, param).map(|p| p.scale())
+        self.builtin
+            .scale(device, param)
+            .or_else(|| self.with_plugin(device, param, |p, _| p.scale()))
     }
 
+    /// A plugin's own value where it was read, else the default.
     fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
-        self.param(device, param).map(|p| p.default)
+        self.builtin
+            .default_value(device, param)
+            .or_else(|| self.with_plugin(device, param, |p, value| value.unwrap_or(p.default)))
     }
 }
 
@@ -200,6 +258,9 @@ pub struct LaneControl {
     /// write mode, or the mixer writes automation), as the mixer's and
     /// device panel's controls do.
     pub writes: bool,
+    /// The control can be moved from the header: not a parameter nothing
+    /// describes (see [`LaneParams`]).
+    pub editable: bool,
 }
 
 /// The lane modes and parameter names the app keeps beside the document.
@@ -209,9 +270,60 @@ pub struct Lanes {
     /// for this session only, like a record button.
     pub write: HashSet<LaneId>,
     pub params: Arc<LaneParams>,
+    /// When the plugins' own values were last read for the lanes.
+    values_read: Option<Instant>,
 }
 
 impl AppState {
+    /// Brings what the lanes know of plugin parameters up to date with the
+    /// session: which plugins are loaded and, for parameters a lane
+    /// automates and the document doesn't store, the value the plugin
+    /// holds (what the device panel shows for it). Each value is a round
+    /// trip to the plugin, so they are read at most every
+    /// [`PLUGIN_REREAD`], as for the panel.
+    pub(crate) fn refresh_lane_params(&mut self) {
+        let session = self.engine.session();
+        let project = self.doc.project();
+        self.lanes.params.set_plugins(
+            project.all_tracks().flat_map(|t| t.devices.iter()),
+            |device| session?.plugin_params(device),
+        );
+        if self
+            .lanes
+            .values_read
+            .is_some_and(|at| at.elapsed() < PLUGIN_REREAD)
+        {
+            return;
+        }
+        self.lanes.values_read = Some(Instant::now());
+        for t in project.all_tracks() {
+            for l in &t.automation {
+                let AutomationTarget::DeviceParam { device, param } = l.target else {
+                    continue;
+                };
+                let unstored = t.devices.iter().any(|d| {
+                    d.id == device
+                        && matches!(d.source, DeviceSource::Plugin { .. })
+                        && !d.params.contains_key(&param)
+                });
+                if unstored {
+                    self.read_plugin_value(device, param);
+                }
+            }
+        }
+    }
+
+    /// Notes the value a loaded plugin holds for `param` now.
+    fn read_plugin_value(&self, device: DeviceId, param: ParamId) {
+        let value = self
+            .engine
+            .session()
+            .and_then(|s| s.with_plugin(device, |p| p.param_value(param)));
+        if let Some(value) = value {
+            self.lanes.params.set_value(device, param, value);
+        }
+    }
+
     fn track_at_index(&self, index: i32) -> Option<&std::sync::Arc<Track>> {
         usize::try_from(index)
             .ok()
@@ -245,11 +357,13 @@ impl AppState {
             value,
             following,
             writes: self.mixer.write() || (l.enabled && self.lanes.write.contains(&l.id)),
+            editable: self.lane_mixer_control(track, lane).is_some(),
         })
     }
 
     /// The mixer control a lane's header drives: its strip and control,
-    /// and for a built-in device's parameter, its description.
+    /// and for a device parameter, its description. `None` for a parameter
+    /// nothing describes: there is no scale to move it along.
     fn lane_mixer_control(
         &self,
         track: i32,
@@ -265,7 +379,11 @@ impl AppState {
             }
             AutomationTarget::DeviceParam { device, param } => Control::Param { device, param },
         };
-        Some((strip_id(t.id), control, self.lane_param(track, lane)))
+        let param = self.lane_param(track, lane);
+        if matches!(control, Control::Param { .. }) && param.is_none() {
+            return None;
+        }
+        Some((strip_id(t.id), control, param))
     }
 
     /// Runs a change to a lane's control as the mixer runs its own: after
@@ -293,6 +411,12 @@ impl AppState {
     /// playback with writing armed, a take, as grabbing the same control on
     /// the Mix page or device panel would start.
     pub fn begin_lane_control(&mut self, track: i32, lane: i32) {
+        // A take starts from what the plugin holds now.
+        if let Some((_, l)) = self.lane_at(track, lane)
+            && let AutomationTarget::DeviceParam { device, param } = l.target
+        {
+            self.read_plugin_value(device, param);
+        }
         let static_value = self
             .lane_at(track, lane)
             .map(|(t, l)| static_value(self.arrange.params.as_ref(), t, l.target));
@@ -559,13 +683,18 @@ mod tests {
 
         let devices = [plugin.clone(), eq_device()];
         let loaded = |id| (id == plugin.id).then_some(&infos[..]);
-        assert!(p.set_plugins(devices.iter(), loaded));
-        assert!(!p.set_plugins(devices.iter(), loaded), "nothing new");
+        p.set_plugins(devices.iter(), loaded);
         let scale = p.scale(&plugin, 7).expect("a range");
         assert_eq!(scale.from_norm(0.0), 20.0);
         assert_eq!(scale.from_norm(1.0), 20_000.0);
         assert_eq!(p.name(&plugin, 7).as_deref(), Some("Cutoff"));
         assert_eq!(p.default_value(&plugin, 7), Some(1_000.0));
+        // What the plugin itself holds, once read, is where a lane rests;
+        // it survives the next look at the session.
+        p.set_value(plugin.id, 7, 5_000.0);
+        p.set_value(plugin.id, 7, f64::NAN);
+        p.set_plugins(devices.iter(), loaded);
+        assert_eq!(p.default_value(&plugin, 7), Some(5_000.0));
         assert_eq!(p.scale(&plugin, 8), None, "not one of its parameters");
         // Too many to offer in the Add Automation Lane menu.
         assert!(p.automatable(&plugin).is_empty());
@@ -581,7 +710,7 @@ mod tests {
             param: 7,
         };
         assert_eq!(lane_scale(Some(&catalog), &track, target), scale);
-        assert_eq!(static_value(Some(&catalog), &track, target), 1_000.0);
+        assert_eq!(static_value(Some(&catalog), &track, target), 5_000.0);
     }
 
     #[test]
@@ -603,11 +732,55 @@ mod tests {
             automatable: true,
         }];
         let p = LaneParams::default();
-        assert!(p.set_plugins(std::iter::once(&plugin), |_| Some(&infos[..])));
+        p.set_plugins(std::iter::once(&plugin), |_| Some(&infos[..]));
+        assert!(p.scale(&plugin, 1).is_some());
         // Removed from the project, or its plugin is gone.
-        assert!(p.set_plugins(std::iter::once(&plugin), |_| None));
+        p.set_plugins(std::iter::once(&plugin), |_| None);
         assert_eq!(p.scale(&plugin, 1), None);
-        assert!(!p.set_plugins(std::iter::empty(), |_| None));
+    }
+
+    /// A plugin may describe any range: one given high end first is turned
+    /// round, and one no value can be placed along is not known at all.
+    #[test]
+    fn plugin_ranges_are_ordered_and_unusable_ones_left_out() {
+        use daw_core::plugin::ParamInfo;
+        let plugin = Device::new(
+            "Odd",
+            DeviceSource::Plugin {
+                format: daw_core::plugin::PluginFormatKind::Clap,
+                id: "com.example.odd".into(),
+            },
+        );
+        let info = |id, min, max| ParamInfo {
+            id,
+            name: format!("P{id}"),
+            min,
+            max,
+            default: 0.0,
+            automatable: true,
+        };
+        let infos = [
+            info(1, 1.0, -1.0),
+            info(2, 0.5, 0.5),
+            info(3, 0.0, f64::INFINITY),
+            info(4, f64::NAN, 1.0),
+        ];
+        let p = LaneParams::default();
+        p.set_plugins(std::iter::once(&plugin), |_| Some(&infos[..]));
+        let scale = p.scale(&plugin, 1).expect("turned round");
+        assert_eq!((scale.from_norm(0.0), scale.from_norm(1.0)), (-1.0, 1.0));
+        for id in 2..=4 {
+            assert_eq!(p.scale(&plugin, id), None, "{id}");
+            assert_eq!(p.param(&plugin, id), None, "{id}");
+        }
+        // The same description again keeps what is known.
+        p.set_value(plugin.id, 1, 0.25);
+        p.set_plugins(std::iter::once(&plugin), |_| Some(&infos[..]));
+        assert_eq!(p.default_value(&plugin, 1), Some(0.25));
+        // A different one (the plugin was swapped or loaded anew) does not.
+        let other = [info(1, 0.0, 10.0)];
+        p.set_plugins(std::iter::once(&plugin), |_| Some(&other[..]));
+        assert_eq!(p.default_value(&plugin, 1), Some(0.0));
     }
 
     #[test]
