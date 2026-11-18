@@ -6,7 +6,8 @@
 //! into a [`Recorder`] on a timer (its [`Recorder::notes`] and
 //! [`Recorder::held`] let the UI draw the take as it grows), call
 //! [`Recorder::finish`] when recording stops, convert with [`to_clip_notes`]
-//! and plan the edit with [`merge_take`].
+//! and add the notes to the clip with
+//! [`take_command`](crate::model::take_command).
 //!
 //! A loop wrap or locate while keys are held ends those notes at the jump
 //! and starts them again where playback continues, so a held chord carries
@@ -17,7 +18,7 @@ use std::ops::Range;
 use daw_core::event::{EventKind, NoteId};
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 
-use crate::note::{EditNote, NoteData};
+use crate::note::NoteData;
 use crate::player::Captured;
 
 /// A recorded note on the timeline, in samples.
@@ -259,44 +260,6 @@ pub fn to_clip_notes(
         .collect()
 }
 
-/// How a take combines with the notes already in the clip.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum TakeMode {
-    /// Keep the existing notes and add the take.
-    #[default]
-    Overdub,
-    /// Remove existing notes that start inside the recorded range first.
-    Replace,
-}
-
-/// The edit a take makes: notes to remove (indices into the existing
-/// notes) and notes to add.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TakePlan {
-    pub remove: Vec<usize>,
-    pub add: Vec<NoteData>,
-}
-
-/// Plans merging `take` into a clip. `range` is the clip-relative span
-/// that was recorded over, used by [`TakeMode::Replace`].
-pub fn merge_take<N: EditNote>(
-    existing: &[N],
-    take: Vec<NoteData>,
-    mode: TakeMode,
-    range: Range<TickTime>,
-) -> TakePlan {
-    let remove = match mode {
-        TakeMode::Overdub => Vec::new(),
-        TakeMode::Replace => existing
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| range.contains(&n.data().start))
-            .map(|(i, _)| i)
-            .collect(),
-    };
-    TakePlan { remove, add: take }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_and_merges() {
+    fn converts_to_clip_notes() {
         let tempo = SegmentTempoMap::new(120.0);
         let notes = [
             RecordedNote {
@@ -466,26 +429,6 @@ mod tests {
         );
         assert_eq!((data[0].start.0, data[0].length.0), (PPQ / 2, PPQ / 2));
         assert_eq!((data[1].start.0, data[1].length.0), (0, PPQ * 3 / 4));
-
-        let existing = [
-            NoteData::new(0, 10, 50, 1.0),
-            NoteData::new(PPQ, 10, 50, 1.0),
-        ];
-        let plan = merge_take(
-            &existing,
-            data.clone(),
-            TakeMode::Replace,
-            TickTime(0)..TickTime(PPQ),
-        );
-        assert_eq!(plan.remove, [0]);
-        assert_eq!(plan.add, data);
-        let plan = merge_take(
-            &existing,
-            data,
-            TakeMode::Overdub,
-            TickTime(0)..TickTime(PPQ),
-        );
-        assert!(plan.remove.is_empty());
     }
 
     #[test]

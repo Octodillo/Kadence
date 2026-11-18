@@ -587,3 +587,173 @@ fn a_silent_preview_velocity_still_sounds() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+#[test]
+fn overlapping_notes_on_one_key_are_not_reattacked() {
+    // The second note retriggers the key at 50: from then on only it
+    // sounds, though the first one still spans the play position.
+    let notes = vec![note(0, 1000, 60, 1), note(50, 500, 60, 2)];
+    let mut rig = Rig::with(notes.clone());
+    rig.play(0, 128, &[64]);
+    // An edit elsewhere on the track sends the same notes again.
+    rig.handle.set_sequence(Sequence::new(notes)).unwrap();
+    assert_eq!(simple(&rig.play(128, 256, &[64])), []);
+    // A loop wrap into the overlap restarts the key once, as the note
+    // that was sounding there.
+    let out = rig.play(100, 600, &[64]);
+    assert_eq!(
+        simple(&out),
+        [(100, 60, false), (100, 60, true), (500, 60, false)]
+    );
+}
+
+#[test]
+fn a_note_cut_short_by_a_retrigger_is_not_chased() {
+    // Played from the start, key 60 is silent after 60: the short note cut
+    // the long one off at 50.
+    let notes = vec![note(0, 200, 60, 1), note(50, 60, 60, 2)];
+    let mut rig = Rig::with(notes.clone());
+    assert_eq!(simple(&rig.play(0, 70, &[35])).len(), 4);
+    rig.handle.set_sequence(Sequence::new(notes)).unwrap();
+    assert_eq!(simple(&rig.play(70, 300, &[64])), []);
+    // A locate there is silent too.
+    assert_eq!(simple(&rig.play(70, 300, &[64])), []);
+}
+
+#[test]
+fn a_note_added_behind_the_play_position_cuts_the_one_it_would_have() {
+    let long = note(0, 1000, 60, 1);
+    let mut rig = Rig::with(vec![long]);
+    assert_eq!(simple(&rig.play(0, 128, &[64])), [(0, 60, true)]);
+    // Played from the start, the short note ends the long one at 50.
+    let edited = Sequence::new(vec![long, note(50, 60, 60, 2)]);
+    rig.handle.set_sequence(edited).unwrap();
+    assert_eq!(simple(&rig.play(128, 1100, &[64])), [(128, 60, false)]);
+}
+
+#[test]
+fn chased_notes_that_do_not_fit_start_in_the_next_block() {
+    let mut rig = Rig::with(vec![
+        note(0, 1000, 60, 1),
+        note(0, 1000, 62, 2),
+        note(0, 1000, 64, 3),
+    ]);
+    rig.limit_output(2);
+    let out = rig.block(500, 64, true, &[]);
+    assert_eq!(simple(&out), [(500, 60, true), (500, 62, true)]);
+    let out = rig.block(564, 64, true, &[]);
+    assert_eq!(simple(&out), [(564, 64, true)]);
+    assert!(rig.block(628, 64, true, &[]).is_empty());
+}
+
+#[test]
+fn sequence_note_offs_that_do_not_fit_go_out_in_the_next_block() {
+    let mut rig = Rig::with(vec![note(0, 1000, 60, 1), note(0, 1000, 62, 2)]);
+    rig.play(0, 64, &[64]);
+    rig.limit_output(2);
+    // Playback stops in a block whose live input fills the list.
+    let out = rig.block(64, 64, false, &[live(on(0, 40)), live(on(0, 41))]);
+    assert_eq!(simple(&out), [(64, 40, true), (64, 41, true)]);
+    let out = rig.block(64, 64, false, &[]);
+    assert_eq!(simple(&out), [(64, 60, false), (64, 62, false)]);
+    assert!(rig.block(64, 64, false, &[]).is_empty());
+    // The overflow is counted, like the engine's dropped parameter changes.
+    assert_eq!(rig.handle.take_event_overflows(), 2);
+    assert_eq!(rig.handle.take_event_overflows(), 0);
+}
+
+#[test]
+fn a_live_note_off_that_does_not_fit_goes_out_in_the_next_block() {
+    let mut rig = Rig::new();
+    rig.block(0, 64, false, &[live(on(0, 60)), live(on(1, 70))]);
+    rig.limit_output(2);
+    let input = [
+        live(on(0, 61)),
+        live(on(0, 62)),
+        live(off(0, Some(60))),
+        // Every note on channel 1.
+        live(off(1, None)),
+    ];
+    let out = rig.block(64, 64, false, &input);
+    assert_eq!(simple(&out), [(64, 61, true), (64, 62, true)]);
+    let out = rig.block(128, 64, false, &[]);
+    assert_eq!(simple(&out), [(128, 60, false), (128, 70, false)]);
+    assert!(rig.block(192, 64, false, &[]).is_empty());
+}
+
+#[test]
+fn a_pedal_lift_that_does_not_fit_goes_out_in_the_next_block() {
+    let mut rig = Rig::new();
+    rig.block(0, 64, false, &[live(EventKind::Midi([0xB0, 64, 127]))]);
+    rig.limit_output(1);
+    let input = [live(on(0, 61)), live(EventKind::Midi([0xB0, 64, 0]))];
+    let out = rig.block(64, 64, false, &input);
+    assert_eq!(simple(&out), [(64, 61, true)]);
+    let out = rig.block(128, 64, false, &[]);
+    let kinds: Vec<_> = out.iter().map(|(_, k)| *k).collect();
+    assert_eq!(kinds, [EventKind::Midi([0xB0, 64, 0])]);
+}
+
+#[test]
+fn notes_that_do_not_fit_start_in_the_next_block() {
+    let mut rig = Rig::with(vec![
+        note(10, 500, 60, 1),
+        note(10, 500, 62, 2),
+        note(10, 500, 64, 3),
+    ]);
+    rig.limit_output(2);
+    let out = rig.block(0, 64, true, &[]);
+    assert_eq!(simple(&out), [(10, 60, true), (10, 62, true)]);
+    let out = rig.block(64, 64, true, &[]);
+    assert_eq!(simple(&out), [(64, 64, true)]);
+}
+
+#[test]
+fn a_preview_that_does_not_fit_sounds_in_the_next_block() {
+    let mut rig = Rig::new();
+    rig.limit_output(1);
+    rig.handle.preview(preview(60));
+    let out = rig.block(0, 64, false, &[live(on(0, 40))]);
+    assert_eq!(simple(&out), [(0, 40, true)]);
+    let out = rig.block(64, 64, false, &[]);
+    assert_eq!(simple(&out), [(64, 60, true)]);
+    // Its end waits for room too.
+    rig.handle.preview(None);
+    let out = rig.block(128, 64, false, &[live(on(0, 41))]);
+    assert_eq!(simple(&out), [(128, 41, true)]);
+    let out = rig.block(192, 64, false, &[]);
+    assert_eq!(simple(&out), [(192, 60, false)]);
+}
+
+#[test]
+fn a_full_list_never_leaves_a_sequence_note_sounding() {
+    // More notes than fit, a live edit, a loop wrap and a stop, all with
+    // room for three events a block.
+    let notes = |shift: i64| -> Vec<_> {
+        (0..40)
+            .map(|i| note(i * 7 + shift, i * 7 + shift + 300, 40 + i as u8, i as u64))
+            .collect()
+    };
+    let mut rig = Rig::with(notes(0));
+    rig.limit_output(3);
+    let mut out = rig.play(0, 400, &[64]);
+    rig.handle.set_sequence(Sequence::new(notes(20))).unwrap();
+    out.extend(rig.play(400, 600, &[64]));
+    out.extend(rig.play(100, 300, &[64]));
+    for _ in 0..40 {
+        out.extend(rig.block(300, 64, false, &[]));
+    }
+    assert!(rig.handle.take_event_overflows() > 0);
+    let mut sounding = std::collections::HashSet::new();
+    for (_, kind) in &out {
+        match *kind {
+            EventKind::NoteOn { key, .. } => assert!(sounding.insert(key), "two voices on {key}"),
+            EventKind::NoteOff { key, .. } => {
+                sounding.remove(&key.unwrap());
+            }
+            _ => {}
+        }
+    }
+    assert!(sounding.is_empty(), "still sounding: {sounding:?}");
+    assert!(rig.block(300, 64, false, &[]).is_empty());
+}
