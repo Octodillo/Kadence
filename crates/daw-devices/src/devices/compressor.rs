@@ -4,10 +4,11 @@
 use std::sync::Arc;
 
 use daw_core::event::ParamId;
+use daw_core::level;
 use daw_core::meter::PeakMeter;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Smoother, db_to_gain, decay_coef, flush};
+use crate::dsp::{Smoother, decay_coef, device_gain, flush};
 use crate::events::{Segmented, input, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
@@ -136,7 +137,7 @@ impl Compressor {
             }
             MAKEUP => self
                 .makeup
-                .set_target(db_to_gain(self.params.get(MAKEUP)) as f32),
+                .set_target(device_gain(self.params.get(MAKEUP)) as f32),
             MIX => self.mix.set_target(self.params.get_f32(MIX)),
             _ => {}
         }
@@ -164,8 +165,8 @@ impl Segmented for Compressor {
         for i in start..end {
             let (l, r) = (input(ctx, 0, i), input(ctx, 1, i));
             let peak = l.abs().max(r.abs());
-            let level = 20.0 * peak.max(1e-9).log10();
-            let reduction = level - gain_computer(level, threshold, ratio, knee);
+            let input_db = level::gain_to_db_f32(peak.max(1e-9));
+            let reduction = input_db - gain_computer(input_db, threshold, ratio, knee);
             let coef = if reduction > self.envelope {
                 self.attack
             } else {
@@ -175,7 +176,7 @@ impl Segmented for Compressor {
             most = most.max(self.envelope);
             // No silence floor on the reduction alone: with makeup a deep
             // reduction is still audible, and a floor would cut it to nothing.
-            let gain = 10f32.powf(-self.envelope / 20.0) * self.makeup.tick();
+            let gain = level::db_to_gain_f32(-self.envelope) * self.makeup.tick();
             let mix = self.mix.tick();
             let g = 1.0 - mix + mix * gain;
             output(ctx, i, l * g, r * g);
@@ -200,7 +201,7 @@ impl Node for Compressor {
         self.makeup.set_time(10.0, sample_rate);
         self.mix.set_time(10.0, sample_rate);
         self.makeup
-            .reset(db_to_gain(self.params.get(MAKEUP)) as f32);
+            .reset(device_gain(self.params.get(MAKEUP)) as f32);
         self.mix.reset(self.params.get_f32(MIX));
         self.reset();
     }

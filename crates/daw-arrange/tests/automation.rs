@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use daw_arrange::automation::{SILENCE_DB, lane_targets, static_value};
+use daw_arrange::automation::{lane_targets, static_value};
 use daw_arrange::{
     Arrange, Env, Hit, LaneScale, Outcome, ParamCatalog, PointShape, Pointer, Prim, Snap,
 };
 use daw_core::event::ParamId;
+use daw_core::level::SILENCE_DB;
 use daw_core::time::{PPQ, SegmentTempoMap, TickTime};
 use daw_model::commands::{AddDevice, AddSend, AddTrack};
 use daw_model::{

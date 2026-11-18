@@ -6,7 +6,7 @@
 use daw_core::event::{NoteId, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Adsr, Smoother, Svf, SvfMode, Waveform, db_to_gain, key_to_hz};
+use crate::dsp::{Adsr, DEVICE_FLOOR_DB, Smoother, Svf, SvfMode, Waveform, device_gain, key_to_hz};
 use crate::events::{Note, Segmented, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::voices::{self, VoicePool};
@@ -198,7 +198,15 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
         0.7,
         ParamUnit::Percent,
     ),
-    ParamSpec::new(GAIN, "gain", "Gain", -70.0, 12.0, -6.0, ParamUnit::Decibels),
+    ParamSpec::new(
+        GAIN,
+        "gain",
+        "Gain",
+        DEVICE_FLOOR_DB,
+        12.0,
+        -6.0,
+        ParamUnit::Decibels,
+    ),
     ParamSpec::new(
         POLYPHONY,
         "polyphony",
@@ -294,7 +302,7 @@ impl Synth {
             }
             GAIN => self
                 .gain
-                .set_target(db_to_gain(self.params.get(GAIN)) as f32),
+                .set_target(device_gain(self.params.get(GAIN)) as f32),
             _ => {}
         }
     }
@@ -429,7 +437,7 @@ impl Node for Synth {
         self.sample_rate = sample_rate;
         self.voices.set_sample_rate(sample_rate);
         self.gain.set_time(10.0, sample_rate);
-        self.gain.reset(db_to_gain(self.params.get(GAIN)) as f32);
+        self.gain.reset(device_gain(self.params.get(GAIN)) as f32);
         self.reset();
     }
 

@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use daw_core::level;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::time::{TickTime, engine_to_file_frames, file_to_engine_frames};
 use daw_engine::mixer::SoloState;
@@ -26,7 +27,7 @@ use crate::Warning;
 use crate::capture::input_tap;
 use crate::media::{Loaded, Seen};
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
-use crate::{Built, MetronomeSettings, Session, db_to_gain};
+use crate::{Built, MetronomeSettings, Session, strip_gain};
 
 /// Every channel strip in the graph is stereo.
 const STRIP_CHANNELS: u16 = 2;
@@ -851,10 +852,10 @@ impl<'a> Builder<'a> {
             {
                 let strip = strip_key(self.project, t.id);
                 let (key, param, to_value): (NodeKey, u32, fn(f64) -> f64) = match lane.target {
-                    AutomationTarget::Volume => (strip, Strip::GAIN, db_to_gain),
+                    AutomationTarget::Volume => (strip, Strip::GAIN, strip_gain),
                     AutomationTarget::Pan => (strip, Strip::PAN, |v| v),
                     AutomationTarget::SendLevel { send } => {
-                        (send_key(send), Strip::GAIN, db_to_gain)
+                        (send_key(send), Strip::GAIN, strip_gain)
                     }
                     AutomationTarget::DeviceParam { device, param } => {
                         (device_key(device), param, |v| v)
@@ -975,7 +976,7 @@ impl Routes {
 /// What a track's strip should be set to. The master has neither pan nor
 /// mute.
 fn strip_params(key: NodeKey, t: &Track, muted: &HashSet<TrackId>) -> Vec<((NodeKey, u32), f64)> {
-    let mut out = vec![((key, Strip::GAIN), db_to_gain(t.volume_db))];
+    let mut out = vec![((key, Strip::GAIN), strip_gain(t.volume_db))];
     if t.kind != TrackKind::Master {
         out.push(((key, Strip::PAN), t.pan.clamp(-1.0, 1.0)));
         let m = if muted.contains(&t.id) { 1.0 } else { 0.0 };
@@ -996,7 +997,7 @@ fn pre_fader_params(t: &Track, muted: &HashSet<TrackId>) -> Vec<((NodeKey, u32),
 
 /// What a send's node should be set to.
 fn send_param(s: &daw_model::Send) -> ((NodeKey, u32), f64) {
-    ((send_key(s.id), Strip::GAIN), db_to_gain(s.level_db))
+    ((send_key(s.id), Strip::GAIN), strip_gain(s.level_db))
 }
 
 /// The parameter value every strip, send and device should have.
@@ -1145,7 +1146,7 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
             fade_out: true,
             user_fade_in: (fade_in, a.fade_in.shape),
             user_fade_out: (fade_out, a.fade_out.shape),
-            gain: 10f64.powf(a.gain_db / 20.0) as f32,
+            gain: level::db_to_gain(a.gain_db) as f32,
             path,
             source,
         };

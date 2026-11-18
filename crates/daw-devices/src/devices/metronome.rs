@@ -4,7 +4,7 @@ use daw_core::event::ParamId;
 use daw_core::node::{CountIn, Node, PortLayout, ProcessContext, TransportState};
 use daw_core::time::{MusicalPosition, Timeline};
 
-use crate::dsp::{db_to_gain, decay_coef};
+use crate::dsp::{DEVICE_FLOOR_DB, decay_coef, device_gain};
 use crate::events::{Segmented, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
@@ -27,7 +27,7 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
         VOLUME,
         "volume",
         "Volume",
-        -70.0,
+        DEVICE_FLOOR_DB,
         6.0,
         -6.0,
         ParamUnit::Decibels,
@@ -136,7 +136,7 @@ impl Segmented for Metronome {
         if t.bpm <= 0.0 {
             t = TransportState::at(&self.fallback, t.playing, t.position, t.sample_rate);
         }
-        let volume = db_to_gain(self.params.get(VOLUME)) as f32;
+        let volume = device_gain(self.params.get(VOLUME)) as f32;
         let group = self.params.get(BEATS_PER_BAR).round() as i64;
         let accent = self.params.get_bool(ACCENT);
         let playback = self.params.get_bool(PLAYBACK);

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use daw_core::event::EventList;
+use daw_core::level::SILENCE_DB;
 use daw_core::time::{PPQ, SampleTime, TempoMap, TickTime};
 use daw_engine::{EngineConfig, EngineProcessor};
 use daw_media::{AudioData, WavFormat, write_wav};
@@ -391,7 +392,7 @@ fn level_ramps_play_in_db_as_drawn_and_lane_edits_change_the_output() {
     // A fade in from silence ramps from -60 dB, as the lane draws it: half
     // way is -30 dB, not the -72 dB a ramp from -144 dB would give.
     let mut fade = ramp_lane(0.0, 0.0).points;
-    fade[0].value = -144.0;
+    fade[0].value = SILENCE_DB;
     rig.doc
         .execute(SetLane {
             id,

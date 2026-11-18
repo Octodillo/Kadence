@@ -17,7 +17,7 @@ use daw_model::{
     AutomationLane, AutomationPoint, AutomationTarget, Command, Document, LaneId, Project, Track,
     TrackId, TrackKind,
 };
-use daw_session::{Session, db_to_gain};
+use daw_session::{Session, strip_gain};
 
 use super::{SessionMixer, find, strip_id};
 use crate::device_panel::BuiltinParams;
@@ -479,12 +479,12 @@ fn live_param(project: &Project, session: &Session, take: &Take) -> Option<(Node
         AutomationTarget::Volume => Some((
             session.strip_key(take.track)?,
             Strip::GAIN,
-            db_to_gain(take.value),
+            strip_gain(take.value),
         )),
         AutomationTarget::Pan => Some((session.strip_key(take.track)?, Strip::PAN, take.value)),
         AutomationTarget::SendLevel { send } => {
             project.send_location(send)?;
-            Some((Session::send_key(send), Strip::GAIN, db_to_gain(take.value)))
+            Some((Session::send_key(send), Strip::GAIN, strip_gain(take.value)))
         }
         AutomationTarget::DeviceParam { device, param } => {
             project.device_location(device)?;
