@@ -70,7 +70,11 @@ fn backend_config(client_name: &str, auto_connect: bool) -> BackendConfig {
 }
 
 fn rig(latency: Latency) -> Rig {
-    let mut backend = DummyBackend::new(Pacing::Freewheel).with_loopback(latency);
+    // At the pace of a sound card. Freewheeling here makes some 18,000 frames
+    // a millisecond, which fills a take's four-second ring in
+    // about the 10 ms its writer sleeps between drains: whether frames were
+    // dropped then hung on how the two threads were scheduled.
+    let mut backend = DummyBackend::new(Pacing::RealTime).with_loopback(latency);
     backend.open(backend_config("rec", true)).unwrap();
     rig_on(backend, PERIOD)
 }
