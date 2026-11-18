@@ -73,8 +73,10 @@ pub mod qobject {
         /// `value` in the target's own unit (dB, pan from -1 (left) to 1,
         /// or the parameter's plain value), `following` when the lane
         /// plays its points so its control follows them, and `writes` when
-        /// moving the control during playback records over the lane. All
-        /// zero and false for no such lane.
+        /// moving the control during playback records over the lane, and
+        /// `editable` unless nothing describes the parameter (a plugin that
+        /// is not loaded), when the control stays where it is. All zero and
+        /// false for no such lane.
         #[qinvokable]
         fn lane_control(self: &Automation, track: i32, lane: i32) -> QMap_QString_QVariant;
         /// The user grabbed the lane's control (also around a key press):
@@ -228,6 +230,10 @@ impl qobject::Automation {
         put(
             "writes",
             QVariant::from(&c.as_ref().is_some_and(|c| c.writes)),
+        );
+        put(
+            "editable",
+            QVariant::from(&c.as_ref().is_some_and(|c| c.editable)),
         );
         map
     }

@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use daw_core::event::ParamId;
+use daw_core::level::{FADER_FLOOR_DB, FADER_MAX_DB, SILENCE_DB};
 use daw_core::time::TickTime;
 use daw_model::commands::{AddLane, LaneField, RemoveLane, SetLane};
 use daw_model::{
@@ -15,14 +16,6 @@ use daw_model::{
 use crate::lane_editor::{LaneFrame, LaneGrid, lane_of};
 use crate::scene::Rect;
 use crate::{Arrange, Button, Hit, Outcome, Pointer};
-
-/// Levels at the bottom of a dB lane are stored as this (what the mixer
-/// stores for a fader pulled all the way down).
-pub const SILENCE_DB: f64 = -144.0;
-/// The range a level lane shows, in dB. Ramps from below the floor play
-/// from it (see [`AutomationTarget::ramp_floor`]).
-pub const LEVEL_FLOOR_DB: f64 = daw_model::LEVEL_FLOOR_DB;
-pub const LEVEL_MAX_DB: f64 = 6.0;
 
 /// How a lane maps its target's values to heights.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -43,8 +36,8 @@ pub enum LaneScale {
 
 impl LaneScale {
     pub const LEVEL: Self = Self::Db {
-        floor: LEVEL_FLOOR_DB,
-        max: LEVEL_MAX_DB,
+        floor: FADER_FLOOR_DB,
+        max: FADER_MAX_DB,
     };
     pub const PAN: Self = Self::Range {
         min: -1.0,
@@ -125,11 +118,13 @@ impl LaneScale {
 /// automated and their ranges. Built-in devices and plugins describe their
 /// parameters differently, so the arrange view asks through this.
 pub trait ParamCatalog: Send + Sync {
-    /// The parameters of `device` that can be automated, in display order.
+    /// The parameters of `device` to offer a new lane for, in display
+    /// order. (A lane can exist for one that is not offered.)
     fn automatable(&self, device: &Device) -> Vec<ParamId>;
     /// The range of one parameter, if `device` has it.
     fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale>;
-    /// The value a parameter has when the device doesn't store one.
+    /// The value a parameter has when the document doesn't store one: the
+    /// device's own, or its default.
     fn default_value(&self, device: &Device, param: ParamId) -> Option<f64>;
 }
 
