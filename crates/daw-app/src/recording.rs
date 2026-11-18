@@ -14,6 +14,8 @@
 //! is lost. With nothing armed, Record records MIDI on the open clip's
 //! track, the selected track or the first instrument track.
 
+use std::path::PathBuf;
+
 use daw_core::time::{SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::model::{meter, midi_clip, new_note, take_command, tempo_map};
 use daw_midi::record::{RecordedNote, Recorder, to_clip_notes};
