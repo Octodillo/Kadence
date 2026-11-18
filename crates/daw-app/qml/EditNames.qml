@@ -86,6 +86,6 @@ QtObject {
     })
 
     function name(label: string): string {
-        return names[label] ?? label;
+        return Object.prototype.hasOwnProperty.call(names, label) ? names[label] : label;
     }
 }

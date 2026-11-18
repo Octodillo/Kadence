@@ -21,12 +21,15 @@ QQC2.ToolButton {
     // The user asked to see the instrument's settings.
     signal settingsRequested()
 
+    // The name as shown: a built-in instrument's is translated.
+    readonly property string label: DeviceNames.name(instrument)
+
     icon.name: "audio-midi"
-    text: instrument || i18nc("@action:button the track has no instrument", "Choose Instrument")
+    text: label || i18nc("@action:button the track has no instrument", "Choose Instrument")
     font: Kirigami.Theme.smallFont
     display: QQC2.AbstractButton.TextBesideIcon
     Accessible.name: instrument
-        ? i18nc("@action:button %1 is an instrument name", "Instrument: %1", instrument)
+        ? i18nc("@action:button %1 is an instrument name", "Instrument: %1", label)
         : text
     QQC2.ToolTip.text: Accessible.name
     QQC2.ToolTip.visible: hovered
@@ -40,7 +43,7 @@ QQC2.ToolButton {
     // Opens the plugin browser for an instrument. Defined here, not in the
     // menu: the browser calls back after the menu has closed and unloaded.
     function browse(): void {
-        applicationWindow().browsePlugins(1, (format, pluginId, name) => {
+        applicationWindow().browsePlugins(Plugins.InstrumentPlugin, (format, pluginId, name) => {
             // The browser and this list come from the same scan.
             Instruments.refresh();
             const row = Instruments.rowOf(format, pluginId);
@@ -73,7 +76,7 @@ QQC2.ToolButton {
                 delegate: QQC2.MenuItem {
                     required property int index
                     required property string name
-                    text: name
+                    text: DeviceNames.name(name)
                     checkable: true
                     checked: index === button.currentChoice
                     onTriggered: {

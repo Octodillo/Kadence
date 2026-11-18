@@ -1,9 +1,8 @@
 //! Contract types and real-time safe building blocks shared by every crate.
 //!
 //! The public signatures in [`time`], [`event`], [`node`] and [`plugin`] are
-//! the Milestone 0 contracts that the parallel work units build against.
-//! Changing one needs a note in the architecture doc and a heads-up to the
-//! threads that depend on it. Adding a helper or a variant does not.
+//! the contracts the other crates build against: changing one needs a note
+//! in the architecture doc. Adding a helper or a variant does not.
 //!
 //! The rest are real-time safe tools: [`queue`] for crossing threads, [`exclusive`] for
 //! sharing one object between the audio thread and the main thread, [`split`] for the

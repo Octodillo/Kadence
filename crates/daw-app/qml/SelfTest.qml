@@ -426,7 +426,7 @@ Item {
             test.waits = 0;
             check(!window.devicePanelDrawer.drawerOpen, "device panel closed");
             // The plugin browser, as Add Effect opens it.
-            test.browser = window.browsePlugins(2, (format, pluginId, name) => {
+            test.browser = window.browsePlugins(Plugins.EffectPlugin, (format, pluginId, name) => {
                 test.picked = [format, pluginId, name];
                 check(Mixer.addPluginInsert(0, format, pluginId, name), "insert the chosen plugin");
             });
@@ -452,16 +452,16 @@ Item {
             }
             // smoke.rs puts the CLAP test plugin in CLAP_PATH; a packaged
             // smoke test runs with whatever plugins the system has.
-            Plugins.setFilter("test gain", 1, 2);
+            Plugins.setFilter("test gain", 1, Plugins.EffectPlugin);
             if (Plugins.count === 0) {
                 console.info("smoke test: no test plugin; skipping the plugin checks");
                 return;
             }
             console.info("smoke test: checking the test plugin");
             check(Plugins.count === 1, "search finds it");
-            Plugins.setFilter("test gain", 0, 1);
+            Plugins.setFilter("test gain", 0, Plugins.InstrumentPlugin);
             check(Plugins.count === 0, "it is not an instrument");
-            Plugins.setFilter("test gain", 1, 2);
+            Plugins.setFilter("test gain", 1, Plugins.EffectPlugin);
             test.browser.pick(0);
             check(test.picked !== null && test.picked[0] === "clap" && test.picked[2] === "DAW Test Gain",
                   "picking a plugin reports it");

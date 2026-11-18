@@ -1,5 +1,5 @@
-//! The plugin hosting contracts, implemented per format by WU6 (CLAP),
-//! WU7 (LV2) and WU8 (VST3).
+//! The plugin hosting contracts, implemented per format by `daw-plugins-clap`,
+//! `daw-plugins-lv2` and `daw-plugins-vst3`.
 
 use std::path::{Path, PathBuf};
 

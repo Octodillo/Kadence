@@ -4,18 +4,13 @@ pragma Singleton
 
 import QtQuick
 
+import io.github.octodillo.daw
+
 // Words control values with their units, in the user's language, the same
-// way wherever they show: levels, pan positions and device parameters.
-// A singleton: ValueText.level(-6). It words values as the channel strip
-// (levels, pan) and device panel (parameters) do.
+// way wherever they show (the channel strip, the device panel, the
+// automation lanes): levels, pan positions and device parameters.
+// A singleton: ValueText.level(-6).
 QtObject {
-    // daw-app mixer::SILENT_DB: a fader or send at or below it is silent.
-    readonly property real faderFloorDb: -60
-    // daw_devices::dsp::MIN_DB: a device level at or below it is silent.
-    readonly property real deviceFloorDb: -70
-
-    readonly property DeviceNames deviceNames: DeviceNames {}
-
     function number(v: real, decimals: int): string {
         return v.toLocaleString(Qt.locale(), "f", decimals);
     }
@@ -24,10 +19,10 @@ QtObject {
         return (v > 0 ? "+" : "") + number(v, decimals);
     }
 
-    // A fader or send level in dB, signed; at or below faderFloorDb it is
+    // A fader or send level in dB, signed; at or below Mixer.silentDb it is
     // silence.
     function level(db: real): string {
-        return db <= faderFloorDb ? i18nc("@label fader at silence", "−∞")
+        return db <= Mixer.silentDb ? i18nc("@label fader at silence", "−∞")
                                   : i18nc("@label decibels", "%1 dB", signed(Math.round(db * 10) / 10, 1));
     }
 
@@ -50,13 +45,13 @@ QtObject {
             return value >= 0.5 ? i18nc("@label parameter switched on", "On")
                                 : i18nc("@label parameter switched off", "Off");
         case "choice":
-            return deviceNames.name(choices[Math.round(value)] ?? "");
+            return DeviceNames.name(choices[Math.round(value)] ?? "");
         case "integer":
             return number(Math.round(value), 0);
         }
         switch (unit) {
         case "dB":
-            return value <= deviceFloorDb ? i18nc("@label silence in decibels", "−∞ dB")
+            return value <= DevicePanel.silentDb ? i18nc("@label silence in decibels", "−∞ dB")
                                           : i18nc("@label decibels", "%1 dB", number(value, 1));
         case "Hz":
             return value >= 1000 ? i18nc("@label kilohertz", "%1 kHz", number(value / 1000, 2))

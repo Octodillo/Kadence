@@ -49,8 +49,6 @@ QQC2.ToolBar {
         function onBpmChanged() { tempoField.value = Math.round(Project.bpm * tempoField.scale); }
         function onMeterNumeratorChanged() { numeratorField.value = Project.meterNumerator; }
         function onMeterDenominatorChanged() { denominatorField.currentIndex = bar.denominators.indexOf(Project.meterDenominator); }
-        function onMetronomeVolumeChanged() { levelSlider.value = Project.metronomeVolume; }
-        function onCountInBarsChanged() { countInField.currentIndex = Project.countInBars; }
         function onMetronomeChanged() { metronomeButton.checked = Project.metronome; }
     }
 
@@ -238,31 +236,14 @@ QQC2.ToolBar {
                     padding: Kirigami.Units.largeSpacing
 
                     contentItem: Kirigami.FormLayout {
-                        QQC2.Slider {
-                            id: levelSlider
+                        MetronomeLevel {
                             Kirigami.FormData.label: i18nc("@label:slider", "Level:")
-                            from: -40
-                            to: 6
-                            value: Project.metronomeVolume
                             implicitWidth: Kirigami.Units.gridUnit * 10
-                            // Saved once the handle is let go, not on every move.
-                            onMoved: Project.setMetronomeLevel(Math.round(value * 2) / 2, !pressed)
-                            onPressedChanged: if (!pressed) Project.setMetronomeLevel(Math.round(value * 2) / 2, true)
-                            Accessible.name: i18nc("@info:accessible", "Metronome level")
-
-                            QQC2.ToolTip.text: i18nc("@info:tooltip %1 is a level in decibels", "%1 dB", Number(value).toLocaleString(Qt.locale(), "f", 1))
+                            QQC2.ToolTip.text: i18nc("@info:tooltip %1 is a level in decibels", "%1 dB", ValueText.number(level, 1))
                             QQC2.ToolTip.visible: hovered || pressed
                         }
-                        QQC2.ComboBox {
-                            id: countInField
+                        CountInBox {
                             Kirigami.FormData.label: i18nc("@label:listbox", "Count-in before recording:")
-                            model: [
-                                i18nc("@item:inlistbox no count-in", "None"),
-                                i18ncp("@item:inlistbox count-in length", "%1 bar", "%1 bars", 1),
-                                i18ncp("@item:inlistbox count-in length", "%1 bar", "%1 bars", 2)
-                            ]
-                            currentIndex: Project.countInBars
-                            onActivated: (index) => Project.setCountIn(index)
                         }
                     }
                 }

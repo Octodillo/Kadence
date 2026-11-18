@@ -54,10 +54,6 @@ Kirigami.OverlayDrawer {
         }
     }
 
-    DeviceNames {
-        id: deviceNames
-    }
-
     Connections {
         target: DevicePanel
         function onActiveChanged(): void {
@@ -82,52 +78,6 @@ Kirigami.OverlayDrawer {
         }
     }
 
-    // A parameter value with its unit, in the user's language.
-    function valueText(value: real, control: string, unit: string, choices: var): string {
-        const num = (v, decimals) => v.toLocaleString(Qt.locale(), "f", decimals);
-        const signed = (v, decimals) => (v > 0 ? "+" : "") + num(v, decimals);
-        switch (control) {
-        case "toggle":
-            return value >= 0.5 ? i18nc("@label parameter switched on", "On")
-                                : i18nc("@label parameter switched off", "Off");
-        case "choice":
-            return deviceNames.name(choices[Math.round(value)] ?? "");
-        case "integer":
-            return num(Math.round(value), 0);
-        }
-        switch (unit) {
-        case "dB":
-            // daw_devices::dsp::MIN_DB and below is silence.
-            return value <= -70 ? i18nc("@label silence in decibels", "−∞ dB")
-                                 : i18nc("@label decibels", "%1 dB", num(value, 1));
-        case "Hz":
-            return value >= 1000 ? i18nc("@label kilohertz", "%1 kHz", num(value / 1000, 2))
-                                 : i18nc("@label hertz", "%1 Hz", num(value, 0));
-        case "ms":
-            return value >= 1000 ? i18nc("@label seconds", "%1 s", num(value / 1000, 2))
-                                 : i18nc("@label milliseconds", "%1 ms", num(value, 1));
-        case "percent":
-            return i18nc("@label percent", "%1 %", num(value * 100, 0));
-        case "semitones":
-            return i18nc("@label semitones", "%1 st", signed(Math.round(value), 0));
-        case "cents":
-            return i18nc("@label cents", "%1 ct", signed(Math.round(value), 0));
-        case "octaves":
-            return i18nc("@label octaves", "%1 oct", signed(value, 2));
-        case "ratio":
-            return i18nc("@label compression ratio", "%1:1", num(value, 1));
-        case "pan": {
-            const pct = Math.round(Math.abs(value) * 100);
-            if (pct === 0) {
-                return i18nc("@label pan centre", "C");
-            }
-            return value < 0 ? i18nc("@label pan left, percent", "L%1", pct)
-                             : i18nc("@label pan right, percent", "R%1", pct);
-        }
-        }
-        return num(value, 2);
-    }
-
     contentItem: ColumnLayout {
         spacing: 0
 
@@ -146,7 +96,7 @@ Kirigami.OverlayDrawer {
                     Kirigami.Heading {
                         Layout.fillWidth: true
                         level: 2
-                        text: deviceNames.name(DevicePanel.deviceName)
+                        text: DeviceNames.name(DevicePanel.deviceName)
                         elide: Text.ElideRight
                     }
                     QQC2.ToolButton {
@@ -316,10 +266,10 @@ Kirigami.OverlayDrawer {
         required property bool isDefault
         required property bool automated
         required property bool writable
-        readonly property string label: deviceNames.name(name)
+        readonly property string label: DeviceNames.name(name)
 
-        readonly property string valueText: drawer.valueText(value, control, unit, choices)
-        readonly property string defaultText: drawer.valueText(defaultValue, control, unit, choices)
+        readonly property string valueText: ValueText.param(value, control, unit, choices)
+        readonly property string defaultText: ValueText.param(defaultValue, control, unit, choices)
 
         Layout.fillWidth: true
         Layout.leftMargin: Kirigami.Units.largeSpacing
@@ -349,7 +299,7 @@ Kirigami.OverlayDrawer {
             }
             QQC2.Label {
                 text: row.control === "continuous" && slider.pressed
-                      ? drawer.valueText(DevicePanel.valueAt(row.index, slider.value), row.control, row.unit, row.choices)
+                      ? ValueText.param(DevicePanel.valueAt(row.index, slider.value), row.control, row.unit, row.choices)
                       : row.valueText
                 font.features: { "tnum": 1 }
                 color: row.isDefault ? Kirigami.Theme.textColor : Kirigami.Theme.highlightColor
@@ -402,7 +352,7 @@ Kirigami.OverlayDrawer {
             visible: row.control === "choice"
             // The lane overrides an edit here, so don't offer one.
             enabled: !row.automated
-            model: row.choices.map(c => deviceNames.name(c))
+            model: row.choices.map(c => DeviceNames.name(c))
             currentIndex: Math.round(row.value)
             onActivated: index => DevicePanel.setValue(row.index, index, false)
             Accessible.name: row.label

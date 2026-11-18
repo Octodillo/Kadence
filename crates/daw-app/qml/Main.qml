@@ -658,7 +658,7 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    // Opens the plugin browser on `kind` (0 any, 1 instruments, 2 effects);
+    // Opens the plugin browser on `kind` (a Plugins.PluginKind);
     // `pick(format, pluginId, name)` runs when the user chooses one.
     function browsePlugins(kind: int, pick: var): var {
         pluginBrowser.kind = kind;

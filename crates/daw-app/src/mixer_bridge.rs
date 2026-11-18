@@ -72,7 +72,11 @@ pub mod qobject {
         /// Touch writing: controls moved during playback are recorded as
         /// automation.
         #[qproperty(bool, write_automation, READ, NOTIFY)]
+        /// A fader or send at or below this many dB is silent.
+        #[qproperty(f64, silent_db, READ = silent_db, CONSTANT)]
         type Mixer = super::MixerRust;
+
+        fn silent_db(self: &Mixer) -> f64;
 
         #[qinvokable]
         fn set_volume(self: Pin<&mut Mixer>, row: i32, db: f64);
@@ -281,6 +285,10 @@ impl cxx_qt::Initialize for qobject::Mixer {
 }
 
 impl qobject::Mixer {
+    fn silent_db(&self) -> f64 {
+        crate::mixer::SILENT_DB
+    }
+
     fn strip_id(&self, row: i32) -> Option<StripId> {
         let row = usize::try_from(row).ok()?;
         self.strips.get(row).map(|s| s.id)
