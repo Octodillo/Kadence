@@ -74,28 +74,43 @@ fn binaries() -> &'static (PathBuf, PathBuf) {
     })
 }
 
-/// A loader that finds only the test plugin, set up as an export's.
+/// What a scan of the test plugin's folder finds, as a catalog would hand it to a loader.
+fn known_plugins() -> Vec<PluginDescriptor> {
+    static KNOWN: OnceLock<Vec<PluginDescriptor>> = OnceLock::new();
+    KNOWN
+        .get_or_init(|| {
+            let (plugins, host) = binaries();
+            HostLauncher::new(host, Vec::<String>::new())
+                .scanner()
+                .scan(&PluginFormatKind::Clap, &plugins.join("test-gain.clap"))
+                .expect("the test plugin scans")
+                .plugins
+        })
+        .clone()
+}
+
+/// A loader that knows only the test plugin, set up as an export's.
 fn export_loader() -> SandboxLoader {
     loader_with(daw_session::export::offline_sandbox)
 }
 
-/// A loader that finds only the test plugin.
+/// A loader that knows only the test plugin.
 fn loader() -> SandboxLoader {
     loader_with(|c| c)
 }
 
 fn loader_with(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
-    let (plugins, host) = binaries();
+    blind_loader_with(adjust).with_known(known_plugins())
+}
+
+/// A loader that has been told of no plugins, as before the app's first scan ends.
+fn blind_loader_with(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> SandboxLoader {
+    let (_, host) = binaries();
     let mut config = SandboxConfig::new(HostLauncher::new(host, Vec::<String>::new()));
     // CI machines are slow and the host is a debug build.
     config.process_timeout = Some(Duration::from_secs(5));
     config.rt_priority = None;
-    let mut loader = SandboxLoader::new(adjust(config));
-    let registry = loader.registry_mut();
-    registry.set_search_paths(PluginFormatKind::Clap, vec![plugins.clone()]);
-    registry.set_search_paths(PluginFormatKind::Lv2, vec![]);
-    registry.set_search_paths(PluginFormatKind::Vst3, vec![]);
-    loader
+    SandboxLoader::new(adjust(config))
 }
 
 /// A catalog that scans only `extra` (as the user's added folders), with the sandbox host as
@@ -889,18 +904,11 @@ fn the_catalog_scans_added_folders_in_the_background() {
     assert_ne!(catalog.list_revision(), list);
 }
 
-#[test]
-fn a_missing_plugin_loads_once_a_scan_finds_it() {
-    let mut rig = Rig::new();
-    // A loader that finds nothing by itself, as when the plugin is in a folder the user added.
-    let mut blind = loader();
-    for format in daw_session::catalog::FORMATS {
-        blind.registry_mut().set_search_paths(format, vec![]);
-    }
-    rig.session.set_plugin_loader(Some(Box::new(blind)));
+/// Adds a second test-gain device to the rig's track.
+fn add_second_gain(rig: &mut Rig) -> DeviceId {
     let mut second = gain_plugin();
     second.name = "Second".into();
-    let second_id = second.id;
+    let id = second.id;
     rig.doc
         .execute(AddDevice {
             track: rig.track,
@@ -908,11 +916,35 @@ fn a_missing_plugin_loads_once_a_scan_finds_it() {
             device: second,
         })
         .unwrap();
+    id
+}
+
+#[test]
+fn a_plugin_waits_for_the_first_scan_and_loads_when_it_is_found() {
+    let mut rig = Rig::new();
+    // A loader looks nowhere by itself. Until a scan's result arrives it cannot say that a
+    // plugin is missing, so the device waits and nothing is reported.
+    rig.session
+        .set_plugin_loader(Some(Box::new(blind_loader_with(|c| c))));
+    let second = add_second_gain(&mut rig);
     rig.sync();
     assert_eq!(
-        rig.session.plugin_status(second_id),
+        rig.session.plugin_status(second),
+        Some(PluginStatus::Waiting)
+    );
+    assert!(rig.session.warnings().is_empty());
+
+    // A scan that did not find it: now it is known to be missing.
+    rig.session.set_known_plugins(&[]);
+    rig.sync();
+    assert_eq!(
+        rig.session.plugin_status(second),
         Some(PluginStatus::Missing)
     );
+    assert!(matches!(
+        rig.session.warnings(),
+        [Warning::PluginMissing { .. }, ..]
+    ));
 
     let (plugins, _) = binaries();
     let dir = tempfile::tempdir().unwrap();
@@ -922,10 +954,35 @@ fn a_missing_plugin_loads_once_a_scan_finds_it() {
     rig.session.set_known_plugins(catalog.plugins());
     rig.sync();
     assert_eq!(
-        rig.session.plugin_status(second_id),
+        rig.session.plugin_status(second),
         Some(PluginStatus::Running)
     );
     // Two gains of 1 in a row.
+    rig.settles_at(LEVEL);
+}
+
+#[test]
+fn a_plugin_that_failed_to_load_is_tried_again_when_a_scan_finds_it_elsewhere() {
+    let mut rig = Rig::new();
+    // The scan's list is from before the bundle moved.
+    let mut stale = known_plugins();
+    for d in &mut stale {
+        d.path = "/gone/test-gain.clap".into();
+    }
+    rig.session.set_known_plugins(&stale);
+    let second = add_second_gain(&mut rig);
+    rig.sync();
+    assert!(matches!(
+        rig.session.plugin_status(second),
+        Some(PluginStatus::Failed(_))
+    ));
+
+    rig.session.set_known_plugins(&known_plugins());
+    rig.sync();
+    assert_eq!(
+        rig.session.plugin_status(second),
+        Some(PluginStatus::Running)
+    );
     rig.settles_at(LEVEL);
 }
 

@@ -13,15 +13,13 @@
 //! Everything here runs on the thread that created the session, as the handles require.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginFormatKind};
 use daw_engine::PluginHandle;
 use daw_model::{Device, DeviceId, DeviceSource, StateBlob};
-use daw_plugin_host::{SandboxConfig, SandboxFormat, SandboxMonitor, sandboxed_registry};
-use daw_plugins::{PluginRegistry, ScanCache, Scanner};
+use daw_plugin_host::{SandboxConfig, SandboxFormat, SandboxMonitor};
 
 use crate::Warning;
 
@@ -38,6 +36,10 @@ pub enum LoadError {
     /// No plugin with this format and id is installed.
     #[error("not installed")]
     NotFound,
+    /// The loader has not been told which plugins are installed yet (see
+    /// [`PluginLoader::set_known`]), so it cannot say whether this one is.
+    #[error("the installed plugins are not known yet")]
+    NotKnownYet,
     #[error(transparent)]
     Failed(#[from] PluginError),
 }
@@ -53,76 +55,38 @@ pub trait PluginLoader {
         max_frames: u32,
     ) -> Result<LoadedPlugin, LoadError>;
 
-    /// The plugins a scan elsewhere found (the app's plugin browser), so the loader can find
-    /// them without scanning itself.
+    /// The installed plugins, as a scan found them (the app's plugin catalog). Replaces what
+    /// the loader knew. A loader that depends on being told answers
+    /// [`LoadError::NotKnownYet`] until then.
     fn set_known(&mut self, _plugins: &[PluginDescriptor]) {}
 }
 
 /// Loads every plugin in its own sandbox host process.
 ///
-/// Plugins are found in [`registry`](Self::registry). When a project names one it does not
-/// know, the loader scans every format's folders once, in scanner child processes, with the
-/// results cached; a plugin installed after that needs a [`rescan`](Self::rescan).
+/// The loader does not look for plugins itself: it loads the ones it has been told about, as
+/// found by a [`PluginCatalog`](crate::catalog::PluginCatalog) scan, and reports any other as
+/// not installed. So playback and an export find exactly the plugins the plugin browser lists,
+/// in the user's folders too. Until it is told, it reports [`LoadError::NotKnownYet`]: the
+/// first scan may still run when a project is opened.
 pub struct SandboxLoader {
     config: SandboxConfig,
-    registry: PluginRegistry,
-    scanner: Scanner,
-    cache: ScanCache,
-    cache_file: Option<PathBuf>,
-    scanned: bool,
+    /// `None` until a scan's result arrives.
+    known: Option<Vec<PluginDescriptor>>,
 }
 
 impl SandboxLoader {
-    /// A loader whose registry has every format of this build, sandboxed with `config`, at
-    /// their default search paths.
+    /// A loader that sandboxes with `config` and has not been told the installed plugins.
     pub fn new(config: SandboxConfig) -> Self {
         Self {
-            registry: sandboxed_registry(&config),
-            scanner: config.launcher.scanner(),
             config,
-            cache: ScanCache::new(),
-            cache_file: None,
-            scanned: false,
+            known: None,
         }
     }
 
-    /// Keeps the scan cache in `path`, so later runs skip unchanged bundles.
-    pub fn with_cache_file(mut self, path: PathBuf) -> Self {
-        self.cache = ScanCache::load(&path);
-        self.cache_file = Some(path);
+    /// Starts out knowing `plugins`, for a loader made once the scan is over (an export's).
+    pub fn with_known(mut self, plugins: Vec<PluginDescriptor>) -> Self {
+        self.known = Some(plugins);
         self
-    }
-
-    /// The plugins found so far, and the search paths to scan.
-    pub fn registry(&self) -> &PluginRegistry {
-        &self.registry
-    }
-
-    pub fn registry_mut(&mut self) -> &mut PluginRegistry {
-        &mut self.registry
-    }
-
-    /// Scans every format's folders again, loading only bundles that changed.
-    pub fn rescan(&mut self) -> daw_plugins::ScanReport {
-        self.scanned = true;
-        // Another scan (the app's) may have written the file since it was read; start from
-        // that, so saving doesn't drop its entries.
-        if let Some(path) = &self.cache_file {
-            self.cache = ScanCache::load(path);
-        }
-        let report = self.registry.scan(&self.scanner, &mut self.cache);
-        if let Some(path) = &self.cache_file {
-            // The cache only saves time; failing to write it is no reason to stop.
-            let _ = self.cache.save(path);
-        }
-        report
-    }
-
-    fn find(&mut self, format: &PluginFormatKind, id: &str) -> Option<PluginDescriptor> {
-        if self.registry.find(format, id).is_none() && !self.scanned {
-            self.rescan();
-        }
-        self.registry.find(format, id).cloned()
     }
 }
 
@@ -134,9 +98,13 @@ impl PluginLoader for SandboxLoader {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<LoadedPlugin, LoadError> {
-        let d = self.find(format, id).ok_or(LoadError::NotFound)?;
+        let known = self.known.as_ref().ok_or(LoadError::NotKnownYet)?;
+        let d = known
+            .iter()
+            .find(|d| d.is(format, id))
+            .ok_or(LoadError::NotFound)?;
         let sandbox = SandboxFormat::new(d.format.clone(), Vec::new(), self.config.clone());
-        let instance = sandbox.instantiate_sandboxed(&d, sample_rate, max_frames)?;
+        let instance = sandbox.instantiate_sandboxed(d, sample_rate, max_frames)?;
         Ok(LoadedPlugin {
             monitor: Some(instance.monitor()),
             instance: Box::new(instance),
@@ -144,8 +112,7 @@ impl PluginLoader for SandboxLoader {
     }
 
     fn set_known(&mut self, plugins: &[PluginDescriptor]) {
-        self.registry.set_plugins(plugins.to_vec());
-        self.scanned = true;
+        self.known = Some(plugins.to_vec());
     }
 }
 
@@ -159,6 +126,11 @@ pub enum PluginStatus {
     Crashed,
     /// The plugin is not installed; the device is bypassed.
     Missing,
+    /// The scan for installed plugins has not finished, so whether this one is installed is
+    /// not known; the device is bypassed until
+    /// [`Session::set_known_plugins`](crate::Session::set_known_plugins) loads it or finds it
+    /// [`Missing`](Self::Missing).
+    Waiting,
     /// The plugin would not load; the device is bypassed. The text is the plugin's or the
     /// format's own, in English.
     Failed(String),
@@ -267,8 +239,8 @@ const CONFIRM_EVERY: Duration = Duration::from_secs(1);
 
 pub(crate) enum Slot {
     Live(Box<Live>),
-    /// Tried and failed; not tried again until the device's source changes or the plugins are
-    /// cleared.
+    /// Tried and failed; not tried again until the device's source changes, the plugins are
+    /// cleared or, unless there is no loader, a scan's result arrives.
     Failed {
         source: DeviceSource,
         status: PluginStatus,
@@ -371,6 +343,8 @@ impl Plugins {
                 });
                 return failed(PluginStatus::Missing);
             }
+            // Not worth a warning: the scan is on its way, and its result tries again.
+            Err(LoadError::NotKnownYet) => return failed(PluginStatus::Waiting),
             Err(LoadError::Failed(e)) => {
                 warnings.push(Warning::PluginLoadFailed {
                     device: d.name.clone(),
@@ -438,21 +412,15 @@ impl Plugins {
         Slot::Live(Box::new(live))
     }
 
-    /// Hands the loader the plugins a scan found. Devices whose plugin was missing are tried
-    /// again on the next build, in case the scan found it.
+    /// Hands the loader the plugins a scan found. Devices whose plugin did not load are tried
+    /// again on the next build: the scan may have found a plugin that was missing or waited
+    /// for, or a new place for one whose bundle had moved.
     pub(crate) fn set_known(&mut self, plugins: &[PluginDescriptor]) {
-        if let Some(loader) = &mut self.loader {
-            loader.set_known(plugins);
-        }
-        self.slots.retain(|_, s| {
-            !matches!(
-                s,
-                Slot::Failed {
-                    status: PluginStatus::Missing,
-                    ..
-                }
-            )
-        });
+        let Some(loader) = &mut self.loader else {
+            return;
+        };
+        loader.set_known(plugins);
+        self.slots.retain(|_, s| matches!(s, Slot::Live(_)));
     }
 
     pub(crate) fn live(&self, device: DeviceId) -> Option<&Live> {
