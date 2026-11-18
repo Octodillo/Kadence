@@ -8,7 +8,8 @@
 //! sharing one object between the audio thread and the main thread, [`split`] for the
 //! audio-thread half of a plugin built on it,
 //! [`dispose`] for freeing memory off the audio thread, [`denormals`] for the
-//! floating-point mode of audio threads and [`meter`] for peak meters.
+//! floating-point mode of audio threads, [`meter`] for peak meters and [`level`]
+//! for decibels.
 //! [`logging`] is where every crate's diagnostics go.
 //!
 //! [`atomic_file`] is the one tool here for other threads: how every crate
@@ -21,6 +22,7 @@ pub mod denormals;
 pub mod dispose;
 pub mod event;
 pub mod exclusive;
+pub mod level;
 pub mod logging;
 pub mod meter;
 pub mod node;

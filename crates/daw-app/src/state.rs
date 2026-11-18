@@ -270,6 +270,9 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        // Plugins load as the session takes the document: from here the
+        // lanes know their parameters.
+        self.refresh_lane_params();
         self.prune_lane_modes();
         self.apply_click();
         self.view_revision += 1;

@@ -3,23 +3,20 @@
 
 use std::f64::consts::PI;
 
-/// Decibel values at or below this are treated as silence.
-pub const MIN_DB: f64 = -70.0;
+use daw_core::level;
 
-pub fn db_to_gain(db: f64) -> f64 {
-    if db <= MIN_DB {
-        0.0
-    } else {
-        10f64.powf(db / 20.0)
-    }
+/// The bottom of a device's dB parameters: this level and anything below it
+/// is silence, and shows as "-inf dB".
+pub const DEVICE_FLOOR_DB: f64 = -70.0;
+
+/// Linear gain for a device parameter in dB, silent at [`DEVICE_FLOOR_DB`].
+pub fn device_gain(db: f64) -> f64 {
+    level::db_to_gain_above(db, DEVICE_FLOOR_DB)
 }
 
-pub fn gain_to_db(gain: f64) -> f64 {
-    if gain <= 0.0 {
-        MIN_DB
-    } else {
-        (20.0 * gain.log10()).max(MIN_DB)
-    }
+/// A linear gain as a device level in dB, never below [`DEVICE_FLOOR_DB`].
+pub fn device_db(gain: f64) -> f64 {
+    level::gain_to_db_above(gain, DEVICE_FLOOR_DB)
 }
 
 /// Flush values too small to hear to zero, so recursive state never decays
@@ -622,26 +619,27 @@ mod tests {
 
     #[test]
     fn db_conversions() {
-        assert_eq!(db_to_gain(0.0), 1.0);
-        assert!((db_to_gain(-6.0) - 0.501_187).abs() < 1e-5);
-        assert_eq!(db_to_gain(MIN_DB), 0.0);
-        assert!((gain_to_db(0.5) + 6.0206).abs() < 1e-3);
+        assert_eq!(device_gain(0.0), 1.0);
+        assert!((device_gain(-6.0) - 0.501_187).abs() < 1e-5);
+        assert_eq!(device_gain(DEVICE_FLOOR_DB), 0.0);
+        assert_eq!(device_db(0.0), DEVICE_FLOOR_DB);
+        assert!((device_db(0.5) + 6.0206).abs() < 1e-3);
     }
 
     #[test]
     fn biquad_designs_hit_their_targets() {
         let sr = 48000.0;
         let p = BiquadCoefs::peaking(sr, 1000.0, 1.0, 6.0);
-        assert!((gain_to_db(p.magnitude(sr, 1000.0)) - 6.0).abs() < 1e-6);
+        assert!((device_db(p.magnitude(sr, 1000.0)) - 6.0).abs() < 1e-6);
         let ls = BiquadCoefs::low_shelf(sr, 200.0, 0.707, -12.0);
-        assert!((gain_to_db(ls.magnitude(sr, 10.0)) + 12.0).abs() < 0.1);
-        assert!(gain_to_db(ls.magnitude(sr, 10000.0)).abs() < 0.1);
+        assert!((device_db(ls.magnitude(sr, 10.0)) + 12.0).abs() < 0.1);
+        assert!(device_db(ls.magnitude(sr, 10000.0)).abs() < 0.1);
         let hs = BiquadCoefs::high_shelf(sr, 5000.0, 0.707, 9.0);
-        assert!((gain_to_db(hs.magnitude(sr, 20000.0)) - 9.0).abs() < 0.2);
+        assert!((device_db(hs.magnitude(sr, 20000.0)) - 9.0).abs() < 0.2);
         let lp = BiquadCoefs::low_pass(sr, 1000.0, std::f64::consts::FRAC_1_SQRT_2);
-        assert!((gain_to_db(lp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
+        assert!((device_db(lp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
         let hp = BiquadCoefs::high_pass(sr, 1000.0, std::f64::consts::FRAC_1_SQRT_2);
-        assert!((gain_to_db(hp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
+        assert!((device_db(hp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
     }
 
     #[test]
