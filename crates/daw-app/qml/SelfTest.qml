@@ -426,7 +426,7 @@ Item {
             test.waits = 0;
             check(!window.devicePanelDrawer.drawerOpen, "device panel closed");
             // The plugin browser, as Add Effect opens it.
-            test.browser = window.browsePlugins(2, (format, pluginId, name) => {
+            test.browser = window.browsePlugins(Plugins.EffectPlugin, (format, pluginId, name) => {
                 test.picked = [format, pluginId, name];
                 check(Mixer.addPluginInsert(0, format, pluginId, name), "insert the chosen plugin");
             });

@@ -37,40 +37,37 @@ option(KADENCE_INSTALL_LICENSES "Install LICENSE and THIRD-PARTY-LICENSES" ON)
 set(KADENCE_LICENSE_DIR ${KDE_INSTALL_DATADIR}/licenses/${APP_BINARY}
     CACHE STRING "Directory for LICENSE and THIRD-PARTY-LICENSES")
 
-# The Qt front end crate arrives in WU10. Until then CMake only installs data.
-set(APP_CRATE ${CMAKE_SOURCE_DIR}/crates/daw-app)
-if(EXISTS ${APP_CRATE}/Cargo.toml)
-    find_program(CARGO cargo REQUIRED)
-    # cxx-qt and build.rs ask qmake where Qt lives. Distros call it qmake6
-    # or qmake-qt6; the Flatpak KDE SDK only has plain qmake.
-    find_program(QMAKE NAMES qmake6 qmake-qt6 qmake REQUIRED)
-    set(CARGO_TARGET_DIR ${CMAKE_BINARY_DIR}/cargo)
-    set(APP_EXECUTABLE ${CARGO_TARGET_DIR}/release/${APP_BINARY})
-    add_custom_target(cargo_build ALL
-        COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CARGO_TARGET_DIR} QMAKE=${QMAKE}
-                ${CARGO} build --release --locked -p daw-app
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        USES_TERMINAL
-        COMMENT "Building ${APP_BINARY} with Cargo")
-    install(PROGRAMS ${APP_EXECUTABLE} DESTINATION ${KDE_INSTALL_BINDIR})
+# The app itself is built by Cargo.
+find_program(CARGO cargo REQUIRED)
+# cxx-qt and build.rs ask qmake where Qt lives. Distros call it qmake6
+# or qmake-qt6; the Flatpak KDE SDK only has plain qmake.
+find_program(QMAKE NAMES qmake6 qmake-qt6 qmake REQUIRED)
+set(CARGO_TARGET_DIR ${CMAKE_BINARY_DIR}/cargo)
+set(APP_EXECUTABLE ${CARGO_TARGET_DIR}/release/${APP_BINARY})
+add_custom_target(cargo_build ALL
+    COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CARGO_TARGET_DIR} QMAKE=${QMAKE}
+            ${CARGO} build --release --locked -p daw-app
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    USES_TERMINAL
+    COMMENT "Building ${APP_BINARY} with Cargo")
+install(PROGRAMS ${APP_EXECUTABLE} DESTINATION ${KDE_INSTALL_BINDIR})
 
-    # The binary statically links MIT, Apache-2.0, Zlib and MPL-2.0 crates,
-    # whose notices must ship with it. Build it from the same Cargo.lock.
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(THIRD_PARTY_LICENSES ${CMAKE_BINARY_DIR}/THIRD-PARTY-LICENSES)
-    add_custom_command(OUTPUT ${THIRD_PARTY_LICENSES}
-        COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/packaging/third-party-licenses.py
-                --cargo ${CARGO} ${THIRD_PARTY_LICENSES}
-        DEPENDS ${CMAKE_SOURCE_DIR}/Cargo.lock ${CMAKE_SOURCE_DIR}/packaging/third-party-licenses.py
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "Collecting third-party license notices")
-    add_custom_target(third_party_licenses ALL DEPENDS ${THIRD_PARTY_LICENSES})
-    # After the build: Cargo has fetched the crates by then, and two rustup
-    # proxies starting at once race to install the toolchain's components.
-    add_dependencies(third_party_licenses cargo_build)
-    if(KADENCE_INSTALL_LICENSES)
-        install(FILES ${THIRD_PARTY_LICENSES} DESTINATION ${KADENCE_LICENSE_DIR})
-    endif()
+# The binary statically links MIT, Apache-2.0, Zlib and MPL-2.0 crates,
+# whose notices must ship with it. Build it from the same Cargo.lock.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(THIRD_PARTY_LICENSES ${CMAKE_BINARY_DIR}/THIRD-PARTY-LICENSES)
+add_custom_command(OUTPUT ${THIRD_PARTY_LICENSES}
+    COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/packaging/third-party-licenses.py
+            --cargo ${CARGO} ${THIRD_PARTY_LICENSES}
+    DEPENDS ${CMAKE_SOURCE_DIR}/Cargo.lock ${CMAKE_SOURCE_DIR}/packaging/third-party-licenses.py
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Collecting third-party license notices")
+add_custom_target(third_party_licenses ALL DEPENDS ${THIRD_PARTY_LICENSES})
+# After the build: Cargo has fetched the crates by then, and two rustup
+# proxies starting at once race to install the toolchain's components.
+add_dependencies(third_party_licenses cargo_build)
+if(KADENCE_INSTALL_LICENSES)
+    install(FILES ${THIRD_PARTY_LICENSES} DESTINATION ${KADENCE_LICENSE_DIR})
 endif()
 
 if(KADENCE_INSTALL_LICENSES)

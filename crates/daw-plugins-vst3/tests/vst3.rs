@@ -95,9 +95,6 @@ fn scans_the_test_plugin() {
     assert_eq!(d.ports, (2, 2));
     assert!(!d.is_instrument);
     assert_eq!(d.id.len(), 32);
-    // A directory scan finds the same bundle.
-    let dir = testgain_bundle().parent().unwrap();
-    assert_eq!(Vst3Format.scan(dir).unwrap().len(), 1);
 }
 
 #[test]

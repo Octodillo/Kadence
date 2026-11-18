@@ -656,11 +656,8 @@ Kirigami.Page {
     }
 
     function forwardWheel(event, x, y): void {
-        // Mice report angles (120 per notch), touchpads pixels.
-        const pixels = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0;
-        const dx = pixels ? event.pixelDelta.x : event.angleDelta.x / 2;
-        const dy = pixels ? event.pixelDelta.y : event.angleDelta.y / 2;
-        view.wheel(x, y, dx, dy, event.modifiers);
+        const by = Wheel.pixels(event);
+        view.wheel(x, y, by.x, by.y, event.modifiers);
         event.accepted = true;
     }
 

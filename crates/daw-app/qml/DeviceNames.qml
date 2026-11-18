@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+pragma Singleton
+
 import QtQuick
 
 // Translates the names the built-in devices give themselves, their
 // settings and the choices of those settings, which daw-devices keeps in
-// English. tests/device_names.rs checks that the table matches the
-// devices. An unknown name (a plugin's, a renamed device) is shown as it is.
+// English: DeviceNames.name("Compressor"). Everything that shows such a
+// name words it here. tests/device_names.rs checks that the table matches
+// the devices. An unknown name (a plugin's, a renamed device) is shown as
+// it is.
 QtObject {
     readonly property var names: ({
         "1/1": i18nc("@label choice of a device setting", "1/1"),

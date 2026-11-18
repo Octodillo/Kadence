@@ -392,11 +392,8 @@ Kirigami.Page {
             }
             onCanceled: roll.cancelDrag()
             onWheel: (w) => {
-                // Mice report angles (120 per notch), touchpads pixels.
-                const pixels = w.pixelDelta.x !== 0 || w.pixelDelta.y !== 0;
-                const dx = pixels ? w.pixelDelta.x : w.angleDelta.x / 2;
-                const dy = pixels ? w.pixelDelta.y : w.angleDelta.y / 2;
-                roll.wheel(w.x, w.y, dx, dy, w.modifiers);
+                const by = Wheel.pixels(w);
+                roll.wheel(w.x, w.y, by.x, by.y, w.modifiers);
                 w.accepted = true;
             }
 
