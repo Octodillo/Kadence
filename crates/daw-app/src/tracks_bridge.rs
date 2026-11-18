@@ -22,7 +22,7 @@ use crate::model_roles;
 use crate::paint::to_qcolor;
 use crate::qt_lists::{ModelRole, row, string_list};
 use crate::state::{self, AppState};
-use crate::tracks::{LaneRow, TrackKind, TrackRow};
+use crate::tracks::{HeaderRow, TrackKind, TrackRow};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -205,15 +205,19 @@ model_roles!(
         Instrument => "instrument",
         /// The instrument's row in `Instruments`, or -1.
         InstrumentChoice => "instrumentChoice",
-        /// Whether the track shows its automation lanes.
+        /// Whether the track shows the rows under it.
         Expanded => "expanded",
-        /// The automation lanes, each a map: `kind` (an
-        /// `Automation.LaneKind`), `detail` (the bus a send goes to, or the
-        /// device's name), `param` (a device parameter's name), `mode` (an
+        /// The rows under the track while it is expanded: its controls,
+        /// and the headings of the groups they fold into. Each is a map:
+        /// `kind` (an `Automation.LaneKind`), `detail` (the bus a send
+        /// goes to, or the device's name), `param` (a device parameter's
+        /// name), `depth` (how many groups it is inside), `open` (a
+        /// heading whose group is unfolded), `lane` (the control's lane as
+        /// an index for `Automation`, or -1), `mode` (an
         /// `Automation.LaneMode`) and, for device parameters, how
         /// `ValueText.param` words the value: `control`, `unit` and
         /// `choices`.
-        Lanes => "lanes",
+        Rows => "rows",
     }
 );
 
@@ -246,13 +250,17 @@ fn text(s: &str) -> QVariant {
     QVariant::from(&QString::from(s))
 }
 
-fn lane_map(lane: &LaneRow) -> QVariant {
+fn row_map(lane: &HeaderRow) -> QVariant {
     let param = lane.param.as_ref();
     let mut map = QMap::<QMapPair_QString_QVariant>::default();
     let mut put = |key: &str, value: QVariant| map.insert(QString::from(key), value);
     put("kind", QVariant::from(&lane_kind_value(lane.name.kind)));
     put("detail", text(&lane.name.detail));
     put("param", text(&lane.name.param));
+    put("depth", QVariant::from(&i32::from(lane.depth)));
+    put("open", QVariant::from(&lane.open));
+    let index = lane.lane.and_then(|l| i32::try_from(l).ok());
+    put("lane", QVariant::from(&index.unwrap_or(-1)));
     put("mode", QVariant::from(&lane_mode_value(lane.mode)));
     put("control", text(param.map_or("", |p| p.control_name())));
     put("unit", text(param.map_or("", |p| p.unit_name())));
@@ -261,11 +269,11 @@ fn lane_map(lane: &LaneRow) -> QVariant {
     QVariant::from(&map)
 }
 
-/// Lanes as the `lanes` role holds them: a list of maps (see [`Role::Lanes`]).
-pub(crate) fn lane_list(lanes: &[LaneRow]) -> QList<QVariant> {
+/// Rows as the `rows` role holds them: a list of maps (see [`Role::Rows`]).
+pub(crate) fn row_list(rows: &[HeaderRow]) -> QList<QVariant> {
     let mut list = QList::default();
-    for lane in lanes {
-        list.append(lane_map(lane));
+    for row in rows {
+        list.append(row_map(row));
     }
     list
 }
@@ -298,7 +306,7 @@ fn value(t: &TrackRow, role: Role) -> QVariant {
                 .unwrap_or(-1),
         ),
         Role::Expanded => QVariant::from(&t.expanded),
-        Role::Lanes => QVariant::from(&lane_list(&t.lanes)),
+        Role::Rows => QVariant::from(&row_list(&t.rows)),
     }
 }
 

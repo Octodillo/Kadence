@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 09:26+0000\n"
+"POT-Creation-Date: 2026-11-18 17:40+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,14 +18,9 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: crates/daw-app/qml/AddLaneMenu.qml
-msgctxt "@title:menu"
-msgid "Add Automation Lane"
-msgstr ""
-
-#: crates/daw-app/qml/AddLaneMenu.qml
-msgctxt "@item:inmenu"
-msgid "Every control has a lane"
+#: crates/daw-app/qml/AddEffectMenu.qml crates/daw-app/qml/InstrumentButton.qml
+msgctxt "@action:inmenu"
+msgid "Browse Plugins…"
 msgstr ""
 
 #: crates/daw-app/qml/ArrangePage.qml crates/daw-app/qml/SelfTest.qml
@@ -383,11 +378,6 @@ msgstr ""
 #: crates/daw-app/qml/ChannelStrip.qml
 msgctxt "@action:button"
 msgid "Add Effect"
-msgstr ""
-
-#: crates/daw-app/qml/ChannelStrip.qml crates/daw-app/qml/InstrumentButton.qml
-msgctxt "@action:inmenu"
-msgid "Browse Plugins…"
 msgstr ""
 
 #: crates/daw-app/qml/ChannelStrip.qml
@@ -1905,84 +1895,6 @@ msgctxt "@action:inmenu"
 msgid "Show Instrument Settings"
 msgstr ""
 
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@info:accessible"
-msgid "No automation lanes"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@action:button"
-msgid "Add Lane"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@item:inlistbox automation lane mode"
-msgid "Off"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@item:inlistbox automation lane mode"
-msgid "Read"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@item:inlistbox automation lane mode"
-msgid "Write"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@label:listbox"
-msgid "Automation mode"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@info:tooltip"
-msgid ""
-"Off: the control keeps its own setting. Read: the lane plays. Write: the "
-"lane plays, and moving the control on the Mix page while playing records "
-"over it."
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@action:button"
-msgid "Remove Lane"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml
-msgctxt "@action:inmenu"
-msgid "Remove Lane"
-msgstr ""
-
-#: crates/daw-app/qml/LaneHeader.qml crates/daw-app/qml/TrackHeader.qml
-msgctxt "@action:inmenu"
-msgid "Hide Automation"
-msgstr ""
-
-#: crates/daw-app/qml/LaneName.qml
-msgctxt "@label automation lane"
-msgid "Volume"
-msgstr ""
-
-#: crates/daw-app/qml/LaneName.qml
-msgctxt "@label automation lane"
-msgid "Pan"
-msgstr ""
-
-#: crates/daw-app/qml/LaneName.qml
-msgctxt "@label automation lane"
-msgid "Send"
-msgstr ""
-
-#: crates/daw-app/qml/LaneName.qml
-msgctxt "@label automation lane, %1 is the bus the send goes to"
-msgid "Send to %1"
-msgstr ""
-
-#: crates/daw-app/qml/LaneName.qml
-msgctxt "@label automation lane, %1 is a device, %2 one of its parameters"
-msgid "%1: %2"
-msgstr ""
-
 #: crates/daw-app/qml/LevelMeter.qml
 msgctxt "@label"
 msgid "Level meter"
@@ -3044,6 +2956,118 @@ msgctxt "@action:button"
 msgid "Locate…"
 msgstr ""
 
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@info:whatsthis a group of controls"
+msgid "Open. Closing it leaves only the automated controls in view."
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@info:whatsthis a group of controls"
+msgid "Closed. Only the automated controls show."
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@info:tooltip"
+msgid "Close: keep only the automated controls in view"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@info:tooltip"
+msgid "Open: show every control"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@item:inlistbox automation lane mode"
+msgid "Off"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@item:inlistbox automation lane mode"
+msgid "Read"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@item:inlistbox automation lane mode"
+msgid "Write"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@label:listbox"
+msgid "Automation mode"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@info:tooltip"
+msgid ""
+"Off: the control keeps its own setting. Read: its automation plays. Write: "
+"it plays, and moving the control while playing records over it."
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:button"
+msgid "Remove Automation"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu a group of controls"
+msgid "Close"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu a group of controls"
+msgid "Open"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu"
+msgid "Remove Automation"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml crates/daw-app/qml/TrackHeader.qml
+msgctxt "@action:inmenu"
+msgid "Hide Controls"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@label a track's control"
+msgid "Volume"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@label a track's control"
+msgid "Pan"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@label a track's control"
+msgid "Send"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@label a track's control, %1 is the bus the send goes to"
+msgid "Send to %1"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@label a track's control, %1 is a device, %2 one of its parameters"
+msgid "%1: %2"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@title:group a track's controls"
+msgid "Instrument"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@title:group a track's controls"
+msgid "Effects"
+msgstr ""
+
+#: crates/daw-app/qml/RowName.qml
+msgctxt "@title:group a track's controls"
+msgid "Sends"
+msgstr ""
+
 #: crates/daw-app/qml/SettingsPage.qml
 msgctxt "@title"
 msgid "Settings"
@@ -3076,12 +3100,12 @@ msgstr ""
 
 #: crates/daw-app/qml/TrackHeader.qml
 msgctxt "@action:button"
-msgid "Hide Automation"
+msgid "Hide Controls"
 msgstr ""
 
 #: crates/daw-app/qml/TrackHeader.qml
 msgctxt "@action:button"
-msgid "Show Automation"
+msgid "Show Controls"
 msgstr ""
 
 #: crates/daw-app/qml/TrackHeader.qml
@@ -3123,7 +3147,7 @@ msgstr ""
 
 #: crates/daw-app/qml/TrackHeader.qml
 msgctxt "@action:inmenu"
-msgid "Show Automation"
+msgid "Show Controls"
 msgstr ""
 
 #: crates/daw-app/qml/TransportBar.qml

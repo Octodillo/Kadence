@@ -365,7 +365,8 @@ impl qobject::ArrangeView {
                 } => {
                     self.automation_menu_requested(px, py, point.is_some());
                 }
-                // The empty row of a track without lanes: the headers add them.
+                // A row without a lane (a group, or a control nothing
+                // automates yet): nothing to offer.
                 Hit::Automation { lane: None, .. } => {}
                 _ => {
                     let on_clip = matches!(hit, Hit::Clip { .. });

@@ -19,8 +19,8 @@ use crate::automation_bridge::{shape, shape_index};
 use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
 use crate::session_mixer::strip_row;
 use crate::state;
-use crate::tracks::LaneRow;
-use crate::tracks_bridge::lane_list;
+use crate::tracks::HeaderRow;
+use crate::tracks_bridge::row_list;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -215,7 +215,7 @@ pub struct PianoRollRust {
     lane_count: i32,
     lanes: QList<QVariant>,
     /// What `lanes` was made from.
-    lane_rows: Vec<LaneRow>,
+    lane_rows: Vec<HeaderRow>,
     /// The view revision and track row `lane_rows` were read at: they are
     /// read again only when either moves, not on every playing frame.
     lanes_at: Option<(u64, Option<usize>)>,
@@ -314,7 +314,7 @@ impl qobject::PianoRoll {
             track_index: i32,
             lane_count: i32,
             /// The lane rows, when something they show may have changed.
-            lanes: Option<Vec<LaneRow>>,
+            lanes: Option<Vec<HeaderRow>>,
             lanes_at: (u64, Option<usize>),
         }
         let (w, h) = (self.width(), self.height());
@@ -377,7 +377,7 @@ impl qobject::PianoRoll {
         if let Some(lanes) = shown.lanes {
             self.as_mut().rust_mut().lanes_at = Some(shown.lanes_at);
             if lanes != self.lane_rows {
-                self.as_mut().set_lanes(lane_list(&lanes));
+                self.as_mut().set_lanes(row_list(&lanes));
                 self.as_mut().rust_mut().lane_rows = lanes;
             }
         }

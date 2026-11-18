@@ -178,12 +178,23 @@ Item {
             // Show the Bass and Keys lanes, then add a point to Bass's
             // volume lane with a click.
             const v = window.pageStack.currentItem.view;
-            const lane = () => Tracks.get(0).lanes[0];
-            check(Tracks.get(0).lanes.length === 1 && lane().kind === Automation.VolumeLane, "demo Bass has a volume lane");
-            check(lane().mode === Automation.LaneRead, "lanes read by default");
             Automation.setExpanded(0, true);
             Automation.setExpanded(2, true);
-            check(Tracks.get(0).expanded && v.rowHeight(0) === v.trackHeight + v.laneHeight, "Bass shows its lane");
+            // Under the track: its controls, and the headings of the groups
+            // the rest fold into. A lane is drawn in its control's row.
+            const rows = track => Tracks.get(track).rows;
+            const volume0 = () => rows(0)[0];
+            const count = rows(0).length;
+            check(Tracks.get(0).expanded && count >= 4 && v.rowHeight(0) === v.trackHeight + count * v.laneHeight, "Bass shows its controls");
+            check(volume0().kind === Automation.VolumeLane && volume0().lane === 0, "volume comes first, with the demo's lane");
+            check(volume0().mode === Automation.LaneRead, "lanes read by default");
+            check(rows(0)[1].kind === Automation.PanLane && rows(0)[1].lane === -1, "pan has no lane yet");
+            const effects = rows(0).findIndex(r => r.kind === Automation.EffectsGroup);
+            check(effects > 1 && !rows(0)[effects].open && rows(0)[effects].depth === 0, "Effects starts closed");
+            Automation.setRowOpen(0, effects, true);
+            check(rows(0)[effects].open && v.rowHeight(0) === v.trackHeight + rows(0).length * v.laneHeight, "Effects opens");
+            Automation.setRowOpen(0, effects, false);
+            check(rows(0).length === count, "Effects closes");
             // A lane header's lower edge resizes the lanes, within limits;
             // a double-click puts the default back.
             // The test leaves the user's saved sizes as they were.
@@ -195,7 +206,7 @@ Item {
             lanes.drag(-1000, false);
             check(lanes.units === lanes.minimumUnits, "lanes keep a minimum height");
             lanes.reset();
-            check(lanes.units === lanes.defaultUnits && v.rowHeight(0) === v.trackHeight + v.laneHeight, "lane height reset");
+            check(lanes.units === lanes.defaultUnits && v.rowHeight(0) === v.trackHeight + count * v.laneHeight, "lane height reset");
             lanes.units = savedLanes;
             AppSettings.setLayoutValue(lanes.key, savedLanes);
             const y = v.rulerHeight + v.trackHeight + v.laneHeight / 2;
@@ -204,37 +215,53 @@ Item {
             Project.tick();
             check(Project.undoText === "Edit Automation", "click adds an automation point");
             check(Project.undoText in editNames.names, "automation edit has a translation");
-            check(Automation.targetCount(0) >= 1 && Automation.targetKind(0, 0) === Automation.PanLane, "Pan can get a lane");
-            Automation.setLaneMode(0, 0, Automation.LaneOff);
+            // A click beside a control without a lane starts automating it.
+            v.press(v.width * 0.45, y + v.laneHeight, 1, 0);
+            v.release(v.width * 0.45, y + v.laneHeight, 0);
             Project.tick();
-            check(lane().mode === Automation.LaneOff && Project.undoText === "Toggle Automation", "lane off");
+            check(rows(0)[1].lane === 1, "a click beside Pan starts its lane");
+            Project.undo();
+            Project.undo();
+            check(rows(0)[1].lane === -1 && Project.undoText === "Edit Automation", "undo takes the new lane away");
+            Automation.setRowMode(0, 0, Automation.LaneOff);
+            Project.tick();
+            check(volume0().mode === Automation.LaneOff && Project.undoText === "Toggle Automation", "lane off");
             // An off lane's control sets the fader; a playing one follows
             // its points and can't be moved.
-            const off = Automation.laneControl(0, 0);
+            const off = Automation.rowControl(0, 0);
             check(!off.following, "an off lane doesn't follow its points");
             check(!off.writes, "a lane in read mode doesn't write");
             const volume = off.value;
-            Automation.beginLaneControl(0, 0);
-            Automation.setLanePosition(0, 0, 0.25);
-            Automation.setLanePosition(0, 0, 1);
-            Automation.endLaneControl(0, 0);
+            Automation.beginRowControl(0, 0);
+            Automation.setRowPosition(0, 0, 0.25);
+            Automation.setRowPosition(0, 0, 1);
+            Automation.endRowControl(0, 0);
             Project.tick();
-            const moved = Automation.laneControl(0, 0);
-            check(moved.value > volume && moved.position === 1, "lane control sets the volume");
+            const moved = Automation.rowControl(0, 0);
+            check(moved.value > volume && moved.position === 1, "a row's control sets the volume");
             // The next gesture (a key press) is its own undo step.
-            Automation.beginLaneControl(0, 0);
-            Automation.setLanePosition(0, 0, 0.5);
-            Automation.endLaneControl(0, 0);
+            Automation.beginRowControl(0, 0);
+            Automation.setRowPosition(0, 0, 0.5);
+            Automation.endRowControl(0, 0);
             Project.undo();
-            check(Automation.laneControl(0, 0).position === 1, "each lane control gesture is its own undo step");
+            check(Automation.rowControl(0, 0).position === 1, "each control gesture is its own undo step");
             Project.undo();
-            check(Automation.laneControl(0, 0).value === volume, "a lane control drag is one undo step");
-            Automation.setLaneMode(0, 0, Automation.LaneWrite);
-            check(lane().mode === Automation.LaneWrite && Automation.laneControl(0, 0).writes, "lane in write mode writes");
-            Automation.setLaneMode(0, 0, Automation.LaneRead);
+            check(Automation.rowControl(0, 0).value === volume, "a control drag is one undo step");
+            Automation.setRowMode(0, 0, Automation.LaneWrite);
+            check(volume0().mode === Automation.LaneWrite && Automation.rowControl(0, 0).writes, "lane in write mode writes");
+            Automation.setRowMode(0, 0, Automation.LaneRead);
             Project.undo();
             Project.undo();
             Project.undo();
+            // For the picture: the Keys' instrument, opened to its
+            // parameters.
+            const instrument = rows(2).findIndex(r => r.kind === Automation.InstrumentGroup);
+            const closed = rows(2).length;
+            Automation.setRowOpen(2, instrument, true);
+            const param = rows(2)[instrument + 1];
+            check(instrument >= 0 && rows(2).length > closed && param.depth === 1
+                  && param.kind === Automation.DeviceParamLane && param.detail === "",
+                  "the instrument opens to its parameters");
             v.refresh();
         },
         () => {
@@ -510,7 +537,11 @@ Item {
             // Under the velocity lane: the clip's track's automation lanes,
             // named beside them, toggled from the toolbar.
             const lanes = roll.laneCount;
-            Automation.addLane(roll.trackIndex, 0);
+            // Arming a control that has no lane for writing gives it one.
+            Automation.setExpanded(roll.trackIndex, true);
+            const free = Tracks.get(roll.trackIndex).rows.findIndex(r => r.kind <= Automation.DeviceParamLane && r.lane < 0);
+            Automation.setRowMode(roll.trackIndex, free, Automation.LaneWrite);
+            Automation.setRowMode(roll.trackIndex, free, Automation.LaneRead);
             roll.refresh();
             check(roll.laneCount === lanes + 1 && roll.lanesHeight > 0
                   && roll.lanesHeight <= roll.laneCount * roll.laneHeight,

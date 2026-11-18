@@ -10,8 +10,9 @@ import io.github.octodillo.daw
 
 // One row of the track list beside the timeline: colour, drag handle,
 // name, instrument (on instrument tracks), MIDI input, record arm, audio
-// input, mute, solo, and the button that shows the track's automation
-// lanes, whose headers follow under it. It is a delegate of the Tracks
+// input, mute, solo, and the button that shows the track's controls: the
+// rows under it (volume, pan and the groups the rest fold into), whose
+// headers follow under this one. It is a delegate of the Tracks
 // model: what it shows are the model's roles, and its edits go to Tracks by
 // row. Dragging the handle reorders tracks; the list view shows where the
 // track will land (`dragFrom`, `dragTo`).
@@ -36,7 +37,8 @@ Column {
     required property string instrument
     required property int instrumentChoice
     required property bool expanded
-    required property var lanes
+    // The rows under the track while it is expanded (see Tracks).
+    required property var rows
 
     // The timeline, for row geometry.
     required property ArrangeView arrange
@@ -45,7 +47,6 @@ Column {
     // The page's actions on the selected track, for the header's menu:
     // rename, move up, move down, delete.
     required property list<Kirigami.Action> trackActions
-    readonly property int laneCount: lanes.length
 
     // How much each of `r` sizes in this row (the track, or the lanes down
     // to a dragged edge) changes so the edge moves `delta` with the pointer.
@@ -100,8 +101,8 @@ Column {
         inputMenu.dismiss();
         instrumentButton.dismiss();
         midiInputButton.dismiss();
-        for (let i = 0; i < laneHeaders.count; ++i) {
-            laneHeaders.itemAt(i).dismiss();
+        for (let i = 0; i < rowHeaders.count; ++i) {
+            rowHeaders.itemAt(i).dismiss();
         }
     }
 
@@ -141,7 +142,7 @@ Column {
                 Layout.alignment: Qt.AlignVCenter
                 icon.name: row.expanded ? "arrow-down" : "arrow-right"
                 display: QQC2.AbstractButton.IconOnly
-                text: row.expanded ? i18nc("@action:button", "Hide Automation") : i18nc("@action:button", "Show Automation")
+                text: row.expanded ? i18nc("@action:button", "Hide Controls") : i18nc("@action:button", "Show Controls")
                 onClicked: Automation.setExpanded(header.index, !row.expanded)
                 QQC2.ToolTip.text: text
                 QQC2.ToolTip.visible: hovered
@@ -389,11 +390,8 @@ Column {
                 QQC2.MenuItem { action: row.trackActions[1] }
                 QQC2.MenuItem { action: row.trackActions[2] }
                 QQC2.MenuSeparator {}
-                AddLaneMenu {
-                    track: header.index
-                }
                 QQC2.MenuItem {
-                    text: row.expanded ? i18nc("@action:inmenu", "Hide Automation") : i18nc("@action:inmenu", "Show Automation")
+                    text: row.expanded ? i18nc("@action:inmenu", "Hide Controls") : i18nc("@action:inmenu", "Show Controls")
                     icon.name: row.expanded ? "arrow-down" : "arrow-right"
                     onTriggered: Automation.setExpanded(header.index, !row.expanded)
                 }
@@ -454,17 +452,16 @@ Column {
         }
     }
 
-    // The lanes' headers, one per lane row the timeline shows.
+    // The rows' headers, one per row the timeline shows under the track.
     Repeater {
-        id: laneHeaders
-        model: row.expanded ? Math.max(1, row.laneCount) : 0
-        delegate: LaneHeader {
-            required property int index
+        id: rowHeaders
+        model: row.expanded ? row.rows.length : 0
+        delegate: RowHeader {
+            required index
             width: row.width
             height: row.arrange.laneHeight
             track: row.index
-            lane: index < row.laneCount ? index : -1
-            info: row.lanes[index] ?? null
+            info: row.rows[index] ?? null
 
             // Drag the lower edge to resize every automation lane,
             // double-click for the default. This track's top stays put and
