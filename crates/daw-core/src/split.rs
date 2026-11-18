@@ -17,7 +17,7 @@ use std::any::Any;
 
 use crate::sync::Arc;
 
-use crate::event::{Event, EventKind, EventList};
+use crate::event::{Event, EventKind, EventList, midi};
 use crate::exclusive::Exclusive;
 use crate::node::ProcessContext;
 use crate::plugin::PluginProcessor;
@@ -96,12 +96,12 @@ impl LateEvents {
 /// Whether an event that was sent before a reset may still be delivered after it: anything
 /// but the start of a note. For every list that holds events back past a reset.
 pub fn survives_reset(e: &Event) -> bool {
-    match e.kind {
-        EventKind::NoteOn { .. } => false,
-        // A MIDI note-on; with velocity 0 it is a note-off.
-        EventKind::Midi([status, _, velocity]) => status & 0xf0 != 0x90 || velocity == 0,
-        EventKind::NoteOff { .. } | EventKind::ParamValue { .. } => true,
-    }
+    let kind = match e.kind {
+        // A note on may be in raw MIDI too.
+        EventKind::Midi(raw) => midi::decode_padded(raw),
+        kind => Some(kind),
+    };
+    !matches!(kind, Some(EventKind::NoteOn { .. }))
 }
 
 /// What a split plugin's `process` works on. Both calls run on the audio thread, or on the

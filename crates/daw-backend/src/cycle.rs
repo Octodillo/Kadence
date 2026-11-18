@@ -1,4 +1,4 @@
-use daw_core::event::EventList;
+use daw_core::event::{Event, EventKind, EventList, midi};
 use daw_core::queue::{Consumer, Producer, spsc};
 
 /// Everything the process callback gets for one audio period.
@@ -82,10 +82,37 @@ impl PortBuffers {
 
 /// Pushes into an event list, counting drops instead of failing.
 #[inline]
-pub(crate) fn push_or_count(list: &mut EventList, e: daw_core::event::Event, dropped: &mut u64) {
+pub(crate) fn push_or_count(list: &mut EventList, e: Event, dropped: &mut u64) {
     if list.push(e).is_err() {
         *dropped += 1;
     }
+}
+
+/// Pushes the event for one raw MIDI message a port received at `frame`.
+/// SysEx and malformed messages are skipped; one the list has no room for is
+/// counted.
+#[inline]
+pub(crate) fn push_midi_or_count(
+    list: &mut EventList,
+    frame: u32,
+    bytes: &[u8],
+    dropped: &mut u64,
+) {
+    if let Some(kind) = midi::decode(bytes) {
+        push_or_count(list, Event { frame, kind }, dropped);
+    }
+}
+
+/// The raw MIDI to send for an event, and its length. A malformed
+/// [`EventKind::Midi`] is counted as dropped; a parameter change has no MIDI
+/// form to lose and is only skipped.
+#[inline]
+pub(crate) fn encode_or_count(kind: &EventKind, dropped: &mut u64) -> Option<([u8; 3], usize)> {
+    let encoded = midi::encode(kind);
+    if encoded.is_none() && matches!(kind, EventKind::Midi(_)) {
+        *dropped += 1;
+    }
+    encoded
 }
 
 /// A change to the extra MIDI inputs, sent to whoever owns the ports.

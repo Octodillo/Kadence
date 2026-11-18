@@ -14,7 +14,6 @@
 
 mod atom;
 mod instance;
-mod midi;
 mod ring;
 mod scan;
 mod ui;
