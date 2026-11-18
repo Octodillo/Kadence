@@ -1088,7 +1088,7 @@ impl qobject::Project {
         ) -> daw_arrange::Outcome,
     ) {
         self.edit(|s| {
-            let out = s.with_arrange(f);
+            let out = s.with_view(f);
             s.apply(out);
         });
     }
