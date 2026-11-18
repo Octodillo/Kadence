@@ -111,6 +111,14 @@ pub mod qobject {
         fn wheel(self: Pin<&mut PianoRoll>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32);
         #[qinvokable]
         fn pinch(self: Pin<&mut PianoRoll>, scale: f64, x: f64);
+        /// Whether a one-finger touch drag from here should scroll the view
+        /// instead of editing (see `PianoRoll::touch_pans`).
+        #[qinvokable]
+        fn touch_pans(self: &PianoRoll, x: f64, y: f64) -> bool;
+        /// Whether a right click here opens a context menu, so that a
+        /// held finger should (see `PianoRoll::has_menu_at`).
+        #[qinvokable]
+        fn has_menu_at(self: &PianoRoll, x: f64, y: f64) -> bool;
         #[qinvokable]
         fn scroll_to(self: Pin<&mut PianoRoll>, x: f64, y: f64);
 
@@ -448,6 +456,14 @@ impl qobject::PianoRoll {
         let p = pointer(x, y, 0, modifiers);
         let out = state::with(|s| s.piano.wheel(p, dx, dy));
         self.after(out);
+    }
+
+    fn touch_pans(&self, x: f64, y: f64) -> bool {
+        state::with(|s| s.piano.touch_pans(s.doc.project(), x, y))
+    }
+
+    fn has_menu_at(&self, x: f64, y: f64) -> bool {
+        state::with(|s| s.piano.has_menu_at(x, y))
     }
 
     fn pinch(self: Pin<&mut Self>, scale: f64, x: f64) {
