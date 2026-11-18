@@ -11,11 +11,14 @@ import io.github.octodillo.daw
 QQC2.ToolButton {
     id: button
 
-    required property int trackIndex
-    property int revision: Project.revision
+    // The device the track listens to ("" for every input) and the channel
+    // (-1 for every channel).
+    required property string device
+    required property int channel
 
-    readonly property string device: revision >= 0 ? Project.trackMidiDevice(trackIndex) : ""
-    readonly property int channel: revision >= 0 ? Project.trackMidiChannel(trackIndex) : -1
+    // The user picked a device and a channel, named as above.
+    signal chosen(string device, int channel)
+
     // A device the track names that is not in use (unplugged and turned off,
     // or from another computer).
     readonly property bool deviceMissing: device !== "" && !AppSettings.midiInputNames.includes(device)
@@ -41,10 +44,6 @@ QQC2.ToolButton {
         menu.dismiss();
     }
 
-    function choose(newDevice: string, newChannel: int): void {
-        Project.setTrackMidiInput(trackIndex, newDevice, newChannel);
-    }
-
     LazyMenu {
         id: menu
         menu: QQC2.Menu {
@@ -54,7 +53,7 @@ QQC2.ToolButton {
                 text: i18nc("@item:inmenu MIDI input", "All Inputs")
                 checkable: true
                 checked: button.device === ""
-                onTriggered: button.choose("", button.channel)
+                onTriggered: button.chosen("", button.channel)
             }
 
             // A Repeater can't add items to a Menu; insert them after "All
@@ -67,7 +66,7 @@ QQC2.ToolButton {
                     text: AppSettings.midiInputLabels[index] ?? modelData
                     checkable: true
                     checked: button.device === modelData
-                    onTriggered: button.choose(modelData, button.channel)
+                    onTriggered: button.chosen(modelData, button.channel)
                 }
                 onObjectAdded: (index, object) => menuPopup.insertItem(index + 1, object)
                 onObjectRemoved: (index, object) => menuPopup.removeItem(object)
@@ -91,7 +90,7 @@ QQC2.ToolButton {
                     text: i18nc("@item:inmenu MIDI channel", "All Channels")
                     checkable: true
                     checked: button.channel < 0
-                    onTriggered: button.choose(button.device, -1)
+                    onTriggered: button.chosen(button.device, -1)
                 }
 
                 QQC2.MenuSeparator {}
@@ -103,7 +102,7 @@ QQC2.ToolButton {
                         text: i18nc("@item:inmenu %1 is a MIDI channel number", "Channel %1", index + 1)
                         checkable: true
                         checked: button.channel === index
-                        onTriggered: button.choose(button.device, index)
+                        onTriggered: button.chosen(button.device, index)
                     }
                     // After "All Channels" and the separator.
                     onObjectAdded: (index, object) => channelMenu.insertItem(index + 2, object)

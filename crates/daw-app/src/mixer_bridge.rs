@@ -43,6 +43,23 @@ pub mod qobject {
         type QStringList = cxx_qt_lib::QStringList;
     }
 
+    /// The `kind` role.
+    #[qenum(Mixer)]
+    enum StripKind {
+        TrackStrip,
+        BusStrip,
+        MasterStrip,
+    }
+
+    /// A strip control that can be automated, for `touch` and `reset`.
+    #[qenum(Mixer)]
+    enum StripControl {
+        VolumeControl,
+        PanControl,
+        /// A send's level; `send` says which.
+        SendControl,
+    }
+
     #[auto_cxx_name]
     extern "RustQt" {
         #[qobject]
@@ -106,14 +123,14 @@ pub mod qobject {
         /// Turns touch writing on or off.
         #[qinvokable]
         fn set_writing(self: Pin<&mut Mixer>, on: bool);
-        /// The user grabbed (`pressed`) or let go of a control: `control`
-        /// is "volume", "pan" or "send" (with `send` its index).
+        /// The user grabbed (`pressed`) or let go of a control; `send` is
+        /// the send's index for `SendControl`.
         #[qinvokable]
-        fn touch(self: Pin<&mut Mixer>, row: i32, control: &QString, send: i32, pressed: bool);
+        fn touch(self: Pin<&mut Mixer>, row: i32, control: StripControl, send: i32, pressed: bool);
         /// Double-click: puts a control (as for `touch`) back to its
         /// default, taking back the first click's edit.
         #[qinvokable]
-        fn reset(self: Pin<&mut Mixer>, row: i32, control: &QString, send: i32);
+        fn reset(self: Pin<&mut Mixer>, row: i32, control: StripControl, send: i32);
         /// Picks up edits made elsewhere and moves the meters on by
         /// `seconds`, the time since the last call.
         #[qinvokable]
@@ -237,11 +254,11 @@ impl Default for MixerRust {
     }
 }
 
-fn kind_name(kind: StripKind) -> &'static str {
+fn qml_kind(kind: StripKind) -> qobject::StripKind {
     match kind {
-        StripKind::Track => "track",
-        StripKind::Bus => "bus",
-        StripKind::Master => "master",
+        StripKind::Track => qobject::StripKind::TrackStrip,
+        StripKind::Bus => qobject::StripKind::BusStrip,
+        StripKind::Master => qobject::StripKind::MasterStrip,
     }
 }
 
@@ -444,33 +461,39 @@ impl qobject::Mixer {
         self.reload();
     }
 
-    /// The strip and control QML names: "volume", "pan" or "send" with
-    /// `send` its index.
-    fn control(&self, row: i32, control: &QString, send: i32) -> Option<(StripId, Control)> {
-        let id = self.strip_id(row)?;
-        let control = match control.to_string().as_str() {
-            "volume" => Control::Volume,
-            "pan" => Control::Pan,
-            "send" => {
-                let target = usize::try_from(send)
-                    .ok()
-                    .and_then(|i| self.strips.get(row as usize)?.sends.get(i))?
-                    .target;
-                Control::Send(target)
-            }
+    /// The strip at `row` and its `control`, with `send` the index of the
+    /// send for `SendControl`.
+    fn control(
+        &self,
+        row: i32,
+        control: qobject::StripControl,
+        send: i32,
+    ) -> Option<(StripId, Control)> {
+        use qobject::StripControl as Qml;
+        let strip = self.strips.get(usize::try_from(row).ok()?)?;
+        let control = match control {
+            Qml::VolumeControl => Control::Volume,
+            Qml::PanControl => Control::Pan,
+            Qml::SendControl => Control::Send(strip.sends.get(usize::try_from(send).ok()?)?.target),
             _ => return None,
         };
-        Some((id, control))
+        Some((strip.id, control))
     }
 
-    fn touch(mut self: Pin<&mut Self>, row: i32, control: &QString, send: i32, pressed: bool) {
+    fn touch(
+        mut self: Pin<&mut Self>,
+        row: i32,
+        control: qobject::StripControl,
+        send: i32,
+        pressed: bool,
+    ) {
         if let Some((id, control)) = self.control(row, control, send) {
             self.as_mut().rust_mut().mixer.touch(id, control, pressed);
             self.reload();
         }
     }
 
-    fn reset(mut self: Pin<&mut Self>, row: i32, control: &QString, send: i32) {
+    fn reset(mut self: Pin<&mut Self>, row: i32, control: qobject::StripControl, send: i32) {
         if let Some((id, control)) = self.control(row, control, send) {
             self.as_mut().rust_mut().mixer.reset(id, control);
             self.reload();
@@ -561,7 +584,7 @@ impl qobject::Mixer {
         };
         match role {
             Role::Name => QVariant::from(&QString::from(s.name.as_str())),
-            Role::Kind => QVariant::from(&QString::from(kind_name(s.kind))),
+            Role::Kind => QVariant::from(&qml_kind(s.kind).repr),
             Role::VolumeDb => QVariant::from(&s.volume_db),
             Role::Pan => QVariant::from(&s.pan),
             Role::Muted => QVariant::from(&s.muted),

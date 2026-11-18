@@ -14,7 +14,8 @@ StripFrame {
 
     required property int index
     required property string name
-    required property string kind
+    // A Mixer.StripKind.
+    required property int kind
     required property double volumeDb
     required property double pan
     required property bool muted
@@ -39,13 +40,13 @@ StripFrame {
     required property double holdRight
     required property double gainReduction
 
-    readonly property bool isMaster: kind === "master"
+    readonly property bool isMaster: kind === Mixer.MasterStrip
     readonly property string masterName: i18nc("@title name of the master bus", "Master")
 
     position: index
     // The master is unnamed unless the user renamed it.
     title: name || (isMaster ? masterName : "")
-    subtitle: kind === "bus" ? i18nc("@label strip type", "Bus")
+    subtitle: kind === Mixer.BusStrip ? i18nc("@label strip type", "Bus")
         : isMaster ? i18nc("@label strip type", "Main output")
         : i18nc("@label strip type", "Track")
     dimmed: silenced
@@ -62,8 +63,9 @@ StripFrame {
 
     // A slider handles its own release after a TapHandler on it, and puts
     // the value back where the second click landed; a double-click's reset
-    // runs after that. `control` and `send` as for Mixer.touch.
-    function reset(control: string, send: int): void {
+    // runs after that. `control` (a Mixer.StripControl) and `send` as for
+    // Mixer.touch.
+    function reset(control: int, send: int): void {
         const row = strip.index;
         Qt.callLater(() => Mixer.reset(row, control, send));
     }
@@ -231,12 +233,12 @@ StripFrame {
                             to: 6
                             value: strip.sendLevels[sendRow.index] ?? -60
                             onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
-                            onPressedChanged: Mixer.touch(strip.index, "send", sendRow.index, pressed)
+                            onPressedChanged: Mixer.touch(strip.index, Mixer.SendControl, sendRow.index, pressed)
                             QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2 (double-click for 0 dB)", sendRow.target, strip.dbText(value))
                             QQC2.ToolTip.visible: hovered || pressed
                             Accessible.name: i18nc("@label:slider", "Send to %1", sendRow.target)
                             TapHandler {
-                                onDoubleTapped: strip.reset("send", sendRow.index)
+                                onDoubleTapped: strip.reset(Mixer.SendControl, sendRow.index)
                             }
                         }
                         // Pre-fader sends ignore the fader: for monitor
@@ -311,13 +313,13 @@ StripFrame {
         to: 1
         value: strip.pan
         onMoved: Mixer.setPan(strip.index, value)
-        onPressedChanged: Mixer.touch(strip.index, "pan", -1, pressed)
+        onPressedChanged: Mixer.touch(strip.index, Mixer.PanControl, -1, pressed)
         Accessible.name: i18nc("@label:slider", "Pan")
         QQC2.ToolTip.text: i18nc("@info:tooltip", "Pan: %1 (double-click to centre)", strip.panText(value))
         QQC2.ToolTip.visible: hovered || pressed
         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         TapHandler {
-            onDoubleTapped: strip.reset("pan", -1)
+            onDoubleTapped: strip.reset(Mixer.PanControl, -1)
         }
     }
 
@@ -338,13 +340,13 @@ StripFrame {
             to: 6
             value: strip.volumeDb
             onMoved: Mixer.setVolume(strip.index, value)
-            onPressedChanged: Mixer.touch(strip.index, "volume", -1, pressed)
+            onPressedChanged: Mixer.touch(strip.index, Mixer.VolumeControl, -1, pressed)
             Accessible.name: i18nc("@label:slider", "Volume")
             QQC2.ToolTip.text: i18nc("@info:tooltip", "Volume (double-click for 0 dB)")
             QQC2.ToolTip.visible: hovered && !pressed
             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             TapHandler {
-                onDoubleTapped: strip.reset("volume", -1)
+                onDoubleTapped: strip.reset(Mixer.VolumeControl, -1)
             }
         }
         LevelMeter {

@@ -11,24 +11,38 @@ import io.github.octodillo.daw
 // One row of the track list beside the timeline: colour, drag handle,
 // name, instrument (on instrument tracks), MIDI input, record arm, audio
 // input, mute, solo, and the button that shows the track's automation
-// lanes, whose headers follow under it. Everything is read from Project and
-// Automation by index; `revision` re-reads it after any change. The
-// bindings use `revision` in an expression: a bare `revision;` statement is
-// dropped by the QML compiler, and then the binding never re-reads.
-// Dragging the handle reorders tracks; the list view shows where the track
-// will land (`dragFrom`, `dragTo`).
+// lanes, whose headers follow under it. It is a delegate of the Tracks
+// model: what it shows are the model's roles, and its edits go to Tracks by
+// row. Dragging the handle reorders tracks; the list view shows where the
+// track will land (`dragFrom`, `dragTo`).
 Column {
     id: row
 
+    // The roles of Tracks.
     required property int index
+    required property string trackId
+    required property bool selected
+    required property string name
+    required property int kind
+    required property color color
+    required property bool muted
+    required property bool soloed
+    required property bool armed
+    required property int input
+    required property bool inputStereo
+    required property bool monitorAuto
+    required property string midiDevice
+    required property int midiChannel
+    required property string instrument
+    required property int instrumentChoice
+    required property bool expanded
+    required property var lanes
+
     // The timeline, for row geometry.
     required property ArrangeView arrange
     // The automation lanes' height (see ArrangePage).
     required property LayoutSize laneSize
-    readonly property int revision: Project.revision + Automation.revision
-
-    readonly property bool expanded: revision >= 0 ? Automation.expanded(index) : false
-    readonly property int laneCount: revision >= 0 ? Automation.laneCount(index) : 0
+    readonly property int laneCount: lanes.length
 
     // How much each of `r` sizes in this row (the track, or the lanes down
     // to a dragged edge) changes so the edge moves `delta` with the pointer.
@@ -57,18 +71,22 @@ Column {
         return arrange.laneHeight > 0 ? Math.round((y - index * arrange.trackHeight) / arrange.laneHeight) : 0;
     }
 
-    // The list reuses headers that scroll out of view for other tracks. A
-    // hidden item keeps its focus and open menus, so close them, or the
-    // next track shown here would be renamed, moved or deleted instead.
-    ListView.onPooled: {
+    // A header is a row, and its track can change under it: the list reuses
+    // headers that scroll out of view, and adding, removing or moving a
+    // track shifts the rows. An open name field or menu would then rename,
+    // move or delete the track that took the row, so close them.
+    ListView.onPooled: dismiss()
+    onTrackIdChanged: dismiss()
+
+    function dismiss(): void {
         nameField.focus = false;
         nameField.visible = false;
         menu.dismiss();
         inputMenu.dismiss();
         instrumentButton.dismiss();
         midiInputButton.dismiss();
-        for (let i = 0; i < lanes.count; ++i) {
-            lanes.itemAt(i).dismiss();
+        for (let i = 0; i < laneHeaders.count; ++i) {
+            laneHeaders.itemAt(i).dismiss();
         }
     }
 
@@ -76,35 +94,23 @@ Column {
         id: header
 
         readonly property int index: row.index
-        readonly property int revision: row.revision
         width: row.width
         height: row.arrange.trackHeight
 
-        readonly property int kind: revision >= 0 ? Project.trackKind(index) : -1
-        readonly property string trackName: revision >= 0 ? Project.trackName(index) : ""
-        readonly property bool muted: revision >= 0 ? Project.trackMuted(index) : false
-        readonly property bool soloed: revision >= 0 ? Project.trackSoloed(index) : false
-        readonly property color trackColor: revision >= 0 ? Project.trackColor(index) : "transparent"
-        readonly property string instrument: revision >= 0 && kind === 1 ? Project.trackInstrument(index) : ""
-        readonly property bool armed: revision >= 0 ? Project.trackArmed(index) : false
-        readonly property int input: revision >= 0 ? Project.trackInput(index) : 0
-        readonly property bool inputStereo: revision >= 0 ? Project.trackInputStereo(index) : false
-        readonly property bool monitorAuto: revision >= 0 ? Project.trackMonitorAuto(index) : false
-        readonly property int inputCount: revision >= 0 ? Project.inputCount() : 0
-        // Audio (0) and instrument (1) tracks record.
-        readonly property bool canRecord: kind === 0 || kind === 1
+        // Audio and instrument tracks record.
+        readonly property bool canRecord: row.kind === Tracks.AudioTrack || row.kind === Tracks.InstrumentTrack
         // Inputs are counted from 1 for people.
-        readonly property string inputText: inputStereo
-            ? i18nc("@item a pair of audio inputs, %1 and %2 are input numbers", "Inputs %1–%2", input + 1, input + 2)
-            : i18nc("@item one audio input, %1 is its number", "Input %1", input + 1)
+        readonly property string inputText: row.inputStereo
+            ? i18nc("@item a pair of audio inputs, %1 and %2 are input numbers", "Inputs %1–%2", row.input + 1, row.input + 2)
+            : i18nc("@item one audio input, %1 is its number", "Input %1", row.input + 1)
 
-        highlighted: Project.selectedTrack === index
+        highlighted: row.selected
         opacity: row.ListView.view && row.ListView.view.dragFrom === index ? 0.5 : 1
         padding: 0
         leftPadding: 0
         onClicked: Project.selectTrack(index)
 
-        Accessible.name: trackName
+        Accessible.name: row.name
 
         contentItem: RowLayout {
             spacing: Kirigami.Units.smallSpacing
@@ -113,7 +119,7 @@ Column {
             Rectangle {
                 Layout.fillHeight: true
                 Layout.preferredWidth: Kirigami.Units.smallSpacing
-                color: header.trackColor
+                color: row.color
             }
 
             QQC2.ToolButton {
@@ -168,7 +174,7 @@ Column {
                             list.dragFrom = -1;
                             list.dragTo = -1;
                             if (from >= 0 && to >= 0 && from !== to) {
-                                Project.moveTrack(from, to);
+                                Tracks.moveTrack(from, to);
                             }
                         }
                     }
@@ -180,7 +186,7 @@ Column {
                 Layout.preferredWidth: Kirigami.Units.iconSizes.small
                 Layout.preferredHeight: Kirigami.Units.iconSizes.small
                 Layout.alignment: Qt.AlignVCenter
-                source: header.kind === 1 ? "audio-midi" : header.kind === 2 ? "view-media-equalizer" : "audio-x-generic"
+                source: row.kind === Tracks.InstrumentTrack ? "audio-midi" : row.kind === Tracks.BusTrack ? "view-media-equalizer" : "audio-x-generic"
                 isMask: true
                 color: Kirigami.Theme.textColor
             }
@@ -189,13 +195,13 @@ Column {
                 id: nameLabel
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
-                text: header.trackName
+                text: row.name
                 elide: Text.ElideRight
                 visible: !nameField.visible
 
                 TapHandler {
                     onDoubleTapped: {
-                        nameField.text = header.trackName;
+                        nameField.text = row.name;
                         nameField.visible = true;
                         nameField.forceActiveFocus();
                         nameField.selectAll();
@@ -209,7 +215,7 @@ Column {
                 Layout.alignment: Qt.AlignVCenter
                 visible: false
                 onAccepted: {
-                    Project.renameTrack(header.index, text);
+                    Tracks.rename(header.index, text);
                     visible = false;
                 }
                 onActiveFocusChanged: if (!activeFocus) visible = false
@@ -220,18 +226,20 @@ Column {
                 id: instrumentButton
                 Layout.alignment: Qt.AlignVCenter
                 Layout.maximumWidth: Kirigami.Units.gridUnit * 5
-                visible: header.kind === 1
-                instrument: header.instrument
-                currentChoice: header.revision >= 0 ? Project.trackInstrumentChoice(header.index) : -1
-                onChosen: (choice, revision) => Project.setTrackInstrument(header.index, choice, revision)
-                onSettingsRequested: DevicePanel.open(Project.trackInstrumentDevice(header.index))
+                visible: row.kind === Tracks.InstrumentTrack
+                instrument: row.instrument
+                currentChoice: row.instrumentChoice
+                onChosen: (choice, revision) => Tracks.setInstrument(header.index, choice, revision)
+                onSettingsRequested: DevicePanel.open(Tracks.instrumentDevice(header.index))
             }
 
             MidiInputButton {
                 id: midiInputButton
                 Layout.alignment: Qt.AlignVCenter
-                visible: header.kind === 1
-                trackIndex: header.index
+                visible: row.kind === Tracks.InstrumentTrack
+                device: row.midiDevice
+                channel: row.midiChannel
+                onChosen: (device, channel) => Tracks.setMidiInput(header.index, device, channel)
             }
 
             // Audio and instrument tracks record. Breeze's record icon is
@@ -255,10 +263,10 @@ Column {
                     }
                 }
                 checkable: true
-                checked: header.armed
+                checked: row.armed
                 display: QQC2.AbstractButton.IconOnly
                 text: i18nc("@action:button arm track for recording", "Arm")
-                onToggled: Project.setTrackArmed(header.index, checked)
+                onToggled: Tracks.setArmed(header.index, checked)
                 QQC2.ToolTip.text: i18nc("@info:tooltip", "Arm for recording. An armed instrument track plays what you play live.")
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -268,7 +276,7 @@ Column {
             QQC2.ToolButton {
                 id: inputButton
                 Layout.alignment: Qt.AlignVCenter
-                visible: header.kind === 0
+                visible: row.kind === Tracks.AudioTrack
                 icon.name: "audio-input-microphone"
                 display: QQC2.AbstractButton.IconOnly
                 text: i18nc("@action:button %1 is the chosen input, like Input 1", "Audio input: %1", header.inputText)
@@ -288,10 +296,10 @@ Column {
                         Instantiator {
                             model: {
                                 const choices = [];
-                                for (let i = 0; i < header.inputCount; ++i) {
+                                for (let i = 0; i < Tracks.inputCount; ++i) {
                                     choices.push({ first: i, stereo: false });
                                 }
-                                for (let i = 0; i + 1 < header.inputCount; i += 2) {
+                                for (let i = 0; i + 1 < Tracks.inputCount; i += 2) {
                                     choices.push({ first: i, stereo: true });
                                 }
                                 return choices;
@@ -303,12 +311,12 @@ Column {
                                             "Inputs %1–%2 (Stereo)", modelData.first + 1, modelData.first + 2)
                                     : i18nc("@item:inmenu one audio input, %1 is its number", "Input %1", modelData.first + 1)
                                 checkable: true
-                                checked: header.inputStereo === modelData.stereo && header.input === modelData.first
+                                checked: row.inputStereo === modelData.stereo && row.input === modelData.first
                                 // Re-picking the current choice keeps it checked.
                                 onTriggered: {
-                                    Project.setTrackInput(header.index, modelData.first, modelData.stereo);
-                                    checked = Qt.binding(() => header.inputStereo === modelData.stereo
-                                                               && header.input === modelData.first);
+                                    Tracks.setInput(header.index, modelData.first, modelData.stereo);
+                                    checked = Qt.binding(() => row.inputStereo === modelData.stereo
+                                                               && row.input === modelData.first);
                                 }
                             }
                             onObjectAdded: (i, item) => inputPopup.insertItem(i, item)
@@ -320,8 +328,8 @@ Column {
                         QQC2.MenuItem {
                             text: i18nc("@option:check", "Monitor Input While Armed")
                             checkable: true
-                            checked: header.monitorAuto
-                            onTriggered: Project.setTrackMonitorAuto(header.index, checked)
+                            checked: row.monitorAuto
+                            onTriggered: Tracks.setMonitorAuto(header.index, checked)
                         }
                     }
                 }
@@ -331,10 +339,10 @@ Column {
                 Layout.alignment: Qt.AlignVCenter
                 icon.name: "audio-volume-muted"
                 checkable: true
-                checked: header.muted
+                checked: row.muted
                 display: QQC2.AbstractButton.IconOnly
                 text: i18nc("@action:button", "Mute")
-                onToggled: Project.setTrackMuted(header.index, checked)
+                onToggled: Tracks.setMuted(header.index, checked)
                 QQC2.ToolTip.text: text
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -345,10 +353,10 @@ Column {
                 Layout.rightMargin: Kirigami.Units.smallSpacing
                 icon.name: "audio-headphones"
                 checkable: true
-                checked: header.soloed
+                checked: row.soloed
                 display: QQC2.AbstractButton.IconOnly
                 text: i18nc("@action:button", "Solo")
-                onToggled: Project.setTrackSoloed(header.index, checked)
+                onToggled: Tracks.setSoloed(header.index, checked)
                 QQC2.ToolTip.text: text
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -369,7 +377,7 @@ Column {
                     text: i18nc("@action:inmenu", "Rename…")
                     icon.name: "edit-rename"
                     onTriggered: {
-                        nameField.text = header.trackName;
+                        nameField.text = row.name;
                         nameField.visible = true;
                         nameField.forceActiveFocus();
                         nameField.selectAll();
@@ -379,13 +387,13 @@ Column {
                     text: i18nc("@action:inmenu", "Move Up")
                     icon.name: "go-up"
                     enabled: header.index > 0
-                    onTriggered: Project.moveTrack(header.index, header.index - 1)
+                    onTriggered: Tracks.moveTrack(header.index, header.index - 1)
                 }
                 QQC2.MenuItem {
                     text: i18nc("@action:inmenu", "Move Down")
                     icon.name: "go-down"
-                    enabled: header.index < Project.trackCount - 1
-                    onTriggered: Project.moveTrack(header.index, header.index + 1)
+                    enabled: header.index < Tracks.count - 1
+                    onTriggered: Tracks.moveTrack(header.index, header.index + 1)
                 }
                 QQC2.MenuSeparator {}
                 AddLaneMenu {
@@ -400,7 +408,7 @@ Column {
                 QQC2.MenuItem {
                     text: i18nc("@action:inmenu", "Delete Track")
                     icon.name: "edit-delete"
-                    onTriggered: Project.removeTrack(header.index)
+                    onTriggered: Tracks.remove(header.index)
                 }
             }
         }
@@ -441,7 +449,7 @@ Column {
                 anchorY = row.y - scroll + row.arrange.rulerHeight;
             }
             onMoved: (delta, done) => row.arrange.resizeTracks(
-                from + row.edgeChange(delta, scroll, row.index, 1, Project.trackCount, content, row.visibleHeight()), anchorY)
+                from + row.edgeChange(delta, scroll, row.index, 1, Tracks.count, content, row.visibleHeight()), anchorY)
             onCanceled: row.arrange.resizeTracks(from, anchorY)
             onReset: row.arrange.resizeTracks(row.arrange.defaultTrackHeight(), row.y - row.arrange.scrollY + row.arrange.rulerHeight)
             Accessible.ignored: true
@@ -450,7 +458,7 @@ Column {
 
     // The lanes' headers, one per lane row the timeline shows.
     Repeater {
-        id: lanes
+        id: laneHeaders
         model: row.expanded ? Math.max(1, row.laneCount) : 0
         delegate: LaneHeader {
             required property int index
@@ -458,7 +466,7 @@ Column {
             height: row.arrange.laneHeight
             track: row.index
             lane: index < row.laneCount ? index : -1
-            revision: row.revision
+            info: row.lanes[index] ?? null
 
             // Drag the lower edge to resize every automation lane,
             // double-click for the default. This track's top stays put and
@@ -480,7 +488,7 @@ Column {
                     scroll = row.arrange.scrollY;
                     content = row.arrange.contentHeight;
                     above = row.lanesAbove();
-                    total = from > 0 ? Math.round((content - Project.trackCount * row.arrange.trackHeight) / from) : 0;
+                    total = from > 0 ? Math.round((content - Tracks.count * row.arrange.trackHeight) / from) : 0;
                 }
                 // The track's top stays where it was, as far as the view
                 // scrolls.

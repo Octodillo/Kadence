@@ -38,6 +38,8 @@ pub mod settings;
 pub mod settings_bridge;
 pub mod state;
 mod test_helper;
+pub mod tracks;
+pub mod tracks_bridge;
 mod transport;
 
 /// Runs a plugin sandbox host or scanner if the arguments ask for one

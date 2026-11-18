@@ -157,6 +157,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/mixer_bridge.rs",
+        "src/tracks_bridge.rs",
         "src/automation_bridge.rs",
         "src/device_panel_bridge.rs",
         "src/plugins_bridge.rs",

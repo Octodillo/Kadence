@@ -58,19 +58,19 @@ Kirigami.Page {
         id: projectMessage
     }
 
-    // Adds a track of `kind` (0 audio, 1 instrument, 2 bus) with a
-    // numbered default name in the user's language.
+    // Adds a track of `kind` (a Tracks.TrackKind) with a numbered default
+    // name in the user's language.
     function addTrack(kind: int): void {
-        const n = Project.nextTrackNumber(kind);
+        const n = Tracks.nextNumber(kind);
         switch (kind) {
-        case 1:
-            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Instrument %1", n));
+        case Tracks.InstrumentTrack:
+            Tracks.add(kind, i18nc("@item default track name, %1 is a number", "Instrument %1", n));
             break;
-        case 2:
-            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Bus %1", n));
+        case Tracks.BusTrack:
+            Tracks.add(kind, i18nc("@item default track name, %1 is a number", "Bus %1", n));
             break;
         default:
-            Project.addTrack(kind, i18nc("@item default track name, %1 is a number", "Audio %1", n));
+            Tracks.add(kind, i18nc("@item default track name, %1 is a number", "Audio %1", n));
         }
     }
 
@@ -82,18 +82,18 @@ Kirigami.Page {
             text: i18nc("@action:inmenu", "Audio Track")
             icon.name: "audio-x-generic"
             shortcut: "Ctrl+T"
-            onTriggered: page.addTrack(0)
+            onTriggered: page.addTrack(Tracks.AudioTrack)
         }
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Instrument Track")
             icon.name: "audio-midi"
             shortcut: "Ctrl+Shift+T"
-            onTriggered: page.addTrack(1)
+            onTriggered: page.addTrack(Tracks.InstrumentTrack)
         }
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Bus")
             icon.name: "view-media-equalizer"
-            onTriggered: page.addTrack(2)
+            onTriggered: page.addTrack(Tracks.BusTrack)
         }
     }
 
@@ -204,14 +204,27 @@ Kirigami.Page {
         page.editActions[7]
     ]
 
+    // Shows a change to the project: the track headers and the timeline.
+    function refresh(): void {
+        Tracks.sync();
+        view.refresh();
+    }
+
+    // An edit in a track header shows everywhere at once, not on the
+    // Project's next tick.
+    Connections {
+        target: Tracks
+        function onEdited() { Project.tick(); }
+    }
+
     // Redraw on any change, and every frame while the playhead moves.
     Connections {
         target: Project
-        function onRevisionChanged() { view.refresh(); }
+        function onRevisionChanged() { page.refresh(); }
     }
     Connections {
         target: Automation
-        function onRevisionChanged() { view.refresh(); }
+        function onRevisionChanged() { page.refresh(); }
     }
     Timer {
         interval: 16
@@ -283,7 +296,7 @@ Kirigami.Page {
                     Layout.fillHeight: true
                     clip: true
                     interactive: false
-                    model: Project.trackCount
+                    model: Tracks
                     contentY: view.scrollY
                     // Scrolling must not build and destroy a header per
                     // row: reuse the ones that leave the view.
@@ -569,14 +582,14 @@ Kirigami.Page {
                     id: placeholder
                     anchors.centerIn: view
                     width: Math.min(view.width - Kirigami.Units.gridUnit * 4, Kirigami.Units.gridUnit * 24)
-                    visible: Project.trackCount === 0
+                    visible: Tracks.count === 0
                     icon.name: "view-media-track"
                     text: i18nc("@info:placeholder", "No tracks yet")
                     explanation: i18nc("@info:placeholder", "Add a track, import audio, or drop audio files here.")
                     helpfulAction: Kirigami.Action {
                         text: i18nc("@action:button", "Add Audio Track")
                         icon.name: "list-add"
-                        onTriggered: page.addTrack(0)
+                        onTriggered: page.addTrack(Tracks.AudioTrack)
                     }
 
                     // On a new, untouched project: pick up where you left off.
@@ -662,15 +675,15 @@ Kirigami.Page {
             enabled: Project.audioSelected
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "Linear")
-                onTriggered: Project.setFadeShape(0)
+                onTriggered: Project.setFadeShape(Project.LinearFade)
             }
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "Equal Power")
-                onTriggered: Project.setFadeShape(1)
+                onTriggered: Project.setFadeShape(Project.EqualPowerFade)
             }
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu fade shape", "S-Curve")
-                onTriggered: Project.setFadeShape(2)
+                onTriggered: Project.setFadeShape(Project.SCurveFade)
             }
         }
         QQC2.MenuItem {
@@ -698,12 +711,12 @@ Kirigami.Page {
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Add Audio Track")
             icon.name: "audio-x-generic"
-            onTriggered: page.addTrack(0)
+            onTriggered: page.addTrack(Tracks.AudioTrack)
         }
         QQC2.MenuItem {
             text: i18nc("@action:inmenu", "Add Instrument Track")
             icon.name: "audio-midi"
-            onTriggered: page.addTrack(1)
+            onTriggered: page.addTrack(Tracks.InstrumentTrack)
         }
         QQC2.MenuSeparator {}
         QQC2.MenuItem { action: page.importAction }
