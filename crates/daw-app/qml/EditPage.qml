@@ -449,7 +449,7 @@ Kirigami.Page {
                 }
             }
         }
-        LaneName {
+        RowName {
             id: laneName
         }
 

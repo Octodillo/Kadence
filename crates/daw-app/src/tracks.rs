@@ -1,21 +1,23 @@
 //! The track list as the track headers show it, without naming Qt.
 //!
 //! [`TrackRow`] is one track beside the timeline: its name, colour and
-//! switches, what it records from, its instrument, and its automation lanes
-//! as their headers name them ([`LaneRow`]). [`AppState::track_rows`] reads
+//! switches, what it records from, its instrument, and the rows under it
+//! as their headers show them ([`HeaderRow`]). [`AppState::track_rows`] reads
 //! them all at once, so the list model over them
 //! ([`Tracks`](crate::tracks_bridge)) can tell which rows changed. The edits
 //! a header makes are here too, each one undo step.
 
 use daw_arrange::Rgba;
+use daw_arrange::rows::{Group, RowKind};
 use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
 use daw_model::{
-    AudioInput, InputChannels, MidiInput, Monitoring, Track, TrackId, TrackKind as ModelKind,
+    AudioInput, AutomationTarget, InputChannels, MidiInput, Monitoring, Track, TrackId,
+    TrackKind as ModelKind,
 };
 
 use crate::device_panel::ParamDesc;
 use crate::instrument::{self, InstrumentChoice};
-use crate::lanes::{LaneMode, TargetName, target_name};
+use crate::lanes::{LaneKind, LaneMode, TargetName, group_name, target_name};
 use crate::state::AppState;
 
 /// The kinds of track the list holds (the master is not in it).
@@ -56,12 +58,23 @@ pub struct InstrumentRow {
     pub choice: Option<usize>,
 }
 
-/// One automation lane, as its header names it.
+/// One row under a track, as its header shows it: a control, with or
+/// without an automation lane, or the heading of a group of them (see
+/// [`daw_arrange::rows`]).
 #[derive(Clone, Debug, PartialEq)]
-pub struct LaneRow {
+pub struct HeaderRow {
+    /// What it is. A parameter under its device's heading goes by its own
+    /// name alone (no `detail`).
     pub name: TargetName,
+    /// How many groups it is inside.
+    pub depth: u8,
+    /// Whether the group it is the heading of is open.
+    pub open: bool,
+    /// The control's lane, as its index among the track's lanes.
+    pub lane: Option<usize>,
+    /// The lane's mode; a control without a lane reads.
     pub mode: LaneMode,
-    /// How a device parameter's value is worded; `None` for other lanes
+    /// How a device parameter's value is worded; `None` for other rows
     /// and for parameters nothing describes.
     pub param: Option<ParamDesc>,
 }
@@ -85,9 +98,10 @@ pub struct TrackRow {
     /// The live MIDI an instrument track listens to.
     pub midi_input: MidiInput,
     pub instrument: Option<InstrumentRow>,
-    /// Whether the track shows its automation lanes.
+    /// Whether the track shows the rows under it.
     pub expanded: bool,
-    pub lanes: Vec<LaneRow>,
+    /// The rows under it while it is expanded.
+    pub rows: Vec<HeaderRow>,
 }
 
 impl AppState {
@@ -106,6 +120,7 @@ impl AppState {
                     device: d.id.to_string(),
                     choice: self.instruments.position(&d.source),
                 });
+                let expanded = self.arrange.expanded.contains(&t.id);
                 Some(TrackRow {
                     id: t.id,
                     selected: self.arrange.selected_track == Some(t.id),
@@ -118,28 +133,85 @@ impl AppState {
                     audio_input: t.audio_input,
                     midi_input: t.midi_input.clone(),
                     instrument,
-                    expanded: self.arrange.expanded.contains(&t.id),
-                    lanes: self.lane_rows(row),
+                    expanded,
+                    rows: if expanded {
+                        self.header_rows(row)
+                    } else {
+                        Vec::new()
+                    },
                 })
             })
             .collect()
     }
 
-    /// The automation lanes of the track at `row`, in lane order; none for
-    /// no such track.
-    pub fn lane_rows(&self, row: usize) -> Vec<LaneRow> {
-        let project = self.doc.project();
-        let Some(t) = project.tracks.get(row) else {
+    /// The rows the track at `row` shows under it when expanded, as the
+    /// timeline lays them out; none for no such track.
+    pub fn header_rows(&self, row: usize) -> Vec<HeaderRow> {
+        let Some(t) = self.doc.project().tracks.get(row) else {
             return Vec::new();
         };
-        let lanes = t.automation.iter().enumerate();
+        let rows = self.arrange.rows_of(t);
+        let all = rows.iter().enumerate();
+        all.map(|(i, r)| match r.kind {
+            RowKind::Group(g) => HeaderRow {
+                name: group_name(t, g),
+                depth: r.depth,
+                open: r.open,
+                lane: None,
+                mode: LaneMode::Read,
+                param: None,
+            },
+            RowKind::Control(target) => {
+                // The heading the row is under: the nearest shallower row.
+                let heading = rows[..i].iter().rev().find(|x| x.depth < r.depth);
+                let named = matches!(
+                    heading.and_then(daw_arrange::LaneRow::group),
+                    Some(Group::Device(_) | Group::Instrument)
+                );
+                HeaderRow {
+                    depth: r.depth,
+                    ..self.control_row(row, t, target, named)
+                }
+            }
+        })
+        .collect()
+    }
+
+    /// The automation lanes of the track at `row` alone, in lane order;
+    /// none for no such track.
+    pub fn lane_rows(&self, row: usize) -> Vec<HeaderRow> {
+        let Some(t) = self.doc.project().tracks.get(row) else {
+            return Vec::new();
+        };
+        let lanes = t.automation.iter();
         lanes
-            .map(|(i, l)| LaneRow {
-                name: target_name(project, &self.lanes.params, t, l.target),
-                mode: self.lane_mode(row as i32, i as i32),
-                param: self.lane_param(row as i32, i as i32),
-            })
+            .map(|l| self.control_row(row, t, l.target, false))
             .collect()
+    }
+
+    /// The row of the control `target` of track `t` (at `row`), outside
+    /// any group. `under_device`: it is listed under its device's heading,
+    /// which names the device for it.
+    fn control_row(
+        &self,
+        row: usize,
+        t: &Track,
+        target: AutomationTarget,
+        under_device: bool,
+    ) -> HeaderRow {
+        let mut name = target_name(self.doc.project(), &self.lanes.params, t, target);
+        if under_device && name.kind == LaneKind::DeviceParam {
+            name.detail.clear();
+        }
+        let lane = t.automation.iter().position(|l| l.target == target);
+        HeaderRow {
+            name,
+            depth: 0,
+            open: false,
+            lane,
+            mode: lane.map_or(LaneMode::Read, |l| self.lane_mode(row as i32, l as i32)),
+            param: self.target_param(row as i32, target),
+        }
     }
 
     /// Hardware inputs the running audio engine has.

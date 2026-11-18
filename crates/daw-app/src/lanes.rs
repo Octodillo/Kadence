@@ -19,11 +19,10 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 
 use daw_arrange::automation::{lane_scale, static_value};
+use daw_arrange::rows::{Group, LaneRow};
 use daw_arrange::{LaneScale, ParamCatalog};
 use daw_core::event::ParamId;
-use daw_model::{
-    AutomationLane, AutomationTarget, Device, DeviceId, DeviceSource, LaneId, Project, Track,
-};
+use daw_model::{AutomationTarget, Device, DeviceId, DeviceSource, LaneId, Project, Track};
 
 use crate::device_panel::{BuiltinParams, PLUGIN_REREAD, ParamDesc};
 use crate::message::Message;
@@ -31,13 +30,18 @@ use crate::mixer::{Control, StripId};
 use crate::session_mixer::{ParamStart, strip_id};
 use crate::state::AppState;
 
-/// What a lane automates, as the header words it.
+/// What a row under a track is, as its header words it: a control (which
+/// is also what a lane automates) or the heading of a group of them.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LaneKind {
     Volume,
     Pan,
     Send,
     DeviceParam,
+    Instrument,
+    Effects,
+    Sends,
+    Device,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -47,8 +51,8 @@ pub enum LaneMode {
     Write,
 }
 
-/// A target's name in parts: the kind, the send's target track or the
-/// device, and the parameter.
+/// A row's or target's name in parts: the kind, the send's target track
+/// or the device, and the parameter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TargetName {
     pub kind: LaneKind,
@@ -193,6 +197,10 @@ impl ParamCatalog for LaneParams {
         self.builtin.automatable(device)
     }
 
+    fn is_instrument(&self, device: &Device) -> bool {
+        self.builtin.is_instrument(device)
+    }
+
     fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
         self.builtin
             .scale(device, param)
@@ -240,6 +248,27 @@ pub fn target_name(
         kind,
         detail,
         param,
+    }
+}
+
+/// Names the group `group` of `track`.
+pub fn group_name(track: &Track, group: Group) -> TargetName {
+    let (kind, detail) = match group {
+        Group::Instrument => (LaneKind::Instrument, String::new()),
+        Group::Effects => (LaneKind::Effects, String::new()),
+        Group::Sends => (LaneKind::Sends, String::new()),
+        Group::Device(id) => {
+            let name = track.devices.iter().find(|d| d.id == id);
+            (
+                LaneKind::Device,
+                name.map(|d| d.name.clone()).unwrap_or_default(),
+            )
+        }
+    };
+    TargetName {
+        kind,
+        detail,
+        param: String::new(),
     }
 }
 
@@ -336,47 +365,66 @@ impl AppState {
         Some(t.automation.get(usize::try_from(lane).ok()?)?.id)
     }
 
-    fn lane_at(&self, track: i32, lane: i32) -> Option<(&std::sync::Arc<Track>, &AutomationLane)> {
+    // -----------------------------------------------------------------------
+    // Rows under a track, by index (see `daw_arrange::rows`)
+
+    /// The rows track `track` shows under it when expanded, as the
+    /// timeline lays them out.
+    pub fn rows_under(&self, track: i32) -> Vec<LaneRow> {
+        self.track_at_index(track)
+            .map_or_else(Vec::new, |t| self.arrange.rows_of(t))
+    }
+
+    fn row_at(&self, track: i32, row: i32) -> Option<LaneRow> {
+        let row = usize::try_from(row).ok()?;
+        self.rows_under(track).get(row).copied()
+    }
+
+    /// The control row `row` of the track is for; `None` for a group.
+    pub fn row_target(&self, track: i32, row: i32) -> Option<AutomationTarget> {
+        self.row_at(track, row)?.target()
+    }
+
+    /// The index among the track's lanes of the lane in row `row`.
+    pub fn row_lane(&self, track: i32, row: i32) -> Option<usize> {
         let t = self.track_at_index(track)?;
-        let l = t.automation.get(usize::try_from(lane).ok()?)?;
-        Some((t, l))
+        let id = self.row_at(track, row)?.lane?;
+        t.automation.iter().position(|l| l.id == id)
     }
 
-    /// What lane `lane` of track `track` automates.
-    fn lane_target(&self, track: i32, lane: i32) -> Option<AutomationTarget> {
-        self.lane_at(track, lane).map(|(_, l)| l.target)
+    /// Opens or closes the group row `row` of the track is the heading of.
+    pub fn set_row_open(&mut self, track: i32, row: i32, on: bool) {
+        let Some(id) = self.track_at_index(track).map(|t| t.id) else {
+            return;
+        };
+        let Some(group) = self.row_at(track, row).and_then(|r| r.group()) else {
+            return;
+        };
+        let project = self.doc.project().clone();
+        let out = self.arrange.set_group_open(&project, id, group, on);
+        self.apply(out);
     }
 
-    /// The value lane `lane` of track `track` controls, as it is now.
-    pub fn lane_control(&self, track: i32, lane: i32) -> Option<LaneControl> {
-        self.target_control(track, self.lane_target(track, lane)?)
-    }
-
-    /// See [`begin_control`](Self::begin_control).
-    pub fn begin_lane_control(&mut self, track: i32, lane: i32) {
-        if let Some(target) = self.lane_target(track, lane) {
-            self.begin_control(track, target);
+    /// Sets the mode of row `row`'s lane. Arming a control that has no
+    /// lane for writing gives it one, to record into.
+    pub fn set_row_mode(&mut self, track: i32, row: i32, mode: LaneMode) {
+        let Some(target) = self.row_target(track, row) else {
+            return;
+        };
+        let Some(t) = self.track_at_index(track).map(|t| t.id) else {
+            return;
+        };
+        if self.row_lane(track, row).is_none() && mode == LaneMode::Write {
+            let out = self.arrange.add_lane(&mut self.doc, t, target);
+            self.apply(out);
         }
-    }
-
-    /// See [`set_control`](Self::set_control).
-    pub fn set_lane_control(&mut self, track: i32, lane: i32, norm: f64) {
-        if let Some(target) = self.lane_target(track, lane) {
-            self.set_control(track, target, norm);
+        // By target: the row stays where it is, but its lane is new.
+        let lane = self
+            .track_at_index(track)
+            .and_then(|t| t.automation.iter().position(|l| l.target == target));
+        if let Some(l) = lane {
+            self.set_lane_mode(track, l as i32, mode);
         }
-    }
-
-    /// See [`end_control`](Self::end_control).
-    pub fn end_lane_control(&mut self, track: i32, lane: i32) {
-        if let Some(target) = self.lane_target(track, lane) {
-            self.end_control(track, target);
-        }
-    }
-
-    /// How a device-parameter lane's parameter is described (its unit,
-    /// control and choices); `None` for other lanes and unknown devices.
-    pub fn lane_param(&self, track: i32, lane: i32) -> Option<ParamDesc> {
-        self.target_param(track, self.lane_target(track, lane)?)
     }
 
     // -----------------------------------------------------------------------
@@ -529,6 +577,9 @@ impl AppState {
         self.lanes.params.param(d, param)
     }
 
+    // -----------------------------------------------------------------------
+    // Lanes
+
     pub fn lane_mode(&self, track: i32, lane: i32) -> LaneMode {
         let Some(t) = self.track_at_index(track) else {
             return LaneMode::Read;
@@ -569,35 +620,6 @@ impl AppState {
         };
         self.lanes.write.remove(&id);
         let out = self.arrange.remove_lane(&mut self.doc, id);
-        self.apply(out);
-    }
-
-    /// Targets on track `track` that have no lane yet, in menu order.
-    pub fn lane_targets(&self, track: i32) -> Vec<(AutomationTarget, TargetName)> {
-        let Some(t) = self.track_at_index(track) else {
-            return Vec::new();
-        };
-        daw_arrange::automation::lane_targets(t, self.arrange.params.as_ref())
-            .into_iter()
-            .map(|target| {
-                let name = target_name(self.doc.project(), &self.lanes.params, t, target);
-                (target, name)
-            })
-            .collect()
-    }
-
-    /// Adds a lane for the `target`th entry of [`lane_targets`](Self::lane_targets).
-    pub fn add_lane(&mut self, track: i32, target: i32) {
-        let Some(t) = self.track_at_index(track).map(|t| t.id) else {
-            return;
-        };
-        let Some((target, _)) = usize::try_from(target)
-            .ok()
-            .and_then(|i| self.lane_targets(track).into_iter().nth(i))
-        else {
-            return;
-        };
-        let out = self.arrange.add_lane(&mut self.doc, t, target);
         self.apply(out);
     }
 
@@ -843,11 +865,10 @@ mod tests {
         .unwrap();
         let p = LaneParams::default();
         let track = doc.project().track(id).unwrap().clone();
-        let targets = daw_arrange::automation::lane_targets(
-            &track,
-            Some(&(std::sync::Arc::new(BuiltinParams) as std::sync::Arc<dyn ParamCatalog>)),
-        );
-        let last = *targets.last().unwrap();
+        let last = AutomationTarget::DeviceParam {
+            device: track.devices[0].id,
+            param: *p.automatable(&track.devices[0]).last().unwrap(),
+        };
         let n = target_name(doc.project(), &p, &track, last);
         assert_eq!(n.kind, LaneKind::DeviceParam);
         assert_eq!(n.detail, "EQ");
@@ -892,9 +913,7 @@ mod tests {
             // Moving a control makes no lane.
             assert!(s.doc.project().tracks[0].automation.is_empty());
         }
-        let rows = daw_arrange::rows::track_rows(&s.doc.project().tracks[0]);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].lane, None);
+        assert_eq!(s.row_lane(0, 0), None);
 
         // Not on the track: no control, and nothing moves.
         let gone = AutomationTarget::DeviceParam {
@@ -912,5 +931,62 @@ mod tests {
         let revision = s.doc.revision();
         s.set_control(0, gone, 0.5);
         assert_eq!(s.doc.revision(), revision);
+    }
+
+    /// The headers' view of the rows: names, folds, and a mode that makes
+    /// the lane it needs.
+    #[test]
+    fn rows_are_named_fold_and_arm() {
+        use crate::engine::StubEngine;
+        let mut s = AppState::with_engine(Box::new(StubEngine::default()));
+        let mut t = Track::new(TrackKind::Audio, "A");
+        t.devices.push(eq_device());
+        s.doc
+            .execute(daw_model::commands::AddTrack::new(0, t))
+            .unwrap();
+        let kinds = |s: &AppState| -> Vec<LaneKind> {
+            s.header_rows(0).iter().map(|r| r.name.kind).collect()
+        };
+        use LaneKind::{Device, DeviceParam, Effects, Pan, Sends, Volume};
+        assert_eq!(kinds(&s), [Volume, Pan, Effects, Sends]);
+        let effects = &s.header_rows(0)[2];
+        assert_eq!(
+            (effects.depth, effects.open, effects.lane),
+            (0, false, None)
+        );
+
+        // Opening Effects lists the EQ; opening the EQ lists its parameters
+        // by their own names.
+        s.set_row_open(0, 2, true);
+        assert_eq!(kinds(&s), [Volume, Pan, Effects, Device, Sends]);
+        assert_eq!(s.header_rows(0)[3].name.detail, "EQ");
+        s.set_row_open(0, 3, true);
+        let rows = s.header_rows(0);
+        assert_eq!((rows[3].depth, rows[3].open), (1, true));
+        let first = rows[4].clone();
+        assert_eq!(first.name.kind, DeviceParam);
+        assert!(first.name.detail.is_empty() && !first.name.param.is_empty());
+        assert_eq!((first.depth, first.open), (2, false));
+        assert!(first.param.is_some());
+        // Opening a control does nothing.
+        s.set_row_open(0, 4, true);
+        assert_eq!(s.header_rows(0).len(), rows.len());
+
+        // Arming a control without a lane gives it one; closing the groups
+        // then leaves that control in view, named with its device.
+        assert_eq!(first.mode, LaneMode::Read);
+        s.set_row_mode(0, 4, LaneMode::Off);
+        assert_eq!(s.header_rows(0)[4].lane, None);
+        s.set_row_mode(0, 4, LaneMode::Write);
+        let armed = &s.header_rows(0)[4];
+        assert_eq!((armed.lane, armed.mode), (Some(0), LaneMode::Write));
+        s.set_row_open(0, 2, false);
+        assert_eq!(kinds(&s), [Volume, Pan, Effects, DeviceParam, Sends]);
+        let kept = &s.header_rows(0)[3];
+        assert_eq!(
+            (kept.name.detail.as_str(), &kept.name.param),
+            ("EQ", &first.name.param)
+        );
+        assert_eq!(kept.mode, LaneMode::Write);
     }
 }

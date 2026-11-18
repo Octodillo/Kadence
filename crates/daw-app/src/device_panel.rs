@@ -268,6 +268,10 @@ impl ParamCatalog for BuiltinParams {
     fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
         Self::spec(device, param).map(|s| s.default)
     }
+
+    fn is_instrument(&self, device: &Device) -> bool {
+        crate::instrument::is_instrument(&device.source)
+    }
 }
 
 impl ParamSource for BuiltinParams {

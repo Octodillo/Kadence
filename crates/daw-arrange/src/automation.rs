@@ -10,10 +10,11 @@ use daw_core::time::TickTime;
 use daw_model::commands::{AddLane, LaneField, RemoveLane, SetLane};
 use daw_model::{
     AutomationLane, AutomationPoint, AutomationTarget, Device, Document, LaneId, Project, Track,
-    TrackId, TrackKind,
+    TrackId,
 };
 
 use crate::lane_editor::{LaneFrame, LaneGrid, lane_of};
+use crate::rows::Group;
 use crate::scene::Rect;
 use crate::{Arrange, Button, Hit, Outcome, Pointer};
 
@@ -126,6 +127,9 @@ pub trait ParamCatalog: Send + Sync {
     /// The value a parameter has when the document doesn't store one: the
     /// device's own, or its default.
     fn default_value(&self, device: &Device, param: ParamId) -> Option<f64>;
+    /// Whether `device`, first in an instrument track's chain, is the
+    /// track's instrument rather than an effect.
+    fn is_instrument(&self, device: &Device) -> bool;
 }
 
 impl std::fmt::Debug for dyn ParamCatalog {
@@ -170,37 +174,6 @@ impl PointShape {
             Self::FastStart => (false, Self::BEND),
         };
     }
-}
-
-/// A target a new lane could automate on a track.
-pub fn lane_targets(
-    track: &Track,
-    params: Option<&Arc<dyn ParamCatalog>>,
-) -> Vec<AutomationTarget> {
-    let mut out = vec![AutomationTarget::Volume];
-    if track.kind != TrackKind::Master {
-        out.push(AutomationTarget::Pan);
-    }
-    out.extend(
-        track
-            .sends
-            .iter()
-            .map(|s| AutomationTarget::SendLevel { send: s.id }),
-    );
-    if let Some(cat) = params {
-        for d in &track.devices {
-            out.extend(
-                cat.automatable(d)
-                    .into_iter()
-                    .map(|param| AutomationTarget::DeviceParam {
-                        device: d.id,
-                        param,
-                    }),
-            );
-        }
-    }
-    out.retain(|t| track.automation.iter().all(|l| l.target != *t));
-    out
 }
 
 /// How `target` on `track` maps to heights; device parameters by `params`.
@@ -326,7 +299,12 @@ impl Arrange {
     /// A press on a lane row (see [`press`](Self::press)).
     pub(crate) fn press_lane(&mut self, doc: &mut Document, p: Pointer, hit: Hit) -> Outcome {
         let Hit::Automation {
-            track, lane, point, ..
+            track,
+            row,
+            index,
+            lane,
+            point,
+            ..
         } = hit
         else {
             return Outcome::default();
@@ -334,6 +312,18 @@ impl Arrange {
         self.selected_track = Some(track);
         self.selection.clear();
         let menu = (p.button == Button::Right).then_some(hit);
+        // A plain click beside a control without a lane starts automating
+        // it: the lane is added, and the press goes on to add its first
+        // point.
+        let lane = lane.or_else(|| {
+            let starts = p.button == Button::Left && !p.alt && !p.ctrl;
+            let target = self
+                .lane_rows(row)
+                .get(index)?
+                .target()
+                .filter(|_| starts)?;
+            self.new_lane(doc, track, target).ok()
+        });
         let Some(lane) = lane else {
             self.lanes.clear_selection();
             return Outcome {
@@ -371,7 +361,23 @@ impl Arrange {
         self.lanes.set_point_shape(doc, shape)
     }
 
-    /// Adds a lane for `target` on `track` and shows the track's lanes.
+    /// Adds an empty lane for `target` on `track`, as its own undo step.
+    fn new_lane(
+        &mut self,
+        doc: &mut Document,
+        track: TrackId,
+        target: AutomationTarget,
+    ) -> Result<LaneId, daw_model::ModelError> {
+        let lane = AutomationLane::new(target);
+        let id = lane.id;
+        doc.seal();
+        let r = doc.execute(AddLane { track, lane });
+        doc.seal();
+        self.relayout(doc.project());
+        r.map(|_| id)
+    }
+
+    /// Adds a lane for `target` on `track` and shows the track's rows.
     /// The lane starts with no points, so the control keeps its value
     /// until one is added.
     pub fn add_lane(
@@ -381,14 +387,8 @@ impl Arrange {
         target: AutomationTarget,
     ) -> Outcome {
         self.end_drag(doc);
-        let lane = AutomationLane::new(target);
-        let r = doc.execute(AddLane { track, lane }).map(|_| ());
-        doc.seal();
-        if r.is_ok() {
-            self.expanded.insert(track);
-            self.relayout(doc.project());
-        }
-        Outcome::from_result(r)
+        self.expanded.insert(track);
+        Outcome::from_result(self.new_lane(doc, track, target).map(|_| ()))
     }
 
     pub fn remove_lane(&mut self, doc: &mut Document, lane: LaneId) -> Outcome {
@@ -417,7 +417,30 @@ impl Arrange {
         Outcome::from_result(r)
     }
 
-    /// Shows or hides a track's lanes.
+    /// Opens or closes a group among a track's rows. Closing it puts away
+    /// the controls in it that no lane automates.
+    pub fn set_group_open(
+        &mut self,
+        project: &Project,
+        track: TrackId,
+        group: Group,
+        on: bool,
+    ) -> Outcome {
+        let changed = if on {
+            self.open.insert((track, group))
+        } else {
+            self.open.remove(&(track, group))
+        };
+        self.relayout(project);
+        self.clamp_scroll(project);
+        if changed {
+            Outcome::view()
+        } else {
+            Outcome::default()
+        }
+    }
+
+    /// Shows or hides a track's rows.
     pub fn set_expanded(&mut self, project: &Project, track: TrackId, on: bool) -> Outcome {
         let changed = if on {
             self.expanded.insert(track)

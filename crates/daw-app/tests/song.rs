@@ -30,7 +30,6 @@ use daw_app::device_panel::{BuiltinParams, DevicePanel, ParamSource, PluginParam
 use daw_app::instrument::{self, InstrumentChoices};
 use daw_app::mixer::{Control, StripId};
 use daw_app::session_mixer::SessionMixer;
-use daw_arrange::automation::lane_targets;
 use daw_arrange::{Arrange, PointShape, Pointer};
 use daw_core::event::EventList;
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
@@ -358,7 +357,7 @@ fn builtin_source(kind: &str) -> DeviceSource {
     DeviceSource::Builtin { kind: kind.into() }
 }
 
-/// Adds a lane for `target` (one the track's Add Lane menu offers) on
+/// Adds a lane for `target` (one of the controls under the track) on
 /// `track` in the arrange view and clicks in its `points` (beat, value),
 /// each holding until the next, as the user does. Returns the lane.
 fn draw_lane(
@@ -369,10 +368,7 @@ fn draw_lane(
     points: &[(f64, f64)],
 ) -> LaneId {
     let t = doc.project().track(track).unwrap();
-    assert!(
-        lane_targets(t, arrange.params.as_ref()).contains(&target),
-        "{target:?} is offered"
-    );
+    assert!(t.has_target(target), "{target:?} is on the track");
     assert!(arrange.add_lane(doc, track, target).document);
     let project = doc.project();
     let t = project.track(track).unwrap();

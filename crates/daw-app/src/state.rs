@@ -1168,6 +1168,7 @@ impl AppState {
         self.arrange.hovered = None;
         self.arrange.lanes.clear_selection();
         self.arrange.expanded.clear();
+        self.arrange.open.clear();
         self.arrange.relayout(self.doc.project());
         self.arrange.selected_track = None;
         self.arrange.view.scroll_x = 0.0;

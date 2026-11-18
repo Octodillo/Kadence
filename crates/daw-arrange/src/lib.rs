@@ -42,7 +42,7 @@ use gesture::DRAG_THRESHOLD;
 pub use gesture::DragStep;
 pub use lane_editor::{LaneEditor, LaneFrame, LaneGrid};
 pub use peaks::{PeakPool, Peaks};
-pub use rows::{LaneRow, RowKind};
+pub use rows::{Group, LaneRow, OpenGroups, RowKind};
 pub use scene::{Palette, Prim, Rect, Rgba, Scene};
 pub use snap::Snap;
 pub use view::TimelineView;
@@ -376,9 +376,11 @@ pub struct Arrange {
     /// The clip under the pointer, which shows its handles like a selected
     /// one. Set by [`Arrange::hover`].
     pub hovered: Option<ClipId>,
-    /// Tracks whose automation lanes are shown under them.
+    /// Tracks whose rows (controls and their lanes) are shown under them.
     pub expanded: BTreeSet<TrackId>,
-    /// Height of one automation lane.
+    /// The open groups among the rows of expanded tracks (see [`rows`]).
+    pub open: OpenGroups,
+    /// Height of one row under a track.
     pub lane_height: f64,
     /// Selected automation points and drags on lanes.
     pub lanes: LaneEditor,
@@ -396,7 +398,28 @@ pub struct Arrange {
     tops: Vec<f64>,
     /// The rows under each track, none for a collapsed one. Laid out with
     /// `tops`.
-    rows: Vec<Vec<LaneRow>>,
+    rows: Vec<TrackRows>,
+}
+
+/// The rows under one track, and what they were made from: the track as it
+/// was (edits replace a track, so the same `Arc` means the same track) and
+/// its open groups. [`Arrange::relayout`] keeps them while both stay the
+/// same, so laying out every frame doesn't list every device's parameters.
+#[derive(Debug, Default)]
+struct TrackRows {
+    track: Option<Arc<Track>>,
+    open: Vec<Group>,
+    rows: Vec<LaneRow>,
+}
+
+impl TrackRows {
+    /// Whether these are the rows of `track` with the groups `open`.
+    fn of(&self, track: &Track, open: &[Group]) -> bool {
+        self.track
+            .as_deref()
+            .is_some_and(|t| std::ptr::eq(t, track))
+            && self.open == open
+    }
 }
 
 impl Default for Arrange {
@@ -422,6 +445,7 @@ impl Arrange {
             selected_track: None,
             hovered: None,
             expanded: BTreeSet::new(),
+            open: OpenGroups::new(),
             lane_height: 40.0,
             lanes: LaneEditor::default(),
             params: None,
@@ -444,21 +468,58 @@ impl Arrange {
         self.lanes.check(project);
         self.expanded
             .retain(|id| project.tracks.iter().any(|t| t.id == *id));
+        self.open.retain(|(id, group)| {
+            project.track(*id).is_some_and(|t| match group {
+                Group::Device(d) => t.devices.iter().any(|x| x.id == *d),
+                _ => true,
+            })
+        });
         self.tops.clear();
         self.tops.reserve(project.tracks.len() + 1);
-        self.rows.clear();
+        let mut laid: HashMap<TrackId, TrackRows> = std::mem::take(&mut self.rows)
+            .into_iter()
+            .filter_map(|r| Some((r.track.as_ref()?.id, r)))
+            .collect();
         self.rows.reserve(project.tracks.len());
         let mut y = 0.0;
         self.tops.push(y);
         for t in &project.tracks {
             let rows = if self.expanded.contains(&t.id) {
-                rows::track_rows(t)
+                let open = self.open_groups(t.id);
+                match laid.remove(&t.id) {
+                    Some(r) if r.of(t, &open) => r,
+                    _ => TrackRows {
+                        rows: rows::track_rows(t, self.params.as_deref(), &self.open),
+                        track: Some(Arc::clone(t)),
+                        open,
+                    },
+                }
             } else {
-                Vec::new()
+                TrackRows::default()
             };
-            y += self.track_height + rows.len() as f64 * self.lane_height;
+            y += self.track_height + rows.rows.len() as f64 * self.lane_height;
             self.tops.push(y);
             self.rows.push(rows);
+        }
+    }
+
+    /// The groups of `track` that are open, in order.
+    fn open_groups(&self, track: TrackId) -> Vec<Group> {
+        self.open
+            .iter()
+            .filter(|(t, _)| *t == track)
+            .map(|&(_, g)| g)
+            .collect()
+    }
+
+    /// The rows `track` shows when expanded, as things are now: the laid
+    /// out ones while they still fit (see [`relayout`](Self::relayout)), so
+    /// the track headers can ask right after an edit, and cheaply.
+    pub fn rows_of(&self, track: &Track) -> Vec<LaneRow> {
+        let open = self.open_groups(track.id);
+        match self.rows.iter().find(|r| r.of(track, &open)) {
+            Some(r) => r.rows.clone(),
+            None => rows::track_rows(track, self.params.as_deref(), &self.open),
         }
     }
 
@@ -468,7 +529,7 @@ impl Arrange {
     /// the document or [`expanded`](Self::expanded) from outside calls
     /// [`relayout`](Self::relayout) before asking.
     pub fn lane_rows(&self, row: usize) -> &[LaneRow] {
-        self.rows.get(row).map_or(&[], Vec::as_slice)
+        self.rows.get(row).map_or(&[], |r| r.rows.as_slice())
     }
 
     /// Top of row `row` in content coordinates.
@@ -633,6 +694,15 @@ impl Arrange {
             Hit::Clip { .. } => Cursor::ResizeHorizontal,
             Hit::Automation { point: Some(_), .. } => Cursor::Move,
             Hit::Automation { lane: Some(_), .. } => Cursor::Crosshair,
+            // A control without a lane: a click starts one.
+            Hit::Automation { row, index, .. }
+                if self
+                    .lane_rows(row)
+                    .get(index)
+                    .is_some_and(|r| r.target().is_some()) =>
+            {
+                Cursor::Crosshair
+            }
             _ => Cursor::Arrow,
         }
     }

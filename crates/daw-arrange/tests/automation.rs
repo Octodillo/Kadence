@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use daw_arrange::automation::{lane_targets, static_value};
+use daw_arrange::automation::static_value;
 use daw_arrange::{
-    Arrange, Env, Hit, LaneScale, Outcome, ParamCatalog, PointShape, Pointer, Prim, Snap,
+    Arrange, Env, Group, Hit, LaneScale, Outcome, ParamCatalog, PointShape, Pointer, Prim, RowKind,
+    Snap,
 };
 use daw_core::event::ParamId;
 use daw_core::level::SILENCE_DB;
@@ -66,9 +67,19 @@ impl Rig {
         self.arrange.view.tick_to_x(TickTime(tick))
     }
 
+    /// The row among track row `row`'s rows that shows its lane `index`.
+    fn lane_row(&self, row: usize, index: usize) -> usize {
+        let lane = self.doc.project().tracks[row].automation[index].id;
+        self.arrange
+            .lane_rows(row)
+            .iter()
+            .position(|r| r.lane == Some(lane))
+            .expect("the lane shows")
+    }
+
     /// The y of height `n` (0 bottom, 1 top) in lane `index` of `row`.
     fn y(&self, row: usize, index: usize, n: f64) -> f64 {
-        let r = self.arrange.lane_rect(row, index);
+        let r = self.arrange.lane_rect(row, self.lane_row(row, index));
         // The lane keeps 4 px free above and below the curve.
         r.bottom() - 4.0 - n * (r.h - 8.0)
     }
@@ -109,22 +120,28 @@ impl Rig {
 }
 
 #[test]
-fn expanded_tracks_grow_by_their_lanes() {
+fn expanded_tracks_grow_by_their_rows() {
     let mut r = Rig::new();
     let a = &r.arrange;
     assert_eq!(a.row_height(0), 64.0);
     assert_eq!(a.row_y(1), 24.0 + 64.0);
 
-    // Adding a lane shows the track's lanes.
+    // Adding a lane shows the track's rows: volume, pan and the headings
+    // of its effects and sends. A lane is drawn in its control's row, so
+    // lanes don't add rows.
+    let rows = 4.0 * 40.0;
     let vol = r.add_lane(0, AutomationTarget::Volume);
     assert!(r.arrange.expanded.contains(&r.tracks[0]));
-    assert_eq!(r.arrange.row_height(0), 64.0 + 40.0);
-    assert_eq!(r.arrange.row_y(1), 24.0 + 104.0);
-    assert_eq!(r.arrange.content_height(r.doc.project()), 104.0 + 64.0);
+    assert_eq!(r.arrange.row_height(0), 64.0 + rows);
+    assert_eq!(r.arrange.row_y(1), 24.0 + 64.0 + rows);
+    assert_eq!(
+        r.arrange.content_height(r.doc.project()),
+        64.0 + rows + 64.0
+    );
     r.add_lane(0, AutomationTarget::Pan);
-    assert_eq!(r.arrange.row_height(0), 64.0 + 80.0);
+    assert_eq!(r.arrange.row_height(0), 64.0 + rows);
 
-    // Hit testing: clips area, then each lane, then the next track.
+    // Hit testing: clips area, then each row, then the next track.
     let p = r.doc.project();
     let x = r.x(BAR);
     assert!(matches!(r.arrange.hit(p, x, 24.0 + 30.0), Hit::Lane { .. }));
@@ -134,18 +151,18 @@ fn expanded_tracks_grow_by_their_lanes() {
         } => assert_eq!(lane, Some(vol)),
         h => panic!("{h:?}"),
     }
-    match r.arrange.hit(p, x, 24.0 + 144.0 + 10.0) {
+    match r.arrange.hit(p, x, 24.0 + 64.0 + rows + 10.0) {
         Hit::Lane { row, .. } => assert_eq!(row, 1),
         h => panic!("{h:?}"),
     }
 
-    // Collapsing hides them again; an expanded track without lanes keeps
-    // one empty row to add lanes from.
+    // Collapsing hides them again; a track without lanes shows the same
+    // rows, with nothing drawn in them.
     let project = r.doc.project().clone();
     r.arrange.set_expanded(&project, r.tracks[0], false);
     assert_eq!(r.arrange.row_height(0), 64.0);
     r.arrange.set_expanded(&project, r.tracks[1], true);
-    assert_eq!(r.arrange.row_height(1), 104.0);
+    assert_eq!(r.arrange.row_height(1), 64.0 + rows);
     match r.arrange.hit(&project, x, r.arrange.row_y(1) + 80.0) {
         Hit::Automation { lane: None, .. } => {}
         h => panic!("{h:?}"),
@@ -362,8 +379,9 @@ fn level_lanes_reach_silence_and_lanes_toggle_and_remove() {
             .automation
             .is_empty()
     );
-    // Still expanded: one empty lane row.
-    assert_eq!(r.arrange.row_height(0), 104.0);
+    // Still expanded: its rows stay, without the lane.
+    assert_eq!(r.arrange.row_height(0), 64.0 + 4.0 * 40.0);
+    assert!(r.arrange.lane_rows(0).iter().all(|x| x.lane.is_none()));
     r.doc.undo().unwrap();
     assert_eq!(r.points(lane).len(), 1);
 }
@@ -385,59 +403,176 @@ impl ParamCatalog for Catalog {
     fn default_value(&self, _: &Device, _: ParamId) -> Option<f64> {
         Some(1000.0)
     }
+    fn is_instrument(&self, d: &Device) -> bool {
+        d.name == "Synth"
+    }
+}
+
+/// The rows of track row `row` as (depth, kind) pairs.
+fn kinds(r: &Rig, row: usize) -> Vec<(u8, RowKind)> {
+    r.arrange
+        .lane_rows(row)
+        .iter()
+        .map(|x| (x.depth, x.kind))
+        .collect()
 }
 
 #[test]
-fn targets_list_what_has_no_lane_yet() {
+fn rows_unfold_groups_and_keep_automated_controls() {
+    use AutomationTarget::{Pan, Volume};
+    use RowKind::{Control, Group as G};
     let mut r = Rig::new();
     let bus = Track::new(TrackKind::Bus, "Bus");
     let bus_id = bus.id;
     r.doc.execute(AddTrack::new(2, bus)).unwrap();
     let send = Send::new(bus_id);
-    let send_id = send.id;
-    r.doc
-        .execute(AddSend {
-            track: r.tracks[0],
-            send,
-        })
-        .unwrap();
+    let send_level = AutomationTarget::SendLevel { send: send.id };
+    let track = r.tracks[0];
+    r.doc.execute(AddSend { track, send }).unwrap();
     let dev = Device::new(
         "EQ",
         DeviceSource::Builtin {
             kind: "daw.eq".into(),
         },
     );
-    let dev_id = dev.id;
+    let eq = Group::Device(dev.id);
+    let param = |param| AutomationTarget::DeviceParam {
+        device: dev.id,
+        param,
+    };
     r.doc
         .execute(AddDevice {
-            track: r.tracks[0],
+            track,
             index: 0,
-            device: dev,
+            device: dev.clone(),
         })
         .unwrap();
     r.arrange.params = Some(Arc::new(Catalog));
 
-    let track = r.doc.project().track(r.tracks[0]).unwrap().clone();
-    let all = lane_targets(&track, r.arrange.params.as_ref());
-    assert_eq!(all.len(), 5);
-    assert_eq!(all[2], AutomationTarget::SendLevel { send: send_id });
-    let eq = AutomationTarget::DeviceParam {
-        device: dev_id,
-        param: 1,
-    };
-    assert_eq!(all[4], eq);
+    // A track unfolds into volume, pan and its closed groups.
+    let project = r.doc.project().clone();
+    r.arrange.set_expanded(&project, track, true);
+    let closed = vec![
+        (0, Control(Volume)),
+        (0, Control(Pan)),
+        (0, G(Group::Effects)),
+        (0, G(Group::Sends)),
+    ];
+    assert_eq!(kinds(&r, 0), closed);
+    assert_eq!(r.arrange.row_height(0), 64.0 + 4.0 * 40.0);
 
-    let lane = r.add_lane(0, eq);
-    let track = r.doc.project().track(r.tracks[0]).unwrap().clone();
-    assert_eq!(lane_targets(&track, r.arrange.params.as_ref()).len(), 4);
-    // A log-scaled parameter lane, drawn at its default with no points.
-    assert_eq!(static_value(r.arrange.params.as_ref(), &track, eq), 1000.0);
-    r.click(r.x(BAR), r.y(0, 0, 0.5));
-    let v = r.points(lane)[0].value;
+    // Effects lists the effects; an effect lists its parameters.
+    assert!(
+        r.arrange
+            .set_group_open(&project, track, Group::Effects, true)
+            .view
+    );
+    assert_eq!(kinds(&r, 0)[2..4], [(0, G(Group::Effects)), (1, G(eq))]);
+    assert!(r.arrange.lane_rows(0)[2].open);
+    r.arrange.set_group_open(&project, track, eq, true);
+    assert_eq!(
+        kinds(&r, 0)[3..6],
+        [(1, G(eq)), (2, Control(param(0))), (2, Control(param(1)))]
+    );
+    r.arrange
+        .set_group_open(&project, track, Group::Sends, true);
+    assert_eq!(kinds(&r, 0).last(), Some(&(1, Control(send_level))));
+
+    // A click beside a control without a lane starts automating it: a
+    // log-scaled parameter, so the middle is the geometric mean.
+    let rect = r.arrange.lane_rect(0, 5);
+    r.click(r.x(BAR), rect.y + rect.h / 2.0);
+    let t = r.doc.project().track(track).unwrap().clone();
+    let lane = t.lane_for(param(1)).expect("a lane");
+    assert_eq!(r.arrange.lane_rows(0)[5].lane, Some(lane.id));
+    let v = lane.points[0].value;
     assert!((v - 632.46).abs() < 5.0, "{v}");
-    // The master has no pan.
+    assert_eq!(
+        static_value(r.arrange.params.as_ref(), &t, param(1)),
+        1000.0
+    );
+    // A click beside a group's heading does nothing to the document.
+    let revision = r.doc.revision();
+    let heading = r.arrange.lane_rect(0, 2);
+    r.click(r.x(BAR), heading.y + 5.0);
+    assert_eq!(r.doc.revision(), revision);
+
+    // Closing a group puts away what has no lane: the effect keeps its
+    // automated parameter, and closed Effects lists it directly.
+    let project = r.doc.project().clone();
+    r.arrange.set_group_open(&project, track, eq, false);
+    assert_eq!(kinds(&r, 0)[3..5], [(1, G(eq)), (2, Control(param(1)))]);
+    r.arrange
+        .set_group_open(&project, track, Group::Effects, false);
+    r.arrange
+        .set_group_open(&project, track, Group::Sends, false);
+    assert_eq!(
+        kinds(&r, 0)[2..],
+        [
+            (0, G(Group::Effects)),
+            (1, Control(param(1))),
+            (0, G(Group::Sends))
+        ]
+    );
+    // The lane is still found, in its new row.
+    let frame = r.arrange.lane_frame(&project, lane.id).unwrap();
+    assert_eq!(frame.rect, r.arrange.lane_rect(0, 3));
+
+    // Removing the effect forgets its fold.
+    r.arrange.set_group_open(&project, track, eq, true);
+    assert!(r.arrange.open.contains(&(track, eq)));
+    r.doc
+        .execute(daw_model::commands::RemoveDevice::new(dev.id))
+        .unwrap();
+    r.arrange.relayout(r.doc.project());
+    assert!(!r.arrange.open.contains(&(track, eq)));
+    assert_eq!(kinds(&r, 0), closed);
+
+    // The master has no pan and no sends.
     let master = r.doc.project().master.clone();
-    assert!(!lane_targets(&master, None).contains(&AutomationTarget::Pan));
+    assert_eq!(
+        r.arrange
+            .rows_of(&master)
+            .iter()
+            .map(|x| x.kind)
+            .collect::<Vec<_>>(),
+        [Control(Volume), G(Group::Effects)]
+    );
+
+    // An instrument track's first device is its instrument, not an effect.
+    let mut inst = Track::new(TrackKind::Instrument, "I");
+    let synth = Device::new(
+        "Synth",
+        DeviceSource::Builtin {
+            kind: "daw.synth".into(),
+        },
+    );
+    let synth_param = AutomationTarget::DeviceParam {
+        device: synth.id,
+        param: 0,
+    };
+    inst.devices.push(synth);
+    inst.devices.push(dev);
+    r.arrange.open.insert((inst.id, Group::Instrument));
+    r.arrange.open.insert((inst.id, Group::Effects));
+    let rows = r.arrange.rows_of(&inst);
+    let got: Vec<_> = rows.iter().map(|x| (x.depth, x.kind)).collect();
+    assert_eq!(
+        got[2..6],
+        [
+            (0, G(Group::Instrument)),
+            (1, Control(synth_param)),
+            (
+                1,
+                Control(AutomationTarget::DeviceParam {
+                    device: inst.devices[0].id,
+                    param: 1
+                })
+            ),
+            (0, G(Group::Effects)),
+        ]
+    );
+    assert_eq!(got[6], (1, G(eq)));
 }
 
 #[test]
@@ -718,30 +853,19 @@ fn clicking_a_point_does_not_move_it() {
 }
 
 #[test]
-fn rows_follow_the_lanes_and_say_where_a_hit_landed() {
-    use daw_arrange::RowKind;
+fn rows_say_where_a_hit_landed() {
     let mut r = Rig::new();
-    // Collapsed: no rows. Expanded without lanes: one placeholder.
+    // Collapsed: no rows.
     assert!(r.arrange.lane_rows(1).is_empty());
     let project = r.doc.project().clone();
     r.arrange.set_expanded(&project, r.tracks[1], true);
     let rows = r.arrange.lane_rows(1);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].kind, RowKind::Placeholder);
-    assert_eq!(rows[0].target(), None);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[1].target(), Some(AutomationTarget::Pan));
+    assert_eq!(rows[1].lane, None);
 
-    let vol = r.add_lane(1, AutomationTarget::Volume);
     let pan = r.add_lane(1, AutomationTarget::Pan);
-    let rows = r.arrange.lane_rows(1).to_vec();
-    assert_eq!(
-        rows.iter()
-            .map(|x| (x.target(), x.lane))
-            .collect::<Vec<_>>(),
-        [
-            (Some(AutomationTarget::Volume), Some(vol)),
-            (Some(AutomationTarget::Pan), Some(pan)),
-        ]
-    );
+    assert_eq!(r.arrange.lane_rows(1)[1].lane, Some(pan));
     // A hit names the row it landed in, and frames come from the same rows.
     let x = r.x(BAR);
     let y = r.arrange.lane_rect(1, 1).y + 5.0;

@@ -215,14 +215,29 @@ master.
 - The metronome has a strip of its own, with its level, on/off and the
   count-in.
 
-### Automation
+### Controls and automation in the Arrange page
 
-Right-click a track header and choose **Show Automation** to see its lanes,
-then add a lane for volume, pan or any device parameter. Click in a lane to
-add a point, drag points to move them, double-click one to delete it, and
-right-click a point to choose the shape of the curve that leaves it. To
-record volume, pan and send moves instead, turn on **Write Automation** on
-the Mix page and move the controls while the song plays.
+Every track carries its mixer controls with it. Click the arrow at the left
+of a track header (or right-click it and choose **Show Controls**) to unfold
+them under the track:
+
+- **Volume** and **Pan**, each a row with its slider.
+- **Instrument** (on instrument tracks), **Effects** and **Sends**. These
+  are groups: click one to open it. Effects lists each effect, and an effect
+  opens to its parameters; Sends lists the level of each send.
+
+Each control has a row in the timeline beside it. Click there to start
+automating the control: the click adds the first point. Drag points to move
+them, double-click one to delete it, and right-click a point to choose the
+shape of the curve that leaves it. The **−** button on a row removes its
+automation.
+
+Closing a group puts away the controls that have no automation and keeps the
+automated ones in view. Closing the track's arrow hides all of its rows.
+
+To record moves instead of drawing them, set a row to **Write** and move its
+slider while the song plays, or turn on **Write Automation** on the Mix page
+and move the controls there.
 
 ## Exporting
 
