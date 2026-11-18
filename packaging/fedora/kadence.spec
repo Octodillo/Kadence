@@ -16,7 +16,7 @@ Summary:        Digital audio workstation for KDE Plasma
 # license expression among them. CI fails when it stops matching
 # (packaging/check-license-fields.py); to see the list:
 #   cargo tree -p daw-app -e normal,no-proc-macro --prefix none -f '{l}' | sort -u
-License:        GPL-3.0-or-later AND MPL-2.0 AND Apache-2.0 AND MIT AND ISC AND Zlib AND (MIT OR Apache-2.0) AND (Unlicense OR MIT) AND (Zlib OR Apache-2.0 OR MIT) AND (0BSD OR Apache-2.0) AND (ISC OR MIT OR Apache-2.0) AND (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)
+License:        GPL-3.0-or-later AND MPL-2.0 AND Apache-2.0 AND MIT AND ISC AND Zlib AND (MIT OR Apache-2.0) AND (Unlicense OR MIT) AND (Zlib OR Apache-2.0 OR MIT) AND (0BSD OR Apache-2.0) AND (ISC OR MIT OR Apache-2.0) AND (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT) AND ((MIT OR Apache-2.0) AND Unicode-3.0)
 URL:            https://github.com/Octodillo/Kadence
 Source0:        %{name}-%{version}.tar.gz
 

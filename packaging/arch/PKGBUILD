@@ -19,7 +19,7 @@ url='https://github.com/Octodillo/Kadence'
 # Kadence, plus the crates statically linked into it (symphonia is MPL-2.0).
 # Their notices are in THIRD-PARTY-LICENSES next to LICENSE. CI fails when
 # this stops covering them (packaging/check-license-fields.py).
-license=(GPL-3.0-or-later MPL-2.0 Apache-2.0 MIT ISC Zlib)
+license=(GPL-3.0-or-later MPL-2.0 Apache-2.0 MIT ISC Zlib Unicode-3.0)
 depends=(
   glibc
   hicolor-icon-theme
