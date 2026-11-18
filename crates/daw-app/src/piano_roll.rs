@@ -84,8 +84,14 @@ pub mod qobject {
 
         #[cxx_override]
         unsafe fn paint(self: Pin<&mut PianoRoll>, painter: *mut QPainter);
+        /// Builds the picture, if it is stale and the roll shows: once a
+        /// frame at most, however many changes there were.
+        #[cxx_override]
+        #[cxx_name = "updatePolish"]
+        fn update_polish(self: Pin<&mut PianoRoll>);
 
-        /// Rebuilds the picture from the current state.
+        /// Shows the current state: the properties at once, the picture on
+        /// the next frame.
         #[qinvokable]
         fn refresh(self: Pin<&mut PianoRoll>);
 
@@ -164,6 +170,11 @@ pub mod qobject {
         #[inherit]
         fn update(self: Pin<&mut PianoRoll>);
         #[inherit]
+        fn polish(self: Pin<&mut PianoRoll>);
+        #[inherit]
+        #[cxx_name = "isVisible"]
+        fn is_visible(self: &PianoRoll) -> bool;
+        #[inherit]
         fn width(self: &PianoRoll) -> f64;
         #[inherit]
         fn height(self: &PianoRoll) -> f64;
@@ -192,6 +203,9 @@ pub struct PianoRollRust {
     lanes: QList<QVariant>,
     /// What `lanes` was made from.
     lane_rows: Vec<LaneRow>,
+    /// The view revision and track row `lane_rows` were read at: they are
+    /// read again only when either moves, not on every playing frame.
+    lanes_at: Option<(u64, Option<usize>)>,
     scroll_x: f64,
     scroll_y: f64,
     content_height: f64,
@@ -228,6 +242,7 @@ impl Default for PianoRollRust {
             lane_count: 0,
             lanes: QList::default(),
             lane_rows: Vec::new(),
+            lanes_at: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
             content_height: 0.0,
@@ -279,7 +294,9 @@ impl qobject::PianoRoll {
             lanes_height: f64,
             track_index: i32,
             lane_count: i32,
-            lanes: Vec<LaneRow>,
+            /// The lane rows, when something they show may have changed.
+            lanes: Option<Vec<LaneRow>>,
+            lanes_at: (u64, Option<usize>),
         }
         let (w, h) = (self.width(), self.height());
         let palette = paint::theme_palette!(self);
@@ -290,7 +307,8 @@ impl qobject::PianoRoll {
         } else {
             Accidentals::Sharps
         };
-        let (scene, shown) = state::with(|s| {
+        let lanes_seen = self.lanes_at;
+        let shown = state::with(|s| {
             s.piano.palette = palette;
             s.piano.ruler_height = rh;
             s.piano.keyboard_width = kw;
@@ -301,11 +319,12 @@ impl qobject::PianoRoll {
             s.piano.resize(w, h);
             s.piano.sync(s.doc.project());
             s.piano.fit_if_pending(s.doc.project());
-            let scene = s.with_piano(|p, doc, env| p.scene(doc.project(), env));
             let p = &s.piano;
             let project = s.doc.project();
             let track = p.track(project);
-            let shown = Shown {
+            let row = p.track_row(project);
+            let lanes_at = (s.view_revision, row);
+            Shown {
                 scroll_x: p.view.scroll_x,
                 scroll_y: p.scroll_y,
                 content_height: 128.0 * p.key_height,
@@ -317,16 +336,13 @@ impl qobject::PianoRoll {
                     .and_then(|t| strip_row(project, t))
                     .map_or(-1, |row| row as i32),
                 lanes_height: p.lanes_height(),
-                track_index: p.track_row(project).map_or(-1, |i| i as i32),
+                track_index: row.map_or(-1, |i| i as i32),
                 lane_count: p.lane_count() as i32,
-                lanes: p
-                    .track_row(project)
-                    .map(|row| s.lane_rows(row))
-                    .unwrap_or_default(),
-            };
-            (scene, shown)
+                lanes: (lanes_seen != Some(lanes_at))
+                    .then(|| row.map(|row| s.lane_rows(row)).unwrap_or_default()),
+                lanes_at,
+            }
         });
-        self.as_mut().rust_mut().scene.store(scene);
         self.as_mut().set_scroll_x(shown.scroll_x);
         self.as_mut().set_scroll_y(shown.scroll_y);
         self.as_mut().set_content_height(shown.content_height);
@@ -339,10 +355,23 @@ impl qobject::PianoRoll {
         self.as_mut().set_lanes_height(shown.lanes_height);
         self.as_mut().set_track_index(shown.track_index);
         self.as_mut().set_lane_count(shown.lane_count);
-        if shown.lanes != self.lane_rows {
-            self.as_mut().set_lanes(lane_list(&shown.lanes));
-            self.as_mut().rust_mut().lane_rows = shown.lanes;
+        if let Some(lanes) = shown.lanes {
+            self.as_mut().rust_mut().lanes_at = Some(shown.lanes_at);
+            if lanes != self.lane_rows {
+                self.as_mut().set_lanes(lane_list(&lanes));
+                self.as_mut().rust_mut().lane_rows = lanes;
+            }
         }
+        self.as_mut().rust_mut().scene.invalidate();
+        self.polish();
+    }
+
+    fn update_polish(mut self: Pin<&mut Self>) {
+        if !self.scene.wants_scene(self.is_visible()) {
+            return;
+        }
+        let scene = state::with(|s| s.with_piano(|p, doc, env| p.scene(doc.project(), env)));
+        self.as_mut().rust_mut().scene.store(scene);
         self.update();
     }
 

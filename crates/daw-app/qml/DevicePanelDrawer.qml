@@ -66,11 +66,10 @@ Kirigami.OverlayDrawer {
     }
 
     // Edits made elsewhere (undo, the mixer, a removed device).
-    Timer {
-        interval: 100
-        repeat: true
-        running: drawer.visible
-        onTriggered: {
+    Connections {
+        target: UiClock
+        enabled: drawer.visible
+        function onSlow() {
             // Before the panel, so a window the user just closed shows
             // the values they set there.
             PluginEditors.refresh();

@@ -154,7 +154,8 @@ fn main() {
             // Shared helpers without state: one instance for the whole app.
             .qml_file(QmlFile::from("qml/ValueText.qml").singleton(true))
             .qml_file(QmlFile::from("qml/DeviceNames.qml").singleton(true))
-            .qml_file(QmlFile::from("qml/Wheel.qml").singleton(true)),
+            .qml_file(QmlFile::from("qml/Wheel.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/UiClock.qml").singleton(true)),
     )
     .files([
         "src/bridge.rs",

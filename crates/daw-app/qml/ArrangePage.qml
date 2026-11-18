@@ -204,17 +204,11 @@ Kirigami.Page {
         page.editActions[7]
     ]
 
-    // Shows a change to the project: the track headers and the timeline.
+    // Shows a change to the project in the timeline. (The track headers
+    // follow by themselves: see UiClock.) Hidden, the timeline only notes
+    // that it is stale and draws when the page is shown.
     function refresh(): void {
-        Tracks.sync();
         view.refresh();
-    }
-
-    // An edit in a track header shows everywhere at once, not on the
-    // Project's next tick.
-    Connections {
-        target: Tracks
-        function onEdited() { Project.tick(); }
     }
 
     // Redraw on any change, and every frame while the playhead moves.
@@ -226,12 +220,12 @@ Kirigami.Page {
         target: Automation
         function onRevisionChanged() { page.refresh(); }
     }
-    Timer {
-        interval: 16
-        repeat: true
-        running: Project.playing && page.visible
-        onTriggered: view.refresh()
+    Connections {
+        target: UiClock
+        enabled: page.visible
+        function onFrame() { view.refresh(); }
     }
+    onVisibleChanged: if (visible) page.refresh()
 
     ColumnLayout {
         anchors.fill: parent

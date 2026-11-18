@@ -142,16 +142,35 @@ pub fn op(p: Prim, texts: &mut Vec<String>, waves: &mut Vec<f32>) -> PaintOp {
 }
 
 /// The last scene, flattened for the painter and kept until the next one.
+///
+/// Building a scene is the costly part of showing a change, so an item does
+/// it at most once a frame and only while it shows: a change marks the list
+/// stale ([`invalidate`](Self::invalidate)) and asks Qt for a polish, and
+/// the item's `updatePolish` builds and stores the scene if
+/// [`wants_scene`](Self::wants_scene).
 #[derive(Default)]
 pub struct DisplayList {
     ops: Vec<PaintOp>,
     texts: Vec<String>,
     waves: Vec<f32>,
+    stale: bool,
 }
 
 impl DisplayList {
+    /// What is stored no longer shows the state.
+    pub fn invalidate(&mut self) {
+        self.stale = true;
+    }
+
+    /// Whether to build a scene now: the stored one is stale and the item
+    /// is `visible`. A hidden item stays stale until it shows again.
+    pub fn wants_scene(&self, visible: bool) -> bool {
+        self.stale && visible
+    }
+
     /// Replaces what is shown with `scene`, reusing the lists' storage.
     pub fn store(&mut self, scene: Scene) {
+        self.stale = false;
         self.ops.clear();
         self.texts.clear();
         self.waves.clear();

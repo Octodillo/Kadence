@@ -403,16 +403,6 @@ Kirigami.ApplicationWindow {
         Project.shutdown();
     }
 
-    // Engine position, peak loading, autosave, plugin scan progress.
-    Timer {
-        interval: 33
-        repeat: true
-        running: true
-        onTriggered: {
-            Project.tick();
-            Plugins.tick();
-        }
-    }
 
     // One browser for every place that adds a plugin; see browsePlugins().
     PluginBrowser {
@@ -611,6 +601,9 @@ Kirigami.ApplicationWindow {
             i18nc("@title:window a plugin's own editor; %1 is the device, %2 its track", "%1 — %2", "%1", "%2"),
             i18nc("@title name of the master bus", "Master"));
         notifyEngineError();
+        // Engine position, peak loading, autosave, plugin scan progress:
+        // UiClock says what is polled and in which order.
+        UiClock.start();
         // The self test must not touch the user's recent list or autosaves.
         if (!smokeTest && screenshotDir === "") {
             Project.startSession();

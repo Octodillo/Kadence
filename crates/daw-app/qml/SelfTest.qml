@@ -202,25 +202,25 @@ Item {
             check(lane().mode === Automation.LaneOff && Project.undoText === "Toggle Automation", "lane off");
             // An off lane's control sets the fader; a playing one follows
             // its points and can't be moved.
-            check(!Automation.laneFollowing(0, 0), "an off lane doesn't follow its points");
-            check(!Automation.laneWrites(0, 0), "a lane in read mode doesn't write");
-            const volume = Automation.laneValue(0, 0);
+            check(!Automation.laneControl(0, 0).following, "an off lane doesn't follow its points");
+            check(!Automation.laneControl(0, 0).writes, "a lane in read mode doesn't write");
+            const volume = Automation.laneControl(0, 0).value;
             Automation.beginLaneControl(0, 0);
             Automation.setLanePosition(0, 0, 0.25);
             Automation.setLanePosition(0, 0, 1);
             Automation.endLaneControl(0, 0);
             Project.tick();
-            check(Automation.laneValue(0, 0) > volume && Automation.lanePosition(0, 0) === 1, "lane control sets the volume");
+            check(Automation.laneControl(0, 0).value > volume && Automation.laneControl(0, 0).position === 1, "lane control sets the volume");
             // The next gesture (a key press) is its own undo step.
             Automation.beginLaneControl(0, 0);
             Automation.setLanePosition(0, 0, 0.5);
             Automation.endLaneControl(0, 0);
             Project.undo();
-            check(Automation.lanePosition(0, 0) === 1, "each lane control gesture is its own undo step");
+            check(Automation.laneControl(0, 0).position === 1, "each lane control gesture is its own undo step");
             Project.undo();
-            check(Automation.laneValue(0, 0) === volume, "a lane control drag is one undo step");
+            check(Automation.laneControl(0, 0).value === volume, "a lane control drag is one undo step");
             Automation.setLaneMode(0, 0, Automation.LaneWrite);
-            check(lane().mode === Automation.LaneWrite && Automation.laneWrites(0, 0), "lane in write mode writes");
+            check(lane().mode === Automation.LaneWrite && Automation.laneControl(0, 0).writes, "lane in write mode writes");
             Automation.setLaneMode(0, 0, Automation.LaneRead);
             Project.undo();
             Project.undo();
