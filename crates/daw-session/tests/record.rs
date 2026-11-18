@@ -55,7 +55,7 @@ impl<B: AudioBackend> Drop for Rig<B> {
 }
 
 /// The backend's config: two audio channels each way, no MIDI.
-fn backend_config(client_name: &str, auto_connect: bool) -> BackendConfig {
+fn backend_config(client_name: &str) -> BackendConfig {
     BackendConfig {
         client_name: client_name.into(),
         audio_inputs: 2,
@@ -64,7 +64,6 @@ fn backend_config(client_name: &str, auto_connect: bool) -> BackendConfig {
         midi_output: false,
         sample_rate: Some(RATE),
         buffer_size: Some(PERIOD),
-        auto_connect,
         midi_capacity: 16,
     }
 }
@@ -75,7 +74,7 @@ fn rig(latency: Latency) -> Rig {
     // the disk, so a take that lasted more than a few tens of milliseconds
     // of wall time filled its four-second ring and dropped frames.
     let mut backend = DummyBackend::new(Pacing::RealTime).with_loopback(latency);
-    backend.open(backend_config("rec", true)).unwrap();
+    backend.open(backend_config("rec")).unwrap();
     rig_on(backend, PERIOD)
 }
 
@@ -539,7 +538,7 @@ fn records_through_a_jack_server() {
         .open(BackendConfig {
             sample_rate: None,
             buffer_size: None,
-            ..backend_config(&client, false)
+            ..backend_config(&client)
         })
         .unwrap();
     wait_visible(&backend, &cable.port("in"));
