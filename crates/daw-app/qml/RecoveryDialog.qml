@@ -87,7 +87,11 @@ Kirigami.Dialog {
                     icon.name: "document-revert"
                     onClicked: {
                         const result = Project.recoverSession(row.index);
-                        dialog.close();
+                        // After a failure it is still on offer: stay open
+                        // to try again or pick another.
+                        if (result.context === undefined) {
+                            dialog.close();
+                        }
                         dialog.recovered(result);
                     }
                 }

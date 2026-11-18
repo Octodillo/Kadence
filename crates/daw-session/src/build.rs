@@ -24,7 +24,7 @@ use daw_midi::player::midi_player;
 
 use crate::Warning;
 use crate::capture::input_tap;
-use crate::media::Loaded;
+use crate::media::{Loaded, Seen};
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
 use crate::{Built, MetronomeSettings, Session, db_to_gain};
 
@@ -77,6 +77,11 @@ fn tap_key(track: TrackId) -> NodeKey {
 /// that its pre-fader sends tap.
 fn pre_fader_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 4)
+}
+
+/// Whether a built-in device kind is the one whose state names sample files.
+fn is_sampler(kind: &str) -> bool {
+    kind == daw_devices::devices::sampler::INFO.id
 }
 
 /// How many captured input events can wait for the recorder.
@@ -185,6 +190,11 @@ impl Structure {
     pub fn has_automation(&self) -> bool {
         self.tracks.iter().any(|t| !t.lanes.is_empty())
     }
+
+    pub fn has_sampler(&self) -> bool {
+        let mut devices = self.tracks.iter().flat_map(|t| t.devices.iter());
+        devices.any(|d| matches!(&d.1, DeviceSource::Builtin { kind } if is_sampler(kind)))
+    }
 }
 
 /// Builds the whole graph for `snapshot`, reusing what `old` had running.
@@ -195,7 +205,7 @@ pub(crate) fn graph(
     snapshot: &ProjectSnapshot,
     structure: Structure,
     old: Built,
-) -> (GraphDesc, Built) {
+) -> (GraphDesc, Build) {
     let mut b = Builder::new(session, snapshot, structure, old);
     for track in snapshot.all_tracks() {
         b.track(track);
@@ -205,7 +215,67 @@ pub(crate) fn graph(
     b.metronome();
     b.automate();
     b.stopped_lanes();
-    (b.g, b.built)
+    let build = Build {
+        built: b.built,
+        old: b.old,
+        taken: b.taken,
+    };
+    (b.g, build)
+}
+
+/// A graph's bookkeeping, until the engine has the graph.
+pub(crate) struct Build {
+    /// What the session keeps once the engine took the graph.
+    pub built: Built,
+    /// What the running graph was built from, less what `built` took over.
+    old: Built,
+    taken: Taken,
+}
+
+/// What a build took over from the running graph's bookkeeping, or changed
+/// outside its own: all of it goes back if the engine refuses the graph.
+#[derive(Default)]
+struct Taken {
+    players: Vec<TrackId>,
+    midi: Vec<TrackId>,
+    taps: Vec<TrackId>,
+    /// Plugins this build marked as no longer fresh.
+    fresh: Vec<DeviceId>,
+}
+
+impl Build {
+    /// The engine refused the graph: gives back the running graph's
+    /// bookkeeping as it was, handles included, so the next build reuses
+    /// the running nodes like this one did.
+    pub fn revert(self, plugins: &mut crate::Plugins) -> Built {
+        let Self {
+            mut built,
+            mut old,
+            taken,
+        } = self;
+        fn back<K: Copy + Eq + std::hash::Hash, V>(
+            keys: &[K],
+            from: &mut HashMap<K, V>,
+            to: &mut HashMap<K, V>,
+        ) {
+            for k in keys {
+                if let Some(v) = from.remove(k) {
+                    to.insert(*k, v);
+                }
+            }
+        }
+        back(&taken.players, &mut built.players, &mut old.players);
+        back(&taken.players, &mut built.clips, &mut old.clips);
+        back(&taken.midi, &mut built.midi, &mut old.midi);
+        back(&taken.midi, &mut built.midi_clips, &mut old.midi_clips);
+        back(&taken.taps, &mut built.taps, &mut old.taps);
+        for device in taken.fresh {
+            if let Some(live) = plugins.live_mut(device) {
+                live.fresh = true;
+            }
+        }
+        old
+    }
 }
 
 /// Where a track's nodes are in the graph being built.
@@ -246,6 +316,7 @@ struct Builder<'a> {
     devices: HashMap<NodeKey, &'a Device>,
     chains: HashMap<TrackId, Chain>,
     routes: Routes,
+    taken: Taken,
 }
 
 impl<'a> Builder<'a> {
@@ -278,6 +349,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             chains: HashMap::new(),
             routes: Routes::default(),
+            taken: Taken::default(),
             session,
             project,
         }
@@ -489,10 +561,15 @@ impl<'a> Builder<'a> {
     /// An audio track's clip player.
     fn clip_player(&mut self, track: &Track) -> NodeId {
         let key = player_key(track.id);
-        if let Some(handle) = self.old.players.remove(&track.id)
+        if self.old.players.contains_key(&track.id)
             && let Some(id) = self.reuse(key)
         {
+            let handle = self.old.players.remove(&track.id).expect("checked");
+            self.taken.players.push(track.id);
             self.built.players.insert(track.id, handle);
+            if let Some(files) = self.old.unread.get(&track.id) {
+                self.built.unread.insert(track.id, files.clone());
+            }
             if let Some(c) = self.old.clips.remove(&track.id) {
                 self.built.clips.insert(track.id, c);
             }
@@ -503,6 +580,7 @@ impl<'a> Builder<'a> {
             self.session.offline.clone(),
         );
         let set = clip_set(self.session, track, &handle);
+        note_unread(&mut self.built.unread, track.id, &set);
         // A fresh queue has room for the first set.
         let _ = handle.send(set);
         self.built.clips.insert(track.id, track.clips.clone());
@@ -515,10 +593,15 @@ impl<'a> Builder<'a> {
     fn input_tap(&mut self, track: &Track) -> NodeId {
         let key = tap_key(track.id);
         let inputs = self.session.config.inputs;
-        let reused = match self.old.taps.remove(&track.id) {
-            Some(handle) => self.reuse(key).map(|id| (id, handle)),
-            None => None,
-        };
+        let reused = self
+            .old
+            .taps
+            .contains_key(&track.id)
+            .then(|| self.reuse(key));
+        let reused = reused.flatten().map(|id| {
+            self.taken.taps.push(track.id);
+            (id, self.old.taps.remove(&track.id).expect("checked"))
+        });
         let (id, handle) = reused.unwrap_or_else(|| {
             let (node, handle) = input_tap(inputs);
             let name = format!("{} input", track.name);
@@ -538,10 +621,15 @@ impl<'a> Builder<'a> {
     /// (what its input gate lets through, see `Session::apply_gates`).
     fn midi_player(&mut self, track: &Track) -> NodeId {
         let key = midi_key(track.id);
-        let reused = match self.old.midi.remove(&track.id) {
-            Some(handle) => self.reuse(key).map(|id| (id, handle)),
-            None => None,
-        };
+        let reused = self
+            .old
+            .midi
+            .contains_key(&track.id)
+            .then(|| self.reuse(key));
+        let reused = reused.flatten().map(|id| {
+            self.taken.midi.push(track.id);
+            (id, self.old.midi.remove(&track.id).expect("checked"))
+        });
         let id = match reused {
             Some((id, handle)) => {
                 self.built.midi.insert(track.id, handle);
@@ -578,11 +666,14 @@ impl<'a> Builder<'a> {
             DeviceSource::Plugin { .. } => self.plugin(d),
             DeviceSource::Builtin { kind } => {
                 let same_source = self.old.structure.device_source(d.id) == Some(&d.source);
-                match same_source.then(|| self.reuse_with_params(key)).flatten() {
+                // A sampler finds relative sample paths in the project
+                // bundle: when that moved, it loads its state again.
+                let keep = same_source && !(self.session.root_moved && is_sampler(kind));
+                match keep.then(|| self.reuse_with_params(key)).flatten() {
                     Some(id) => {
                         self.g.rename(id, &d.name);
-                        if let Some(m) = self.old.device_meters.remove(&d.id) {
-                            self.built.device_meters.insert(d.id, m);
+                        if let Some(m) = self.old.device_meters.get(&d.id) {
+                            self.built.device_meters.insert(d.id, m.clone());
                         }
                         id
                     }
@@ -639,16 +730,20 @@ impl<'a> Builder<'a> {
         let key = device_key(d.id);
         let session = &mut *self.session;
         let (sample_rate, max_frames) = (session.sample_rate(), session.config.engine.max_frames);
-        let live = session
-            .plugins
-            .ensure(d, sample_rate, max_frames, &mut session.warnings);
+        let live = session.plugins.ensure(d, sample_rate, max_frames);
         let node: Box<dyn Node> = match live {
             Some(live) => {
                 // A fresh plugin has had none of the document's values:
                 // the session sends them all once the graph is in.
                 let fresh = std::mem::take(&mut live.fresh);
                 let node = live.handle.node(sample_rate, max_frames);
-                if !fresh {
+                if fresh {
+                    self.taken.fresh.push(d.id);
+                } else if !session.sent.maybe_unplayed(&session.controller, key) {
+                    // A value sent just before this graph may never reach the
+                    // plugin (its node is new in every graph, and the engine
+                    // hands the old node's waiting changes to no one), so
+                    // such a node's values are all sent again.
                     self.carry_params(key);
                 }
                 Box::new(node)
@@ -991,12 +1086,13 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         let path = session.media.resolve(&a.source);
         let engine_rate = session.sample_rate();
         let mut file_rate = engine_rate;
-        let source = match session.media.get(&path) {
+        let (loaded, stamp) = session.media.get(&path);
+        let source = match loaded {
             Loaded::Memory(data, rate) => {
                 file_rate = f64::from(rate);
                 ClipSource::Memory(data)
             }
-            Loaded::Stream(rate) if handle.has_stream(c.id, &path) => {
+            Loaded::Stream(rate) if handle.has_stream(c.id, &path, stamp) => {
                 file_rate = f64::from(rate);
                 ClipSource::Stream(None)
             }
@@ -1040,6 +1136,7 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         let file_rate = file_rate.max(1.0);
         let mut clip = PlayClip {
             id: c.id,
+            stamp,
             start,
             end,
             // The model keeps the offset in the file's own frames.
@@ -1063,6 +1160,14 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         set.clips.push(clip);
     }
     set
+}
+
+/// Keeps which of a track's files `set` could not read.
+pub(crate) fn note_unread(unread: &mut HashMap<TrackId, Vec<Seen>>, track: TrackId, set: &ClipSet) {
+    match set.unread() {
+        files if files.is_empty() => unread.remove(&track),
+        files => unread.insert(track, files),
+    };
 }
 
 /// A clip that continues an earlier one (the two halves of a split: same

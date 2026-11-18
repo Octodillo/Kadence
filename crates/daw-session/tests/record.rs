@@ -216,7 +216,8 @@ fn record_take<B: AudioBackend>(
         &rig.session,
         after.max(beat + 20_000 + i64::from(latency) + slack),
     );
-    assert!(takes.poll().is_empty());
+    let problems = takes.poll();
+    assert!(problems.is_empty(), "{problems:?}");
     let stopped_at = rig.session.controller().position().0;
     let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
     rig.session.stop().unwrap();
@@ -383,7 +384,7 @@ fn auto_monitoring_follows_arm_and_transport() {
 
 #[test]
 fn saving_to_a_new_place_mid_take_keeps_the_take() {
-    // Save As moves the project root, which rebuilds the graph.
+    // Save As moves the project root: every player gets its clips again.
     record_and_check_with(
         Latency {
             input: 300,

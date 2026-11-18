@@ -8,6 +8,9 @@
 # - Debian 13: CMake install from source, the oldest Qt (6.8) and KDE
 #   Frameworks (6.13) we support.
 # - Flatpak: the KDE runtime manifest, built and run in its sandbox.
+#
+# The package jobs run the scripts the Release workflow runs (ci/*-package.sh).
+# The weekly run also checks the dependencies against the RustSec advisories.
 name: Packaging
 
 on:
@@ -45,33 +48,24 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed base-devel git namcap sudo \
             weston xorg-server-xvfb xorg-xauth
-          useradd -m builder
-          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - name: makepkg
+      - name: makepkg, namcap, install, smoke test
+        run: ci/arch-package.sh git out
+      - name: The release PKGBUILD is written and lints
+        # The release workflow builds it; here, only that the generator
+        # still understands the PKGBUILD it reads.
         run: |
-          git config --system --add safe.directory '*'
-          cp -r packaging/arch /home/builder/pkg
-          chown -R builder /home/builder/pkg
-          cd /home/builder/pkg
-          sudo -u builder env KADENCE_SOURCE="git+file://$GITHUB_WORKSPACE#commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" \
-            makepkg --syncdeps --noconfirm
-      - name: namcap
-        # namcap exits 0 whatever it finds, so fail on its error lines.
-        run: |
-          set -o pipefail
-          namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-git-*.pkg.tar.zst | tee namcap.log
-          ! grep -q ' E: ' namcap.log
-      - name: Install
-        run: pacman -U --noconfirm /home/builder/pkg/kadence-git-*.pkg.tar.zst
-      - name: Smoke test (installed)
-        run: sudo -u builder env REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence
+          mkdir /tmp/release-pkgbuild
+          packaging/arch/release-pkgbuild.sh 0.0.0 > /tmp/release-pkgbuild/PKGBUILD
+          bash -n /tmp/release-pkgbuild/PKGBUILD
+          ci/arch-package.sh lint /tmp/release-pkgbuild/PKGBUILD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: arch-package
-          path: /home/builder/pkg/kadence-git-*.pkg.tar.zst
+          path: out/*.pkg.tar.zst
+          if-no-files-found: error
 
   fedora:
     name: Fedora package
@@ -86,23 +80,14 @@ jobs:
       - name: Source tarball (vendored crates)
         run: |
           git config --system --add safe.directory '*'
-          packaging/make-dist.sh ~/rpmbuild/SOURCES
-      - name: rpmbuild
-        run: |
-          dnf -y builddep packaging/fedora/kadence.spec
-          rpmbuild -ba packaging/fedora/kadence.spec
-      - name: rpmlint
-        run: rpmlint packaging/fedora/kadence.spec ~/rpmbuild/RPMS/*/kadence-0*.rpm
-      - name: Install
-        run: dnf -y install ~/rpmbuild/RPMS/*/kadence-0*.rpm
-      - name: Smoke test (installed)
-        run: |
-          useradd -m tester
-          su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
+          packaging/make-dist.sh dist
+      - name: rpmbuild, rpmlint, install, smoke test
+        run: ci/fedora-package.sh dist/kadence-*.tar.gz out
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fedora-package
-          path: ~/rpmbuild/RPMS/*/kadence-0*.rpm
+          path: out/*.x86_64.rpm
+          if-no-files-found: error
 
   neon:
     name: KDE neon install
@@ -127,13 +112,7 @@ jobs:
           weston xvfb xauth
       - name: Install Rust
         if: steps.neon.outputs.available == 'true'
-        run: |
-          # A pinned rustup-init, checked against its sha256, rather than curl | sh.
-          curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
-          echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        run: ci/install-rustup.sh
       - name: Build and install to /usr
         if: steps.neon.outputs.available == 'true'
         run: |
@@ -165,14 +144,10 @@ jobs:
             libkf6colorscheme-dev libkf6iconthemes-dev breeze-icon-theme \
             extra-cmake-modules gettext python3 libjack-jackd2-dev liblilv-dev \
             weston xvfb xauth
-          # Debian's Rust is older than the workspace's rust-version.
-          # A pinned rustup-init, checked against its sha256, rather than curl | sh.
-          curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
-          echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust
+        # Debian's is older than the workspace's rust-version.
+        run: ci/install-rustup.sh
       - name: Build and install to /usr
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
@@ -191,47 +166,37 @@ jobs:
       # flatpak-builder sandboxes each build step with bubblewrap.
       options: --privileged
     steps:
-      - name: Install Flatpak and the runtimes
-        run: |
-          dnf -y install flatpak flatpak-builder git python3
-          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install -y --noninteractive flathub \
-            org.kde.Sdk//6.11 org.kde.Platform//6.11 \
-            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
-            org.freedesktop.Sdk.Extension.llvm21//25.08 \
-            org.flatpak.Builder
+      # Before git is installed, so this is a plain download; nothing
+      # below needs the history.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Crate sources from Cargo.lock
-        run: packaging/flatpak/cargo-sources.py
-      - name: flatpak-builder
-        run: |
-          flatpak-builder --disable-rofiles-fuse --force-clean \
-            --state-dir=/tmp/flatpak-state --repo=/tmp/repo /tmp/build \
-            packaging/flatpak/io.github.octodillo.daw.yml
-          flatpak build-bundle /tmp/repo kadence.flatpak io.github.octodillo.daw
-      - name: Lint (Flathub rules)
-        # Advisory until the Flathub submission: some rules (for example the
-        # generated cargo-sources.json not being committed) only matter there.
+      - name: Install Flatpak and the runtimes
+        run: ci/flatpak-package.sh setup org.flatpak.Builder
+      - name: Build, install and smoke test in the sandbox
+        run: ci/flatpak-package.sh build kadence.flatpak
+      - name: Lint
+        # Advisory: the linter enforces Flathub's submission rules, and some
+        # (the generated cargo-sources.json not being committed, x11 together
+        # with wayland, home directory access) do not apply to a bundle
+        # attached to a GitHub release.
         continue-on-error: true
         run: |
           flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
             manifest packaging/flatpak/io.github.octodillo.daw.yml
           flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo /tmp/repo
-      - name: Install and smoke test in the sandbox
-        run: |
-          flatpak install -y --noninteractive kadence.flatpak
-          # Audio needs libjack inside the sandbox; the runtime's comes from PipeWire.
-          flatpak run --command=sh io.github.octodillo.daw -c 'ldconfig -p | grep -F libjack.so.0'
-          # Flatpak keeps the app's config in ~/.var/app; start from a clean one.
-          rm -rf ~/.var/app/io.github.octodillo.daw
-          # The step needs kadence's exit status, not tee's.
-          set -o pipefail
-          flatpak run \
-            --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software \
-            --env=QT_FORCE_STDERR_LOGGING=1 \
-            io.github.octodillo.daw --smoke-test 2>&1 | tee smoke.log
-          grep -q "smoke test: passed" smoke.log
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: flatpak-bundle
           path: kadence.flatpak
+
+  # Only on the weekly run (and by hand), so a new advisory against a
+  # dependency does not turn unrelated pull requests red. The Release
+  # workflow runs the same check before it builds anything.
+  advisories:
+    name: cargo deny (advisories)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
