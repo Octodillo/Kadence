@@ -1,9 +1,10 @@
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, DummyBackend, Latency, Pacing, PortDirection,
-    PortFilter, PortKind,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, DummyBackend, Latency, Pacing,
+    PortDirection, PortFilter, PortKind,
 };
 use daw_core::event::{Event, EventKind};
 
@@ -374,7 +375,7 @@ fn queues_survive_a_panicking_callback() {
     }))
     .unwrap();
     rx.recv_timeout(WAIT).unwrap();
-    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
+    b.stop().unwrap();
     let rx = start_forwarding_midi_in(&mut b);
     assert!(inject.send(&CC));
     let e = rx.recv_timeout(WAIT).expect("MIDI after the panic");
@@ -522,6 +523,103 @@ fn other_clients_ports_come_and_go() {
     assert!(b.connect("keys:out", &port.name).is_err());
 }
 
+/// Waits for `b` to report `health`, which the audio thread sets.
+fn wait_for_health(b: &DummyBackend, health: BackendHealth) {
+    let end = Instant::now() + WAIT;
+    while b.health() != health {
+        assert!(Instant::now() < end, "health is {:?}", b.health());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn health_reports_a_server_that_went_away() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    let system = b.system();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+    system.shut_down();
+    wait_for_health(&b, BackendHealth::ServerGone);
+    assert!(b.stats().server_gone);
+    // No cycle runs any more, though nobody stopped the backend.
+    let cycles = b.stats().cycles;
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(b.stats().cycles, cycles);
+    assert!(b.is_running());
+    // Without a server the backend cannot start again, and is closed for
+    // trying; nor can it connect.
+    b.stop().unwrap();
+    assert_eq!(b.health(), BackendHealth::ServerGone);
+    assert!(b.start(Box::new(|_| {})).is_err());
+    assert!(matches!(
+        b.start(Box::new(|_| {})),
+        Err(BackendError::NotOpen)
+    ));
+    assert!(matches!(b.open(cfg(32)), Err(BackendError::Connect(_))));
+
+    // Reopening connects to a server that is there again.
+    system.restore();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+}
+
+#[test]
+fn health_reports_a_panicked_callback_until_the_next_start() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| panic!("callback bug"))).unwrap();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    assert!(b.stats().callback_panicked);
+    // Stopping works as usual: the panic is in `health`.
+    b.stop().unwrap();
+    assert_eq!(b.health(), BackendHealth::CallbackPanicked);
+
+    // A callback that works clears it; the system can make that one panic.
+    let system = b.system();
+    b.start(Box::new(|_| {})).unwrap();
+    let cycles = b.stats().cycles;
+    assert!(b.wait_for_cycles(cycles + 10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+    system.panic_callback();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    b.stop().unwrap();
+}
+
+#[test]
+fn a_rate_change_asked_of_one_connection_does_not_reach_the_next() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    let system = b.system();
+    b.open(cfg(32)).unwrap();
+    system.change_sample_rate(44_100);
+    b.close().unwrap();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.sample_rate(), 48_000.0);
+}
+
+#[test]
+fn close_after_a_panicked_callback_still_closes() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    b.add_midi_input("pads").unwrap();
+    b.start(Box::new(|_| panic!("callback bug"))).unwrap();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    b.close().unwrap();
+    assert!(!b.is_running());
+    assert!(b.midi_inputs().is_empty());
+    assert!(matches!(
+        b.list_ports(&PortFilter::default()),
+        Err(BackendError::NotOpen)
+    ));
+    b.open(cfg(32)).unwrap();
+    b.close().unwrap();
+}
+
 #[test]
 fn loopback_returns_the_outputs_after_the_reported_latency() {
     let latency = Latency {
@@ -580,4 +678,24 @@ fn allocation_count_is_absent_without_the_counter() {
     assert!(b.wait_for_cycles(4, WAIT));
     b.stop().unwrap();
     assert_eq!(b.stats().rt_alloc_violations, None);
+}
+
+#[test]
+fn a_server_rate_change_reaches_the_backend_and_its_cycles() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(BackendConfig::default()).unwrap();
+    let before = b.sample_rate();
+    let seen = Arc::new(AtomicU32::new(0));
+    let rate = seen.clone();
+    b.start(Box::new(move |c| {
+        rate.store(c.sample_rate as u32, Ordering::Relaxed);
+    }))
+    .unwrap();
+    b.system().change_sample_rate(44_100);
+    let from = b.stats().cycles;
+    assert!(b.wait_for_cycles(from + 2, Duration::from_secs(5)));
+    assert_ne!(before, 44_100.0);
+    assert_eq!(b.sample_rate(), 44_100.0);
+    assert_eq!(seen.load(Ordering::Relaxed), 44_100);
+    b.close().unwrap();
 }
