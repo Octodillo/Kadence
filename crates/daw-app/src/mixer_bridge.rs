@@ -11,6 +11,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{
     QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QStringList, QVariant, QVector,
 };
+use daw_core::plugin::PluginFormatKind;
 
 use crate::mixer::{Control, MeterBallistics, MeterDisplay, StripId, StripInfo, StripKind};
 use crate::model_roles;
@@ -101,8 +102,9 @@ pub mod qobject {
         /// Appends the effect at `effect` in `effect_names` to the strip.
         #[qinvokable]
         fn add_insert(self: Pin<&mut Mixer>, row: i32, effect: i32) -> bool;
-        /// Appends plugin `plugin` (a plugin id) of `format` ("clap",
-        /// "lv2" or "vst3") to the strip, as a device called `name`.
+        /// Appends plugin `plugin` (a plugin id) of `format` (a `formatId`
+        /// of `Plugins`, see `PluginFormatKind::as_str`) to the strip, as a
+        /// device called `name`.
         #[qinvokable]
         fn add_plugin_insert(
             self: Pin<&mut Mixer>,
@@ -411,7 +413,7 @@ impl qobject::Mixer {
         plugin: &QString,
         name: &QString,
     ) -> bool {
-        let format = format.to_string().parse();
+        let format = format.to_string().parse::<PluginFormatKind>();
         let (Some(id), Ok(format)) = (self.strip_id(row), format) else {
             return false;
         };

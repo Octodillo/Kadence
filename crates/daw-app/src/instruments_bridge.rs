@@ -10,6 +10,7 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
+use daw_core::plugin::PluginFormatKind;
 
 use crate::instrument::InstrumentChoice;
 use crate::model_roles;
@@ -49,8 +50,9 @@ pub mod qobject {
         #[qinvokable]
         fn refresh(self: Pin<&mut Instruments>);
 
-        /// The row of plugin `plugin` of `format` ("clap", "lv2" or
-        /// "vst3"), or -1. Call `refresh` first.
+        /// The row of plugin `plugin` of `format` (a `formatId` of
+        /// `Plugins`, see `PluginFormatKind::as_str`), or -1. Call `refresh`
+        /// first.
         #[qinvokable]
         fn row_of(self: &Instruments, format: &QString, plugin: &QString) -> i32;
     }
@@ -144,7 +146,7 @@ impl qobject::Instruments {
     }
 
     fn row_of(&self, format: &QString, plugin: &QString) -> i32 {
-        let Ok(format) = format.to_string().parse() else {
+        let Ok(format) = format.to_string().parse::<PluginFormatKind>() else {
             return -1;
         };
         let source = daw_model::DeviceSource::Plugin {
