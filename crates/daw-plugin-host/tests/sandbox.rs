@@ -82,7 +82,8 @@ fn format() -> SandboxFormat {
 fn descriptor() -> PluginDescriptor {
     let mut found = format()
         .scan(&test_plugin())
-        .expect("the test plugin loads");
+        .expect("the test plugin loads")
+        .plugins;
     assert_eq!(found.len(), 1, "one plugin in the test bundle");
     found.remove(0)
 }
@@ -1035,6 +1036,7 @@ fn a_new_rate_refreshes_parameter_ranges() {
     let d = format
         .scan(bundle.path())
         .expect("scan")
+        .plugins
         .into_iter()
         .find(|d| d.id == "http://drobilla.net/plugins/mda/Delay")
         .expect("scanned");

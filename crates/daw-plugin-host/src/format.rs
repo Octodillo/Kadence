@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use daw_core::plugin::{
-    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 use daw_plugins::{PluginRegistry, ScanError};
 
@@ -60,7 +60,7 @@ impl PluginFormat for SandboxFormat {
 
     /// Scans in a host process, so a plugin that crashes while loading fails the scan instead
     /// of taking the caller down.
-    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+    fn scan(&self, path: &Path) -> Result<BundleScan, PluginError> {
         self.config
             .launcher
             .scanner()

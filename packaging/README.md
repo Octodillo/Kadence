@@ -129,13 +129,13 @@ Plugins come from two places:
   VST3 plugins install into (as for Ardour and Zrythm).
 - `~/.clap`, `~/.lv2` and `~/.vst3`, read only.
 
-`CLAP_PATH` and `VST3_PATH` point at the extension's directories, and the
-CLAP and VST3 hosts search them before the standard locations. `LV2_PATH` is
-left unset, since it would replace lilv's defaults rather than add to them;
-instead the LV2 host adds `/app/extensions/Plugins/lv2` (and the app's own
-`/app/lib/lv2`) itself when it runs inside Flatpak (`/.flatpak-info` exists). It searches
-them after `~/.lv2`, so for LV2 (unlike CLAP and VST3) a copy of a plugin in
-the home directory wins over the extension's.
+The manifest sets no `CLAP_PATH`, `LV2_PATH` or `VST3_PATH`. When Kadence runs
+inside Flatpak (`/.flatpak-info` exists) every plugin host adds the
+extension's directory for its format (`/app/extensions/Plugins/clap`, `lv2`,
+`vst3`) and the app's own (`/app/lib/<format>`) to its search paths itself
+(`daw_core::plugin::default_search_paths`). They come after the home
+directory, so a copy of a plugin in `~/.clap`, `~/.lv2` or `~/.vst3` wins over
+the extension's.
 
 Plugins installed system-wide (`/usr/lib/{clap,lv2,vst3}`) are not visible
 inside the sandbox, so the native packages remain the better choice for

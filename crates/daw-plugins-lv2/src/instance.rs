@@ -1069,7 +1069,7 @@ mod tests {
         let found = format
             .scan(&dir.join(bundle))
             .ok()
-            .and_then(|plugins| plugins.into_iter().find(|d| d.id == id));
+            .and_then(|scan| scan.plugins.into_iter().find(|d| d.id == id));
         let Some(d) = found else {
             assert!(
                 std::env::var_os(daw_test_support::lv2::REQUIRE_ENV).is_none(),

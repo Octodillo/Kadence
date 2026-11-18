@@ -19,6 +19,7 @@ loom.workspace = true
 [dev-dependencies]
 daw-test-support.workspace = true
 proptest.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true
