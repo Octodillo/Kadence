@@ -14,7 +14,8 @@ use daw_core::plugin::{
     PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 use daw_plugin_host::{
-    CrashReason, HostLauncher, SandboxConfig, SandboxFormat, SandboxStatus, SandboxedInstance,
+    CrashReason, HostLauncher, Realtime, SandboxConfig, SandboxFormat, SandboxStatus,
+    SandboxedInstance,
 };
 use daw_test_support::no_alloc::assert_no_alloc;
 
@@ -1046,4 +1047,58 @@ fn a_new_rate_refreshes_parameter_ranges() {
     plugin.prepare(2.0 * SR, MAX);
     let info = output(&plugin);
     assert!((info.max - 0.45 * 2.0 * SR).abs() < 0.01, "{info:?}");
+}
+
+/// Whether the host's plugin-audio thread has a real-time policy, as the kernel tells it.
+fn audio_thread_is_realtime(pid: u32) -> bool {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("the host runs");
+    let audio = tasks
+        .filter_map(Result::ok)
+        .find(|t| {
+            std::fs::read_to_string(t.path().join("comm")).is_ok_and(|n| n.trim() == "plugin-audio")
+        })
+        .expect("the host has its audio thread");
+    let thread: libc::pid_t = audio.file_name().to_str().unwrap().parse().unwrap();
+    // SAFETY: plain syscall wrapper.
+    let policy = unsafe { libc::sched_getscheduler(thread) };
+    assert!(policy >= 0, "the thread's policy can be read");
+    // The kernel gives FIFO; a broker may give round-robin.
+    [libc::SCHED_FIFO, libc::SCHED_RR].contains(&(policy & !libc::SCHED_RESET_ON_FORK))
+}
+
+/// Pumps the instance until its host has an answer about its audio thread.
+fn scheduling(plugin: &mut SandboxedInstance) -> Realtime {
+    let monitor = plugin.monitor();
+    wait_for("an answer about real-time", Duration::from_secs(20), || {
+        plugin.on_main_thread();
+        monitor.realtime() != Realtime::Pending
+    });
+    monitor.realtime()
+}
+
+#[test]
+fn the_monitor_tells_how_the_hosts_audio_thread_is_scheduled() {
+    let mut plain = instance();
+    assert_eq!(scheduling(&mut plain), Realtime::Off);
+    assert!(!audio_thread_is_realtime(plain.monitor().pid()));
+
+    // Whether this machine grants it differs (a container may give it directly, a desktop
+    // through one of its brokers, a build machine not at all), but what the monitor says is
+    // what the kernel says.
+    let mut config = config();
+    config.rt_priority = Some(1);
+    let mut wanted = instance_with(config);
+    let pid = wanted.monitor().pid();
+    let answer = scheduling(&mut wanted);
+    assert_ne!(answer, Realtime::Off);
+    assert_eq!(answer.is_granted(), audio_thread_is_realtime(pid));
+
+    // A prepare starts the thread anew, and it is asked for again.
+    wanted.prepare(SR, MAX * 2);
+    let answer = scheduling(&mut wanted);
+    assert_ne!(answer, Realtime::Off);
+    assert_eq!(answer.is_granted(), audio_thread_is_realtime(pid));
+    // The plugin still plays.
+    let (out, _) = run(&mut wanted, 64, 0.5, &[]);
+    assert!(out[0].iter().all(|s| s.is_finite()));
 }
