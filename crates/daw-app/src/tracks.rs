@@ -18,6 +18,7 @@ use daw_model::{
 use crate::device_panel::ParamDesc;
 use crate::instrument::{self, InstrumentChoice};
 use crate::lanes::{LaneKind, LaneMode, TargetName, group_name, target_name};
+use crate::session_mixer;
 use crate::state::AppState;
 
 /// The kinds of track the list holds (the master is not in it).
@@ -77,6 +78,10 @@ pub struct HeaderRow {
     /// How a device parameter's value is worded; `None` for other rows
     /// and for parameters nothing describes.
     pub param: Option<ParamDesc>,
+    /// What the row's actions address in the Mixer: an effect's heading
+    /// its place among the strip's inserts, a send's level its place
+    /// among the strip's sends.
+    pub item: Option<usize>,
 }
 
 /// One track, as its header shows it.
@@ -98,6 +103,8 @@ pub struct TrackRow {
     /// The live MIDI an instrument track listens to.
     pub midi_input: MidiInput,
     pub instrument: Option<InstrumentRow>,
+    /// The track's strip among the Mixer's rows.
+    pub strip: Option<usize>,
     /// Whether the track shows the rows under it.
     pub expanded: bool,
     /// The rows under it while it is expanded.
@@ -133,6 +140,7 @@ impl AppState {
                     audio_input: t.audio_input,
                     midi_input: t.midi_input.clone(),
                     instrument,
+                    strip: session_mixer::strip_row(project, t.id),
                     expanded,
                     rows: if expanded {
                         self.header_rows(row)
@@ -160,6 +168,13 @@ impl AppState {
                 lane: None,
                 mode: LaneMode::Read,
                 param: None,
+                item: match g {
+                    Group::Device(id) => {
+                        let at = t.devices.iter().position(|d| d.id == id);
+                        at.and_then(|i| i.checked_sub(instrument::effects_start(t)))
+                    }
+                    _ => None,
+                },
             },
             RowKind::Control(target) => {
                 // The heading the row is under: the nearest shallower row.
@@ -211,6 +226,10 @@ impl AppState {
             lane,
             mode: lane.map_or(LaneMode::Read, |l| self.lane_mode(row as i32, l as i32)),
             param: self.target_param(row as i32, target),
+            item: match target {
+                AutomationTarget::SendLevel { send } => t.sends.iter().position(|s| s.id == send),
+                _ => None,
+            },
         }
     }
 

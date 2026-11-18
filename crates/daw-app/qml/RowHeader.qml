@@ -13,10 +13,18 @@ import io.github.octodillo.daw
 // itself, the mode of its automation lane (off, read, write) and, once it
 // has a lane, a button to remove that. The lane itself is drawn beside the
 // header, in the timeline; clicking there starts one.
+//
+// Headings and sends also do what the track's channel strip does with
+// them, through the Mixer: Effects adds an effect and Sends a send, an
+// effect or the instrument shows its settings, and an effect or a send
+// can be removed.
 Rectangle {
     id: rowHeader
 
     property int track: -1
+    // The track's strip among the Mixer's rows (the `strip` role of
+    // Tracks), for the Mixer's actions on it.
+    property int strip: -1
     // The row among the track's rows.
     property int index: -1
     // The row as one entry of the track's `rows` role (see Tracks).
@@ -33,6 +41,11 @@ Rectangle {
     readonly property int lane: info ? info.lane : -1
     // An Automation.LaneMode.
     readonly property int mode: info ? info.mode : Automation.LaneRead
+    // An effect heading's insert, or a send level's send, on the strip;
+    // -1 for other rows.
+    readonly property int item: info ? info.item : -1
+    readonly property bool isSend: kind === Automation.SendLane && item >= 0
+    readonly property bool isEffect: kind === Automation.DeviceGroup && item >= 0
 
     // The control as it is now: its value in its unit, and whether its
     // lane's points set it as it plays.
@@ -113,9 +126,21 @@ Rectangle {
         return "";
     }
 
-    // Closes the row's menu, if open.
+    // Closes the row's menus, if open.
     function dismiss(): void {
         rowMenu.dismiss();
+        effectMenu.dismiss();
+        sendMenu.dismiss();
+    }
+
+    // Opens the device panel on the effect or the instrument.
+    function showSettings(): void {
+        DevicePanel.open(isEffect ? Mixer.insertDevice(strip, item) : Mixer.instrumentDevice(strip));
+    }
+
+    // The strip's roles (see Mixer.get), read when a menu opens.
+    function stripInfo(): var {
+        return Mixer.get(strip);
     }
 
     // Like the timeline's rows under a track: a shade off the background.
@@ -173,6 +198,51 @@ Rectangle {
                     font: Kirigami.Theme.smallFont
                 }
             }
+        }
+
+        // Adds an effect (Effects) or a send (Sends) to the track.
+        QQC2.ToolButton {
+            id: addButton
+            visible: rowHeader.kind === Automation.EffectsGroup || rowHeader.kind === Automation.SendsGroup
+            Layout.alignment: Qt.AlignVCenter
+            icon.name: "list-add"
+            display: QQC2.AbstractButton.IconOnly
+            text: rowHeader.kind === Automation.EffectsGroup
+                ? i18nc("@action:button", "Add Effect")
+                : i18nc("@action:button", "Add Send")
+            onClicked: rowHeader.kind === Automation.EffectsGroup
+                ? effectMenu.popup(addButton, 0, addButton.height)
+                : sendMenu.popup(addButton, 0, addButton.height)
+            QQC2.ToolTip.text: text
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+        }
+
+        // The settings of an effect or of the instrument.
+        QQC2.ToolButton {
+            visible: rowHeader.isEffect || rowHeader.kind === Automation.InstrumentGroup
+            Layout.alignment: Qt.AlignVCenter
+            icon.name: "configure"
+            display: QQC2.AbstractButton.IconOnly
+            text: rowHeader.isEffect
+                ? i18nc("@action:button", "Show Effect Settings")
+                : i18nc("@action:button", "Show Instrument Settings")
+            onClicked: rowHeader.showSettings()
+            QQC2.ToolTip.text: text
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+        }
+
+        QQC2.ToolButton {
+            visible: rowHeader.isEffect
+            Layout.alignment: Qt.AlignVCenter
+            icon.name: "edit-delete-remove"
+            display: QQC2.AbstractButton.IconOnly
+            text: i18nc("@action:button", "Remove Effect")
+            onClicked: Mixer.removeInsert(rowHeader.strip, rowHeader.item)
+            QQC2.ToolTip.text: text
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         }
 
         QQC2.Label {
@@ -275,8 +345,25 @@ Rectangle {
     }
 
     LazyMenu {
+        id: effectMenu
+        menu: AddEffectMenu {
+            row: rowHeader.strip
+        }
+    }
+    LazyMenu {
+        id: sendMenu
+        menu: AddSendMenu {
+            row: rowHeader.strip
+            choices: rowHeader.stripInfo().sendChoices ?? []
+        }
+    }
+
+    LazyMenu {
         id: rowMenu
         menu: QQC2.Menu {
+            id: contextMenu
+            // The strip as the menu opened.
+            readonly property var stripInfo: rowHeader.stripInfo()
             QQC2.MenuItem {
                 visible: rowHeader.isGroup
                 height: visible ? implicitHeight : 0
@@ -291,6 +378,53 @@ Rectangle {
                 text: i18nc("@action:inmenu", "Remove Automation")
                 icon.name: "list-remove"
                 onTriggered: Automation.removeLane(rowHeader.track, rowHeader.lane)
+            }
+            QQC2.MenuItem {
+                visible: rowHeader.kind === Automation.EffectsGroup
+                height: visible ? implicitHeight : 0
+                text: i18nc("@action:inmenu", "Add Effect")
+                icon.name: "list-add"
+                onTriggered: effectMenu.popup(addButton, 0, addButton.height)
+            }
+            QQC2.MenuItem {
+                visible: rowHeader.kind === Automation.SendsGroup
+                height: visible ? implicitHeight : 0
+                enabled: (contextMenu.stripInfo.sendChoices ?? []).length > 0
+                text: i18nc("@action:inmenu", "Add Send")
+                icon.name: "list-add"
+                onTriggered: sendMenu.popup(addButton, 0, addButton.height)
+            }
+            QQC2.MenuItem {
+                visible: rowHeader.isEffect || rowHeader.kind === Automation.InstrumentGroup
+                height: visible ? implicitHeight : 0
+                text: rowHeader.isEffect
+                    ? i18nc("@action:inmenu", "Show Effect Settings")
+                    : i18nc("@action:inmenu", "Show Instrument Settings")
+                icon.name: "configure"
+                onTriggered: rowHeader.showSettings()
+            }
+            QQC2.MenuItem {
+                visible: rowHeader.isEffect
+                height: visible ? implicitHeight : 0
+                text: i18nc("@action:inmenu", "Remove Effect")
+                icon.name: "edit-delete-remove"
+                onTriggered: Mixer.removeInsert(rowHeader.strip, rowHeader.item)
+            }
+            // A send taps the track before or after its fader.
+            QQC2.MenuItem {
+                visible: rowHeader.isSend
+                height: visible ? implicitHeight : 0
+                checkable: true
+                checked: (contextMenu.stripInfo.sendPreFader ?? [])[rowHeader.item] === true
+                text: i18nc("@action:inmenu a send taken before the fader", "Pre-Fader")
+                onTriggered: Mixer.setSendPreFader(rowHeader.strip, rowHeader.item, checked)
+            }
+            QQC2.MenuItem {
+                visible: rowHeader.isSend
+                height: visible ? implicitHeight : 0
+                text: i18nc("@action:inmenu", "Remove Send")
+                icon.name: "edit-delete-remove"
+                onTriggered: Mixer.removeSend(rowHeader.strip, rowHeader.item)
             }
             QQC2.MenuItem {
                 text: i18nc("@action:inmenu", "Hide Controls")

@@ -2,8 +2,8 @@
 //! role plumbing the list models share.
 
 use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QList, QListElement, QModelIndex, QString,
-    QStringList, QVector,
+    QByteArray, QHash, QHashPair_i32_QByteArray, QList, QListElement, QMap,
+    QMapPair_QString_QVariant, QModelIndex, QString, QStringList, QVariant, QVector,
 };
 
 pub fn string_list<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> QStringList {
@@ -46,6 +46,18 @@ pub trait ModelRole: Copy + 'static {
         }
         names
     }
+}
+
+/// One item's roles by name, as a model's `get` gives them to code that is
+/// not a delegate: `value` answers each role.
+pub fn role_map<R: ModelRole>(
+    mut value: impl FnMut(R) -> QVariant,
+) -> QMap<QMapPair_QString_QVariant> {
+    let mut map = QMap::<QMapPair_QString_QVariant>::default();
+    for (role, name) in R::ALL {
+        map.insert(QString::from(*name), value(*role));
+    }
+    map
 }
 
 /// `Qt::UserRole`.

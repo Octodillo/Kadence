@@ -268,6 +268,44 @@ Item {
             shoot(window.title, "arrange-automation");
         },
         () => {
+            // The rows do what Bass's channel strip does: Effects adds an
+            // effect, which is its own heading there, and Sends a send.
+            const rows = () => Tracks.get(0).rows;
+            const strip = Tracks.get(0).strip;
+            check(strip >= 0 && Mixer.get(strip).name === Tracks.get(0).name, "a track knows its strip");
+            const effects = rows().findIndex(r => r.kind === Automation.EffectsGroup);
+            Automation.setRowOpen(0, effects, true);
+            const sends = rows().findIndex(r => r.kind === Automation.SendsGroup);
+            Automation.setRowOpen(0, sends, true);
+            check(Mixer.addInsert(strip, 0), "add an effect from the Effects row");
+            check(Mixer.get(strip).sendChoices.length > 0 && Mixer.addSend(strip, 0), "add a send from the Sends row");
+        },
+        () => {
+            const rows = () => Tracks.get(0).rows;
+            const strip = Tracks.get(0).strip;
+            const inserts = Mixer.get(strip).inserts.length;
+            const effect = rows().findIndex(r => r.kind === Automation.DeviceGroup && r.item === inserts - 1);
+            check(effect >= 0 && rows()[effect].depth === 1, "the new effect is a heading under Effects");
+            const send = rows().findIndex(r => r.kind === Automation.SendLane && r.item >= 0);
+            check(send >= 0 && rows()[send].depth === 1 && rows()[send].lane === -1, "the new send's level is a row under Sends");
+            // What the rows' Remove buttons do.
+            Mixer.removeSend(strip, rows()[send].item);
+            Mixer.removeInsert(strip, rows()[effect].item);
+        },
+        () => {
+            const strip = Tracks.get(0).strip;
+            const rows = Tracks.get(0).rows;
+            check(!rows.some(r => r.kind === Automation.SendLane) && Mixer.get(strip).sends.length === 0, "remove the send");
+            check(!rows.some(r => r.kind === Automation.DeviceGroup && r.item === Mixer.get(strip).inserts.length), "remove the effect");
+            // Back as the demo was.
+            for (let i = 0; i < 4; ++i) {
+                Project.undo();
+            }
+            Automation.setRowOpen(0, rows.findIndex(r => r.kind === Automation.SendsGroup), false);
+            const effects = Tracks.get(0).rows.findIndex(r => r.kind === Automation.EffectsGroup);
+            Automation.setRowOpen(0, effects, false);
+        },
+        () => {
             Automation.setExpanded(0, false);
             Automation.setExpanded(2, false);
             check(!Tracks.get(0).expanded, "lanes hidden");

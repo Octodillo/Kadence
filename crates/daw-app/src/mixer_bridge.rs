@@ -9,13 +9,14 @@ use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{
-    QHash, QHashPair_i32_QByteArray, QList, QModelIndex, QString, QStringList, QVariant, QVector,
+    QHash, QHashPair_i32_QByteArray, QList, QMap, QMapPair_QString_QVariant, QModelIndex, QString,
+    QStringList, QVariant, QVector,
 };
 use daw_core::plugin::PluginFormatKind;
 
 use crate::mixer::{Control, MeterBallistics, MeterDisplay, StripId, StripInfo, StripKind};
 use crate::model_roles;
-use crate::qt_lists::{ModelRole, list, role_numbers, row, string_list};
+use crate::qt_lists::{ModelRole, list, role_map, role_numbers, row, string_list};
 use crate::session_mixer::AppMixer;
 
 #[cxx_qt::bridge]
@@ -42,6 +43,8 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qstringlist.h");
         type QStringList = cxx_qt_lib::QStringList;
+        include!("cxx-qt-lib/qmap.h");
+        type QMap_QString_QVariant = cxx_qt_lib::QMap<cxx_qt_lib::QMapPair_QString_QVariant>;
     }
 
     /// The `kind` role.
@@ -181,6 +184,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_override]
         fn data(self: &Mixer, index: &QModelIndex, role: i32) -> QVariant;
+
+        /// The roles of the strip at `row` by name, for code that is not a
+        /// strip delegate (the arrange view's rows read a track's sends and
+        /// outputs); empty when there is no such row.
+        #[qinvokable]
+        fn get(self: &Mixer, row: i32) -> QMap_QString_QVariant;
 
         #[qinvokable]
         #[cxx_override]
@@ -596,73 +605,18 @@ impl qobject::Mixer {
             return QVariant::default();
         };
         let m = row(&self.meters, index).copied().unwrap_or_default();
-        let Some(role) = Role::from_qt(role) else {
-            return QVariant::default();
+        Role::from_qt(role).map_or_else(QVariant::default, |role| strip_value(s, &m, role))
+    }
+
+    fn get(&self, row: i32) -> QMap<QMapPair_QString_QVariant> {
+        let Some(r) = usize::try_from(row).ok() else {
+            return QMap::default();
         };
-        match role {
-            Role::Name => QVariant::from(&QString::from(s.name.as_str())),
-            Role::Kind => QVariant::from(&qml_kind(s.kind).repr),
-            Role::VolumeDb => QVariant::from(&s.volume_db),
-            Role::Pan => QVariant::from(&s.pan),
-            Role::Muted => QVariant::from(&s.muted),
-            Role::Soloed => QVariant::from(&s.soloed),
-            Role::Silenced => QVariant::from(&s.silenced),
-            Role::HasInstrument => QVariant::from(&s.has_instrument),
-            Role::Instrument => QVariant::from(&QString::from(
-                s.instrument.as_ref().map_or("", |i| i.name.as_str()),
-            )),
-            Role::InstrumentChoice => QVariant::from(
-                &s.instrument_choice
-                    .and_then(|i| i32::try_from(i).ok())
-                    .unwrap_or(-1),
-            ),
-            Role::Inserts => {
-                QVariant::from(&string_list(s.inserts.iter().map(|i| i.name.as_str())))
-            }
-            Role::InsertsEnabled => {
-                let mut on = QList::<bool>::default();
-                for i in &s.inserts {
-                    on.append(i.enabled);
-                }
-                QVariant::from(&on)
-            }
-            Role::InsertMeters => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
-            Role::Sends => {
-                QVariant::from(&string_list(s.sends.iter().map(|x| x.target_name.as_str())))
-            }
-            Role::SendLevels => {
-                let mut levels = QList::<f64>::default();
-                for x in &s.sends {
-                    levels.append(x.level_db);
-                }
-                QVariant::from(&levels)
-            }
-            Role::SendPreFader => {
-                let mut pre = QList::<bool>::default();
-                for x in &s.sends {
-                    pre.append(x.pre_fader);
-                }
-                QVariant::from(&pre)
-            }
-            Role::SendChoices => {
-                QVariant::from(&string_list(s.send_choices.iter().map(|c| c.name.as_str())))
-            }
-            Role::OutputChoices => QVariant::from(&string_list(
-                s.output_choices.iter().map(|c| c.name.as_str()),
-            )),
-            Role::OutputIndex => {
-                let i = s
-                    .output
-                    .as_ref()
-                    .and_then(|o| s.output_choices.iter().position(|c| c.id == o.id));
-                QVariant::from(&i.map_or(-1, |i| i as i32))
-            }
-            Role::LevelLeft => QVariant::from(&m.level[0]),
-            Role::LevelRight => QVariant::from(&m.level[1]),
-            Role::HoldLeft => QVariant::from(&m.hold[0]),
-            Role::HoldRight => QVariant::from(&m.hold[1]),
-            Role::GainReduction => QVariant::from(&m.gain_reduction_db.unwrap_or(-1.0)),
-        }
+        let Some(s) = self.strips.get(r) else {
+            return QMap::default();
+        };
+        let m = self.meters.get(r).copied().unwrap_or_default();
+        role_map(|role| strip_value(s, &m, role))
     }
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
@@ -671,5 +625,69 @@ impl qobject::Mixer {
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
         self.strips.len() as i32
+    }
+}
+
+/// What role `role` of strip `s`, metered as `m`, holds.
+fn strip_value(s: &StripInfo, m: &MeterDisplay, role: Role) -> QVariant {
+    match role {
+        Role::Name => QVariant::from(&QString::from(s.name.as_str())),
+        Role::Kind => QVariant::from(&qml_kind(s.kind).repr),
+        Role::VolumeDb => QVariant::from(&s.volume_db),
+        Role::Pan => QVariant::from(&s.pan),
+        Role::Muted => QVariant::from(&s.muted),
+        Role::Soloed => QVariant::from(&s.soloed),
+        Role::Silenced => QVariant::from(&s.silenced),
+        Role::HasInstrument => QVariant::from(&s.has_instrument),
+        Role::Instrument => QVariant::from(&QString::from(
+            s.instrument.as_ref().map_or("", |i| i.name.as_str()),
+        )),
+        Role::InstrumentChoice => QVariant::from(
+            &s.instrument_choice
+                .and_then(|i| i32::try_from(i).ok())
+                .unwrap_or(-1),
+        ),
+        Role::Inserts => QVariant::from(&string_list(s.inserts.iter().map(|i| i.name.as_str()))),
+        Role::InsertsEnabled => {
+            let mut on = QList::<bool>::default();
+            for i in &s.inserts {
+                on.append(i.enabled);
+            }
+            QVariant::from(&on)
+        }
+        Role::InsertMeters => QVariant::from(&s.inserts.iter().any(|i| i.has_gain_reduction)),
+        Role::Sends => QVariant::from(&string_list(s.sends.iter().map(|x| x.target_name.as_str()))),
+        Role::SendLevels => {
+            let mut levels = QList::<f64>::default();
+            for x in &s.sends {
+                levels.append(x.level_db);
+            }
+            QVariant::from(&levels)
+        }
+        Role::SendPreFader => {
+            let mut pre = QList::<bool>::default();
+            for x in &s.sends {
+                pre.append(x.pre_fader);
+            }
+            QVariant::from(&pre)
+        }
+        Role::SendChoices => {
+            QVariant::from(&string_list(s.send_choices.iter().map(|c| c.name.as_str())))
+        }
+        Role::OutputChoices => QVariant::from(&string_list(
+            s.output_choices.iter().map(|c| c.name.as_str()),
+        )),
+        Role::OutputIndex => {
+            let i = s
+                .output
+                .as_ref()
+                .and_then(|o| s.output_choices.iter().position(|c| c.id == o.id));
+            QVariant::from(&i.map_or(-1, |i| i as i32))
+        }
+        Role::LevelLeft => QVariant::from(&m.level[0]),
+        Role::LevelRight => QVariant::from(&m.level[1]),
+        Role::HoldLeft => QVariant::from(&m.hold[0]),
+        Role::HoldRight => QVariant::from(&m.hold[1]),
+        Role::GainReduction => QVariant::from(&m.gain_reduction_db.unwrap_or(-1.0)),
     }
 }

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 18:30+0000\n"
+"POT-Creation-Date: 2026-11-18 18:44+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -335,7 +335,7 @@ msgid "%1 ms"
 msgstr ""
 
 #: crates/daw-app/qml/ChannelStrip.qml crates/daw-app/qml/DevicePanelDrawer.qml
-#: crates/daw-app/qml/Main.qml
+#: crates/daw-app/qml/Main.qml crates/daw-app/qml/TrackHeader.qml
 msgctxt "@title name of the master bus"
 msgid "Master"
 msgstr ""
@@ -375,7 +375,7 @@ msgctxt "@action:button"
 msgid "Remove %1"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml
+#: crates/daw-app/qml/ChannelStrip.qml crates/daw-app/qml/RowHeader.qml
 msgctxt "@action:button"
 msgid "Add Effect"
 msgstr ""
@@ -430,7 +430,7 @@ msgctxt "@info:tooltip"
 msgid "Sends after the fader; click to send before it"
 msgstr ""
 
-#: crates/daw-app/qml/ChannelStrip.qml
+#: crates/daw-app/qml/ChannelStrip.qml crates/daw-app/qml/RowHeader.qml
 msgctxt "@action:button"
 msgid "Add Send"
 msgstr ""
@@ -1897,7 +1897,7 @@ msgctxt "@action:button %1 is an instrument name"
 msgid "Instrument: %1"
 msgstr ""
 
-#: crates/daw-app/qml/InstrumentButton.qml
+#: crates/daw-app/qml/InstrumentButton.qml crates/daw-app/qml/RowHeader.qml
 msgctxt "@action:inmenu"
 msgid "Show Instrument Settings"
 msgstr ""
@@ -2991,6 +2991,21 @@ msgid "Open: show every control"
 msgstr ""
 
 #: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:button"
+msgid "Show Effect Settings"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:button"
+msgid "Show Instrument Settings"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:button"
+msgid "Remove Effect"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
 msgctxt "@item:inlistbox automation lane mode"
 msgid "Off"
 msgstr ""
@@ -3035,6 +3050,36 @@ msgstr ""
 #: crates/daw-app/qml/RowHeader.qml
 msgctxt "@action:inmenu"
 msgid "Remove Automation"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu"
+msgid "Add Effect"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu"
+msgid "Add Send"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu"
+msgid "Show Effect Settings"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu"
+msgid "Remove Effect"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu a send taken before the fader"
+msgid "Pre-Fader"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu"
+msgid "Remove Send"
 msgstr ""
 
 #: crates/daw-app/qml/RowHeader.qml crates/daw-app/qml/TrackHeader.qml
@@ -3162,6 +3207,11 @@ msgstr ""
 #: crates/daw-app/qml/TrackHeader.qml
 msgctxt "@action:inmenu"
 msgid "Show Controls"
+msgstr ""
+
+#: crates/daw-app/qml/TrackHeader.qml
+msgctxt "@title:menu where the track's sound goes"
+msgid "Output"
 msgstr ""
 
 #: crates/daw-app/qml/TransportBar.qml
