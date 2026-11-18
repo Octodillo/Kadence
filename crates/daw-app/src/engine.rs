@@ -216,7 +216,7 @@ fn sandbox_loader(
 /// Where plugin scan results are kept, shared by the session's loader and
 /// the plugin browser's scan.
 pub(crate) fn plugin_cache_file() -> Option<PathBuf> {
-    Some(crate::user_dirs::cache()?.join("plugins.json"))
+    crate::paths::cache_dir().map(|dir| dir.join("plugins.json"))
 }
 
 /// The client name of a quiet run, set by [`use_quiet_audio`].

@@ -74,3 +74,22 @@ fn denormals() {
 fn recovers_from_non_finite_input() {
     check_recovers_from_non_finite(&mut Reverb::new());
 }
+
+/// Issue #178: the pre-delay tap jumped to a new time, cutting the signal
+/// that feeds the tank. It now glides there.
+#[test]
+fn pre_delay_changes_glide() {
+    let s = Setup::default();
+    let mut r = Reverb::new();
+    r.set_param(MIX, 1.0);
+    r.set_param(PRE_DELAY, 0.0);
+    let frames = 4 * 48000;
+    // 100 ms is half a cycle of the tone, so a jumping tap flips its sign.
+    let input = sine(5.0, 1.0, s.sample_rate, frames);
+    let change_at = 2 * 48000 + 2400;
+    let events = [(change_at, param(PRE_DELAY, 100.0))];
+    let out = render(&mut r, frames, &[input], &events, s);
+    let settled = steepest(&out.channels[0][48000..change_at]);
+    let changing = steepest(&out.channels[0][change_at..]);
+    assert!(changing < 2.0 * settled, "{changing} vs {settled}");
+}

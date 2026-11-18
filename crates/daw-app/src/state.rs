@@ -169,6 +169,24 @@ fn device_label(d: &daw_model::Device) -> String {
     }
 }
 
+/// What the views need to know about playback and the open bundle. Takes
+/// the state's fields one by one, so the caller can hand out a view and the
+/// document next to it.
+fn view_env<'a>(
+    engine: &'a dyn EngineHandle,
+    fallback_tempo: &'a SegmentTempoMap,
+    root: Option<&'a Path>,
+) -> Env<'a> {
+    let session = engine.session();
+    Env {
+        tempo: session.map_or(fallback_tempo, |s| s.tempo()),
+        sample_rate: session.map_or(48_000.0, |s| s.sample_rate()),
+        root,
+        playhead: session.map_or(TickTime(0), |s| s.position()),
+        loop_range: session.and_then(|s| s.loop_range()),
+    }
+}
+
 impl AppState {
     fn new() -> Self {
         Self::with_engine(default_engine())
@@ -446,7 +464,6 @@ impl AppState {
     /// once per revision and retried quietly every few seconds, in case it
     /// was passing (a full disk that was cleared).
     pub fn autosave(&mut self) {
-        const RETRY: Duration = Duration::from_secs(10);
         if self.shut_down {
             return;
         }
@@ -460,15 +477,25 @@ impl AppState {
             self.autosave_scratch();
             return;
         }
-        let revision = self.doc.revision();
-        let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
-        if let Some((r, at)) = self.autosave_failed
-            && r == revision
-            && at.elapsed() < RETRY
-        {
+        if self.autosave_retry_waits() {
             return;
         }
-        match self.doc.autosave() {
+        let result = self.doc.autosave();
+        self.autosave_tried(result);
+    }
+
+    /// Whether the autosave of this revision failed a moment ago and should
+    /// not be tried again yet.
+    fn autosave_retry_waits(&self) -> bool {
+        const RETRY: Duration = Duration::from_secs(10);
+        matches!(self.autosave_failed,
+            Some((revision, at)) if revision == self.doc.revision() && at.elapsed() < RETRY)
+    }
+
+    /// Takes note of how an autosave went; `Ok(true)` when it wrote one.
+    fn autosave_tried(&mut self, result: Result<bool, FormatError>) {
+        let revision = self.doc.revision();
+        match result {
             Ok(wrote) => {
                 self.autosave_failed = None;
                 // The next one waits a whole interval after this one.
@@ -477,6 +504,7 @@ impl AppState {
                 }
             }
             Err(e) => {
+                let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
                 self.autosave_failed = Some((revision, Instant::now()));
                 if !failed_here {
                     self.report(Message::File(Context::Autosave, e));
@@ -526,20 +554,11 @@ impl AppState {
     /// [`AppState::autosave`] for a project with no bundle: into the scratch
     /// folder, removed again when the project is back to unmodified.
     fn autosave_scratch(&mut self) {
-        const RETRY: Duration = Duration::from_secs(10);
         let Some(scratch) = &self.scratch else {
             return;
         };
         let at = (self.doc_serial, self.doc.revision());
-        if self.scratch_saved == Some(at) {
-            return;
-        }
-        let revision = self.doc.revision();
-        let failed_here = matches!(self.autosave_failed, Some((r, _)) if r == revision);
-        if let Some((r, when)) = self.autosave_failed
-            && r == revision
-            && when.elapsed() < RETRY
-        {
+        if self.scratch_saved == Some(at) || self.autosave_retry_waits() {
             return;
         }
         let result = if self.doc.is_modified() {
@@ -550,20 +569,11 @@ impl AppState {
                 source: e,
             })
         };
-        match result {
-            Ok(()) => {
-                self.scratch_saved = Some(at);
-                self.autosave_failed = None;
-                // The next one waits a whole interval after this one.
-                self.last_autosave = Some(Instant::now());
-            }
-            Err(e) => {
-                self.autosave_failed = Some((revision, Instant::now()));
-                if !failed_here {
-                    self.report(Message::File(Context::Autosave, e));
-                }
-            }
+        if result.is_ok() {
+            self.scratch_saved = Some(at);
         }
+        // Writing or removing: either way the folder is as it should be.
+        self.autosave_tried(result.map(|()| true));
     }
 
     /// Hands over the user's config and the scratch folder, and lists the
@@ -778,52 +788,25 @@ impl AppState {
         self.engine.session().map_or(48_000.0, |s| s.sample_rate())
     }
 
-    /// Calls `f` with the arrange view, the document and an [`Env`].
-    /// Ends an arrange drag in progress before an edit from elsewhere (undo,
-    /// a menu), so the drag doesn't merge with it or touch what it removed.
     /// Ends the drags in progress in the arrange view and the piano roll
-    /// before another edit.
+    /// before an edit from elsewhere (undo, a menu), so a drag doesn't merge
+    /// with it or touch what it removed.
     pub fn end_drag(&mut self) {
         self.arrange.end_drag(&mut self.doc);
         self.piano.end_drag(&mut self.doc);
     }
 
+    /// Calls `f` with the arrange view, the document and an [`Env`].
     pub fn with_arrange<R>(&mut self, f: impl FnOnce(&mut Arrange, &mut Document, &Env) -> R) -> R {
         let root = self.root();
-        let playhead = self.playhead();
-        let loop_range = self.loop_range();
-        let sample_rate = self.sample_rate();
-        let tempo = self
-            .engine
-            .session()
-            .map_or(&self.fallback_tempo, |s| s.tempo());
-        let env = Env {
-            tempo,
-            sample_rate,
-            root: root.as_deref(),
-            playhead,
-            loop_range,
-        };
+        let env = view_env(self.engine.as_ref(), &self.fallback_tempo, root.as_deref());
         f(&mut self.arrange, &mut self.doc, &env)
     }
 
     /// Calls `f` with the piano roll, the document and an [`Env`].
     pub fn with_piano<R>(&mut self, f: impl FnOnce(&mut PianoRoll, &mut Document, &Env) -> R) -> R {
         let root = self.root();
-        let playhead = self.playhead();
-        let loop_range = self.loop_range();
-        let sample_rate = self.sample_rate();
-        let tempo = self
-            .engine
-            .session()
-            .map_or(&self.fallback_tempo, |s| s.tempo());
-        let env = Env {
-            tempo,
-            sample_rate,
-            root: root.as_deref(),
-            playhead,
-            loop_range,
-        };
+        let env = view_env(self.engine.as_ref(), &self.fallback_tempo, root.as_deref());
         f(&mut self.piano, &mut self.doc, &env)
     }
 

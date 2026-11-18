@@ -23,9 +23,9 @@ use daw_model::{Bundle, FormatError, Project, bundle};
 const SCRATCH_FILE: &str = "Untitled.kadence.autosave";
 
 /// The folder scratch folders go in: `recovery` in Kadence's data folder
-/// (see [`crate::user_dirs::data`]).
+/// (see [`crate::paths::data_dir`]).
 pub fn default_base() -> Option<PathBuf> {
-    Some(crate::user_dirs::data()?.join("recovery"))
+    crate::paths::data_dir().map(|data| data.join("recovery"))
 }
 
 /// An exclusive advisory lock on a folder, held until dropped.

@@ -25,6 +25,7 @@ pub mod message;
 pub mod mixer;
 pub mod mixer_bridge;
 mod paint;
+mod paths;
 pub mod piano_roll;
 pub mod plugin_editors_bridge;
 pub mod plugins_bridge;
@@ -38,7 +39,6 @@ pub mod settings_bridge;
 pub mod state;
 mod test_helper;
 mod transport;
-mod user_dirs;
 
 /// Runs a plugin sandbox host or scanner if the arguments ask for one
 /// (`--plugin-host <socket>` or `--scan <format> <bundle>`), which the

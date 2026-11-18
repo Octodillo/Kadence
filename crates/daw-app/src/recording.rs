@@ -52,9 +52,11 @@ pub struct AudioRecording {
 }
 
 /// Where takes of an unsaved project go: `recordings` in Kadence's data
-/// folder, if the user has one (see [`crate::user_dirs::data`]).
+/// folder, if the user has one (see [`crate::paths::data_dir`]). Never the
+/// shared temporary folder, where another user of the machine could make
+/// the path first and read the takes.
 fn unsaved_recordings_dir() -> Result<PathBuf, Message> {
-    crate::user_dirs::data()
+    crate::paths::data_dir()
         .map(|data| data.join("recordings"))
         .ok_or(Message::Record(RecordProblem::NoTakeFolder))
 }
