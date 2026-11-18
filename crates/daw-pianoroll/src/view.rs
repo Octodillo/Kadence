@@ -1,53 +1,27 @@
-//! Piano-roll geometry, without any UI toolkit.
+//! Note-grid geometry: where notes are and what a pointer gesture on them
+//! means.
 //!
-//! The painted piano-roll item asks this module where things are and what a
-//! pointer gesture means; it never does the arithmetic itself. Horizontal
-//! zoom is pixels per beat (a quarter note), matching the arrange view.
-//! Keys run from 127 at the top to 0 at the bottom.
+//! [`PianoRoll`](crate::PianoRoll) asks this module where things are; it
+//! never does the arithmetic itself. Coordinates are relative to the note
+//! grid's top-left corner. The horizontal axis is the piano roll's
+//! [`TimelineView`], the one mapping between ticks and pixels that the
+//! ruler, the grid lines, the playhead and the automation lanes use too, so
+//! notes sit exactly on the lines drawn for their ticks. Keys run from 127
+//! at the top to 0 at the bottom.
 //!
 //! Note times are relative to the clip start, as in the model. The view
 //! works in timeline ticks, and `clip_start` maps between the two.
 
+use daw_arrange::{Rect, TimelineView};
 use daw_core::time::{PPQ, TickTime};
+use daw_midi::edit::{self, MIN_LENGTH, MIN_VELOCITY, Snap};
+use daw_midi::{EditNote, NoteData};
 
-use crate::edit::{self, MIN_LENGTH, Snap};
-use crate::note::{EditNote, NoteData};
-
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub struct Rect {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-}
-
-impl Rect {
-    /// A rectangle spanning two corners in any order.
-    pub fn from_corners(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
-        Self {
-            x: x0.min(x1),
-            y: y0.min(y1),
-            w: (x1 - x0).abs(),
-            h: (y1 - y0).abs(),
-        }
-    }
-
-    pub fn contains(&self, x: f64, y: f64) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
-    }
-
-    pub fn intersects(&self, o: &Rect) -> bool {
-        self.x < o.x + o.w && o.x < self.x + self.w && self.y < o.y + o.h && o.y < self.y + self.h
-    }
-}
-
-/// The visible part of the piano roll.
+/// The visible part of the note grid.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct PianoRollView {
-    /// Timeline tick at the left edge.
-    pub left: TickTime,
-    /// Horizontal zoom.
-    pub px_per_beat: f64,
+    /// Horizontal zoom and scroll.
+    pub time: TimelineView,
     /// Vertical scroll: pixels from the top of key 127's row to the top
     /// of the view.
     pub scroll_y: f64,
@@ -55,18 +29,6 @@ pub struct PianoRollView {
     pub key_height: f64,
     /// Where the edited clip starts on the timeline.
     pub clip_start: TickTime,
-}
-
-impl Default for PianoRollView {
-    fn default() -> Self {
-        Self {
-            left: TickTime(0),
-            px_per_beat: 80.0,
-            scroll_y: 0.0,
-            key_height: 14.0,
-            clip_start: TickTime(0),
-        }
-    }
 }
 
 /// Which part of a note the pointer is over.
@@ -86,23 +48,9 @@ pub struct Hit {
 }
 
 impl PianoRollView {
-    fn px_per_tick(&self) -> f64 {
-        self.px_per_beat / PPQ as f64
-    }
-
-    /// X of a timeline tick.
-    pub fn tick_to_x(&self, t: TickTime) -> f64 {
-        (t.0 - self.left.0) as f64 * self.px_per_tick()
-    }
-
-    /// Timeline tick at `x`, rounded to the nearest tick.
-    pub fn x_to_tick(&self, x: f64) -> TickTime {
-        TickTime(self.left.0 + (x / self.px_per_tick()).round() as i64)
-    }
-
-    /// Clip-relative tick at `x`.
+    /// Clip-relative tick under `x`.
     pub fn x_to_clip_tick(&self, x: f64) -> TickTime {
-        TickTime(self.x_to_tick(x).0 - self.clip_start.0)
+        TickTime(self.time.x_to_tick(x).0 - self.clip_start.0)
     }
 
     /// Top of `key`'s row.
@@ -118,19 +66,12 @@ impl PianoRollView {
 
     /// Where a note is drawn.
     pub fn note_rect(&self, n: &NoteData) -> Rect {
-        let x = self.tick_to_x(TickTime(self.clip_start.0 + n.start.0));
-        let w = n.length.0 as f64 * self.px_per_tick();
-        Rect {
-            x,
-            y: self.key_to_y(n.key),
-            w,
-            h: self.key_height,
-        }
-    }
-
-    /// The visible timeline ticks for a view `width` pixels wide.
-    pub fn visible_ticks(&self, width: f64) -> std::ops::Range<TickTime> {
-        self.left..TickTime(self.x_to_tick(width).0 + 1)
+        Rect::new(
+            self.time.tick_to_x(TickTime(self.clip_start.0 + n.start.0)),
+            self.key_to_y(n.key),
+            n.length.0 as f64 * self.time.px_per_tick(),
+            self.key_height,
+        )
     }
 
     /// The visible keys, lowest first, for a view `height` pixels tall.
@@ -171,7 +112,8 @@ impl PianoRollView {
 
     /// The note a click with the draw tool makes: on the clicked key,
     /// starting at the grid line at or before the pointer, `length` long
-    /// (one grid step when `None`).
+    /// (one grid step when `None`). `None` for a click before the clip
+    /// start, where a clip has no notes.
     pub fn new_note(
         &self,
         x: f64,
@@ -179,19 +121,23 @@ impl PianoRollView {
         snap: Option<&Snap>,
         length: Option<i64>,
         velocity: f64,
-    ) -> NoteData {
+    ) -> Option<NoteData> {
         let t = self.x_to_clip_tick(x);
+        if t.0 < 0 {
+            return None;
+        }
         let (start, step) = match snap {
-            Some(s) => (s.floor(t), s.step_at(t)),
+            // The grid line may lie before a clip that starts off the grid.
+            Some(s) => (s.floor(t).max(TickTime(0)), s.step_at(t)),
             None => (t, PPQ / 4),
         };
-        NoteData {
-            start: TickTime(start.0.max(0)),
+        Some(NoteData {
+            start,
             length: TickTime(length.unwrap_or(step).max(MIN_LENGTH)),
             key: self.y_to_key(y),
             channel: 0,
             velocity: edit::clamp_velocity(velocity),
-        }
+        })
     }
 }
 
@@ -236,10 +182,28 @@ impl Drag {
         grabbed: &N,
         selection: &[N],
     ) -> Self {
+        Self::begin_at(
+            kind,
+            view.time.x_to_tick(x),
+            view.y_to_key(y),
+            grabbed,
+            selection,
+        )
+    }
+
+    /// Starts a drag anchored at a timeline tick and a key rather than at
+    /// the pointer: the pointer's distance from there is what it moves by.
+    pub fn begin_at<N: EditNote>(
+        kind: DragKind,
+        anchor_tick: TickTime,
+        anchor_key: u8,
+        grabbed: &N,
+        selection: &[N],
+    ) -> Self {
         Self {
             kind,
-            anchor_tick: view.x_to_tick(x),
-            anchor_key: view.y_to_key(y),
+            anchor_tick,
+            anchor_key,
             grabbed: grabbed.data(),
             originals: selection.iter().map(|n| n.data()).collect(),
         }
@@ -256,7 +220,7 @@ impl Drag {
     ) -> Vec<NoteData> {
         // The anchor is a tick, so scrolling or zooming mid-drag keeps the
         // note under the pointer.
-        let raw = view.x_to_tick(x).0 - self.anchor_tick.0;
+        let raw = view.time.x_to_tick(x).0 - self.anchor_tick.0;
         let g = self.grabbed;
         let mut notes = self.originals.clone();
         match self.kind {
@@ -300,7 +264,8 @@ impl Drag {
 }
 
 /// The velocity lane under the piano roll: velocity 1 at the top, 0 at
-/// the bottom, one stem per note at its start.
+/// the bottom, one stem per note at its start. The lowest velocity it
+/// sets is [`MIN_VELOCITY`], at the bottom and below.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct VelocityLane {
     pub height: f64,
@@ -313,9 +278,9 @@ impl VelocityLane {
 
     pub fn y_to_velocity(&self, y: f64) -> f64 {
         if self.height <= 0.0 {
-            return 0.0;
+            return MIN_VELOCITY;
         }
-        (1.0 - y / self.height).clamp(0.0, 1.0)
+        (1.0 - y / self.height).clamp(MIN_VELOCITY, 1.0)
     }
 
     /// The stem nearest to `x`, within `tolerance_px`. Among stems at the
@@ -372,14 +337,16 @@ impl VelocityLane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{Grid, Meter};
+    use daw_midi::grid::{Grid, Meter};
 
     const Q: i64 = PPQ;
 
     fn view() -> PianoRollView {
         PianoRollView {
-            left: TickTime(0),
-            px_per_beat: 96.0,
+            time: TimelineView {
+                px_per_beat: 96.0,
+                scroll_x: 0.0,
+            },
             scroll_y: 0.0,
             key_height: 10.0,
             clip_start: TickTime(Q),
@@ -389,9 +356,8 @@ mod tests {
     #[test]
     fn coordinates_round_trip() {
         let v = view();
-        assert_eq!(v.tick_to_x(TickTime(Q)), 96.0);
-        assert_eq!(v.x_to_tick(48.0), TickTime(Q / 2));
-        assert_eq!(v.x_to_clip_tick(96.0), TickTime(0));
+        assert_eq!(v.x_to_clip_tick(96.5), TickTime(5));
+        assert_eq!(v.x_to_clip_tick(95.5), TickTime(-5));
         assert_eq!(v.key_to_y(127), 0.0);
         assert_eq!(v.key_to_y(60), 670.0);
         assert_eq!(v.y_to_key(675.0), 60);
@@ -401,15 +367,7 @@ mod tests {
             assert_eq!(v.y_to_key(v.key_to_y(key) + 1.0), key);
         }
         let r = v.note_rect(&NoteData::new(Q, Q / 2, 60, 1.0));
-        assert_eq!(
-            r,
-            Rect {
-                x: 192.0,
-                y: 670.0,
-                w: 48.0,
-                h: 10.0
-            }
-        );
+        assert_eq!(r, Rect::new(192.0, 670.0, 48.0, 10.0));
         assert_eq!(v.visible_keys(100.0), 117..=127);
     }
 
@@ -448,7 +406,7 @@ mod tests {
             })
         );
         assert_eq!(v.hit_test(&notes, 150.0, 665.0, 5.0), None);
-        let band = Rect::from_corners(200.0, 600.0, 150.0, 700.0);
+        let band = Rect::spanning(200.0, 600.0, 150.0, 700.0);
         assert_eq!(v.notes_in_rect(&notes, &band), [0]);
     }
 
@@ -511,12 +469,20 @@ mod tests {
         let meter = Meter::default();
         let snap = Snap::new(&grid, &meter, v.clip_start);
         let n = v.new_note(96.0 + 60.0, 675.0, Some(&snap), None, 0.7);
+        let n = n.unwrap();
         assert_eq!((n.start.0, n.length.0, n.key), (Q / 2, Q / 2, 60));
-        // Left of the clip start clamps to 0.
-        assert_eq!(
-            v.new_note(10.0, 675.0, Some(&snap), Some(10), 0.7).start.0,
-            0
-        );
+        // Left of the clip start there is no note to make.
+        assert_eq!(v.new_note(10.0, 675.0, Some(&snap), Some(10), 0.7), None);
+        assert_eq!(v.new_note(95.0, 675.0, None, None, 0.7), None);
+        // In a clip that starts off the grid, a click before its first
+        // grid line makes a note at the clip start.
+        let off_grid = PianoRollView {
+            clip_start: TickTime(Q + 100),
+            ..v
+        };
+        let snap = Snap::new(&grid, &meter, off_grid.clip_start);
+        let n = off_grid.new_note(96.0 + 15.0, 675.0, Some(&snap), None, 0.7);
+        assert_eq!(n.unwrap().start.0, 0);
     }
 
     #[test]
@@ -535,7 +501,12 @@ mod tests {
         let changed = lane.draw_line(&v, &mut notes, (96.0, 100.0), (288.0, 0.0));
         assert_eq!(changed, [0, 1, 2]);
         let vel: Vec<f64> = notes.iter().map(|n| n.velocity).collect();
-        assert_eq!(vel, [0.0, 0.5, 1.0]);
+        assert_eq!(vel, [MIN_VELOCITY, 0.5, 1.0]);
+        assert_eq!(lane.y_to_velocity(1e9), MIN_VELOCITY);
+        assert_eq!(
+            VelocityLane { height: 0.0 }.y_to_velocity(0.0),
+            MIN_VELOCITY
+        );
     }
 
     #[test]
@@ -544,11 +515,11 @@ mod tests {
         let sel = [NoteData::new(0, 100, 60, 1.0)];
         let d = Drag::begin(DragKind::Move, &v, 100.0, 675.0, &sel[0], &sel);
         // Autoscroll one beat to the right while the pointer stays put.
-        v.left = TickTime(Q);
+        v.time.scroll_x = 96.0;
         assert_eq!(d.update(&v, 100.0, 675.0, None)[0].start.0, Q);
         // Zoom in 2x around the left edge: the same x is now half as far.
-        v.left = TickTime(0);
-        v.px_per_beat *= 2.0;
+        v.time.scroll_x = 0.0;
+        v.time.px_per_beat *= 2.0;
         assert_eq!(d.update(&v, 200.0, 675.0, None)[0].start.0, 0);
     }
 }

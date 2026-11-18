@@ -9,13 +9,12 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector,
-};
+use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector};
 use daw_session::PluginStatus;
 
 use crate::device_panel::{AppDevicePanel, DeviceView, ParamView};
-use crate::qt_lists::string_list;
+use crate::model_roles;
+use crate::qt_lists::{ModelRole, string_list};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -45,6 +44,8 @@ pub mod qobject {
         #[base = QAbstractListModel]
         #[qml_element]
         #[qml_singleton]
+        /// A built-in device's level at or below this many dB is silent.
+        #[qproperty(f64, silent_db, READ = silent_db, CONSTANT)]
         /// A device is open.
         #[qproperty(bool, active, READ, NOTIFY)]
         #[qproperty(QString, device_id, READ, NOTIFY)]
@@ -73,6 +74,8 @@ pub mod qobject {
         /// own words (English).
         #[qproperty(QString, plugin_error, READ, NOTIFY)]
         type DevicePanel = super::DevicePanelRust;
+
+        fn silent_db(self: &DevicePanel) -> f64;
 
         /// Opens the device with this id. Returns false if there is none.
         #[qinvokable]
@@ -152,28 +155,29 @@ pub mod qobject {
     }
 }
 
-/// Model roles, after Qt::UserRole.
-const ROLES: &[&str] = &[
-    "paramId",
-    "name",
-    "value",
-    // Slider position from 0 to 1, along the taper.
-    "position",
-    "defaultValue",
-    "minimum",
-    "maximum",
-    // "continuous", "integer", "toggle" or "choice".
-    "control",
-    // See `ParamDesc::unit_name`.
-    "unit",
-    "choices",
-    "isDefault",
-    // An automation lane plays the parameter.
-    "automated",
-    // Moving it during playback records into its lane.
-    "writable",
-];
-const USER_ROLE: i32 = 0x0100;
+model_roles!(
+    /// What a parameter delegate reads.
+    enum Role {
+        ParamId => "paramId",
+        Name => "name",
+        Value => "value",
+        /// Slider position from 0 to 1, along the taper.
+        Position => "position",
+        DefaultValue => "defaultValue",
+        Minimum => "minimum",
+        Maximum => "maximum",
+        /// "continuous", "integer", "toggle" or "choice".
+        Control => "control",
+        /// See `ParamDesc::unit_name`.
+        Unit => "unit",
+        Choices => "choices",
+        IsDefault => "isDefault",
+        /// An automation lane plays the parameter.
+        Automated => "automated",
+        /// Moving it during playback records into its lane.
+        Writable => "writable",
+    }
+);
 
 #[derive(Default)]
 pub struct DevicePanelRust {
@@ -199,6 +203,10 @@ pub struct DevicePanelRust {
 }
 
 impl qobject::DevicePanel {
+    fn silent_db(&self) -> f64 {
+        daw_devices::dsp::DEVICE_FLOOR_DB
+    }
+
     fn params(&self) -> &[ParamView] {
         self.view.as_ref().map_or(&[], |v| &v.params)
     }
@@ -311,8 +319,11 @@ impl qobject::DevicePanel {
     /// Re-reads the open device: signals the rows that changed, or resets
     /// the model when the parameters themselves did.
     fn reload(mut self: Pin<&mut Self>) {
-        let view = self.panel.view();
+        // The revision first: reading it brings the plugin's parameters
+        // and values up to date, and the view must not be older than the
+        // revision kept for it, or `refresh` would never show the rest.
         let revision = self.panel.revision();
+        let view = self.panel.view();
         self.as_mut().rust_mut().revision = revision;
         if view == self.view {
             return;
@@ -405,30 +416,28 @@ impl qobject::DevicePanel {
             return QVariant::default();
         };
         let d = &p.desc;
-        match ROLES.get((role - USER_ROLE) as usize).copied() {
-            Some("paramId") => QVariant::from(&(d.id as i32)),
-            Some("name") => QVariant::from(&QString::from(d.name.as_str())),
-            Some("value") => QVariant::from(&p.value),
-            Some("position") => QVariant::from(&d.to_normalized(p.value)),
-            Some("defaultValue") => QVariant::from(&d.default),
-            Some("minimum") => QVariant::from(&d.min),
-            Some("maximum") => QVariant::from(&d.max),
-            Some("control") => QVariant::from(&QString::from(d.control_name())),
-            Some("unit") => QVariant::from(&QString::from(d.unit_name())),
-            Some("choices") => QVariant::from(&string_list(d.choices())),
-            Some("isDefault") => QVariant::from(&p.is_default()),
-            Some("automated") => QVariant::from(&p.automated),
-            Some("writable") => QVariant::from(&p.writable),
-            _ => QVariant::default(),
+        let Some(role) = Role::from_qt(role) else {
+            return QVariant::default();
+        };
+        match role {
+            Role::ParamId => QVariant::from(&(d.id as i32)),
+            Role::Name => QVariant::from(&QString::from(d.name.as_str())),
+            Role::Value => QVariant::from(&p.value),
+            Role::Position => QVariant::from(&d.to_normalized(p.value)),
+            Role::DefaultValue => QVariant::from(&d.default),
+            Role::Minimum => QVariant::from(&d.min),
+            Role::Maximum => QVariant::from(&d.max),
+            Role::Control => QVariant::from(&QString::from(d.control_name())),
+            Role::Unit => QVariant::from(&QString::from(d.unit_name())),
+            Role::Choices => QVariant::from(&string_list(d.choices())),
+            Role::IsDefault => QVariant::from(&p.is_default()),
+            Role::Automated => QVariant::from(&p.automated),
+            Role::Writable => QVariant::from(&p.writable),
         }
     }
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
-        let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
-        for (i, name) in ROLES.iter().enumerate() {
-            roles.insert(USER_ROLE + i as i32, QByteArray::from(*name));
-        }
-        roles
+        Role::names()
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {

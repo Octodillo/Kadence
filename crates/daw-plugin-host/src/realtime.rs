@@ -237,7 +237,7 @@ pub(crate) fn current_thread() -> libc::pid_t {
 /// Gives a thread of this process real-time scheduling at `priority`, or the highest
 /// priority below it that is allowed: `SCHED_FIFO` from the kernel, or whatever policy a
 /// broker gives (RealtimeKit's default is `SCHED_RR`). It may take as long as the brokers
-/// take to answer. With `explain`, a refusal is written to stderr with each route's reason.
+/// take to answer. With `explain`, a refusal is logged with each route's reason.
 fn promote(thread: libc::pid_t, priority: i32, explain: bool) -> Realtime {
     let direct = match promote_directly(thread, priority) {
         Ok(()) => return Realtime::Direct,
@@ -253,10 +253,7 @@ fn promote(thread: libc::pid_t, priority: i32, explain: bool) -> Realtime {
         }
     }
     if explain {
-        eprintln!(
-            "daw-plugin-host: real-time priority {priority} not granted, audio may glitch \
-             ({reasons})"
-        );
+        log::warn!("real-time priority {priority} not granted, audio may glitch ({reasons})");
     }
     Realtime::Refused
 }

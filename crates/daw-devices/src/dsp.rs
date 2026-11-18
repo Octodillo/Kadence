@@ -3,23 +3,20 @@
 
 use std::f64::consts::PI;
 
-/// Decibel values at or below this are treated as silence.
-pub const MIN_DB: f64 = -70.0;
+use daw_core::level;
 
-pub fn db_to_gain(db: f64) -> f64 {
-    if db <= MIN_DB {
-        0.0
-    } else {
-        10f64.powf(db / 20.0)
-    }
+/// The bottom of a device's dB parameters: this level and anything below it
+/// is silence, and shows as "-inf dB".
+pub const DEVICE_FLOOR_DB: f64 = -70.0;
+
+/// Linear gain for a device parameter in dB, silent at [`DEVICE_FLOOR_DB`].
+pub fn device_gain(db: f64) -> f64 {
+    level::db_to_gain_above(db, DEVICE_FLOOR_DB)
 }
 
-pub fn gain_to_db(gain: f64) -> f64 {
-    if gain <= 0.0 {
-        MIN_DB
-    } else {
-        (20.0 * gain.log10()).max(MIN_DB)
-    }
+/// A linear gain as a device level in dB, never below [`DEVICE_FLOOR_DB`].
+pub fn device_db(gain: f64) -> f64 {
+    level::gain_to_db_above(gain, DEVICE_FLOOR_DB)
 }
 
 /// Flush values too small to hear to zero, so recursive state never decays
@@ -43,59 +40,76 @@ pub fn flush64(x: f64) -> f64 {
     }
 }
 
-/// Coefficient for a one-pole filter that moves ~63% of the way in `ms`.
-pub fn one_pole_coef(ms: f64, sample_rate: f64) -> f32 {
+/// What is left, after one sample, of a value that decays to 1/e (~37%) in
+/// `ms`. No time at all leaves nothing.
+fn decay_per_sample(ms: f64, sample_rate: f64) -> f64 {
     if ms <= 0.0 || sample_rate <= 0.0 {
-        return 1.0;
+        return 0.0;
     }
-    (1.0 - (-1000.0 / (ms * sample_rate)).exp()) as f32
+    (-1000.0 / (ms * sample_rate)).exp()
+}
+
+/// Factor that, applied every sample, decays a value to 1/e (~37%) in `ms`:
+/// an envelope's release, or `y = target + (y - target) * coef` for a follower.
+pub fn decay_coef(ms: f64, sample_rate: f64) -> f32 {
+    decay_per_sample(ms, sample_rate) as f32
+}
+
+/// Coefficient for a one-pole filter that moves ~63% of the way in `ms`:
+/// `y += (target - y) * coef`. The complement of [`decay_coef`].
+pub fn one_pole_coef(ms: f64, sample_rate: f64) -> f32 {
+    (1.0 - decay_per_sample(ms, sample_rate)) as f32
 }
 
 /// One-pole parameter smoother, used to avoid zipper noise.
+///
+/// The state is `f64` whatever the size of the value: in `f32` a glide over a
+/// large value, like a delay time in samples, stalls many samples short of
+/// the target and would have to jump the rest of the way.
 #[derive(Clone, Copy, Debug)]
 pub struct Smoother {
-    current: f32,
-    target: f32,
-    coef: f32,
+    current: f64,
+    target: f64,
+    coef: f64,
 }
 
 impl Smoother {
     pub fn new(value: f32) -> Self {
         Self {
-            current: value,
-            target: value,
+            current: value as f64,
+            target: value as f64,
             coef: 1.0,
         }
     }
 
     pub fn set_time(&mut self, ms: f64, sample_rate: f64) {
-        self.coef = one_pole_coef(ms, sample_rate);
+        self.coef = one_pole_coef(ms, sample_rate) as f64;
     }
 
     pub fn set_target(&mut self, value: f32) {
-        self.target = value;
+        self.target = value as f64;
     }
 
     pub fn reset(&mut self, value: f32) {
-        self.current = value;
-        self.target = value;
+        self.current = value as f64;
+        self.target = value as f64;
     }
 
     pub fn target(&self) -> f32 {
-        self.target
+        self.target as f32
     }
 
     #[inline]
     pub fn tick(&mut self) -> f32 {
         let next = self.current + (self.target - self.current) * self.coef;
-        // Snap once a step no longer moves the value (or is inaudibly small),
-        // so large values like delay times don't stall short of the target.
+        // Finish the glide once the rest is inaudibly small (or a step no
+        // longer moves the value), so the state settles instead of creeping.
         if next == self.current || (self.target - next).abs() < 1e-6 {
             self.current = self.target;
         } else {
             self.current = next;
         }
-        self.current
+        self.current as f32
     }
 }
 
@@ -323,6 +337,9 @@ pub struct DelayLine {
     buf: Vec<f32>,
     mask: usize,
     write: usize,
+    /// Samples pushed since the last clear, up to the buffer length. Older
+    /// taps read as silence, which lets `clear` leave the buffer alone.
+    filled: usize,
 }
 
 impl DelayLine {
@@ -333,6 +350,7 @@ impl DelayLine {
             buf: vec![0.0; len],
             mask: len - 1,
             write: 0,
+            filled: 0,
         }
     }
 
@@ -348,24 +366,33 @@ impl DelayLine {
         }
         self.write = (self.write + 1) & self.mask;
         self.buf[self.write] = flush(x);
+        self.filled = (self.filled + 1).min(self.buf.len());
+    }
+
+    /// Sample written `age` pushes ago; silence if that is before the last clear.
+    #[inline]
+    fn tap(&self, age: usize) -> f32 {
+        if age < self.filled {
+            self.buf[self.write.wrapping_sub(age) & self.mask]
+        } else {
+            0.0
+        }
     }
 
     /// Sample written `delay` pushes ago (0 = the latest), linearly interpolated.
     #[inline]
     pub fn read(&self, delay: f32) -> f32 {
-        if self.buf.is_empty() {
-            return 0.0;
-        }
         let d = delay.clamp(0.0, self.max_delay() as f32);
         let i = d as usize;
         let frac = d - i as f32;
-        let a = self.buf[(self.write.wrapping_sub(i)) & self.mask];
-        let b = self.buf[(self.write.wrapping_sub(i + 1)) & self.mask];
+        let (a, b) = (self.tap(i), self.tap(i + 1));
         a + (b - a) * frac
     }
 
+    /// Forget everything pushed so far. Constant time, so a long line can be
+    /// cleared on the real-time thread.
     pub fn clear(&mut self) {
-        self.buf.fill(0.0);
+        self.filled = 0;
     }
 }
 
@@ -592,26 +619,27 @@ mod tests {
 
     #[test]
     fn db_conversions() {
-        assert_eq!(db_to_gain(0.0), 1.0);
-        assert!((db_to_gain(-6.0) - 0.501_187).abs() < 1e-5);
-        assert_eq!(db_to_gain(MIN_DB), 0.0);
-        assert!((gain_to_db(0.5) + 6.0206).abs() < 1e-3);
+        assert_eq!(device_gain(0.0), 1.0);
+        assert!((device_gain(-6.0) - 0.501_187).abs() < 1e-5);
+        assert_eq!(device_gain(DEVICE_FLOOR_DB), 0.0);
+        assert_eq!(device_db(0.0), DEVICE_FLOOR_DB);
+        assert!((device_db(0.5) + 6.0206).abs() < 1e-3);
     }
 
     #[test]
     fn biquad_designs_hit_their_targets() {
         let sr = 48000.0;
         let p = BiquadCoefs::peaking(sr, 1000.0, 1.0, 6.0);
-        assert!((gain_to_db(p.magnitude(sr, 1000.0)) - 6.0).abs() < 1e-6);
+        assert!((device_db(p.magnitude(sr, 1000.0)) - 6.0).abs() < 1e-6);
         let ls = BiquadCoefs::low_shelf(sr, 200.0, 0.707, -12.0);
-        assert!((gain_to_db(ls.magnitude(sr, 10.0)) + 12.0).abs() < 0.1);
-        assert!(gain_to_db(ls.magnitude(sr, 10000.0)).abs() < 0.1);
+        assert!((device_db(ls.magnitude(sr, 10.0)) + 12.0).abs() < 0.1);
+        assert!(device_db(ls.magnitude(sr, 10000.0)).abs() < 0.1);
         let hs = BiquadCoefs::high_shelf(sr, 5000.0, 0.707, 9.0);
-        assert!((gain_to_db(hs.magnitude(sr, 20000.0)) - 9.0).abs() < 0.2);
+        assert!((device_db(hs.magnitude(sr, 20000.0)) - 9.0).abs() < 0.2);
         let lp = BiquadCoefs::low_pass(sr, 1000.0, std::f64::consts::FRAC_1_SQRT_2);
-        assert!((gain_to_db(lp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
+        assert!((device_db(lp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
         let hp = BiquadCoefs::high_pass(sr, 1000.0, std::f64::consts::FRAC_1_SQRT_2);
-        assert!((gain_to_db(hp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
+        assert!((device_db(hp.magnitude(sr, 1000.0)) + 3.01).abs() < 0.05);
     }
 
     #[test]
@@ -623,6 +651,57 @@ mod tests {
         assert_eq!(d.read(0.0), 9.0);
         assert_eq!(d.read(3.0), 6.0);
         assert_eq!(d.read(3.5), 5.5);
+    }
+
+    /// Issue #177: `clear` zeroed the whole buffer, megabytes for the Delay
+    /// device, on the audio thread. It now only forgets what was pushed.
+    #[test]
+    fn delay_line_clears_without_touching_the_buffer() {
+        let mut d = DelayLine::new(100);
+        for _ in 0..300 {
+            d.push(1.0);
+        }
+        d.clear();
+        assert!(d.buf.iter().all(|&x| x == 1.0), "clear rewrote the buffer");
+        let silent = |d: &DelayLine, from: usize| {
+            (from..=d.max_delay()).all(|i| d.read(i as f32) == 0.0 && d.read(i as f32 + 0.5) == 0.0)
+        };
+        assert!(silent(&d, 0));
+        // Only what is pushed after the clear reads back, interpolating
+        // towards silence at its far end.
+        d.push(0.5);
+        d.push(0.25);
+        assert_eq!(d.read(0.0), 0.25);
+        assert_eq!(d.read(1.0), 0.5);
+        assert_eq!(d.read(1.5), 0.25);
+        assert!(silent(&d, 2));
+        // Once the line has wrapped, every tap is live again.
+        for _ in 0..300 {
+            d.push(0.5);
+        }
+        assert!((0..=d.max_delay()).all(|i| d.read(i as f32) == 0.5));
+    }
+
+    /// Issue #178: in `f32` a glide over a large value stalled short of the
+    /// target and then jumped there, 37.5 samples for this delay time change.
+    #[test]
+    fn smoother_arrives_without_a_jump() {
+        let mut s = Smoother::new(96000.0);
+        s.set_time(50.0, 96000.0);
+        s.set_target(192000.0);
+        let (mut last, mut last_step) = (96000.0f32, f32::MAX);
+        for _ in 0..4 * 96000 {
+            let v = s.tick();
+            let step = v - last;
+            // A one-pole glide only ever slows down. Allow for the rounding
+            // of the `f32` output, 1/64 sample at this size.
+            assert!(
+                (0.0..=last_step + 0.04).contains(&step),
+                "stepped {step} after {last_step} at {last}"
+            );
+            (last, last_step) = (v, step);
+        }
+        assert_eq!(last, 192000.0);
     }
 
     #[test]

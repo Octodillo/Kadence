@@ -4,7 +4,7 @@
 use daw_core::event::ParamId;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Biquad, BiquadCoefs, Smoother, db_to_gain, gain_to_db};
+use crate::dsp::{Biquad, BiquadCoefs, Smoother, device_db, device_gain};
 use crate::events::{Segmented, input, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
@@ -216,7 +216,7 @@ impl ParametricEq {
     fn apply_param(&mut self, id: ParamId) {
         if id == OUTPUT {
             self.output
-                .set_target(db_to_gain(self.params.get(OUTPUT)) as f32);
+                .set_target(device_gain(self.params.get(OUTPUT)) as f32);
         } else {
             self.coefs = self.design();
         }
@@ -229,7 +229,7 @@ impl ParametricEq {
             .iter()
             .map(|c| c.magnitude(self.sample_rate, freq))
             .product();
-        gain_to_db(lin) + self.params.get(OUTPUT)
+        device_db(lin) + self.params.get(OUTPUT)
     }
 }
 
@@ -240,10 +240,6 @@ impl_device!(ParametricEq, INFO, PARAMS, {
 });
 
 impl Segmented for ParametricEq {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         for i in start..end {
             let g = self.output.tick();
@@ -274,7 +270,7 @@ impl Node for ParametricEq {
         self.coefs = self.design();
         self.output.set_time(10.0, sample_rate);
         self.output
-            .reset(db_to_gain(self.params.get(OUTPUT)) as f32);
+            .reset(device_gain(self.params.get(OUTPUT)) as f32);
         self.reset();
     }
 

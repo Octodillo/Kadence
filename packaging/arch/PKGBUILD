@@ -4,6 +4,10 @@
 # Development package built from git. `KADENCE_SOURCE` overrides where the
 # source comes from, so CI can build the checkout it is testing:
 #   KADENCE_SOURCE="git+file://$PWD#commit=$(git rev-parse HEAD)" makepkg
+#
+# The release package (kadence) is this file with the "kadence-git only"
+# part below swapped for the release tarball: ./release-pkgbuild.sh writes
+# it, so everything outside that part is shared by both.
 
 pkgname=kadence-git
 _appid=io.github.octodillo.daw
@@ -13,8 +17,9 @@ pkgdesc='Digital audio workstation for KDE Plasma'
 arch=(x86_64 aarch64)
 url='https://github.com/Octodillo/Kadence'
 # Kadence, plus the crates statically linked into it (symphonia is MPL-2.0).
-# Their notices are in THIRD-PARTY-LICENSES next to LICENSE.
-license=(GPL-3.0-or-later MPL-2.0 Apache-2.0 MIT Zlib)
+# Their notices are in THIRD-PARTY-LICENSES next to LICENSE. CI fails when
+# this stops covering them (packaging/check-license-fields.py).
+license=(GPL-3.0-or-later MPL-2.0 Apache-2.0 MIT ISC Zlib)
 depends=(
   glibc
   hicolor-icon-theme
@@ -38,7 +43,6 @@ makedepends=(
   clang
   cmake
   extra-cmake-modules
-  git
   lld
   ninja
   python
@@ -46,29 +50,35 @@ makedepends=(
 optdepends=(
   'breeze-icons: icons outside Plasma'
 )
+options=(!lto !debug)
+
+# >>> kadence-git only
+makedepends+=(git)
 provides=(kadence)
 conflicts=(kadence)
-options=(!lto !debug)
-source=("kadence::${KADENCE_SOURCE:-git+$url.git}")
+_srcdir=kadence
+source=("$_srcdir::${KADENCE_SOURCE:-git+$url.git}")
 sha256sums=(SKIP)
 
 pkgver() {
-  cd kadence
+  cd "$_srcdir"
   local version
   version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
   printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
 }
 
 prepare() {
-  cd kadence
+  cd "$_srcdir"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
+# <<< kadence-git only
 
 build() {
   export RUSTUP_TOOLCHAIN=stable
+  # prepare() fetched the crates, or the release tarball vendors them.
   export CARGO_NET_OFFLINE=true
-  cmake -S kadence -B build -G Ninja \
+  cmake -S "$_srcdir" -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=None \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DKADENCE_LICENSE_DIR="share/licenses/$pkgname"

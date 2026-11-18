@@ -8,59 +8,46 @@ use clack_host::events::spaces::CoreEventSpace;
 use clack_host::events::{EventFlags, EventHeader, Match, Pckn, UnknownEvent};
 use clack_host::prelude::*;
 use clack_host::utils::{BeatTime, SecondsTime};
-use daw_core::event::{Event, EventKind, EventList, NoteId, all_notes_off};
+use daw_core::event::{Event, EventKind, EventList, NoteId, midi};
 use daw_core::node::TransportState;
 
 /// Pushes the CLAP form of `e`, at `frame`, into `out`. Notes become MIDI when the plugin's note
-/// port does not speak the CLAP note dialect.
+/// port does not speak the CLAP note dialect, and a note in raw MIDI is a note like any other.
+/// Malformed MIDI is not passed on.
 pub(crate) fn push_clap(out: &mut EventBuffer, e: &Event, frame: u32, notes_as_midi: bool) {
-    match e.kind {
+    let kind = match e.kind {
+        EventKind::Midi(raw) => match midi::decode_padded(raw) {
+            Some(kind) => kind,
+            None => return,
+        },
+        kind => kind,
+    };
+    match kind {
         EventKind::NoteOn {
             channel,
             key,
             velocity,
             note_id,
-        } => {
-            if notes_as_midi {
-                out.push(&MidiEvent::new(
-                    frame,
-                    0,
-                    // Velocity 0 would turn a quiet note on into a note off.
-                    [
-                        0x90 | (channel & 0x0f),
-                        key & 0x7f,
-                        midi_velocity(velocity).max(1),
-                    ],
-                ));
-            } else {
-                out.push(&NoteOnEvent::new(
-                    frame,
-                    pckn(channel, key, note_id),
-                    f64::from(velocity),
-                ));
-            }
-        }
+        } if !notes_as_midi => out.push(&NoteOnEvent::new(
+            frame,
+            pckn(channel, key, note_id),
+            f64::from(velocity),
+        )),
         EventKind::NoteOff {
             channel,
             key,
             velocity,
             note_id,
-        } => {
-            if notes_as_midi {
-                let data = match key {
-                    Some(key) => [0x80 | (channel & 0x0f), key & 0x7f, midi_velocity(velocity)],
-                    None => all_notes_off(channel),
-                };
+        } if !notes_as_midi => out.push(&NoteOffEvent::new(
+            frame,
+            pckn(channel, key, note_id),
+            f64::from(velocity),
+        )),
+        EventKind::NoteOn { .. } | EventKind::NoteOff { .. } | EventKind::Midi(_) => {
+            if let Some((data, _)) = midi::encode(&kind) {
                 out.push(&MidiEvent::new(frame, 0, data));
-            } else {
-                out.push(&NoteOffEvent::new(
-                    frame,
-                    pckn(channel, key, note_id),
-                    f64::from(velocity),
-                ));
             }
         }
-        EventKind::Midi(data) => out.push(&MidiEvent::new(frame, 0, data)),
         EventKind::ParamValue { param, value } => {
             // `u32::MAX` is CLAP's invalid id, which `ClapId::new` panics on; a hand-edited
             // project could name it, so it is dropped here instead.
@@ -119,7 +106,12 @@ pub(crate) fn push_daw(out: &mut EventList, e: &UnknownEvent, frame: u32) -> Res
             let raw = n.as_raw();
             note_off(raw.channel, raw.key, 0.0, raw.note_id, &mut push)
         }
-        Some(CoreEventSpace::Midi(m)) => push(EventKind::Midi(m.data())),
+        // The plugin's bytes are its word: notes in them become notes, and bytes that are not
+        // a MIDI message go no further.
+        Some(CoreEventSpace::Midi(m)) => match midi::decode_padded(m.data()) {
+            Some(kind) => push(kind),
+            None => Ok(()),
+        },
         Some(CoreEventSpace::ParamValue(p)) => match p.param_id() {
             Some(param) => push(EventKind::ParamValue {
                 param: param.get(),
@@ -220,12 +212,6 @@ fn pckn(channel: u8, key: impl Into<Option<u8>>, note_id: NoteId) -> Pckn {
         None => Match::All,
     };
     Pckn::new(0u16, u16::from(channel), key, id)
-}
-
-fn midi_velocity(v: f32) -> u8 {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let v = (v.clamp(0.0, 1.0) * 127.0).round() as u8;
-    v
 }
 
 #[cfg(test)]
@@ -448,6 +434,66 @@ mod tests {
             ),
             "{kinds:?}"
         );
+    }
+
+    #[test]
+    fn a_plugins_midi_is_decoded_and_malformed_bytes_go_no_further() {
+        let from_plugin = |data| {
+            let mut buf = EventBuffer::with_capacity(1);
+            buf.push(&MidiEvent::new(0, 0, data));
+            converted(buf.get(0).unwrap())
+        };
+        assert_eq!(
+            from_plugin([0x92, 60, 127]),
+            [EventKind::NoteOn {
+                channel: 2,
+                key: 60,
+                velocity: 1.0,
+                note_id: -1
+            }]
+        );
+        assert_eq!(
+            from_plugin([0xb0, 7, 100]),
+            [EventKind::Midi([0xb0, 7, 100])]
+        );
+        assert_eq!(from_plugin([0x90, 60, 0x80]), []);
+        assert_eq!(from_plugin([0x12, 0, 0]), []);
+    }
+
+    #[test]
+    fn malformed_midi_is_not_sent_to_a_plugin() {
+        let mut buf = EventBuffer::with_capacity(2);
+        for raw in [[0x90, 60, 0x80], [0xb0, 7, 100]] {
+            let e = Event {
+                frame: 0,
+                kind: EventKind::Midi(raw),
+            };
+            push_clap(&mut buf, &e, 0, false);
+        }
+        assert_eq!(buf.len(), 1);
+        let Some(CoreEventSpace::Midi(m)) = buf.get(0).and_then(|e| e.as_core_event()) else {
+            panic!("expected a MIDI event");
+        };
+        assert_eq!(m.data(), [0xb0, 7, 100]);
+    }
+
+    #[test]
+    fn a_note_in_raw_midi_is_sent_in_the_dialect_the_port_speaks() {
+        let note = Event {
+            frame: 0,
+            kind: EventKind::Midi([0x93, 60, 100]),
+        };
+        let mut buf = EventBuffer::with_capacity(2);
+        push_clap(&mut buf, &note, 0, false);
+        push_clap(&mut buf, &note, 0, true);
+        let Some(CoreEventSpace::NoteOn(n)) = buf.get(0).and_then(|e| e.as_core_event()) else {
+            panic!("expected a CLAP note on");
+        };
+        assert_eq!((n.as_raw().channel, n.as_raw().key), (3, 60));
+        let Some(CoreEventSpace::Midi(m)) = buf.get(1).and_then(|e| e.as_core_event()) else {
+            panic!("expected a MIDI event");
+        };
+        assert_eq!(m.data(), [0x93, 60, 100]);
     }
 
     #[test]

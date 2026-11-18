@@ -3,20 +3,21 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
-use daw_core::event::EventList;
 use jack::{
     AudioIn, AudioOut, Client, ClientOptions, ClientStatus, Control, Frames, LatencyType, MidiIn,
     MidiOut, NotificationHandler, Port, PortFlags, ProcessHandler, ProcessScope, RawMidi,
 };
 
-use crate::cycle::{PortBuffers, push_or_count};
+use crate::cycle::{CycleDriver, MidiPorts};
 use crate::link_log::{Link, LinkLog, OwnChange};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback, midi,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, BackendStats, Latency, PortDirection,
+    PortFilter, PortInfo, PortKind, ProcessCallback,
 };
-use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
+use crate::{
+    MAIN_MIDI_INPUT, MAIN_MIDI_OUTPUT, MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs,
+};
 
 /// Cycles `stop` lets pass first, so link notifications already on their
 /// way (a patchbay's change just before) arrive.
@@ -48,14 +49,15 @@ pub struct JackBackend {
     log: Arc<LinkLog>,
     /// Links of ours made or removed while running, until `log` has them.
     recent: Vec<OwnChange>,
-    /// Auto-connect has run since `open`. Later starts restore `links`
-    /// instead, so ports the user unplugged stay unplugged.
-    auto_connected: bool,
     /// Adds and removes the ports of [`AudioBackend::add_midi_input`].
     extra: Option<MidiInputsControl<Port<MidiIn>>>,
     /// Make the next `start` fail the way `jack_activate` failing does.
     #[cfg(test)]
     fail_next_activation: bool,
+    /// Make the next `stop` or `close` of a running backend fail the way
+    /// `jack_deactivate` failing does.
+    #[cfg(test)]
+    fail_next_deactivation: bool,
 }
 
 #[derive(Default)]
@@ -103,6 +105,88 @@ impl JackBackend {
         self.unregister_removed();
     }
 
+    /// The client is gone: forgets everything that belonged to it.
+    fn set_closed(&mut self) {
+        self.state = State::Closed;
+        self.cfg = None;
+        self.extra = None;
+        self.links.clear();
+        self.recent.clear();
+    }
+
+    /// The links of our ports to restore on the next `start`, read while
+    /// still running.
+    fn settled_links(&self, client: &Client, cfg: &BackendConfig) -> Vec<Link> {
+        // Let notifications on their way arrive, and wait for those of our
+        // own changes. If the server stalls, our record of them stands in.
+        let cycles = self.shared.cycles.load(Relaxed) + SETTLE_CYCLES;
+        let end = Instant::now() + SETTLE;
+        while (self.shared.cycles.load(Relaxed) <= cycles || !self.log.has_all(&self.recent))
+            && Instant::now() < end
+            && !self.shared.server_gone.load(Relaxed)
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let ours = self.our_ports(client, cfg);
+        let is_ours = |n: &String| ours.iter().any(|(o, _)| o == n);
+        // Ports that went away took their links with them.
+        let exists = |n: &String| client.port_by_name(n).is_some();
+        self.log
+            .links(&self.recent)
+            .into_iter()
+            .filter(|(a, b)| (is_ours(a) || is_ours(b)) && exists(a) && exists(b))
+            .collect()
+    }
+
+    /// Ends the process callback, if running, and leaves the backend open.
+    /// `save_links` is for `stop`: it waits for the links to settle and
+    /// keeps them for the next `start`. `close` has no use for them.
+    ///
+    /// On an error the client is gone and the backend closed.
+    fn end_run(&mut self, save_links: bool) -> Result<(), BackendError> {
+        let active = match std::mem::take(&mut self.state) {
+            State::Running(active) => active,
+            other => {
+                self.state = other;
+                return Ok(());
+            }
+        };
+        // After a server shutdown there is nothing left to ask.
+        if save_links
+            && let Some(cfg) = &self.cfg
+            && !self.shared.server_gone.load(Relaxed)
+        {
+            self.links = self.settled_links(active.as_client(), cfg);
+        }
+        self.recent.clear();
+        #[cfg(test)]
+        let result = if std::mem::take(&mut self.fail_next_deactivation) {
+            // What the jack crate does when jack_deactivate fails.
+            drop(active);
+            Err(jack::Error::ClientDeactivationError)
+        } else {
+            active.deactivate()
+        };
+        #[cfg(not(test))]
+        let result = active.deactivate();
+        match result {
+            Ok((client, _, processor)) => {
+                // The callback drops here, on the caller's thread.
+                self.state = State::Open(client, Box::new(processor.ports));
+                self.apply_extra_now();
+                Ok(())
+            }
+            Err(e) => {
+                // The jack crate destroyed the client, and with it the
+                // ports, because it no longer knows what state it is in.
+                self.set_closed();
+                Err(BackendError::Other(format!(
+                    "could not deactivate the JACK client ({e}); the backend is closed and must be opened again"
+                )))
+            }
+        }
+    }
+
     /// Full names of our ports, each with whether it is an output.
     fn our_ports(&self, client: &Client, cfg: &BackendConfig) -> Vec<(String, bool)> {
         let me = client.name();
@@ -110,13 +194,13 @@ impl JackBackend {
         v.extend((1..=cfg.audio_inputs).map(|i| (format!("{me}:audio_in_{i}"), false)));
         v.extend((1..=cfg.audio_outputs).map(|i| (format!("{me}:audio_out_{i}"), true)));
         if cfg.midi_input {
-            v.push((format!("{me}:midi_in"), false));
+            v.push((format!("{me}:{MAIN_MIDI_INPUT}"), false));
         }
         if cfg.midi_output {
             v.push((format!("{me}:midi_out"), true));
         }
         if let Some(extra) = &self.extra {
-            v.extend(extra.names().map(|(_, n)| (n.to_owned(), false)));
+            v.extend(extra.ports().into_iter().map(|p| (p.name, false)));
         }
         v
     }
@@ -183,41 +267,6 @@ impl JackBackend {
         [from, to]
             .iter()
             .any(|n| client.port_by_name(n).is_some_and(|p| client.is_mine(&p)))
-    }
-
-    fn auto_connect(&mut self, client: &Client, cfg: &BackendConfig) {
-        let me = client.name();
-        let physical = |ty, dir| client.ports(None, Some(ty), PortFlags::IS_PHYSICAL | dir);
-        let ours = |prefix: &str, n: u16| -> Vec<String> {
-            (1..=n).map(|i| format!("{me}:{prefix}_{i}")).collect()
-        };
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        pairs.extend(
-            ours("audio_out", cfg.audio_outputs)
-                .into_iter()
-                .zip(physical(AUDIO_TYPE, PortFlags::IS_INPUT)),
-        );
-        pairs.extend(
-            physical(AUDIO_TYPE, PortFlags::IS_OUTPUT)
-                .into_iter()
-                .zip(ours("audio_in", cfg.audio_inputs)),
-        );
-        if cfg.midi_input {
-            let midi_in = format!("{me}:midi_in");
-            pairs.extend(
-                physical(MIDI_TYPE, PortFlags::IS_OUTPUT)
-                    .into_iter()
-                    .map(|p| (p, midi_in.clone())),
-            );
-        }
-        for (from, to) in pairs {
-            let mark = self.log.begin_change(&mut self.recent);
-            // Already-connected pairs (WirePlumber may link us first) are fine.
-            match client.connect_ports_by_name(&from, &to) {
-                Ok(()) => self.note_change(true, (from, to), mark),
-                Err(e) => log::debug!("auto-connect {from} -> {to}: {e}"),
-            }
-        }
     }
 }
 
@@ -297,15 +346,15 @@ impl AudioBackend for JackBackend {
         if cfg.midi_input {
             ports.midi_in = Some(
                 client
-                    .register_port("midi_in", MidiIn::default())
-                    .map_err(port_err("midi_in".into()))?,
+                    .register_port(MAIN_MIDI_INPUT, MidiIn::default())
+                    .map_err(port_err(MAIN_MIDI_INPUT.into()))?,
             );
         }
         if cfg.midi_output {
             ports.midi_out = Some(
                 client
-                    .register_port("midi_out", MidiOut::default())
-                    .map_err(port_err("midi_out".into()))?,
+                    .register_port(MAIN_MIDI_OUTPUT, MidiOut::default())
+                    .map_err(port_err(MAIN_MIDI_OUTPUT.into()))?,
             );
         }
 
@@ -316,7 +365,6 @@ impl AudioBackend for JackBackend {
         self.cfg = Some(cfg);
         self.extra = Some(extra_control);
         self.links.clear();
-        self.auto_connected = false;
         Ok(())
     }
 
@@ -331,17 +379,16 @@ impl AudioBackend for JackBackend {
         };
         let cfg = self.cfg.clone().ok_or(BackendError::NotOpen)?;
         let processor = Processor {
-            bufs: PortBuffers::new(ports.audio_in.len(), ports.audio_out.len()),
             ports,
-            midi_in: EventList::with_capacity(cfg.midi_capacity),
-            midi_out: EventList::with_capacity(cfg.midi_capacity),
-            cb,
+            driver: CycleDriver::new(cb, &cfg, self.shared.clone()),
             shared: self.shared.clone(),
-            frame_time: 0,
             rt_check_in: 0,
             panicked: false,
         };
         self.shared.callback_panicked.store(false, Relaxed);
+        // Notifications start with activation, before the graph can be
+        // read: the log must be empty by then, not emptied after.
+        self.log.clear();
         let notifications = Notifications {
             shared: self.shared.clone(),
             log: self.log.clone(),
@@ -373,24 +420,20 @@ impl AudioBackend for JackBackend {
                 }
                 // On any other error the crate dropped, and so closed, the
                 // client. Either way the ports are gone.
-                self.cfg = None;
-                self.extra = None;
-                self.links.clear();
+                self.set_closed();
                 return Err(BackendError::Other(format!(
                     "could not activate the JACK client ({e}); the backend is closed and must be opened again"
                 )));
             }
         };
-        // Notifications start now. Links already there (none on jackd, which
-        // won't link an inactive client) come from the server's graph.
-        self.log.reset(self.live_links(active.as_client(), &cfg));
-        if cfg.auto_connect && !self.auto_connected {
-            self.auto_connect(active.as_client(), &cfg);
-            self.auto_connected = true;
-        }
+        // Links already there (none on jackd, which won't link an inactive
+        // client) come from the server's graph. A change since activation
+        // may or may not show in it, but its notification is in the log.
+        self.log
+            .add_snapshot(self.live_links(active.as_client(), &cfg));
         for (from, to) in std::mem::take(&mut self.links) {
             let client = active.as_client();
-            // Auto-connect or the session manager may have made it already.
+            // The session manager may have made it already.
             let made = client
                 .port_by_name(&from)
                 .is_some_and(|p| p.is_connected_to(&to).unwrap_or(false));
@@ -408,56 +451,21 @@ impl AudioBackend for JackBackend {
     }
 
     fn stop(&mut self) -> Result<(), BackendError> {
-        match std::mem::take(&mut self.state) {
-            State::Running(active) => {
-                // After a server shutdown there is nothing left to ask.
-                if let Some(cfg) = &self.cfg
-                    && !self.shared.server_gone.load(Relaxed)
-                {
-                    let client = active.as_client();
-                    // Let notifications on their way arrive, and wait for
-                    // those of our own changes. If the server stalls, our
-                    // record of them stands in.
-                    let cycles = self.shared.cycles.load(Relaxed) + SETTLE_CYCLES;
-                    let end = Instant::now() + SETTLE;
-                    while (self.shared.cycles.load(Relaxed) <= cycles
-                        || !self.log.has_all(&self.recent))
-                        && Instant::now() < end
-                        && !self.shared.server_gone.load(Relaxed)
-                    {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    let ours = self.our_ports(client, cfg);
-                    let is_ours = |n: &String| ours.iter().any(|(o, _)| o == n);
-                    // Ports that went away took their links with them.
-                    let exists = |n: &String| client.port_by_name(n).is_some();
-                    self.links = self
-                        .log
-                        .links(&self.recent)
-                        .into_iter()
-                        .filter(|(a, b)| (is_ours(a) || is_ours(b)) && exists(a) && exists(b))
-                        .collect();
-                }
-                self.recent.clear();
-                let (client, _, processor) = active
-                    .deactivate()
-                    .map_err(|e| BackendError::Other(format!("could not deactivate: {e}")))?;
-                // The callback drops here, on the caller's thread.
-                self.state = State::Open(client, Box::new(processor.ports));
-                self.apply_extra_now();
-            }
-            other => self.state = other,
-        }
-        Ok(())
+        self.end_run(true)
     }
 
     fn close(&mut self) -> Result<(), BackendError> {
-        self.stop()?;
-        self.state = State::Closed;
-        self.cfg = None;
-        self.extra = None;
-        self.links.clear();
-        Ok(())
+        let result = self.end_run(false);
+        self.set_closed();
+        match result {
+            // A server that is gone cannot deactivate us, and there is
+            // nothing left to close: this is the close that was asked for.
+            Err(e) if self.shared.server_gone.load(Relaxed) => {
+                log::debug!("closing after the server went away: {e}");
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     fn is_running(&self) -> bool {
@@ -589,9 +597,8 @@ impl AudioBackend for JackBackend {
         self.unregister_removed();
         let client = client_of(&self.state)?;
         let extra = self.extra.as_mut().ok_or(BackendError::NotOpen)?;
-        let slot = extra.free_slot().ok_or_else(|| {
-            BackendError::Config(format!("at most {} MIDI inputs", crate::MAX_MIDI_INPUTS))
-        })?;
+        // Before a port is registered for nothing.
+        extra.check_room()?;
         let port = client
             .register_port(name, MidiIn::default())
             .map_err(|_| BackendError::Port(name.into()))?;
@@ -602,14 +609,15 @@ impl AudioBackend for JackBackend {
                 return Err(BackendError::Other(e.to_string()));
             }
         };
-        if let Err(port) = extra.add(slot, full.clone(), port) {
-            let _ = client.unregister_port(port);
-            return Err(BackendError::Other(
-                "the audio thread has not caught up with earlier port changes".into(),
-            ));
-        }
+        let added = match extra.add(full, port) {
+            Ok(added) => added,
+            Err((e, port)) => {
+                let _ = client.unregister_port(port);
+                return Err(e);
+            }
+        };
         self.apply_extra_now();
-        Ok(MidiInputPort { slot, name: full })
+        Ok(added)
     }
 
     fn collect_removed(&mut self) {
@@ -618,16 +626,7 @@ impl AudioBackend for JackBackend {
 
     fn remove_midi_input(&mut self, slot: usize) -> Result<(), BackendError> {
         let extra = self.extra.as_mut().ok_or(BackendError::NotOpen)?;
-        let name = extra
-            .names()
-            .find(|&(s, _)| s == slot)
-            .map(|(_, n)| n.to_owned())
-            .ok_or_else(|| BackendError::Config(format!("no MIDI input in slot {slot}")))?;
-        if !extra.remove(slot) {
-            return Err(BackendError::Other(
-                "the audio thread has not caught up with earlier port changes".into(),
-            ));
-        }
+        let name = extra.remove(slot)?;
         // Links saved while stopped would fail to come back.
         self.links.retain(|(a, b)| *a != name && *b != name);
         self.log.forget_port(&name);
@@ -637,15 +636,9 @@ impl AudioBackend for JackBackend {
     }
 
     fn midi_inputs(&self) -> Vec<MidiInputPort> {
-        self.extra.as_ref().map_or_else(Vec::new, |extra| {
-            extra
-                .names()
-                .map(|(slot, name)| MidiInputPort {
-                    slot,
-                    name: name.to_owned(),
-                })
-                .collect()
-        })
+        self.extra
+            .as_ref()
+            .map_or_else(Vec::new, MidiInputsControl::ports)
     }
 
     fn stats(&self) -> BackendStats {
@@ -654,6 +647,10 @@ impl AudioBackend for JackBackend {
             s.dsp_load = Some(a.as_client().cpu_load());
         }
         s
+    }
+
+    fn health(&self) -> BackendHealth {
+        self.shared.health()
     }
 
     fn latency(&self) -> Latency {
@@ -738,12 +735,8 @@ impl NotificationHandler for Notifications {
 
 struct Processor {
     ports: Ports,
-    bufs: PortBuffers,
-    midi_in: EventList,
-    midi_out: EventList,
-    cb: ProcessCallback,
+    driver: CycleDriver,
     shared: Arc<SharedStats>,
-    frame_time: u64,
     /// Cycles until the next real-time scheduling check; `u32::MAX` once
     /// the thread is known to be real-time.
     rt_check_in: u32,
@@ -805,78 +798,54 @@ impl Processor {
         } else if self.rt_check_in != u32::MAX {
             self.rt_check_in -= 1;
         }
-        let frames = ps.n_frames();
-        let mut dropped = 0;
-        self.midi_in.clear();
-        self.midi_out.clear();
-        if let Some(port) = &self.ports.midi_in {
-            for m in port.iter(ps) {
-                if let Some(e) = midi::decode(m.time, m.bytes) {
-                    push_or_count(&mut self.midi_in, e, &mut dropped);
-                }
-            }
-        }
-        let extra = &mut self.ports.extra;
-        extra.begin_cycle();
-        for (port, list) in extra.ports.iter().zip(&mut extra.lists) {
-            let Some(port) = port else { continue };
-            for m in port.iter(ps) {
-                if let Some(e) = midi::decode(m.time, m.bytes) {
-                    push_or_count(list, e, &mut dropped);
-                }
-            }
-        }
-
-        let frame_time = self.frame_time;
-        let sample_rate = f64::from(self.shared.sample_rate.load(Relaxed));
-        let xruns = self.shared.xruns.load(Relaxed);
-        let (cb, midi_in, midi_out) = (&mut self.cb, &self.midi_in, &mut self.midi_out);
-        let midi_inputs = &self.ports.extra.lists[..];
-        self.bufs.run(
-            self.ports.audio_in.iter().map(|p| p.as_slice(ps)),
-            self.ports.audio_out.iter_mut().map(|p| p.as_mut_slice(ps)),
-            |audio_in, audio_out| {
-                cb(&mut BackendCycle {
-                    frames,
-                    sample_rate,
-                    frame_time,
-                    audio_in,
-                    audio_out,
-                    midi_in,
-                    midi_inputs,
-                    midi_out,
-                    xruns,
-                })
-            },
+        let ports = &mut self.ports;
+        let mut midi = ScopePorts {
+            ps,
+            main: ports.midi_in.as_ref(),
+            // Creating the writer clears the buffer, so also without events.
+            writer: ports.midi_out.as_mut().map(|port| port.writer(ps)),
+        };
+        self.driver.run(
+            ps.n_frames(),
+            f64::from(self.shared.sample_rate.load(Relaxed)),
+            &mut midi,
+            &mut ports.extra,
+            ports.audio_in.iter().map(|p| p.as_slice(ps)),
+            ports.audio_out.iter_mut().map(|p| p.as_mut_slice(ps)),
         );
+    }
+}
 
-        if let Some(port) = &mut self.ports.midi_out {
-            let mut writer = port.writer(ps);
-            for e in self.midi_out.iter() {
-                let mut bytes = [0; 3];
-                let Some(len) = midi::encode(&e.kind, &mut bytes) else {
-                    dropped += u64::from(midi::is_malformed(&e.kind));
-                    continue;
-                };
-                let time = e.frame.min(frames.saturating_sub(1));
-                if writer
-                    .write(&RawMidi {
-                        time,
-                        bytes: &bytes[..len],
-                    })
-                    .is_err()
-                {
-                    dropped += 1;
-                }
-            }
-        }
+/// JACK's MIDI ports within one process scope.
+struct ScopePorts<'a> {
+    ps: &'a ProcessScope,
+    main: Option<&'a Port<MidiIn>>,
+    writer: Option<jack::MidiWriter<'a>>,
+}
 
-        self.frame_time += u64::from(frames);
-        self.shared.frames.fetch_add(u64::from(frames), Relaxed);
-        self.shared.cycles.fetch_add(1, Relaxed);
-        if dropped > 0 {
-            self.shared.midi_dropped.fetch_add(dropped, Relaxed);
+impl MidiPorts for ScopePorts<'_> {
+    type Input = Port<MidiIn>;
+
+    fn read_main(&mut self, each: &mut dyn FnMut(u32, &[u8])) {
+        for m in self.main.iter().flat_map(|port| port.iter(self.ps)) {
+            each(m.time, m.bytes);
         }
+    }
+
+    fn read(&mut self, port: &mut Self::Input, each: &mut dyn FnMut(u32, &[u8])) {
+        for m in port.iter(self.ps) {
+            each(m.time, m.bytes);
+        }
+    }
+
+    fn has_output(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    fn write(&mut self, frame: u32, bytes: &[u8]) -> bool {
+        self.writer
+            .as_mut()
+            .is_some_and(|w| w.write(&RawMidi { time: frame, bytes }).is_ok())
     }
 }
 
@@ -884,15 +853,92 @@ impl Processor {
 mod tests {
     use super::*;
 
+    // Unique: PipeWire doesn't rename a second client with a taken name.
+    fn cfg(base: &str) -> BackendConfig {
+        BackendConfig {
+            client_name: format!("kt-{base}-{}", std::process::id()),
+            ..BackendConfig::default()
+        }
+    }
+
+    /// A running backend with an extra MIDI input, whose next deactivation
+    /// fails.
+    fn running_with_a_failing_deactivation(base: &str) -> JackBackend {
+        let mut b = JackBackend::new();
+        b.open(cfg(base)).unwrap();
+        b.add_midi_input("pads").unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        b.fail_next_deactivation = true;
+        b
+    }
+
+    fn assert_closed(b: &mut JackBackend) {
+        assert!(matches!(b.state, State::Closed));
+        assert!(b.cfg.is_none() && b.extra.is_none());
+        assert!(b.links.is_empty() && b.recent.is_empty());
+        assert!(!b.is_running());
+        assert!(b.midi_inputs().is_empty());
+        assert!(matches!(
+            b.start(Box::new(|_| {})),
+            Err(BackendError::NotOpen)
+        ));
+    }
+
+    #[test]
+    #[ignore = "needs a running JACK server"]
+    fn a_failed_stop_leaves_the_backend_closed() {
+        let mut b = running_with_a_failing_deactivation("stopfail");
+        let err = b.stop().unwrap_err();
+        assert!(err.to_string().contains("must be opened again"), "{err}");
+        assert_closed(&mut b);
+        // Nothing is left over to report or to undo.
+        b.close().unwrap();
+        b.open(cfg("stopfail")).unwrap();
+        assert!(b.midi_inputs().is_empty());
+        b.start(Box::new(|_| {})).unwrap();
+        b.close().unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a running JACK server"]
+    fn a_failed_deactivation_does_not_keep_close_from_closing() {
+        let mut b = running_with_a_failing_deactivation("closefail");
+        assert!(matches!(b.close(), Err(BackendError::Other(_))));
+        assert_closed(&mut b);
+        b.close().unwrap();
+
+        // Once the server is gone, failing to deactivate is to be expected.
+        let mut b = running_with_a_failing_deactivation("closegone");
+        b.shared.server_gone.store(true, Relaxed);
+        b.close().unwrap();
+        assert_closed(&mut b);
+        assert_eq!(b.health(), BackendHealth::ServerGone);
+    }
+
+    /// `stop` waits for the links it saves to settle. `close` saves none,
+    /// so it must not wait: the host closes on every audio settings change
+    /// and on exit.
+    #[test]
+    #[ignore = "needs a running JACK server"]
+    fn close_does_not_wait_for_links_to_settle() {
+        let mut b = JackBackend::new();
+        b.open(cfg("closefast")).unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        // A change of ours the server never notifies: `stop` would wait
+        // for it as long as it is willing to.
+        let mark = b.log.begin_change(&mut b.recent);
+        b.note_change(true, ("kt-nobody:out".into(), "kt-nobody:in".into()), mark);
+        let started = Instant::now();
+        b.close().unwrap();
+        let took = started.elapsed();
+        assert!(took < SETTLE, "close took {took:?}");
+    }
+
     #[test]
     #[ignore = "needs a running JACK server"]
     fn failed_activation_closes_the_client_and_frees_its_name() {
-        // Unique: PipeWire doesn't rename a second client with a taken name.
-        let name = format!("kt-actfail-{}", std::process::id());
-        let cfg = BackendConfig {
-            client_name: name.clone(),
-            ..BackendConfig::default()
-        };
+        let cfg = cfg("actfail");
+        let name = cfg.client_name.clone();
         let mut b = JackBackend::new();
         b.open(cfg.clone()).unwrap();
         b.fail_next_activation = true;

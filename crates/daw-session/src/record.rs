@@ -81,8 +81,23 @@ struct Take {
     recorder: Recorder,
     progress: TakeProgress,
     /// Reported so far, so each problem shows once.
-    failed: bool,
+    write_failure: Reported,
     dropped: u64,
+}
+
+/// Whether a take's write error has been reported. It can turn up while the
+/// take runs ([`AudioTakes::poll`]) or only when it ends
+/// ([`AudioTakes::finish`]), and is shown once either way.
+#[derive(Default)]
+struct Reported(bool);
+
+impl Reported {
+    /// `error` if it is one to report now: the first one seen.
+    fn first<E>(&mut self, error: Option<E>) -> Option<E> {
+        let news = error.filter(|_| !self.0);
+        self.0 |= news.is_some();
+        news
+    }
 }
 
 /// Takes in progress. See the module docs.
@@ -191,7 +206,7 @@ impl AudioTakes {
                 name: track.name.clone(),
                 recorder,
                 progress,
-                failed: false,
+                write_failure: Reported::default(),
                 dropped: 0,
             });
         }
@@ -233,12 +248,10 @@ impl AudioTakes {
     pub fn poll(&mut self) -> Vec<TakeProblem> {
         let mut out = Vec::new();
         for t in &mut self.takes {
-            if t.recorder.failed() && !t.failed {
-                t.failed = true;
-                // The error itself comes with `finish`.
+            if let Some(error) = t.write_failure.first(t.recorder.error()) {
                 out.push(TakeProblem::WriteFailed {
                     track: t.name.clone(),
-                    error: Arc::new(MediaError::Encode("the disk refused the recording".into())),
+                    error,
                 });
             }
             let dropped = t.recorder.dropped_frames();
@@ -260,7 +273,7 @@ impl AudioTakes {
         let mut problems = Vec::new();
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
         let latency = self.latency();
-        for t in self.takes {
+        for mut t in self.takes {
             if let Some(tap) = session.tap_mut(t.track) {
                 // A full queue only happens if stop is called in a burst; a
                 // few tries are plenty. If it still fails, the tap writes
@@ -285,10 +298,11 @@ impl AudioTakes {
                     continue;
                 }
             };
-            if let Some(error) = &stats.error {
+            // Unless `poll` reported the writer's error already.
+            if let Some(error) = t.write_failure.first(stats.error.clone()) {
                 problems.push(TakeProblem::WriteFailed {
                     track: t.name.clone(),
-                    error: error.clone(),
+                    error,
                 });
             }
             if stats.dropped_frames > 0 && t.dropped == 0 {
@@ -426,6 +440,23 @@ fn remove_take_file(path: &Path) {
 mod tests {
     use super::*;
     use crate::SessionConfig;
+
+    /// Issue #210: a disk that filled during a take was reported twice, once
+    /// while recording and again at the end.
+    #[test]
+    fn a_write_error_is_reported_once_whenever_it_is_first_seen() {
+        // Seen while the take runs: not again when it ends.
+        let mut seen = Reported::default();
+        assert_eq!(seen.first(None::<&str>), None);
+        assert_eq!(seen.first(Some("disk full")), Some("disk full"));
+        assert_eq!(seen.first(Some("disk full")), None);
+        // Seen only when the take ends.
+        let mut seen = Reported::default();
+        assert_eq!(seen.first(None::<&str>), None);
+        assert_eq!(seen.first(Some("disk full")), Some("disk full"));
+        // Never failed.
+        assert_eq!(Reported::default().first(None::<&str>), None);
+    }
 
     #[test]
     fn placing_keeps_every_frame_where_it_belongs() {

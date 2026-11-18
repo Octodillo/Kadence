@@ -26,7 +26,6 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use assert_no_alloc::{AllocDisabler, assert_no_alloc, violation_count};
 use daw_app::device_panel::{BuiltinParams, DevicePanel, ParamSource, PluginParams};
 use daw_app::instrument::{self, InstrumentChoices};
 use daw_app::mixer::{Control, StripId};
@@ -52,9 +51,9 @@ use daw_session::export::{
     ExportJob, ExportSettings, LoaderFactory, Progress, RenderSettings, offline_sandbox, song_end,
 };
 use daw_session::{PluginStatus, SandboxLoader, Session, SessionConfig};
+use daw_test_support::no_alloc::assert_no_alloc;
 
-#[global_allocator]
-static ALLOC: AllocDisabler = AllocDisabler;
+daw_test_support::install_checker!();
 
 const RATE: f64 = 48_000.0;
 const BLOCK: usize = 256;
@@ -551,9 +550,7 @@ fn play(doc: &mut Document, plugin: DeviceId, n: usize) -> AudioData {
     while channels[0].len() < frames {
         let n = BLOCK.min(frames - channels[0].len());
         let mut outs: [&mut [f32]; 2] = [&mut l[..n], &mut r[..n]];
-        let before = violation_count();
-        assert_no_alloc(|| proc.process(n, &[], &mut outs, &events));
-        assert_eq!(violation_count(), before, "process allocated");
+        assert_no_alloc("process", || proc.process(n, &[], &mut outs, &events));
         channels[0].extend_from_slice(&l[..n]);
         channels[1].extend_from_slice(&r[..n]);
         let report = session.tick();

@@ -4,7 +4,7 @@ use daw_core::event::ParamId;
 use daw_core::node::{CountIn, Node, PortLayout, ProcessContext, TransportState};
 use daw_core::time::{MusicalPosition, Timeline};
 
-use crate::dsp::db_to_gain;
+use crate::dsp::{DEVICE_FLOOR_DB, decay_coef, device_gain};
 use crate::events::{Segmented, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
@@ -27,7 +27,7 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
         VOLUME,
         "volume",
         "Volume",
-        -70.0,
+        DEVICE_FLOOR_DB,
         6.0,
         -6.0,
         ParamUnit::Decibels,
@@ -128,10 +128,6 @@ impl Metronome {
 impl_device!(Metronome, INFO, PARAMS);
 
 impl Segmented for Metronome {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         let mut t = *ctx.transport;
         if t.sample_rate <= 0.0 {
@@ -140,7 +136,7 @@ impl Segmented for Metronome {
         if t.bpm <= 0.0 {
             t = TransportState::at(&self.fallback, t.playing, t.position, t.sample_rate);
         }
-        let volume = db_to_gain(self.params.get(VOLUME)) as f32;
+        let volume = device_gain(self.params.get(VOLUME)) as f32;
         let group = self.params.get(BEATS_PER_BAR).round() as i64;
         let accent = self.params.get_bool(ACCENT);
         let playback = self.params.get_bool(PLAYBACK);
@@ -240,7 +236,7 @@ impl Node for Metronome {
 
     fn prepare(&mut self, sample_rate: f64, _max_frames: u32) {
         self.sample_rate = sample_rate;
-        self.decay = (-1000.0 / (DECAY_MS * sample_rate)).exp() as f32;
+        self.decay = decay_coef(DECAY_MS, sample_rate);
         self.reset();
     }
 

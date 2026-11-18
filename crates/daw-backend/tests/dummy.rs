@@ -1,9 +1,10 @@
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, DummyBackend, Latency, Pacing, PortDirection,
-    PortFilter, PortKind,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, DummyBackend, Latency, Pacing,
+    PortDirection, PortFilter, PortKind, connect_physical,
 };
 use daw_core::event::{Event, EventKind};
 
@@ -18,7 +19,6 @@ fn cfg(frames: u32) -> BackendConfig {
         midi_output: true,
         sample_rate: Some(48_000),
         buffer_size: Some(frames),
-        auto_connect: false,
         midi_capacity: 16,
     }
 }
@@ -115,6 +115,75 @@ fn midi_in_is_decoded_and_midi_out_is_encoded() {
     assert_eq!(out.as_bytes(), &[0x81, 60, 0]);
     assert_eq!(out.frame % 32, 5);
     b.stop().unwrap();
+}
+
+#[test]
+fn midi_out_past_the_period_goes_out_on_its_last_frame() {
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(1);
+    b.open(cfg(32)).unwrap();
+    let mut tap = b.midi_tap();
+    b.start(Box::new(|c| {
+        let kind = EventKind::Midi([0xB0, 7, 100]);
+        c.midi_out.push(Event { frame: 100, kind }).unwrap();
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(1, WAIT));
+    b.stop().unwrap();
+    assert_eq!(tap.try_recv().map(|m| m.frame), Some(31));
+}
+
+#[test]
+fn without_a_midi_output_nothing_is_sent_or_counted() {
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(1);
+    b.open(BackendConfig {
+        midi_output: false,
+        ..cfg(32)
+    })
+    .unwrap();
+    let mut tap = b.midi_tap();
+    b.start(Box::new(|c| {
+        for kind in [
+            EventKind::Midi([0xB0, 7, 100]),
+            EventKind::Midi([0xF0, 1, 2]),
+        ] {
+            c.midi_out.push(Event { frame: 0, kind }).unwrap();
+        }
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(1, WAIT));
+    b.stop().unwrap();
+    assert!(tap.try_recv().is_none());
+    assert_eq!(b.stats().midi_dropped, 0);
+}
+
+#[test]
+fn an_added_input_named_like_the_main_one_is_not_auto_connected() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(BackendConfig {
+        midi_input: false,
+        ..cfg(32)
+    })
+    .unwrap();
+    b.add_midi_input(daw_backend::MAIN_MIDI_INPUT).unwrap();
+    connect_physical(&mut b, true);
+    assert!(
+        b.connections().iter().all(|(_, to)| !to.contains("midi")),
+        "{:?}",
+        b.connections()
+    );
+}
+
+#[test]
+fn midi_inputs_are_refused_once_every_slot_is_taken() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    for n in 0..daw_backend::MAX_MIDI_INPUTS {
+        b.add_midi_input(&format!("in {n}")).unwrap();
+    }
+    assert!(matches!(
+        b.add_midi_input("one more"),
+        Err(BackendError::Config(_))
+    ));
 }
 
 #[test]
@@ -252,13 +321,20 @@ fn ports_list_and_connect() {
 }
 
 #[test]
-fn auto_connect_wires_physical_ports() {
+fn connect_physical_wires_physical_ports() {
     let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(1);
-    b.open(BackendConfig {
-        auto_connect: true,
-        ..cfg(64)
-    })
-    .unwrap();
+    b.open(cfg(64)).unwrap();
+    // An added input is the caller's to connect, and a program's audio is
+    // not hardware.
+    b.add_midi_input("keys").unwrap();
+    b.system()
+        .add_port("synth:out", PortKind::Audio, PortDirection::Output, false);
+    // A program's MIDI output is not hardware and stays unconnected.
+    b.system()
+        .add_port("seq:out", PortKind::Midi, PortDirection::Output, false);
+    connect_physical(&mut b, true);
+    // Again changes nothing.
+    connect_physical(&mut b, true);
     b.start(Box::new(|_| {})).unwrap();
     let mut c: Vec<_> = b
         .connections()
@@ -374,7 +450,7 @@ fn queues_survive_a_panicking_callback() {
     }))
     .unwrap();
     rx.recv_timeout(WAIT).unwrap();
-    assert!(matches!(b.stop(), Err(BackendError::Other(_))));
+    b.stop().unwrap();
     let rx = start_forwarding_midi_in(&mut b);
     assert!(inject.send(&CC));
     let e = rx.recv_timeout(WAIT).expect("MIDI after the panic");
@@ -522,6 +598,103 @@ fn other_clients_ports_come_and_go() {
     assert!(b.connect("keys:out", &port.name).is_err());
 }
 
+/// Waits for `b` to report `health`, which the audio thread sets.
+fn wait_for_health(b: &DummyBackend, health: BackendHealth) {
+    let end = Instant::now() + WAIT;
+    while b.health() != health {
+        assert!(Instant::now() < end, "health is {:?}", b.health());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn health_reports_a_server_that_went_away() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    let system = b.system();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+    system.shut_down();
+    wait_for_health(&b, BackendHealth::ServerGone);
+    assert!(b.stats().server_gone);
+    // No cycle runs any more, though nobody stopped the backend.
+    let cycles = b.stats().cycles;
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(b.stats().cycles, cycles);
+    assert!(b.is_running());
+    // Without a server the backend cannot start again, and is closed for
+    // trying; nor can it connect.
+    b.stop().unwrap();
+    assert_eq!(b.health(), BackendHealth::ServerGone);
+    assert!(b.start(Box::new(|_| {})).is_err());
+    assert!(matches!(
+        b.start(Box::new(|_| {})),
+        Err(BackendError::NotOpen)
+    ));
+    assert!(matches!(b.open(cfg(32)), Err(BackendError::Connect(_))));
+
+    // Reopening connects to a server that is there again.
+    system.restore();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+}
+
+#[test]
+fn health_reports_a_panicked_callback_until_the_next_start() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| panic!("callback bug"))).unwrap();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    assert!(b.stats().callback_panicked);
+    // Stopping works as usual: the panic is in `health`.
+    b.stop().unwrap();
+    assert_eq!(b.health(), BackendHealth::CallbackPanicked);
+
+    // A callback that works clears it; the system can make that one panic.
+    let system = b.system();
+    b.start(Box::new(|_| {})).unwrap();
+    let cycles = b.stats().cycles;
+    assert!(b.wait_for_cycles(cycles + 10, WAIT));
+    assert_eq!(b.health(), BackendHealth::Ok);
+    system.panic_callback();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    b.stop().unwrap();
+}
+
+#[test]
+fn a_rate_change_asked_of_one_connection_does_not_reach_the_next() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    let system = b.system();
+    b.open(cfg(32)).unwrap();
+    system.change_sample_rate(44_100);
+    b.close().unwrap();
+    b.open(cfg(32)).unwrap();
+    b.start(Box::new(|_| {})).unwrap();
+    assert!(b.wait_for_cycles(10, WAIT));
+    assert_eq!(b.sample_rate(), 48_000.0);
+}
+
+#[test]
+fn close_after_a_panicked_callback_still_closes() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    b.add_midi_input("pads").unwrap();
+    b.start(Box::new(|_| panic!("callback bug"))).unwrap();
+    wait_for_health(&b, BackendHealth::CallbackPanicked);
+    b.close().unwrap();
+    assert!(!b.is_running());
+    assert!(b.midi_inputs().is_empty());
+    assert!(matches!(
+        b.list_ports(&PortFilter::default()),
+        Err(BackendError::NotOpen)
+    ));
+    b.open(cfg(32)).unwrap();
+    b.close().unwrap();
+}
+
 #[test]
 fn loopback_returns_the_outputs_after_the_reported_latency() {
     let latency = Latency {
@@ -565,4 +738,39 @@ fn loopback_returns_the_outputs_after_the_reported_latency() {
     });
     b.open(cfg(64)).unwrap();
     assert_eq!(b.latency().total(), 64);
+}
+
+/// This binary does not install `RtAllocCounter`, so nothing counts
+/// allocations in cycles, and the stats say so rather than reporting zero.
+#[test]
+fn allocation_count_is_absent_without_the_counter() {
+    let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(4);
+    b.open(cfg(64)).unwrap();
+    b.start(Box::new(|_| {
+        std::hint::black_box(vec![0u8; 64]);
+    }))
+    .unwrap();
+    assert!(b.wait_for_cycles(4, WAIT));
+    b.stop().unwrap();
+    assert_eq!(b.stats().rt_alloc_violations, None);
+}
+
+#[test]
+fn a_server_rate_change_reaches_the_backend_and_its_cycles() {
+    let mut b = DummyBackend::new(Pacing::Freewheel);
+    b.open(BackendConfig::default()).unwrap();
+    let before = b.sample_rate();
+    let seen = Arc::new(AtomicU32::new(0));
+    let rate = seen.clone();
+    b.start(Box::new(move |c| {
+        rate.store(c.sample_rate as u32, Ordering::Relaxed);
+    }))
+    .unwrap();
+    b.system().change_sample_rate(44_100);
+    let from = b.stats().cycles;
+    assert!(b.wait_for_cycles(from + 2, Duration::from_secs(5)));
+    assert_ne!(before, 44_100.0);
+    assert_eq!(b.sample_rate(), 44_100.0);
+    assert_eq!(seen.load(Ordering::Relaxed), 44_100);
+    b.close().unwrap();
 }

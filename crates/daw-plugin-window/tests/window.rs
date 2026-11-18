@@ -151,3 +151,96 @@ fn destroying_the_window_reads_as_a_close() {
         "DestroyNotify for the window is a close"
     );
 }
+
+/// Resizes `window` from another client, as a window manager does for the user.
+/// With no window manager (the test display) the request applies as it is; under one it
+/// becomes a request to the manager, which may ignore it for a window that is not mapped.
+fn user_resizes(conn: &RustConnection, window: &HostWindow, width: u32, height: u32) {
+    let aux = x11rb::protocol::xproto::ConfigureWindowAux::new()
+        .width(width)
+        .height(height);
+    conn.configure_window(window.id(), &aux).unwrap();
+    conn.sync().unwrap();
+}
+
+/// Pumps `window` until `fit` has been asked once, for up to five seconds, and returns the
+/// size it was asked for.
+fn pump_until_fitted(window: &HostWindow, snap_to: (u32, u32)) -> Option<(u32, u32)> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut asked = None;
+    while asked.is_none() && Instant::now() < deadline {
+        assert!(window.pump(|w, h| {
+            asked = Some((w, h));
+            snap_to
+        }));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    asked
+}
+
+#[test]
+fn pump_offers_the_users_size_and_snaps_to_what_the_editor_took() {
+    if !display() {
+        return;
+    }
+    let window = HostWindow::new("Resizable", 300, 200, false).unwrap();
+    let (conn, _) = x11rb::connect(None).unwrap();
+    user_resizes(&conn, &window, 500, 410);
+    assert_eq!(pump_until_fitted(&window, (480, 400)), Some((500, 410)));
+    assert_eq!(window.size(), (480, 400), "snapped to the editor's size");
+    // The snap is the window's own doing: it is not offered back as a user resize.
+    window.connection().sync().unwrap();
+    assert!(window.pump(|_, _| panic!("no new size to fit")));
+}
+
+#[test]
+fn pump_fits_once_to_the_newest_size_and_an_editor_that_takes_it_moves_nothing() {
+    if !display() {
+        return;
+    }
+    let window = HostWindow::new("Resizable", 300, 200, false).unwrap();
+    let (conn, _) = x11rb::connect(None).unwrap();
+    user_resizes(&conn, &window, 500, 410);
+    user_resizes(&conn, &window, 520, 420);
+    window.connection().sync().unwrap();
+    let mut asked = Vec::new();
+    assert!(window.pump(|w, h| {
+        asked.push((w, h));
+        (w, h)
+    }));
+    assert_eq!(asked, [(520, 420)]);
+    assert_eq!(window.size(), (520, 420));
+    // Nothing was sent to the window, so nothing comes back.
+    window.connection().sync().unwrap();
+    assert!(window.pump(|_, _| panic!("no new size to fit")));
+}
+
+#[test]
+fn pump_leaves_a_fixed_window_alone_and_reports_a_close() {
+    if !display() {
+        return;
+    }
+    let window = HostWindow::new("Fixed", 300, 200, true).unwrap();
+    let (conn, _) = x11rb::connect(None).unwrap();
+    user_resizes(&conn, &window, 500, 410);
+    assert!(wait_for(&window, |e| matches!(
+        e,
+        WindowEvent::Resized(500, 410)
+    )));
+    user_resizes(&conn, &window, 520, 420);
+    window.connection().sync().unwrap();
+    assert!(window.pump(|_, _| panic!("a fixed window is not fitted")));
+    assert_eq!(window.size(), (520, 420), "the pump saw the resize");
+
+    let wm_protocols = atom(&conn, "WM_PROTOCOLS");
+    let wm_delete = atom(&conn, "WM_DELETE_WINDOW");
+    let event = ClientMessageEvent::new(32, window.id(), wm_protocols, [wm_delete, 0, 0, 0, 0]);
+    conn.send_event(false, window.id(), EventMask::NO_EVENT, event)
+        .unwrap();
+    conn.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while window.pump(|w, h| (w, h)) {
+        assert!(Instant::now() < deadline, "the close never arrived");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

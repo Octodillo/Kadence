@@ -3,15 +3,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use daw_core::event::{Event, EventKind, EventList, ParamId};
+use daw_core::event::{Event, EventKind, EventList, ParamId, midi};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor};
 use daw_core::split::{SharedAudio, SplitAudio};
+use daw_plugin_window::EditorTitle;
 use livi::event::{LV2AtomEventBuilder, LV2AtomSequence};
 use livi::{EmptyPortConnections, PortIndex, PortType};
 
 use crate::atom::{self, Urids};
-use crate::{Shared, midi, ring, ui};
+use crate::{Shared, ring, ui};
 
 const LV2_CORE: &str = "http://lv2plug.in/ns/lv2core#";
 const PPROPS_NOT_AUTOMATIC: &str = "http://lv2plug.in/ns/ext/port-props#notAutomatic";
@@ -35,8 +36,7 @@ const ATOM_CAPACITY: usize = 8192;
 pub struct Lv2Instance {
     // Declared first so it is dropped before the plugin it points into.
     editor: Option<ui::Editor>,
-    /// From `set_editor_title`; the plugin's name until then.
-    editor_title: Option<String>,
+    editor_title: EditorTitle,
     /// The UI changed a value, and `take_state_changed` has not said so yet.
     state_changed: bool,
     ui_info: Option<ui::UiInfo>,
@@ -344,7 +344,7 @@ impl Lv2Instance {
         }
         Ok(Self {
             editor: None,
-            editor_title: None,
+            editor_title: EditorTitle::default(),
             state_changed: false,
             ui_info,
             ui_ends: Some(ui::UiEnds { to_dsp, from_dsp }),
@@ -396,7 +396,7 @@ impl Lv2Instance {
         let reopen = self.editor.is_some();
         // Also collects an edit the editor has not reported yet.
         self.close_editor();
-        fresh.editor_title = self.editor_title.take();
+        fresh.editor_title = std::mem::take(&mut self.editor_title);
         fresh.state_changed = self.state_changed;
         *self = fresh;
         if reopen {
@@ -567,7 +567,7 @@ impl Audio {
                 if ty == self.urids.midi_event
                     && self.atom_out_midi[j]
                     && let (Some(out), Some(kind)) =
-                        (events_out.as_deref_mut(), midi::from_midi(ev.data))
+                        (events_out.as_deref_mut(), midi::decode(ev.data))
                 {
                     let time = ev.time.clamp(0, (n - 1) as i64);
                     let frame = (start as i64 + time) as u32;
@@ -666,7 +666,7 @@ impl Audio {
                     pending_at = at;
                 }
                 ref kind => {
-                    let (Some(i), Some((bytes, len))) = (self.midi_in, midi::to_midi(kind)) else {
+                    let (Some(i), Some((bytes, len))) = (self.midi_in, midi::encode(kind)) else {
                         continue;
                     };
                     let bytes = &bytes[..len];
@@ -873,10 +873,7 @@ impl PluginInstance for Lv2Instance {
             features: &self.features,
             urids: &self.urids,
             plugin_uri: &self.descriptor.id,
-            title: self
-                .editor_title
-                .as_deref()
-                .unwrap_or(&self.descriptor.name),
+            title: self.editor_title.or_name(&self.descriptor.name),
             handle,
             extension_data,
         };
@@ -911,10 +908,11 @@ impl PluginInstance for Lv2Instance {
     }
 
     fn set_editor_title(&mut self, title: &str) {
-        if let Some(editor) = &mut self.editor {
+        if self.editor_title.set(title)
+            && let Some(editor) = &mut self.editor
+        {
             editor.set_title(title);
         }
-        self.editor_title = Some(title.to_owned());
     }
 
     fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {
@@ -1065,18 +1063,17 @@ mod tests {
     /// test) where the bundle is not installed and not required.
     fn installed(bundle: &str, id: &str) -> Option<Lv2Instance> {
         let format = crate::Lv2Format::new();
+        let dir = daw_test_support::lv2::find_bundles(format.default_search_paths(), &[bundle])?;
         let found = format
-            .default_search_paths()
-            .into_iter()
-            .find(|d| d.join(bundle).is_dir())
-            .and_then(|dir| format.scan(&dir.join(bundle)).ok())
-            .and_then(|plugins| plugins.into_iter().find(|d| d.id == id));
+            .scan(&dir.join(bundle))
+            .ok()
+            .and_then(|scan| scan.plugins.into_iter().find(|d| d.id == id));
         let Some(d) = found else {
             assert!(
-                std::env::var_os("DAW_REQUIRE_LV2_PLUGINS").is_none(),
-                "{id} of {bundle} must be installed"
+                std::env::var_os(daw_test_support::lv2::REQUIRE_ENV).is_none(),
+                "{bundle} must contain {id}"
             );
-            eprintln!("skipped: {id} of {bundle} not installed");
+            eprintln!("skipped: {bundle} has no {id}");
             return None;
         };
         Some(format.instantiate_lv2(&d, 48_000.0).unwrap())
@@ -1224,7 +1221,7 @@ mod tests {
         });
         let arrived: Vec<_> = events_out.iter().map(|e| (e.frame, e.kind)).collect();
         let sent: Vec<_> = (0..notes)
-            .map(|key| (frames - 1, midi::from_midi(&[0x80, 60 + key, 0]).unwrap()))
+            .map(|key| (frames - 1, midi::decode(&[0x80, 60 + key, 0]).unwrap()))
             .collect();
         assert_eq!(arrived, sent);
     }

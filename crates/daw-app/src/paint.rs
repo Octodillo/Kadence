@@ -1,7 +1,13 @@
-//! The flat form of a `daw_arrange::Scene` that C++ paints with QPainter
-//! (see `cpp/scenepainter.cpp`).
+//! What the painted items (the arrange view and the piano roll) share: the
+//! flat form of a `daw_arrange::Scene` that C++ paints with QPainter (see
+//! `cpp/scenepainter.cpp`), kept between paints in a [`DisplayList`], the
+//! theme colours they take from QML, and how Qt's pointer events and
+//! cursors map to `daw_arrange`'s.
 
-use daw_arrange::{Prim, scene::Align};
+use std::pin::Pin;
+
+use cxx_qt_lib::QColor;
+use daw_arrange::{Button, Cursor, Pointer, Prim, Rgba, Scene, scene::Align};
 
 #[cxx::bridge(namespace = "kadence")]
 mod ffi {
@@ -134,3 +140,125 @@ pub fn op(p: Prim, texts: &mut Vec<String>, waves: &mut Vec<f32>) -> PaintOp {
         },
     }
 }
+
+/// The last scene, flattened for the painter and kept until the next one.
+///
+/// Building a scene is the costly part of showing a change, so an item does
+/// it at most once a frame and only while it shows: a change marks the list
+/// stale ([`invalidate`](Self::invalidate)) and asks Qt for a polish, and
+/// the item's `updatePolish` builds and stores the scene if
+/// [`wants_scene`](Self::wants_scene).
+#[derive(Default)]
+pub struct DisplayList {
+    ops: Vec<PaintOp>,
+    texts: Vec<String>,
+    waves: Vec<f32>,
+    stale: bool,
+}
+
+impl DisplayList {
+    /// What is stored no longer shows the state.
+    pub fn invalidate(&mut self) {
+        self.stale = true;
+    }
+
+    /// Whether to build a scene now: the stored one is stale and the item
+    /// is `visible`. A hidden item stays stale until it shows again.
+    pub fn wants_scene(&self, visible: bool) -> bool {
+        self.stale && visible
+    }
+
+    /// Replaces what is shown with `scene`, reusing the lists' storage.
+    pub fn store(&mut self, scene: Scene) {
+        self.stale = false;
+        self.ops.clear();
+        self.texts.clear();
+        self.waves.clear();
+        for p in scene.prims {
+            self.ops.push(op(p, &mut self.texts, &mut self.waves));
+        }
+    }
+
+    /// Paints the stored scene, for a `QQuickPaintedItem`'s `paint`.
+    /// Returns whether there was a painter to paint with.
+    ///
+    /// # Safety
+    /// `painter` is null or a live, active painter, as Qt passes one for
+    /// the duration of `paint`.
+    pub unsafe fn paint(&self, painter: *mut cxx_qt_lib::QPainter) -> bool {
+        // SAFETY: the caller passes null or a live painter.
+        let Some(painter) = (unsafe { painter.as_mut() }) else {
+            return false;
+        };
+        // SAFETY: QPainter is not moved while we hold it.
+        let painter = unsafe { Pin::new_unchecked(painter) };
+        paint_scene(painter, &self.ops, &self.texts, &self.waves);
+        true
+    }
+}
+
+pub fn to_qcolor(c: Rgba) -> QColor {
+    QColor::from_rgba(
+        i32::from(c.r()),
+        i32::from(c.g()),
+        i32::from(c.b()),
+        i32::from(c.a()),
+    )
+}
+
+pub fn to_rgba(c: &QColor) -> Rgba {
+    let ch = |v: i32| v.clamp(0, 255) as u32;
+    Rgba(ch(c.alpha()) << 24 | ch(c.red()) << 16 | ch(c.green()) << 8 | ch(c.blue()))
+}
+
+// Qt::KeyboardModifier and Qt::MouseButton values.
+const SHIFT: i32 = 0x0200_0000;
+const CTRL: i32 = 0x0400_0000;
+const ALT: i32 = 0x0800_0000;
+
+/// A pointer event as QML passes it: `button` a Qt::MouseButton and
+/// `modifiers` Qt::KeyboardModifiers.
+pub fn pointer(x: f64, y: f64, button: i32, modifiers: i32) -> Pointer {
+    Pointer {
+        x,
+        y,
+        button: match button {
+            2 => Button::Right,
+            4 => Button::Middle,
+            _ => Button::Left,
+        },
+        shift: modifiers & SHIFT != 0,
+        ctrl: modifiers & CTRL != 0,
+        alt: modifiers & ALT != 0,
+    }
+}
+
+/// Qt::CursorShape values.
+pub fn cursor_shape(c: Cursor) -> i32 {
+    match c {
+        Cursor::Arrow => 0,
+        Cursor::Move => 17,
+        Cursor::ResizeHorizontal => 6,
+        Cursor::ResizeVertical => 5,
+        Cursor::Pointing => 13,
+        Cursor::Crosshair => 2,
+    }
+}
+
+/// The [`Palette`](daw_arrange::Palette) of a painted item's seven
+/// theme-colour properties (`background_color` and so on, which QML binds
+/// to the Kirigami theme).
+macro_rules! theme_palette {
+    ($item:expr) => {
+        daw_arrange::Palette {
+            background: $crate::paint::to_rgba(&$item.background_color),
+            alternate_background: $crate::paint::to_rgba(&$item.alternate_background_color),
+            text: $crate::paint::to_rgba(&$item.text_color),
+            disabled_text: $crate::paint::to_rgba(&$item.disabled_text_color),
+            highlight: $crate::paint::to_rgba(&$item.highlight_color),
+            highlighted_text: $crate::paint::to_rgba(&$item.highlighted_text_color),
+            negative: $crate::paint::to_rgba(&$item.negative_color),
+        }
+    };
+}
+pub(crate) use theme_palette;

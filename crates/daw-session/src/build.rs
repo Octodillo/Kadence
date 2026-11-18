@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use daw_core::level;
 use daw_core::node::{Node, PortLayout, ProcessContext};
-use daw_core::time::TickTime;
+use daw_core::time::{TickTime, engine_to_file_frames, file_to_engine_frames};
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
 use daw_engine::{GraphDesc, NodeId, NodeKey, NodeKind, NodeMeter};
@@ -24,9 +25,9 @@ use daw_midi::player::midi_player;
 
 use crate::Warning;
 use crate::capture::input_tap;
-use crate::media::Loaded;
+use crate::media::{Loaded, Seen};
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
-use crate::{Built, MetronomeSettings, Session, db_to_gain};
+use crate::{Built, MetronomeSettings, Session, strip_gain};
 
 /// Every channel strip in the graph is stereo.
 const STRIP_CHANNELS: u16 = 2;
@@ -73,10 +74,15 @@ fn tap_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 3)
 }
 
-/// The key of a bus's input: a unity gain stage in front of the strip, for
-/// pre-fader sends from a bus with no devices to tap.
-fn input_key(track: TrackId) -> NodeKey {
+/// The key of a track's pre-fader stage: the point in front of its strip
+/// that its pre-fader sends tap.
+fn pre_fader_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 4)
+}
+
+/// Whether a built-in device kind is the one whose state names sample files.
+fn is_sampler(kind: &str) -> bool {
+    kind == daw_devices::devices::sampler::INFO.id
 }
 
 /// How many captured input events can wait for the recorder.
@@ -185,6 +191,11 @@ impl Structure {
     pub fn has_automation(&self) -> bool {
         self.tracks.iter().any(|t| !t.lanes.is_empty())
     }
+
+    pub fn has_sampler(&self) -> bool {
+        let mut devices = self.tracks.iter().flat_map(|t| t.devices.iter());
+        devices.any(|d| matches!(&d.1, DeviceSource::Builtin { kind } if is_sampler(kind)))
+    }
 }
 
 /// Builds the whole graph for `snapshot`, reusing what `old` had running.
@@ -195,7 +206,7 @@ pub(crate) fn graph(
     snapshot: &ProjectSnapshot,
     structure: Structure,
     old: Built,
-) -> (GraphDesc, Built) {
+) -> (GraphDesc, Build) {
     let mut b = Builder::new(session, snapshot, structure, old);
     for track in snapshot.all_tracks() {
         b.track(track);
@@ -205,7 +216,67 @@ pub(crate) fn graph(
     b.metronome();
     b.automate();
     b.stopped_lanes();
-    (b.g, b.built)
+    let build = Build {
+        built: b.built,
+        old: b.old,
+        taken: b.taken,
+    };
+    (b.g, build)
+}
+
+/// A graph's bookkeeping, until the engine has the graph.
+pub(crate) struct Build {
+    /// What the session keeps once the engine took the graph.
+    pub built: Built,
+    /// What the running graph was built from, less what `built` took over.
+    old: Built,
+    taken: Taken,
+}
+
+/// What a build took over from the running graph's bookkeeping, or changed
+/// outside its own: all of it goes back if the engine refuses the graph.
+#[derive(Default)]
+struct Taken {
+    players: Vec<TrackId>,
+    midi: Vec<TrackId>,
+    taps: Vec<TrackId>,
+    /// Plugins this build marked as no longer fresh.
+    fresh: Vec<DeviceId>,
+}
+
+impl Build {
+    /// The engine refused the graph: gives back the running graph's
+    /// bookkeeping as it was, handles included, so the next build reuses
+    /// the running nodes like this one did.
+    pub fn revert(self, plugins: &mut crate::Plugins) -> Built {
+        let Self {
+            mut built,
+            mut old,
+            taken,
+        } = self;
+        fn back<K: Copy + Eq + std::hash::Hash, V>(
+            keys: &[K],
+            from: &mut HashMap<K, V>,
+            to: &mut HashMap<K, V>,
+        ) {
+            for k in keys {
+                if let Some(v) = from.remove(k) {
+                    to.insert(*k, v);
+                }
+            }
+        }
+        back(&taken.players, &mut built.players, &mut old.players);
+        back(&taken.players, &mut built.clips, &mut old.clips);
+        back(&taken.midi, &mut built.midi, &mut old.midi);
+        back(&taken.midi, &mut built.midi_clips, &mut old.midi_clips);
+        back(&taken.taps, &mut built.taps, &mut old.taps);
+        for device in taken.fresh {
+            if let Some(live) = plugins.live_mut(device) {
+                live.fresh = true;
+            }
+        }
+        old
+    }
 }
 
 /// Where a track's nodes are in the graph being built.
@@ -213,9 +284,21 @@ struct Chain {
     strip: NodeId,
     /// Where audio routed into the track (from outputs and sends) enters.
     head: NodeId,
-    /// The end of the track's devices, for pre-fader sends. `None` when
-    /// nothing comes before the strip.
+    /// What the track's pre-fader sends tap, if it has any.
     pre_fader: Option<NodeId>,
+}
+
+/// A track's signal on its way down the chain, while the chain is built.
+#[derive(Default)]
+struct Signal {
+    /// The nodes whose outputs, summed, are the signal so far.
+    sources: Vec<NodeId>,
+    /// The first node the signal went into: where audio routed into the
+    /// track joins it.
+    head: Option<NodeId>,
+    /// Whether other tracks can be routed into this one (a bus or the
+    /// master), so that it needs a `head` that passes audio on.
+    takes_routes: bool,
 }
 
 /// A graph being built for a snapshot, one pass at a time: each track's
@@ -234,6 +317,7 @@ struct Builder<'a> {
     devices: HashMap<NodeKey, &'a Device>,
     chains: HashMap<TrackId, Chain>,
     routes: Routes,
+    taken: Taken,
 }
 
 impl<'a> Builder<'a> {
@@ -266,6 +350,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             chains: HashMap::new(),
             routes: Routes::default(),
+            taken: Taken::default(),
             session,
             project,
         }
@@ -321,73 +406,127 @@ impl<'a> Builder<'a> {
         Box::new(strip)
     }
 
-    /// One track's chain: [player] -> devices -> strip.
+    /// One track's chain: [player, input] -> devices -> [pre-fader stage]
+    /// -> strip.
     fn track(&mut self, track: &'a Track) {
         let strip = self.strip(track);
-        let mut chain: Vec<NodeId> = Vec::new();
-        let mut tap = None;
+        let mut signal = Signal {
+            takes_routes: matches!(track.kind, TrackKind::Bus | TrackKind::Master),
+            ..Signal::default()
+        };
         if track.kind == TrackKind::Audio {
-            chain.push(self.clip_player(track));
-            // The input tap joins the chain after the player, so monitored
-            // input goes through the track's devices like its clips do.
+            signal.sources.push(self.clip_player(track));
+            // Monitored input goes through the track's devices like its
+            // clips do.
             if self.session.config.inputs > 0 {
-                tap = Some(self.input_tap(track));
+                signal.sources.push(self.input_tap(track));
             }
         }
-        // An instrument track's MIDI player feeds its first device events,
-        // not audio, so it stays out of the audio chain.
+        // An instrument track's MIDI player feeds a device events, not
+        // audio, so it stays out of the audio chain.
         let midi = (track.kind == TrackKind::Instrument).then(|| self.midi_player(track));
+        let mut takes_notes = None;
         for d in &track.devices {
             let id = self.device(d);
+            if takes_notes.is_none() && self.ports(id).event_in {
+                takes_notes = Some(id);
+            }
             // A switched-off device stays in the graph, so it keeps its
             // state, but audio goes around it.
             if d.enabled {
-                chain.push(id);
+                self.pass_through(&mut signal, id, &d.name);
             }
         }
-        // A bus taps its pre-fader sends from the end of its devices; with
-        // none switched on, from a unity stage in front of the strip.
-        if chain.is_empty()
-            && track.kind == TrackKind::Bus
-            && track.sends.iter().any(|s| s.pre_fader)
-        {
-            chain.push(self.bus_input(track));
-        }
-        for pair in chain.windows(2) {
-            self.g.connect(pair[0], pair[1]);
-        }
-        if let Some(tap) = tap {
-            // The player is first in an audio track's chain.
-            let after_player = chain.get(1).copied().unwrap_or(strip);
-            self.g.connect(tap, after_player);
-        }
-        if let Some(&last) = chain.last() {
-            self.g.connect(last, strip);
-        }
-        // Audio routed into a bus goes through its devices; a track with no
-        // player and no devices takes it straight into the strip.
-        let head = match track.kind {
-            TrackKind::Audio => strip,
-            _ => chain.first().copied().unwrap_or(strip),
-        };
-        if let Some(player) = midi {
-            // The first device even when it is switched off: switching the
-            // instrument off silences it, and it still gets the note-offs
-            // of notes that were sounding.
-            if let Some(first) = track.devices.first() {
-                self.g
-                    .connect_events(player, self.nodes[&device_key(first.id)]);
+        // Notes go to the first device that takes events (one that takes
+        // none, a fixed utility effect, would have the engine refuse the
+        // graph), even when it is switched off: switching the instrument
+        // off silences it, and it still gets the note-offs of notes that
+        // were sounding.
+        match (midi, takes_notes) {
+            (Some(player), Some(device)) => self.g.connect_events(player, device),
+            (Some(_), None) if !track.devices.is_empty() => {
+                self.session.warnings.push(Warning::NotesUnplayed {
+                    track: track.name.clone(),
+                });
             }
+            _ => {}
         }
-        let pre_fader = chain.last().copied();
+        let pre_fader = track.sends.iter().any(|s| s.pre_fader).then(|| {
+            let stage = self.pre_fader_stage(track);
+            self.pass_through(&mut signal, stage, &track.name);
+            stage
+        });
+        for &source in &signal.sources {
+            self.link(source, strip);
+        }
         self.chains.insert(
             track.id,
             Chain {
                 strip,
-                head,
+                // A track with nothing before its strip takes routed audio
+                // straight into it.
+                head: signal.head.unwrap_or(strip),
                 pre_fader,
             },
         );
+    }
+
+    fn ports(&self, id: NodeId) -> PortLayout {
+        self.g.ports(id).unwrap_or_default()
+    }
+
+    /// Sends `signal` through `node`, whatever its channel counts. A node
+    /// without audio inputs (an instrument) adds its sound to the signal
+    /// instead, and one without outputs (an analyser) only listens.
+    fn pass_through(&mut self, signal: &mut Signal, node: NodeId, name: &str) {
+        let ports = self.ports(node);
+        if ports.audio_in > 0 {
+            // A listener can't be where routed audio joins the track, as
+            // that audio would end in it: it joins at a stage in front.
+            if ports.audio_out == 0 && signal.head.is_none() && signal.takes_routes {
+                let stage = Box::new(Strip::send(STRIP_CHANNELS, 1.0));
+                let stage = self.g.add_device(format!("{name} input"), stage);
+                signal.head = Some(stage);
+                signal.sources.push(stage);
+            }
+            let entry = self.stereo_entry(node, name);
+            for &source in &signal.sources {
+                self.link(source, entry);
+            }
+            signal.head.get_or_insert(entry);
+        }
+        if ports.audio_out > 0 {
+            if ports.audio_in > 0 {
+                signal.sources.clear();
+            }
+            signal.sources.push(node);
+        }
+    }
+
+    /// Where a stereo signal goes into `node`: the node itself, or for a
+    /// node with one input a stage in front of it that mixes both channels
+    /// into that one, so a mono effect does not drop the right channel.
+    fn stereo_entry(&mut self, node: NodeId, name: &str) -> NodeId {
+        if self.ports(node).audio_in != 1 {
+            return node;
+        }
+        let name = format!("{name} mono mix");
+        let mix = self.g.add_device(name, Box::new(MonoMix));
+        self.g.connect_audio(mix, 0, node, 0);
+        mix
+    }
+
+    /// Connects the first two channels of `from` to those of `to`. A mono
+    /// `from` goes to both, so it plays in the middle and not on the left.
+    fn link(&mut self, from: NodeId, to: NodeId) {
+        let outs = self.ports(from).audio_out;
+        let ins = self.ports(to).audio_in.min(STRIP_CHANNELS);
+        if outs == 0 {
+            return;
+        }
+        for ch in 0..ins {
+            self.g.connect_audio(from, ch.min(outs - 1), to, ch);
+        }
     }
 
     fn strip(&mut self, track: &Track) -> NodeId {
@@ -423,10 +562,15 @@ impl<'a> Builder<'a> {
     /// An audio track's clip player.
     fn clip_player(&mut self, track: &Track) -> NodeId {
         let key = player_key(track.id);
-        if let Some(handle) = self.old.players.remove(&track.id)
+        if self.old.players.contains_key(&track.id)
             && let Some(id) = self.reuse(key)
         {
+            let handle = self.old.players.remove(&track.id).expect("checked");
+            self.taken.players.push(track.id);
             self.built.players.insert(track.id, handle);
+            if let Some(files) = self.old.unread.get(&track.id) {
+                self.built.unread.insert(track.id, files.clone());
+            }
             if let Some(c) = self.old.clips.remove(&track.id) {
                 self.built.clips.insert(track.id, c);
             }
@@ -437,6 +581,7 @@ impl<'a> Builder<'a> {
             self.session.offline.clone(),
         );
         let set = clip_set(self.session, track, &handle);
+        note_unread(&mut self.built.unread, track.id, &set);
         // A fresh queue has room for the first set.
         let _ = handle.send(set);
         self.built.clips.insert(track.id, track.clips.clone());
@@ -449,10 +594,15 @@ impl<'a> Builder<'a> {
     fn input_tap(&mut self, track: &Track) -> NodeId {
         let key = tap_key(track.id);
         let inputs = self.session.config.inputs;
-        let reused = match self.old.taps.remove(&track.id) {
-            Some(handle) => self.reuse(key).map(|id| (id, handle)),
-            None => None,
-        };
+        let reused = self
+            .old
+            .taps
+            .contains_key(&track.id)
+            .then(|| self.reuse(key));
+        let reused = reused.flatten().map(|id| {
+            self.taken.taps.push(track.id);
+            (id, self.old.taps.remove(&track.id).expect("checked"))
+        });
         let (id, handle) = reused.unwrap_or_else(|| {
             let (node, handle) = input_tap(inputs);
             let name = format!("{} input", track.name);
@@ -472,10 +622,15 @@ impl<'a> Builder<'a> {
     /// (what its input gate lets through, see `Session::apply_gates`).
     fn midi_player(&mut self, track: &Track) -> NodeId {
         let key = midi_key(track.id);
-        let reused = match self.old.midi.remove(&track.id) {
-            Some(handle) => self.reuse(key).map(|id| (id, handle)),
-            None => None,
-        };
+        let reused = self
+            .old
+            .midi
+            .contains_key(&track.id)
+            .then(|| self.reuse(key));
+        let reused = reused.flatten().map(|id| {
+            self.taken.midi.push(track.id);
+            (id, self.old.midi.remove(&track.id).expect("checked"))
+        });
         let id = match reused {
             Some((id, handle)) => {
                 self.built.midi.insert(track.id, handle);
@@ -512,11 +667,14 @@ impl<'a> Builder<'a> {
             DeviceSource::Plugin { .. } => self.plugin(d),
             DeviceSource::Builtin { kind } => {
                 let same_source = self.old.structure.device_source(d.id) == Some(&d.source);
-                match same_source.then(|| self.reuse_with_params(key)).flatten() {
+                // A sampler finds relative sample paths in the project
+                // bundle: when that moved, it loads its state again.
+                let keep = same_source && !(self.session.root_moved && is_sampler(kind));
+                match keep.then(|| self.reuse_with_params(key)).flatten() {
                     Some(id) => {
                         self.g.rename(id, &d.name);
-                        if let Some(m) = self.old.device_meters.remove(&d.id) {
-                            self.built.device_meters.insert(d.id, m);
+                        if let Some(m) = self.old.device_meters.get(&d.id) {
+                            self.built.device_meters.insert(d.id, m.clone());
                         }
                         id
                     }
@@ -545,7 +703,12 @@ impl<'a> Builder<'a> {
         };
         // Samplers find relative sample paths in the project bundle.
         if let Some(state) = &d.state
-            && let Err(e) = load_device_state(dev.as_mut(), &state.0, self.session.media.root())
+            && let Err(e) = load_device_state(
+                dev.as_mut(),
+                &state.0,
+                self.session.media.root(),
+                &mut self.session.warnings,
+            )
         {
             self.session.warnings.push(Warning::DeviceStateRejected {
                 device: d.name.clone(),
@@ -568,16 +731,20 @@ impl<'a> Builder<'a> {
         let key = device_key(d.id);
         let session = &mut *self.session;
         let (sample_rate, max_frames) = (session.sample_rate(), session.config.engine.max_frames);
-        let live = session
-            .plugins
-            .ensure(d, sample_rate, max_frames, &mut session.warnings);
+        let live = session.plugins.ensure(d, sample_rate, max_frames);
         let node: Box<dyn Node> = match live {
             Some(live) => {
                 // A fresh plugin has had none of the document's values:
                 // the session sends them all once the graph is in.
                 let fresh = std::mem::take(&mut live.fresh);
                 let node = live.handle.node(sample_rate, max_frames);
-                if !fresh {
+                if fresh {
+                    self.taken.fresh.push(d.id);
+                } else if !session.sent.maybe_unplayed(&session.controller, key) {
+                    // A value sent just before this graph may never reach the
+                    // plugin (its node is new in every graph, and the engine
+                    // hands the old node's waiting changes to no one), so
+                    // such a node's values are all sent again.
                     self.carry_params(key);
                 }
                 Box::new(node)
@@ -587,13 +754,20 @@ impl<'a> Builder<'a> {
         self.add(NodeKind::Device, &d.name, node, key)
     }
 
-    /// A bus's input: a unity stage in front of its strip.
-    fn bus_input(&mut self, track: &Track) -> NodeId {
-        let key = input_key(track.id);
-        self.reuse(key).unwrap_or_else(|| {
-            let name = format!("{} input", track.name);
-            let stage = Box::new(Strip::send(STRIP_CHANNELS, 1.0));
-            self.add(NodeKind::Bus, name, stage, key)
+    /// The stage a track's pre-fader sends tap: everything the strip gets,
+    /// before the fader. It is silent while the track is (muted, or not
+    /// part of a solo), so the sends are too.
+    fn pre_fader_stage(&mut self, track: &Track) -> NodeId {
+        let key = pre_fader_key(track.id);
+        self.reuse_with_params(key).unwrap_or_else(|| {
+            let params = pre_fader_params(track, &self.muted);
+            let stage = self.new_strip(Strip::track(STRIP_CHANNELS), &params);
+            self.add(
+                NodeKind::Send,
+                format!("{} pre-fader", track.name),
+                stage,
+                key,
+            )
         })
     }
 
@@ -629,11 +803,10 @@ impl<'a> Builder<'a> {
                 let Some(head) = self.chains.get(&s.target).map(|c| c.head) else {
                     continue;
                 };
-                // Before the fader is the end of the device chain. A track
-                // with nothing before its strip (an instrument track
-                // without devices) has no pre-fader signal.
-                let tap = if s.pre_fader { pre_fader } else { Some(strip) };
-                let Some(tap) = tap else { continue };
+                let tap = match pre_fader {
+                    Some(stage) if s.pre_fader => stage,
+                    _ => strip,
+                };
                 if self.route(track, s.target) {
                     self.g.connect(tap, node);
                     self.g.connect(node, head);
@@ -679,10 +852,10 @@ impl<'a> Builder<'a> {
             {
                 let strip = strip_key(self.project, t.id);
                 let (key, param, to_value): (NodeKey, u32, fn(f64) -> f64) = match lane.target {
-                    AutomationTarget::Volume => (strip, Strip::GAIN, db_to_gain),
+                    AutomationTarget::Volume => (strip, Strip::GAIN, strip_gain),
                     AutomationTarget::Pan => (strip, Strip::PAN, |v| v),
                     AutomationTarget::SendLevel { send } => {
-                        (send_key(send), Strip::GAIN, db_to_gain)
+                        (send_key(send), Strip::GAIN, strip_gain)
                     }
                     AutomationTarget::DeviceParam { device, param } => {
                         (device_key(device), param, |v| v)
@@ -691,6 +864,15 @@ impl<'a> Builder<'a> {
                 let Some(&node) = self.nodes.get(&key) else {
                     continue;
                 };
+                // Nothing to drive, and the engine would refuse the graph:
+                // only a damaged project has a lane on a device without
+                // parameters.
+                if !self.ports(node).event_in {
+                    self.session.warnings.push(Warning::LaneSkipped {
+                        device: self.g.name(node).unwrap_or_default().to_owned(),
+                    });
+                    continue;
+                }
                 if self.session.suspended.contains(&lane.id) {
                     // Overwritten by hand for now: the value from before
                     // the lane still is what removing the lane goes back to.
@@ -794,7 +976,7 @@ impl Routes {
 /// What a track's strip should be set to. The master has neither pan nor
 /// mute.
 fn strip_params(key: NodeKey, t: &Track, muted: &HashSet<TrackId>) -> Vec<((NodeKey, u32), f64)> {
-    let mut out = vec![((key, Strip::GAIN), db_to_gain(t.volume_db))];
+    let mut out = vec![((key, Strip::GAIN), strip_gain(t.volume_db))];
     if t.kind != TrackKind::Master {
         out.push(((key, Strip::PAN), t.pan.clamp(-1.0, 1.0)));
         let m = if muted.contains(&t.id) { 1.0 } else { 0.0 };
@@ -803,9 +985,19 @@ fn strip_params(key: NodeKey, t: &Track, muted: &HashSet<TrackId>) -> Vec<((Node
     out
 }
 
+/// What a track's pre-fader stage should be set to: nothing for a track
+/// without pre-fader sends, which has none.
+fn pre_fader_params(t: &Track, muted: &HashSet<TrackId>) -> Vec<((NodeKey, u32), f64)> {
+    if !t.sends.iter().any(|s| s.pre_fader) {
+        return Vec::new();
+    }
+    let m = if muted.contains(&t.id) { 1.0 } else { 0.0 };
+    vec![((pre_fader_key(t.id), Strip::MUTE), m)]
+}
+
 /// What a send's node should be set to.
 fn send_param(s: &daw_model::Send) -> ((NodeKey, u32), f64) {
-    ((send_key(s.id), Strip::GAIN), db_to_gain(s.level_db))
+    ((send_key(s.id), Strip::GAIN), strip_gain(s.level_db))
 }
 
 /// The parameter value every strip, send and device should have.
@@ -814,6 +1006,7 @@ pub(crate) fn params(project: &Project) -> Vec<((NodeKey, u32), f64)> {
     let mut out = Vec::new();
     for t in project.all_tracks() {
         out.extend(strip_params(strip_key(project, t.id), t, &muted));
+        out.extend(pre_fader_params(t, &muted));
         out.extend(t.sends.iter().map(send_param));
         for d in &t.devices {
             for (&p, &v) in &d.params {
@@ -882,6 +1075,8 @@ pub fn effective_mutes(project: &Project) -> HashSet<TrackId> {
 /// The clips of an audio track as a player plays them.
 pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHandle) -> ClipSet {
     let mut set = ClipSet::default();
+    // Where each clip of the set ends in its file, in the file's frames.
+    let mut file_ends: Vec<i64> = Vec::new();
     for c in &track.clips {
         let ClipContent::Audio(a) = &c.content else {
             continue;
@@ -892,12 +1087,13 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
         let path = session.media.resolve(&a.source);
         let engine_rate = session.sample_rate();
         let mut file_rate = engine_rate;
-        let source = match session.media.get(&path) {
+        let (loaded, stamp) = session.media.get(&path);
+        let source = match loaded {
             Loaded::Memory(data, rate) => {
                 file_rate = f64::from(rate);
                 ClipSource::Memory(data)
             }
-            Loaded::Stream(rate) if handle.has_stream(c.id, &path) => {
+            Loaded::Stream(rate) if handle.has_stream(c.id, &path, stamp) => {
                 file_rate = f64::from(rate);
                 ClipSource::Stream(None)
             }
@@ -938,51 +1134,79 @@ pub(crate) fn clip_set(session: &mut Session, track: &Track, handle: &PlayerHand
                 ))
                 .0;
         let (fade_in, fade_out) = daw_model::fit_fades(fade_in, fade_out, end - start);
-        set.clips.push(PlayClip {
+        let file_rate = file_rate.max(1.0);
+        let mut clip = PlayClip {
             id: c.id,
+            stamp,
             start,
             end,
             // The model keeps the offset in the file's own frames.
-            file_start: (a.offset.0 as f64 * engine_rate / file_rate.max(1.0)).round() as i64,
+            file_start: file_to_engine_frames(a.offset.0, file_rate, engine_rate),
             fade_in: true,
             fade_out: true,
             user_fade_in: (fade_in, a.fade_in.shape),
             user_fade_out: (fade_out, a.fade_out.shape),
-            gain: 10f64.powf(a.gain_db / 20.0) as f32,
+            gain: level::db_to_gain(a.gain_db) as f32,
             path,
             source,
-        });
+        };
+        // Where the file is when the clip ends, in its own frames, as a
+        // split works out the offset of its right half.
+        let file_end = a.offset.0 + engine_to_file_frames(end - start, file_rate, engine_rate);
+        // At another rate each part's length is rounded on its own, so the
+        // parts of a file cut more than once can be a frame out.
+        let slack = i64::from(file_rate != engine_rate);
+        join_contiguous(&mut set.clips, &file_ends, &mut clip, a.offset.0, slack);
+        file_ends.push(file_end);
+        set.clips.push(clip);
     }
-    join_contiguous(&mut set);
     set
 }
 
-/// Clips that continue each other (the two halves of a split: same file,
-/// one ends where the next starts, the file running on) play without the
-/// edge fades between them, so a cut is inaudible.
-fn join_contiguous(set: &mut ClipSet) {
-    for i in 1..set.clips.len() {
-        let (before, after) = set.clips.split_at_mut(i);
-        let next = &mut after[0];
-        if let Some(prev) = before
-            .iter_mut()
-            .rev()
-            .find(|p| p.end == next.start && p.path == next.path)
-            && prev.file_start + (prev.end - prev.start) == next.file_start
-            && prev.gain == next.gain
-        {
-            prev.fade_out = false;
-            next.fade_in = false;
-        }
+/// Keeps which of a track's files `set` could not read.
+pub(crate) fn note_unread(unread: &mut HashMap<TrackId, Vec<Seen>>, track: TrackId, set: &ClipSet) {
+    match set.unread() {
+        files if files.is_empty() => unread.remove(&track),
+        files => unread.insert(track, files),
+    };
+}
+
+/// A clip that continues an earlier one (the two halves of a split: same
+/// file, one ends where the next starts, the file running on) plays without
+/// the edge fades between them, so a cut is inaudible.
+///
+/// Whether the file runs on is asked in the file's own frames (`file_ends`
+/// of `clips`, `offset` of `next`), as the model has them, give or take
+/// `slack` frames. Each clip keeps the file position its own offset gives
+/// it: one that followed its neighbour would have its stream seek, and
+/// drop out, whenever the neighbour is edited.
+fn join_contiguous(
+    clips: &mut [PlayClip],
+    file_ends: &[i64],
+    next: &mut PlayClip,
+    offset: i64,
+    slack: i64,
+) {
+    let prev = clips.iter_mut().zip(file_ends).rev().find(|(p, file_end)| {
+        p.end == next.start
+            && p.path == next.path
+            && (**file_end - offset).abs() <= slack
+            && p.gain == next.gain
+    });
+    if let Some((prev, _)) = prev {
+        prev.fade_out = false;
+        next.fade_in = false;
     }
 }
 
 /// Restores a built-in device's saved state. A sampler's relative sample
-/// paths are relative to `root`.
+/// paths are relative to `root`; a sample that will not load leaves its zone
+/// silent and a warning in `warnings`.
 fn load_device_state(
     dev: &mut dyn daw_devices::Device,
     data: &[u8],
     root: Option<&Path>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<(), daw_devices::StateError> {
     let Some(sampler) = dev.as_any_mut().downcast_mut::<daw_devices::Sampler>() else {
         return dev.load_state(data);
@@ -992,8 +1216,39 @@ fn load_device_state(
             Some(root) if path.is_relative() => root.join(path),
             _ => path.to_path_buf(),
         };
-        daw_devices::SampleBuffer::load(&path).ok().map(Arc::new)
+        match daw_devices::SampleBuffer::load(&path) {
+            Ok(sample) => Some(Arc::new(sample)),
+            Err(_) => {
+                warnings.push(Warning::CannotRead { path });
+                None
+            }
+        }
     })
+}
+
+/// Mixes a stereo signal into one channel for a mono device, at half
+/// level each, so a sound in the middle keeps its level.
+struct MonoMix;
+
+impl Node for MonoMix {
+    fn ports(&self) -> PortLayout {
+        PortLayout {
+            audio_in: STRIP_CHANNELS,
+            audio_out: 1,
+            ..Default::default()
+        }
+    }
+
+    fn prepare(&mut self, _sample_rate: f64, _max_frames: u32) {}
+
+    fn process(&mut self, ctx: &mut ProcessContext) {
+        let ([left, right], [out]) = (ctx.audio_in, &mut ctx.audio_out[..]) else {
+            return;
+        };
+        for ((o, l), r) in out.iter_mut().zip(left.iter()).zip(right.iter()) {
+            *o = 0.5 * (l + r);
+        }
+    }
 }
 
 /// Stands in for a device that can't be loaded: stereo through.

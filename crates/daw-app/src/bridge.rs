@@ -84,7 +84,6 @@ pub mod qobject {
         #[qproperty(i32, error_kind)]
         #[qproperty(i32, error_number)]
         #[qproperty(QString, error_detail)]
-        #[qproperty(bool, playing)]
         /// Device display names; index 0 is the backend's default device.
         #[qproperty(QStringList, device_names)]
         #[qproperty(i32, device_index)]
@@ -93,12 +92,6 @@ pub mod qobject {
         #[qproperty(QList_i32, buffer_sizes)]
         #[qproperty(i32, buffer_size)]
         type Engine = super::EngineRust;
-
-        #[qinvokable]
-        fn toggle_playback(self: Pin<&mut Engine>);
-
-        #[qinvokable]
-        fn stop(self: Pin<&mut Engine>);
 
         /// Apply and save new audio settings. Returns false if they were
         /// refused, in which case the old settings stay live and the error
@@ -123,7 +116,6 @@ pub struct EngineRust {
     error_kind: i32,
     error_number: i32,
     error_detail: QString,
-    playing: bool,
     device_names: QStringList,
     device_index: i32,
     sample_rates: QList<i32>,
@@ -241,26 +233,6 @@ impl cxx_qt::Initialize for qobject::Engine {
 }
 
 impl qobject::Engine {
-    fn toggle_playback(self: Pin<&mut Self>) {
-        state::with(|s| {
-            if s.engine.is_playing() {
-                s.engine.stop();
-            } else {
-                s.engine.play();
-            }
-            s.touch();
-        });
-        self.sync();
-    }
-
-    fn stop(self: Pin<&mut Self>) {
-        state::with(|s| {
-            s.engine.stop();
-            s.touch();
-        });
-        self.sync();
-    }
-
     fn apply_audio_settings(
         mut self: Pin<&mut Self>,
         device_index: i32,
@@ -400,13 +372,7 @@ impl qobject::Engine {
     /// Copy engine state into the Qt properties.
     fn sync(mut self: Pin<&mut Self>) {
         self.as_mut().refresh_devices();
-        let (config, status, playing) = state::with(|s| {
-            (
-                s.engine.audio_config(),
-                s.engine.status(),
-                s.engine.is_playing(),
-            )
-        });
+        let (config, status) = state::with(|s| (s.engine.audio_config(), s.engine.status()));
         let running = matches!(status, EngineStatus::Running { .. });
         let device_index = config
             .device
@@ -424,7 +390,6 @@ impl qobject::Engine {
             ),
         }
         self.as_mut().set_running(running);
-        self.as_mut().set_playing(playing);
         self.as_mut().set_device_index(device_index);
         self.as_mut()
             .set_sample_rate(i32::try_from(config.sample_rate).unwrap_or(0));

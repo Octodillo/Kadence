@@ -3,7 +3,7 @@
 use daw_core::event::ParamId;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Smoother, db_to_gain};
+use crate::dsp::{DEVICE_FLOOR_DB, Smoother, device_gain};
 use crate::events::{Segmented, input, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
@@ -22,7 +22,15 @@ pub const INVERT_L: ParamId = 3;
 pub const INVERT_R: ParamId = 4;
 
 pub(crate) static PARAMS: &[ParamSpec] = &[
-    ParamSpec::new(GAIN, "gain", "Gain", -70.0, 24.0, 0.0, ParamUnit::Decibels),
+    ParamSpec::new(
+        GAIN,
+        "gain",
+        "Gain",
+        DEVICE_FLOOR_DB,
+        24.0,
+        0.0,
+        ParamUnit::Decibels,
+    ),
     ParamSpec::new(PAN, "pan", "Pan", -1.0, 1.0, 0.0, ParamUnit::Pan),
     ParamSpec::new(WIDTH, "width", "Width", 0.0, 2.0, 1.0, ParamUnit::Percent),
     ParamSpec::toggle(INVERT_L, "invert_l", "Invert Left", false),
@@ -58,7 +66,7 @@ impl Utility {
     /// Per-channel gains: gain, then a sin/cos balance law that keeps the
     /// centre at unity, then polarity.
     fn channel_gains(&self) -> (f32, f32) {
-        let g = db_to_gain(self.params.get(GAIN));
+        let g = device_gain(self.params.get(GAIN));
         let pan = self.params.get(PAN);
         let angle = pan.abs() * std::f64::consts::FRAC_PI_2;
         let (mut l, mut r) = if pan > 0.0 {
@@ -96,10 +104,6 @@ impl_device!(Utility, INFO, PARAMS, {
 });
 
 impl Segmented for Utility {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn render(&mut self, ctx: &mut ProcessContext, start: usize, end: usize) {
         for i in start..end {
             let (l, r) = (input(ctx, 0, i), input(ctx, 1, i));

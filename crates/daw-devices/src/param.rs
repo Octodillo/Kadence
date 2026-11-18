@@ -160,7 +160,7 @@ impl ParamSpec {
             ParamKind::Continuous => {}
         }
         match self.unit {
-            ParamUnit::Decibels if v <= crate::dsp::MIN_DB => "-inf dB".to_owned(),
+            ParamUnit::Decibels if v <= crate::dsp::DEVICE_FLOOR_DB => "-inf dB".to_owned(),
             ParamUnit::Decibels => format!("{v:.1} dB"),
             ParamUnit::Hertz if v >= 1000.0 => format!("{:.2} kHz", v / 1000.0),
             ParamUnit::Hertz => format!("{v:.0} Hz"),

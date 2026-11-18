@@ -14,7 +14,6 @@
 
 mod atom;
 mod instance;
-mod midi;
 mod ring;
 mod scan;
 mod ui;
@@ -24,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use daw_core::plugin::{
-    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 
 pub use instance::Lv2Instance;
@@ -113,14 +112,10 @@ impl PluginFormat for Lv2Format {
         PluginFormatKind::Lv2
     }
 
-    fn default_search_paths(&self) -> Vec<PathBuf> {
-        scan::default_search_paths()
-    }
-
     /// LV2 scans read only the bundles' Turtle data; plugin code loads on instantiation, so a
     /// scan does not fail. Unparsable data gives no plugins.
-    fn scan(&self, path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
-        Ok(scan::scan(path))
+    fn scan(&self, path: &Path) -> Result<BundleScan, PluginError> {
+        Ok(BundleScan::complete(scan::scan(path)))
     }
 
     fn instantiate(

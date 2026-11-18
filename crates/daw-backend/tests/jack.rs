@@ -30,12 +30,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendStats, JackBackend, PortDirection, PortFilter, PortKind,
+    AudioBackend, BackendConfig, BackendHealth, BackendStats, JackBackend, PortDirection,
+    PortFilter, PortKind, RtAllocCounter, connect_physical,
 };
 use daw_core::event::{Event, EventKind};
 
 #[global_allocator]
-static ALLOC: daw_backend::RtAllocCounter = daw_backend::RtAllocCounter;
+static ALLOC: RtAllocCounter = RtAllocCounter;
 
 // JACK clients in one process share the server connection; keep tests apart
 // when they run in one process (`cargo test`).
@@ -263,7 +264,7 @@ fn runs_cycles_and_lists_ports() {
     let before = b.stats().cycles;
     b.start(Box::new(|_| {})).unwrap();
     wait(&b, |s| s.cycles >= before + 5);
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, Some(0));
     b.close().unwrap();
 }
 
@@ -332,8 +333,8 @@ fn audio_and_midi_flow_between_two_clients() {
     src.disconnect(&midi_out, &midi_in).unwrap();
     // Input to output is refused.
     assert!(src.connect(&audio_in, &audio_out).is_err());
-    assert_eq!(src.stats().rt_alloc_violations, 0);
-    assert_eq!(dst.stats().rt_alloc_violations, 0);
+    assert_eq!(src.stats().rt_alloc_violations, Some(0));
+    assert_eq!(dst.stats().rt_alloc_violations, Some(0));
     src.close().unwrap();
     dst.close().unwrap();
 }
@@ -342,7 +343,7 @@ fn audio_and_midi_flow_between_two_clients() {
 /// are someone's speakers.
 #[test]
 #[ignore = "needs a running JACK server"]
-fn auto_connect_reaches_physical_ports() {
+fn connect_physical_reaches_physical_ports() {
     if std::env::var("KADENCE_TEST_PHYSICAL_PORTS").as_deref() != Ok("1") {
         eprintln!("skipped: set KADENCE_TEST_PHYSICAL_PORTS=1 on a jackd -d dummy server");
         return;
@@ -350,11 +351,7 @@ fn auto_connect_reaches_physical_ports() {
     let _g = serial();
     let me = unique("auto");
     let mut b = JackBackend::new();
-    b.open(BackendConfig {
-        auto_connect: true,
-        ..cfg(&me)
-    })
-    .unwrap();
+    b.open(cfg(&me)).unwrap();
     let physical_in = b
         .list_ports(&PortFilter {
             kind: Some(PortKind::Audio),
@@ -363,6 +360,7 @@ fn auto_connect_reaches_physical_ports() {
         })
         .unwrap();
     b.start(Box::new(|_| {})).unwrap();
+    connect_physical(&mut b, true);
     let first = physical_in
         .first()
         .expect("the dummy server has playback ports");
@@ -371,7 +369,7 @@ fn auto_connect_reaches_physical_ports() {
     // Connecting again is refused: the link is there.
     assert!(b.connect(&out, &first.name).is_err());
     wait(&b, |s| s.cycles >= 5);
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, Some(0));
     b.close().unwrap();
 }
 
@@ -422,7 +420,7 @@ fn connections_survive_stop_and_start() {
     b.disconnect(&out2, &hw.playback(1)).unwrap();
     b.start(Box::new(|_| {})).unwrap();
     assert_stays_unlinked(&b, &out2);
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, Some(0));
     b.close().unwrap();
 }
 
@@ -460,7 +458,7 @@ fn links_made_just_before_stop_are_kept() {
         assert_stays_unlinked(&b, &out);
         b.stop().unwrap();
     }
-    assert_eq!(b.stats().rt_alloc_violations, 0);
+    assert_eq!(b.stats().rt_alloc_violations, Some(0));
     b.close().unwrap();
 }
 
@@ -500,11 +498,13 @@ fn a_panicking_callback_is_contained() {
         }
     }))
     .unwrap();
+    assert_eq!(b.health(), BackendHealth::Ok);
     let out = format!("{me}:audio_out_1");
     wait_visible(&ear, &out);
     ear.connect(&out, &format!("{listener}:audio_in_1"))
         .unwrap();
     wait(&b, |s| s.callback_panicked);
+    assert_eq!(b.health(), BackendHealth::CallbackPanicked);
     // The backend keeps running (silently) and no longer calls the callback.
     let after = b.stats().cycles;
     wait(&b, |s| s.cycles >= after + 2);
@@ -521,6 +521,7 @@ fn a_panicking_callback_is_contained() {
     b.start(Box::new(|_| {})).unwrap();
     wait(&b, |s| s.cycles >= before + 5);
     assert!(!b.stats().callback_panicked);
+    assert_eq!(b.health(), BackendHealth::Ok);
     b.close().unwrap();
 }
 
@@ -659,7 +660,7 @@ fn added_midi_inputs_keep_their_sources_apart() {
             .all(|p| p.name != during.name),
         "the removed port is unregistered"
     );
-    assert_eq!(dst.stats().rt_alloc_violations, 0);
+    assert_eq!(dst.stats().rt_alloc_violations, Some(0));
     src.close().unwrap();
     dst.close().unwrap();
 }

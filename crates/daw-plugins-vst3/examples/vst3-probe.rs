@@ -103,6 +103,10 @@ fn main() {
         println!("scan failed: {e}");
         std::process::exit(1)
     });
+    for skipped in &found.skipped {
+        println!("skipped: {skipped}");
+    }
+    let found = found.plugins;
     println!("scan: {} plugin(s) in {}", found.len(), path.display());
     let mut failures = 0;
     for d in &found {

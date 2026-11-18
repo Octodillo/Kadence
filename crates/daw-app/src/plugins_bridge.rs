@@ -6,17 +6,18 @@
 //! results. Plugin names, vendors and scan failures are the plugins' own
 //! text; the format names (CLAP, VST3, LV2) are not translated.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{
-    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QUrl, QVariant,
+    QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QUrl, QVariant,
 };
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
 use daw_session::catalog::{FORMATS, Filter, PluginKind};
 
-use crate::qt_lists::string_list;
+use crate::model_roles;
+use crate::qt_lists::{ModelRole, row, string_list};
 use crate::settings::{self, KConfigStore};
 use crate::state;
 
@@ -39,6 +40,14 @@ pub mod qobject {
         type QStringList = cxx_qt_lib::QStringList;
         include!("cxx-qt-lib/qurl.h");
         type QUrl = cxx_qt_lib::QUrl;
+    }
+
+    /// Which plugins a browser shows.
+    #[qenum(Plugins)]
+    enum PluginKind {
+        AnyPlugin,
+        InstrumentPlugin,
+        EffectPlugin,
     }
 
     #[auto_cxx_name]
@@ -67,7 +76,7 @@ pub mod qobject {
         #[qproperty(QStringList, extra_folders)]
         type Plugins = super::PluginsRust;
 
-        /// Picks up scan progress and results. Called by the UI's timer.
+        /// Picks up scan progress and results. Called by the UI's clock.
         #[qinvokable]
         fn tick(self: Pin<&mut Plugins>);
 
@@ -76,10 +85,9 @@ pub mod qobject {
         fn rescan(self: Pin<&mut Plugins>);
 
         /// Shows plugins whose name or vendor holds every word of `text`,
-        /// of `format` (0 any, 1 CLAP, 2 VST3, 3 LV2) and `kind` (0 any,
-        /// 1 instruments, 2 effects).
+        /// of `format` (0 any, 1 CLAP, 2 VST3, 3 LV2) and of `kind`.
         #[qinvokable]
-        fn set_filter(self: Pin<&mut Plugins>, text: &QString, format: i32, kind: i32);
+        fn set_filter(self: Pin<&mut Plugins>, text: &QString, format: i32, kind: PluginKind);
 
         /// Adds a folder to the search, saves it and rescans. False if it
         /// is not a local folder or already listed.
@@ -88,6 +96,18 @@ pub mod qobject {
 
         #[qinvokable]
         fn remove_folder(self: Pin<&mut Plugins>, index: i32);
+
+        /// The formats' names, in the order `setFilter` and `formatFolders`
+        /// number them from 1.
+        #[qinvokable]
+        fn format_names(self: &Plugins) -> QStringList;
+
+        /// The folders searched for a format (numbered as in `setFilter`,
+        /// from 1) before the added ones, in search order, with the home
+        /// folder written `~`. Folders outside the home folder that do
+        /// not exist are left out.
+        #[qinvokable]
+        fn format_folders(self: &Plugins, format: i32) -> QStringList;
 
         /// Row `row` as [formatId, pluginId, name], or empty.
         #[qinvokable]
@@ -122,17 +142,18 @@ pub mod qobject {
     impl cxx_qt::Initialize for Plugins {}
 }
 
-/// `name` and `vendor` are the plugin's; `format` is its display name,
-/// `formatId` the name `Mixer.addPluginInsert` takes; `pluginId` its id.
-const ROLES: &[&str] = &[
-    "name",
-    "vendor",
-    "format",
-    "formatId",
-    "pluginId",
-    "instrument",
-];
-const USER_ROLE: i32 = 0x0100;
+model_roles!(
+    /// `name` and `vendor` are the plugin's; `format` is its display name,
+    /// `formatId` the name `Mixer.addPluginInsert` takes; `pluginId` its id.
+    enum Role {
+        Name => "name",
+        Vendor => "vendor",
+        Format => "format",
+        FormatId => "formatId",
+        PluginId => "pluginId",
+        Instrument => "instrument",
+    }
+);
 
 #[derive(Default)]
 pub struct PluginsRust {
@@ -173,17 +194,52 @@ pub fn format_label(format: &PluginFormatKind) -> &'static str {
     }
 }
 
-/// The filter for the browser's choices: `format` and `kind` as in
-/// `Plugins.setFilter`, out-of-range values meaning any.
-pub fn filter_for(text: &str, format: i32, kind: i32) -> Filter {
-    let format = usize::try_from(format)
+/// The format `Plugins.setFilter` numbers `format`: [`FORMATS`] from 1.
+fn format_at(format: i32) -> Option<PluginFormatKind> {
+    usize::try_from(format)
         .ok()
         .and_then(|i| i.checked_sub(1))
         .and_then(|i| FORMATS.get(i))
-        .cloned();
+        .cloned()
+}
+
+/// `$HOME` as a folder of the user's own: not when unset, empty or `/`,
+/// where everything would count as theirs.
+fn home_folder(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    home.map(PathBuf::from).filter(|h| h.parent().is_some())
+}
+
+/// `path` for showing, with `home` shortened to `~` as users write it.
+fn display_folder(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// The searched `folders` worth showing, as text: those that `exists`, and
+/// those in `home` even when they don't, since the user may create them.
+/// A system folder this distribution doesn't have is only noise.
+fn shown_folders(
+    folders: &[PathBuf],
+    home: Option<&Path>,
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<String> {
+    folders
+        .iter()
+        .filter(|f| home.is_some_and(|home| f.starts_with(home)) || exists(f))
+        .map(|f| display_folder(f, home))
+        .collect()
+}
+
+/// The filter for the browser's choices: `format` and `kind` as in
+/// `Plugins.setFilter`, out-of-range values meaning any.
+pub fn filter_for(text: &str, format: i32, kind: qobject::PluginKind) -> Filter {
+    let format = format_at(format);
     let kind = match kind {
-        1 => Some(PluginKind::Instrument),
-        2 => Some(PluginKind::Effect),
+        qobject::PluginKind::InstrumentPlugin => Some(PluginKind::Instrument),
+        qobject::PluginKind::EffectPlugin => Some(PluginKind::Effect),
         _ => None,
     };
     Filter {
@@ -271,7 +327,12 @@ impl qobject::Plugins {
         self.as_mut().reload();
     }
 
-    fn set_filter(mut self: Pin<&mut Self>, text: &QString, format: i32, kind: i32) {
+    fn set_filter(
+        mut self: Pin<&mut Self>,
+        text: &QString,
+        format: i32,
+        kind: qobject::PluginKind,
+    ) {
         let filter = filter_for(&text.to_string(), format, kind);
         if filter != self.filter {
             self.as_mut().rust_mut().filter = filter;
@@ -312,6 +373,19 @@ impl qobject::Plugins {
         self.set_folders(folders);
     }
 
+    fn format_folders(&self, format: i32) -> QStringList {
+        let Some(format) = format_at(format) else {
+            return QStringList::default();
+        };
+        let home = home_folder(std::env::var_os("HOME"));
+        let folders = state::with(|s| s.plugins.format_folders(&format));
+        string_list(shown_folders(&folders, home.as_deref(), Path::is_dir))
+    }
+
+    fn format_names(&self) -> QStringList {
+        string_list(FORMATS.iter().map(|f| format_label(f).to_owned()))
+    }
+
     fn plugin_at(&self, row: i32) -> QStringList {
         let Some(p) = usize::try_from(row).ok().and_then(|r| self.rows.get(r)) else {
             return QStringList::default();
@@ -324,30 +398,25 @@ impl qobject::Plugins {
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let Some(p) = usize::try_from(index.row())
-            .ok()
-            .and_then(|r| self.rows.get(r))
-        else {
+        let Some(p) = row(&self.rows, index) else {
             return QVariant::default();
         };
         let text = |s: &str| QVariant::from(&QString::from(s));
-        match ROLES.get((role - USER_ROLE) as usize).copied() {
-            Some("name") => text(&p.name),
-            Some("vendor") => text(&p.vendor),
-            Some("format") => text(format_label(&p.format)),
-            Some("formatId") => text(daw_plugins::kind_name(&p.format)),
-            Some("pluginId") => text(&p.id),
-            Some("instrument") => QVariant::from(&p.is_instrument),
-            _ => QVariant::default(),
+        let Some(role) = Role::from_qt(role) else {
+            return QVariant::default();
+        };
+        match role {
+            Role::Name => text(&p.name),
+            Role::Vendor => text(&p.vendor),
+            Role::Format => text(format_label(&p.format)),
+            Role::FormatId => text(daw_plugins::kind_name(&p.format)),
+            Role::PluginId => text(&p.id),
+            Role::Instrument => QVariant::from(&p.is_instrument),
         }
     }
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
-        let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
-        for (i, name) in ROLES.iter().enumerate() {
-            roles.insert(USER_ROLE + i as i32, QByteArray::from(*name));
-        }
-        roles
+        Role::names()
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
@@ -361,14 +430,66 @@ mod tests {
 
     #[test]
     fn filters_follow_the_browser_choices() {
-        assert_eq!(filter_for("", 0, 0), Filter::default());
-        let f = filter_for("eq", 3, 2);
+        use qobject::PluginKind as Qml;
+        assert_eq!(filter_for("", 0, Qml::AnyPlugin), Filter::default());
+        let f = filter_for("eq", 3, Qml::EffectPlugin);
         assert_eq!(f.text, "eq");
         assert_eq!(f.format, Some(PluginFormatKind::Lv2));
         assert_eq!(f.kind, Some(PluginKind::Effect));
-        assert_eq!(filter_for("", 1, 1).format, Some(PluginFormatKind::Clap));
-        assert_eq!(filter_for("", 2, 1).kind, Some(PluginKind::Instrument));
-        let odd = filter_for("", 9, -1);
+        let f = filter_for("", 1, Qml::InstrumentPlugin);
+        assert_eq!(f.format, Some(PluginFormatKind::Clap));
+        assert_eq!(f.kind, Some(PluginKind::Instrument));
+        let odd = filter_for("", 9, Qml { repr: -1 });
         assert_eq!((odd.format, odd.kind), (None, None));
+    }
+
+    #[test]
+    fn folders_show_the_home_folder_as_a_tilde() {
+        let home = Some(Path::new("/home/me"));
+        assert_eq!(display_folder(Path::new("/home/me/.clap"), home), "~/.clap");
+        assert_eq!(display_folder(Path::new("/home/me"), home), "~");
+        assert_eq!(
+            display_folder(Path::new("/home/meg/.clap"), home),
+            "/home/meg/.clap"
+        );
+        assert_eq!(
+            display_folder(Path::new("/usr/lib/clap"), home),
+            "/usr/lib/clap"
+        );
+        assert_eq!(
+            display_folder(Path::new("/home/me/.clap"), None),
+            "/home/me/.clap"
+        );
+    }
+
+    #[test]
+    fn the_root_folder_is_nobodys_home() {
+        assert_eq!(
+            home_folder(Some("/home/me".into())),
+            Some(PathBuf::from("/home/me"))
+        );
+        for none in [Some("/".into()), Some("".into()), None] {
+            assert_eq!(home_folder(none), None);
+        }
+    }
+
+    #[test]
+    fn missing_folders_are_shown_only_in_the_home_folder() {
+        let folders = ["/home/me/.lv2", "/usr/lib/lv2", "/usr/lib64/lv2"].map(PathBuf::from);
+        let exists = |p: &Path| p == Path::new("/usr/lib/lv2");
+        assert_eq!(
+            shown_folders(&folders, Some(Path::new("/home/me")), exists),
+            ["~/.lv2", "/usr/lib/lv2"]
+        );
+        assert_eq!(shown_folders(&folders, None, exists), ["/usr/lib/lv2"]);
+    }
+
+    #[test]
+    fn formats_are_numbered_from_one() {
+        assert_eq!(format_at(1), Some(PluginFormatKind::Clap));
+        assert_eq!(format_at(3), Some(PluginFormatKind::Lv2));
+        for none in [0, 4, -1, i32::MIN] {
+            assert_eq!(format_at(none), None);
+        }
     }
 }

@@ -33,6 +33,8 @@ cargo nextest run   # or: cargo test
 
 CI runs `cargo fmt --check`, `cargo clippy -D warnings` and the tests on
 every pull request.
+[docs/testing.md](docs/testing.md) covers the shared test helpers and the
+environment switches the tests read.
 
 ## License
 

@@ -1,5 +1,6 @@
 //! Builds the arrange view's display list.
 
+use daw_core::level;
 use daw_core::time::{TempoMap, TickTime};
 use daw_midi::grid::{LineKind, Meter};
 use daw_model::{AudioClip, Clip, ClipContent, Project, Track};
@@ -249,7 +250,7 @@ fn draw_clip(s: &mut Scene, a: &mut Arrange, env: &Env, row: usize, clip: &Clip,
         ClipContent::Audio(audio) => {
             let path = env.resolve(&audio.source);
             if let Peaks::Ready(cache) = a.peaks.get(&path) {
-                let gain = 10f64.powf(audio.gain_db / 20.0) as f32;
+                let gain = level::db_to_gain(audio.gain_db) as f32;
                 waveform(s, a, env, clip, audio, &cache, body, ink, gain);
             }
             if let Some(h) = a.handles(row, clip) {
@@ -332,8 +333,9 @@ fn fades(
     }
 }
 
-/// The fade and gain handles: small squares along the clip's top edge,
-/// filled where they are set to something.
+/// The fade and gain handles: small squares along the clip's top edge (see
+/// [`Arrange::handles`](crate::Arrange::handles)), filled where they are set
+/// to something.
 fn handles(s: &mut Scene, h: &crate::Handles, audio: &AudioClip, pal: Palette, ink: Rgba) {
     let set = [
         (h.fade_in, !audio.fade_in.is_none()),

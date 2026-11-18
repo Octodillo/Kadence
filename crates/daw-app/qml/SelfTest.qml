@@ -79,10 +79,10 @@ Item {
         },
         () => {
             const arrange = window.pageStack.currentItem;
-            check(Project.trackCount === 0, "new project is empty");
-            arrange.addTrack(1);
-            check(Project.trackCount === 1, "add instrument track");
-            check(Project.trackName(0) === i18nc("@item default track name, %1 is a number", "Instrument %1", 1),
+            check(Tracks.count === 0, "new project is empty");
+            arrange.addTrack(Tracks.InstrumentTrack);
+            check(Tracks.count === 1, "add instrument track");
+            check(Tracks.get(0).name === i18nc("@item default track name, %1 is a number", "Instrument %1", 1),
                   "default track name worded in QML");
             // Dragging a header's lower edge resizes every track.
             const v = arrange.view;
@@ -97,30 +97,40 @@ Item {
             check(close(v.trackHeight, before), "resize tracks back");
             // The edge follows the pointer: scrolled, the sizes above the
             // row scroll away; at the top, they share the movement.
+            // A list view makes its delegates when it next lays out.
+            arrange.trackHeaders.forceLayout();
             const header = arrange.trackHeaders.itemAtIndex(0);
             check(header.edgeChange(12, 100, 2, 1, 10, 2000, 500) === 12, "a dragged edge follows the pointer");
             check(header.edgeChange(12, 0, 2, 1, 3, 192, 500) === 4 && header.edgeChange(12, 0, 1, 2, 3, 192, 500) === 4,
                   "in a short timeline, the sizes above a dragged edge share the movement");
             check(header.edgeChange(-30, 10, 1, 1, 10, 2000, 500) === -20, "an edge scrolls to the top, then shares the rest");
+            // What the header's menu does is also a page action on the
+            // selected track, for the keyboard.
+            check(Project.selectedTrack === 0 && arrange.trackActions[0].enabled, "a new track is selected");
+            arrange.trackActions[0].trigger();
+            check(header.renaming, "Rename Track opens the selected track's name");
+            header.dismiss();
+            check(!header.renaming && !arrange.trackActions[1].enabled && !arrange.trackActions[2].enabled,
+                  "an only track has nowhere to move");
             // Double-click the first lane: a one-bar MIDI clip appears.
             v.doubleClick(v.width / 4, v.rulerHeight + v.trackHeight / 2, 0);
             check(Project.canUndo && Project.undoText !== "", "clip added");
             check(Project.undoText in editNames.names, "undo name has a translation");
             // Arm it and pick a MIDI input: both undoable, both translated.
-            Project.setTrackArmed(0, true);
-            check(Project.trackArmed(0) && Project.undoText === "Arm Track", "arm a track");
-            Project.setTrackMidiInput(0, "Midi-Bridge:USB Keyboard (capture)", 9);
-            check(Project.trackMidiDevice(0) === "Midi-Bridge:USB Keyboard (capture)"
-                  && Project.trackMidiChannel(0) === 9
+            Tracks.setArmed(0, true);
+            check(Tracks.get(0).armed && Project.undoText === "Arm Track", "arm a track");
+            Tracks.setMidiInput(0, "Midi-Bridge:USB Keyboard (capture)", 9);
+            check(Tracks.get(0).midiDevice === "Midi-Bridge:USB Keyboard (capture)"
+                  && Tracks.get(0).midiChannel === 9
                   && Project.undoText === "Change MIDI Input"
                   && Project.undoText in editNames.names, "choose a MIDI input");
             Project.undo();
-            check(Project.trackMidiDevice(0) === "" && Project.trackMidiChannel(0) === -1, "undo the MIDI input");
+            check(Tracks.get(0).midiDevice === "" && Tracks.get(0).midiChannel === -1, "undo the MIDI input");
             Project.undo();
-            check(!Project.trackArmed(0), "undo arming");
+            check(!Tracks.get(0).armed, "undo arming");
             Project.undo();
             Project.undo();
-            check(Project.trackCount === 0, "undo back to empty");
+            check(Tracks.count === 0, "undo back to empty");
             // A failed import says why, worded in QML (checked next step).
             check(!v.dropFile("file:///nonexistent/take.wav", 10, 10), "missing file refused");
             const open = Project.openProject("file:///nonexistent/song.kadence");
@@ -131,7 +141,7 @@ Item {
         },
         () => {
             // Pick up the state now: on a slow first start the step timer can
-            // fire before Project's own timer has ticked.
+            // fire before the application's clock has ticked.
             Project.tick();
             check(Project.status.context === Project.ImportContext
                   && Project.status.reason === Project.CannotDecode
@@ -142,20 +152,20 @@ Item {
         },
         () => {
             check(TestHelper.loadDemoProject(), "load demo project");
-            // Building the demo can outlast the 33 ms tick, and then this
+            // Building the demo can outlast the clock's beat, and then this
             // timer may fire before it: refresh Project's properties now.
             Project.tick();
         },
         () => {
             // A slow load can block the event loop past this step's timer,
-            // so both timers are overdue at once; refresh before reading.
+            // so this timer and the clock are overdue at once; refresh before reading.
             Project.tick();
-            check(Project.trackCount === 4, "demo has three tracks and a bus");
+            check(Tracks.count === 4, "demo has three tracks and a bus");
             // Show an armed instrument track listening to one channel.
-            for (let i = 0; i < Project.trackCount; i++) {
-                if (Project.trackKind(i) === 1) {
-                    Project.setTrackArmed(i, true);
-                    Project.setTrackMidiInput(i, "", 0);
+            for (let i = 0; i < Tracks.count; i++) {
+                if (Tracks.get(i).kind === Tracks.InstrumentTrack) {
+                    Tracks.setArmed(i, true);
+                    Tracks.setMidiInput(i, "", 0);
                     break;
                 }
             }
@@ -168,11 +178,12 @@ Item {
             // Show the Bass and Keys lanes, then add a point to Bass's
             // volume lane with a click.
             const v = window.pageStack.currentItem.view;
-            check(Automation.laneCount(0) === 1 && Automation.laneKind(0, 0) === 0, "demo Bass has a volume lane");
-            check(Automation.laneMode(0, 0) === 1, "lanes read by default");
+            const lane = () => Tracks.get(0).lanes[0];
+            check(Tracks.get(0).lanes.length === 1 && lane().kind === Automation.VolumeLane, "demo Bass has a volume lane");
+            check(lane().mode === Automation.LaneRead, "lanes read by default");
             Automation.setExpanded(0, true);
             Automation.setExpanded(2, true);
-            check(Automation.expanded(0) && v.rowHeight(0) === v.trackHeight + v.laneHeight, "Bass shows its lane");
+            check(Tracks.get(0).expanded && v.rowHeight(0) === v.trackHeight + v.laneHeight, "Bass shows its lane");
             // A lane header's lower edge resizes the lanes, within limits;
             // a double-click puts the default back.
             // The test leaves the user's saved sizes as they were.
@@ -193,32 +204,34 @@ Item {
             Project.tick();
             check(Project.undoText === "Edit Automation", "click adds an automation point");
             check(Project.undoText in editNames.names, "automation edit has a translation");
-            check(Automation.targetCount(0) >= 1 && Automation.targetKind(0, 0) === 1, "Pan can get a lane");
-            Automation.setLaneMode(0, 0, 0);
+            check(Automation.targetCount(0) >= 1 && Automation.targetKind(0, 0) === Automation.PanLane, "Pan can get a lane");
+            Automation.setLaneMode(0, 0, Automation.LaneOff);
             Project.tick();
-            check(Automation.laneMode(0, 0) === 0 && Project.undoText === "Toggle Automation", "lane off");
+            check(lane().mode === Automation.LaneOff && Project.undoText === "Toggle Automation", "lane off");
             // An off lane's control sets the fader; a playing one follows
             // its points and can't be moved.
-            check(!Automation.laneFollowing(0, 0), "an off lane doesn't follow its points");
-            check(!Automation.laneWrites(0, 0), "a lane in read mode doesn't write");
-            const volume = Automation.laneValue(0, 0);
+            const off = Automation.laneControl(0, 0);
+            check(!off.following, "an off lane doesn't follow its points");
+            check(!off.writes, "a lane in read mode doesn't write");
+            const volume = off.value;
             Automation.beginLaneControl(0, 0);
             Automation.setLanePosition(0, 0, 0.25);
             Automation.setLanePosition(0, 0, 1);
             Automation.endLaneControl(0, 0);
             Project.tick();
-            check(Automation.laneValue(0, 0) > volume && Automation.lanePosition(0, 0) === 1, "lane control sets the volume");
+            const moved = Automation.laneControl(0, 0);
+            check(moved.value > volume && moved.position === 1, "lane control sets the volume");
             // The next gesture (a key press) is its own undo step.
             Automation.beginLaneControl(0, 0);
             Automation.setLanePosition(0, 0, 0.5);
             Automation.endLaneControl(0, 0);
             Project.undo();
-            check(Automation.lanePosition(0, 0) === 1, "each lane control gesture is its own undo step");
+            check(Automation.laneControl(0, 0).position === 1, "each lane control gesture is its own undo step");
             Project.undo();
-            check(Automation.laneValue(0, 0) === volume, "a lane control drag is one undo step");
-            Automation.setLaneMode(0, 0, 2);
-            check(Automation.laneMode(0, 0) === 2 && Automation.laneWrites(0, 0), "lane in write mode writes");
-            Automation.setLaneMode(0, 0, 1);
+            check(Automation.laneControl(0, 0).value === volume, "a lane control drag is one undo step");
+            Automation.setLaneMode(0, 0, Automation.LaneWrite);
+            check(lane().mode === Automation.LaneWrite && Automation.laneControl(0, 0).writes, "lane in write mode writes");
+            Automation.setLaneMode(0, 0, Automation.LaneRead);
             Project.undo();
             Project.undo();
             Project.undo();
@@ -230,7 +243,7 @@ Item {
         () => {
             Automation.setExpanded(0, false);
             Automation.setExpanded(2, false);
-            check(!Automation.expanded(0), "lanes hidden");
+            check(!Tracks.get(0).expanded, "lanes hidden");
         },
         () => {
             // Tempo and time signature: edits in a row are one undo step.
@@ -303,11 +316,11 @@ Item {
             // The mixer catches up with the project on its own clock, which
             // a loaded machine can take a few ticks for.
             // The demo's three tracks, its reverb bus and the master.
-            if (Mixer.levels.length !== 5 * 5 && test.waits < 25) {
+            if (Mixer.meterLevels().length !== 5 * 5 && test.waits < 25) {
                 return false;
             }
             test.waits = 0;
-            check(Mixer.levels.length === 5 * 5, "a strip per track");
+            check(Mixer.meterLevels().length === 5 * 5, "a strip per track");
             const compressor = Mixer.effectNames.indexOf("Compressor");
             check(compressor >= 0 && Mixer.addInsert(0, compressor), "add a compressor to Bass");
             // Play so the meters have something to show.
@@ -317,26 +330,26 @@ Item {
             // The engine swaps in the new graph on its own time, and a busy
             // machine (CI runs several app instances at once) can take more
             // than one step to bring the compressor's meter up.
-            const metered = Mixer.levels.some((v, i) => i % 5 < 4 && v > 0) && Mixer.levels[0 * 5 + 4] >= 0;
+            const metered = Mixer.meterLevels().some((v, i) => i % 5 < 4 && v > 0) && Mixer.meterLevels()[0 * 5 + 4] >= 0;
             if (!metered && test.waits < 25) {
                 return false;
             }
             test.waits = 0;
             check(Project.undoText === "Add Device", "mixer edits undo");
-            check(Mixer.levels.some((v, i) => i % 5 < 4 && v > 0), "meters move while playing");
-            check(Mixer.levels[0 * 5 + 4] >= 0, "compressor gain reduction metered");
+            check(Mixer.meterLevels().some((v, i) => i % 5 < 4 && v > 0), "meters move while playing");
+            check(Mixer.meterLevels()[0 * 5 + 4] >= 0, "compressor gain reduction metered");
             Mixer.setSoloed(0, true);
             check(Mixer.anySoloed, "solo");
             Mixer.setSoloed(0, false);
             // Touch-write a fader move on Lead.
             Mixer.setWriting(true);
-            Mixer.touch(1, "volume", -1, true);
+            Mixer.touch(1, Mixer.VolumeControl, -1, true);
             Mixer.setVolume(1, -12);
             shoot(window.title, "mix");
         },
         () => {
             Mixer.setVolume(1, -20);
-            Mixer.touch(1, "volume", -1, false);
+            Mixer.touch(1, Mixer.VolumeControl, -1, false);
             Mixer.setWriting(false);
             window.playAction.trigger();
         },
@@ -423,7 +436,7 @@ Item {
             test.waits = 0;
             check(!window.devicePanelDrawer.drawerOpen, "device panel closed");
             // The plugin browser, as Add Effect opens it.
-            test.browser = window.browsePlugins(2, (format, pluginId, name) => {
+            test.browser = window.browsePlugins(Plugins.EffectPlugin, (format, pluginId, name) => {
                 test.picked = [format, pluginId, name];
                 check(Mixer.addPluginInsert(0, format, pluginId, name), "insert the chosen plugin");
             });
@@ -439,22 +452,26 @@ Item {
             // Later steps get their own budget.
             test.waits = 0;
             check(Plugins.hasScanned, "plugin scan finished");
+            // What the plugin settings list: a group of folders per format.
+            check(Plugins.formatNames().join(" ") === "CLAP VST3 LV2", "the plugin formats are named");
+            check(Plugins.formatFolders(0).length === 0 && Plugins.formatFolders(4).length === 0,
+                  "only the three formats have folders");
             shoot(window.title, "plugin-browser");
             if (!window.smokeTest) {
                 return;
             }
             // smoke.rs puts the CLAP test plugin in CLAP_PATH; a packaged
             // smoke test runs with whatever plugins the system has.
-            Plugins.setFilter("test gain", 1, 2);
+            Plugins.setFilter("test gain", 1, Plugins.EffectPlugin);
             if (Plugins.count === 0) {
                 console.info("smoke test: no test plugin; skipping the plugin checks");
                 return;
             }
             console.info("smoke test: checking the test plugin");
             check(Plugins.count === 1, "search finds it");
-            Plugins.setFilter("test gain", 0, 1);
+            Plugins.setFilter("test gain", 0, Plugins.InstrumentPlugin);
             check(Plugins.count === 0, "it is not an instrument");
-            Plugins.setFilter("test gain", 1, 2);
+            Plugins.setFilter("test gain", 1, Plugins.EffectPlugin);
             test.browser.pick(0);
             check(test.picked !== null && test.picked[0] === "clap" && test.picked[2] === "DAW Test Gain",
                   "picking a plugin reports it");
@@ -481,8 +498,8 @@ Item {
             // demo's bus comes last, so its rows are track numbers).
             const edit = window.pageStack.currentItem;
             const strip = edit.trackStrip.strip;
-            check(strip !== null && strip.index === roll.stripRow && strip.kind === "track"
-                  && strip.name === Project.trackName(roll.stripRow), "the Edit page shows the clip's track strip");
+            check(strip !== null && strip.index === roll.stripRow && strip.kind === Mixer.TrackStrip
+                  && strip.name === Tracks.get(roll.stripRow).name, "the Edit page shows the clip's track strip");
             check(strip !== null && strip.edge === Qt.LeftEdge
                   && Math.abs(edit.trackStrip.width - edit.stripWidth.pixels) < 1, "the track strip has its own width");
             const stripToggle = edit.editActions[21];
@@ -509,10 +526,11 @@ Item {
             // A track in front moves the clip's strip a row on; the Mixer
             // resets its rows, and the strip must survive that.
             test.stripRow = roll.stripRow;
-            Project.addTrack(1, "Strip Test");
-            for (let i = 0; i < Project.trackCount; i++) {
-                if (Project.trackName(i) === "Strip Test") {
-                    Project.moveTrack(i, 0);
+            Tracks.add(Tracks.InstrumentTrack, "Strip Test");
+            for (let i = 0; i < Tracks.count; i++) {
+                if (Tracks.get(i).name === "Strip Test") {
+                    Tracks.moveTrack(i, 0);
+                    break;
                 }
             }
             // Dragging the velocity lane's edge up makes it taller, but
@@ -533,11 +551,26 @@ Item {
             AppSettings.setLayoutValue(velocity.key, savedVelocity);
             const notes = TestHelper.pianoNoteCount();
             check(notes === 12, "demo clip has 12 notes");
-            // Double-click empty space low in the grid: a note is added.
-            roll.doubleClick(roll.width * 0.8, roll.height - roll.lanesHeight - roll.velocityHeight - 20, 0);
+            // Double-click empty space low in the grid: a note is added,
+            // and dragging before letting go sets its length in the same
+            // undo step.
+            const newX = roll.width * 0.8;
+            const newY = roll.height - roll.lanesHeight - roll.velocityHeight - 20;
+            roll.press(newX, newY, Qt.LeftButton, 0);
+            roll.doubleClick(newX, newY, 0);
             check(TestHelper.pianoNoteCount() === notes + 1, "double-click adds a note");
+            roll.motion(newX + Kirigami.Units.gridUnit * 3, newY, 0);
+            roll.release(newX + Kirigami.Units.gridUnit * 3, newY, 0);
+            check(TestHelper.pianoNoteCount() === notes + 1, "dragging the new note keeps it");
             Project.undo();
             check(TestHelper.pianoNoteCount() === notes, "undo removes it");
+            // The toolbar spells the black keys either way.
+            const flatsToggle = edit.editActions[24];
+            const flats = AppSettings.flatNoteNames;
+            flatsToggle.trigger();
+            check(AppSettings.flatNoteNames === !flats && roll.flatNoteNames === !flats, "toggle flat note names");
+            flatsToggle.trigger();
+            check(AppSettings.flatNoteNames === flats && roll.flatNoteNames === flats, "toggle note names back");
             roll.selectAll();
             check(roll.hasSelection, "select all");
             shoot(window.title, "edit");
@@ -554,7 +587,7 @@ Item {
             check(edit.roll.stripRow === test.stripRow + 1,
                   "the clip's track moved a row on (" + test.stripRow + " to " + edit.roll.stripRow + ")");
             check(strip !== null && strip.index === edit.roll.stripRow
-                  && strip.name === Project.trackName(edit.roll.stripRow),
+                  && strip.name === Tracks.get(edit.roll.stripRow).name,
                   "the strip follows its track to another row (strip "
                   + (strip === null ? "none" : strip.index + " " + strip.name) + ")");
             Project.undo();
@@ -641,11 +674,11 @@ Item {
         },
         () => {
             window.unsavedDialog.reject();
-            check(Project.trackCount === 1, "cancel keeps the project");
+            check(Tracks.count === 1, "cancel keeps the project");
             window.fileActions[0].trigger();
             window.unsavedDialog.discarded();
             check(!window.unsavedDialog.opened, "discard closes the question");
-            check(Project.trackCount === 0 && !Project.modified, "discard makes the new project");
+            check(Tracks.count === 0 && !Project.modified, "discard makes the new project");
             check(!TestHelper.fileExists("file://" + filesDir + "/Files/Files.kadence.autosave"),
                   "discarding removes the autosave");
         },
@@ -663,17 +696,17 @@ Item {
         () => {
             const result = Project.recoverSession(0);
             check(result.context === undefined, "recover");
-            check(Project.trackCount === 1 && Project.trackName(0) === "Recovered", "recovered tracks");
+            check(Tracks.count === 1 && Tracks.get(0).name === "Recovered", "recovered tracks");
             check(Project.modified && !Project.savedBefore, "recovered work is unsaved");
             check(Project.recoveryCount === 0 && !window.recoveryDialog.opened, "nothing left to recover");
             // Open Recent goes through the same question.
             window.openRecent(0);
             check(window.unsavedDialog.visible, "Open Recent asks about unsaved changes");
             window.unsavedDialog.discarded();
-            check(Project.name === "Files" && Project.trackCount === 1, "open recent");
+            check(Project.name === "Files" && Tracks.count === 1, "open recent");
             // A take in progress is unsaved work too, though the project
             // itself has no changes yet.
-            Project.setTrackArmed(0, true);
+            Tracks.setArmed(0, true);
             check(Project.save().context === undefined && !Project.modified, "save with the track armed");
             Project.toggleRecord();
             check(Project.recording && !Project.modified, "a take in progress is not in the project yet");
@@ -687,12 +720,12 @@ Item {
             check(!Project.recording && Project.undoText === "Record Audio", "New ends the take and keeps it");
             check(window.unsavedDialog.visible, "New asks about the take");
             window.unsavedDialog.reject();
-            check(Project.name === "Files" && Project.trackCount === 1, "cancel keeps the project and the take");
+            check(Project.name === "Files" && Tracks.count === 1, "cancel keeps the project and the take");
             Project.undo();
             check(!Project.modified, "without the take nothing is unsaved");
         },
         () => {
-            settingsPage = window.openSettings();
+            settingsPage = window.openSettings(SettingsPage.Tab.General);
             check(settingsPage !== null, "open settings");
         },
         () => {

@@ -1,8 +1,9 @@
 //! An open project: the model, its history and where it is saved.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::bundle::{Bundle, Link};
+use crate::bundle::{Bundle, Link, Target};
+use crate::carry;
 use crate::change::ChangeSet;
 use crate::command::Command;
 use crate::error::{FormatError, ModelError};
@@ -66,16 +67,15 @@ impl Document {
         Self::load(bundle)
     }
 
-    /// Opens a bundle's project file, deleting any autosave first.
+    /// Opens a bundle's project file and deletes any autosave. One that
+    /// cannot be deleted (the bundle is read-only) stays, and is offered
+    /// again at the next open.
     pub fn open_discarding_autosave(path: impl AsRef<Path>) -> Result<Self, FormatError> {
         let bundle = Bundle::open(path)?;
         // Load first: if the project file is missing or broken, the autosave
         // may be the only copy of the work.
         let doc = Self::load(bundle)?;
-        doc.bundle
-            .as_ref()
-            .expect("just loaded")
-            .discard_autosave()?;
+        let _ = doc.bundle.as_ref().expect("just loaded").discard_autosave();
         Ok(doc)
     }
 
@@ -222,17 +222,47 @@ impl Document {
         Ok(())
     }
 
-    /// Saves into a new bundle directory and makes it the document's bundle.
-    /// Audio in the old bundle's `audio/` folder is copied across.
-    pub fn save_as(&mut self, dir: impl AsRef<Path>) -> Result<(), FormatError> {
+    /// Saves into a new bundle and makes it the document's bundle. `path`
+    /// is the bundle directory, or the project file `Name.kadence` for the
+    /// directory `Name` around it (see [`Bundle::target`]).
+    ///
+    /// The old bundle's `audio/` folder is copied across, with any other
+    /// file in the old bundle that a clip plays. Choosing the document's own
+    /// bundle, by its folder or a file in it, is a plain save; another
+    /// project's file is refused, since its bundle is not this one's to
+    /// write into.
+    pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), FormatError> {
+        let path = path.as_ref();
+        let own = |root: &Path| {
+            let real = |p: &Path| p.canonicalize().ok();
+            self.bundle
+                .as_ref()
+                .is_some_and(|b| real(root).is_some_and(|r| Some(r) == real(b.root())))
+        };
+        // Its own project file is the bundle it has, even when that file is
+        // not there (the document was recovered from the autosave alone).
+        let own_file = self.bundle.as_ref().is_some_and(|b| {
+            path.file_name() == b.project_file().file_name() && path.parent().is_some_and(own)
+        });
+        let dir = match Bundle::target(path)? {
+            _ if own_file => return self.save(),
+            Target::New(dir) if own(&dir) => return self.save(),
+            Target::Existing(chosen) if own(chosen.root()) => return self.save(),
+            Target::New(dir) => dir,
+            Target::Existing(chosen) => {
+                return Err(FormatError::io(chosen.project_file())(
+                    std::io::ErrorKind::AlreadyExists.into(),
+                ));
+            }
+        };
         let new = Bundle::create(dir)?;
-        let copied = match &self.bundle {
-            Some(old) => copy_dir_files(&old.audio_dir(), &new.audio_dir())?,
-            None => Vec::new(),
+        let carried = match &self.bundle {
+            Some(old) => carry::audio(&self.project, old, &new)?,
+            None => carry::Made::default(),
         };
         if let Err(e) = new.save(&self.project, Link::Replace) {
             // Leave the target as it was, so the user can retry there.
-            remove_files(&copied);
+            carried.remove();
             return Err(e);
         }
         self.project_link = Link::Replace;
@@ -253,8 +283,9 @@ impl Document {
     }
 
     /// Writes an autosave if anything changed since the last save or
-    /// autosave, and removes it if the document is back to its saved state. The app calls this on a timer. Returns whether it wrote one.
-    /// A document with no bundle yet has nowhere to autosave and returns
+    /// autosave, and removes it if the document is back to its saved state.
+    /// The app calls this on a timer. Returns whether it wrote one. A
+    /// document with no bundle yet has nowhere to autosave and returns
     /// `false`.
     pub fn autosave(&mut self) -> Result<bool, FormatError> {
         let Some(bundle) = &self.bundle else {
@@ -275,48 +306,5 @@ impl Document {
         bundle.write_autosave(&self.project)?;
         self.autosaved_revision = self.revision;
         Ok(true)
-    }
-}
-
-/// Copies the files in `from` into `to`, refusing before copying anything if
-/// a file of the same name is already there, since clips may use it. Returns
-/// the files it made. On failure it removes them again, so a retry into the
-/// same folder isn't refused over a half-finished copy.
-fn copy_dir_files(from: &Path, to: &Path) -> Result<Vec<PathBuf>, FormatError> {
-    if !from.is_dir() {
-        return Ok(Vec::new());
-    }
-    std::fs::create_dir_all(to).map_err(FormatError::io(to))?;
-    let mut copies = Vec::new();
-    for entry in std::fs::read_dir(from).map_err(FormatError::io(from))? {
-        let path = entry.map_err(FormatError::io(from))?.path();
-        if path.is_file() {
-            let dest = to.join(path.file_name().expect("files have names"));
-            if dest.exists() {
-                return Err(FormatError::io(dest)(
-                    std::io::ErrorKind::AlreadyExists.into(),
-                ));
-            }
-            copies.push((path, dest));
-        }
-    }
-    let mut made = Vec::with_capacity(copies.len());
-    for (path, dest) in copies {
-        // Pushed first: a failed copy can leave part of the file behind.
-        made.push(dest);
-        let dest = made.last().expect("just pushed");
-        if let Err(e) = std::fs::copy(&path, dest) {
-            remove_files(&made);
-            return Err(FormatError::io(dest)(e));
-        }
-    }
-    Ok(made)
-}
-
-/// Removes files [`copy_dir_files`] made. Each was checked not to exist
-/// before, so nothing of the user's is lost.
-fn remove_files(files: &[PathBuf]) {
-    for f in files {
-        let _ = std::fs::remove_file(f);
     }
 }

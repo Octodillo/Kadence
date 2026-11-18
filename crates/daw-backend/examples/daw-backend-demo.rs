@@ -151,7 +151,6 @@ fn main() {
         midi_output: false,
         sample_rate: args.rate,
         buffer_size: args.frames,
-        auto_connect: args.connect,
         ..BackendConfig::default()
     };
     if let Err(e) = backend.open(cfg) {
@@ -184,6 +183,9 @@ fn main() {
     if let Err(e) = started {
         eprintln!("Could not start: {e}");
         std::process::exit(1);
+    }
+    if args.connect {
+        daw_backend::connect_physical(backend.as_mut(), args.midi);
     }
 
     let quit = Arc::new(AtomicBool::new(false));
@@ -241,11 +243,8 @@ fn main() {
                 backend.buffer_size()
             );
         }
-        if s.rt_alloc_violations > 0 {
-            eprintln!(
-                "bug: {} allocations on the audio thread",
-                s.rt_alloc_violations
-            );
+        if let Some(n) = s.rt_alloc_violations.filter(|&n| n > 0) {
+            eprintln!("bug: {n} allocations on the audio thread");
         }
         if s.server_gone {
             eprintln!("The audio server went away.");

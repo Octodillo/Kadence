@@ -1,5 +1,7 @@
 //! Timestamped events: notes, raw MIDI and parameter changes.
 
+pub mod midi;
+
 /// Identifies one note across on, off and expression events. `-1` = none.
 pub type NoteId = i32;
 
@@ -23,12 +25,11 @@ pub enum EventKind {
         velocity: f32,
         note_id: NoteId,
     },
+    /// One short MIDI message, zero-padded to three bytes. Anything may be in here: read it
+    /// with [`midi::decode_padded`], which also says whether it is a well-formed message.
     Midi([u8; 3]),
     /// Plain (not normalised) value.
-    ParamValue {
-        param: ParamId,
-        value: f64,
-    },
+    ParamValue { param: ParamId, value: f64 },
 }
 
 /// MIDI all notes off (CC 123) on `channel`: the MIDI form of a wildcard
@@ -54,6 +55,8 @@ pub struct EventList {
     events: Vec<Event>,
     // `Vec::with_capacity` may round up, so the logical limit is tracked separately.
     capacity: usize,
+    /// Pushes refused since [`take_overflow`](Self::take_overflow).
+    overflow: u64,
 }
 
 impl EventList {
@@ -61,14 +64,18 @@ impl EventList {
         Self {
             events: Vec::with_capacity(n),
             capacity: n,
+            overflow: 0,
         }
     }
 
     /// Inserts `e` after every event whose frame is `<= e.frame`.
     ///
-    /// Returns the event back when the list is full. Never allocates.
+    /// Returns the event back when the list is full, and counts it for
+    /// [`take_overflow`](Self::take_overflow), so a caller with nothing better
+    /// to do than drop the event can ignore the result. Never allocates.
     pub fn push(&mut self, e: Event) -> Result<(), Event> {
         if self.events.len() >= self.capacity {
+            self.overflow += 1;
             return Err(e);
         }
         // Events almost always arrive in order, so check the tail before searching.
@@ -80,6 +87,14 @@ impl EventList {
             _ => self.events.push(e),
         }
         Ok(())
+    }
+
+    /// How many events [`push`](Self::push) refused since the last call:
+    /// what whoever filled the list had to drop. The audio thread cannot
+    /// report a full list, so the owner of the list reads this instead.
+    /// [`clear`](Self::clear) leaves the count alone.
+    pub fn take_overflow(&mut self) -> u64 {
+        std::mem::take(&mut self.overflow)
     }
 
     pub fn clear(&mut self) {
@@ -127,6 +142,7 @@ impl Clone for EventList {
         Self {
             events,
             capacity: self.capacity,
+            overflow: self.overflow,
         }
     }
 }
@@ -183,6 +199,20 @@ mod tests {
         list.clear();
         assert!(list.is_empty());
         list.push(ev(2, 2)).unwrap();
+    }
+
+    #[test]
+    fn refused_pushes_are_counted_until_taken() {
+        let mut list = EventList::with_capacity(3);
+        for e in [ev(4, 0), ev(2, 1), ev(6, 2), ev(0, 3), ev(1, 4)] {
+            let _ = list.push(e);
+        }
+        assert_eq!(tags(&list), [(2, 1), (4, 0), (6, 2)]);
+        list.clear();
+        assert_eq!(list.take_overflow(), 2, "clearing does not forget them");
+        assert_eq!(list.take_overflow(), 0);
+        list.push(ev(0, 0)).unwrap();
+        assert_eq!(list.take_overflow(), 0);
     }
 
     #[test]

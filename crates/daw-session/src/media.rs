@@ -5,12 +5,32 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use daw_media::{AudioData, Decoder, DiskStreamer, MediaError, StreamerConfig, load_file};
+use daw_media::{
+    AudioData, AudioFileInfo, Decoder, DiskStreamer, MediaError, StreamerConfig, load_file_within,
+};
 
 use crate::player::Streams;
 
 /// Files at most this long (at the engine rate) are decoded into memory.
 pub const MEMORY_LIMIT_SECONDS: f64 = 60.0;
+
+/// The most samples a second of a file in memory is counted as: 8 channels
+/// at 192 kHz.
+const NOMINAL_SAMPLES_PER_SECOND: u64 = 192_000 * 8;
+
+/// What tells a file from an earlier version of itself: its modification
+/// time and length.
+pub type Stamp = (std::time::SystemTime, u64);
+
+/// A file as it was at one look: its path and its [`Stamp`] then, `None`
+/// if it was not there.
+pub type Seen = (PathBuf, Option<Stamp>);
+
+/// The file's [`Stamp`] now, `None` if there is no such file.
+pub(crate) fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
 
 /// How a file is played.
 #[derive(Clone)]
@@ -26,7 +46,12 @@ pub(crate) enum Loaded {
 pub struct MediaPool {
     sample_rate: u32,
     root: Option<PathBuf>,
-    loaded: HashMap<PathBuf, Loaded>,
+    /// Files looked at so far, each with its [`stamp`] at the time: a file
+    /// that changed since is read again, also one that could not be read.
+    /// The change is noticed when a track's clips are next sent to its
+    /// player: on an edit of them, or after
+    /// [`Session::reload_media`](crate::Session::reload_media).
+    loaded: HashMap<PathBuf, (Loaded, Stamp)>,
     streamer: DiskStreamer,
     memory_limit: f64,
 }
@@ -48,10 +73,13 @@ impl MediaPool {
     /// The project bundle directory that relative clip paths are resolved
     /// against.
     pub fn set_root(&mut self, root: Option<PathBuf>) {
-        if self.root != root {
-            self.root = root;
-            self.loaded.clear();
-        }
+        // The cache is by resolved path, so it holds for any root.
+        self.root = root;
+    }
+
+    /// Forgets every file read so far.
+    pub(crate) fn clear(&mut self) {
+        self.loaded.clear();
     }
 
     /// Files longer than this many seconds are streamed instead of decoded
@@ -77,13 +105,23 @@ impl MediaPool {
         self.loaded.retain(|p, _| keep.contains(p));
     }
 
-    pub(crate) fn get(&mut self, path: &Path) -> Loaded {
-        if let Some(l) = self.loaded.get(path) {
-            return l.clone();
+    /// How to play the file, and which version of it that is.
+    pub(crate) fn get(&mut self, path: &Path) -> (Loaded, Option<Stamp>) {
+        let Some(now) = stamp(path) else {
+            self.loaded.remove(path);
+            return (Loaded::Missing, None);
+        };
+        if let Some((loaded, then)) = self.loaded.get(path)
+            && *then == now
+        {
+            return (loaded.clone(), Some(now));
         }
-        let l = self.load(path).unwrap_or(Loaded::Missing);
-        self.loaded.insert(path.to_path_buf(), l.clone());
-        l
+        // A file that can't be read is kept too: decoding it again gives
+        // the same until it changes.
+        let loaded = self.load(path).unwrap_or(Loaded::Missing);
+        self.loaded
+            .insert(path.to_path_buf(), (loaded.clone(), now));
+        (loaded, Some(now))
     }
 
     pub(crate) fn open_streams(&self, path: &Path) -> Result<Streams, MediaError> {
@@ -95,12 +133,89 @@ impl MediaPool {
         let seconds = info
             .frames
             .map(|f| f as f64 / f64::from(info.sample_rate.max(1)));
-        match seconds {
+        let in_memory = match seconds {
+            // The header's length decides whether to try, but the decoder
+            // holds to the limit itself: a file can be longer than it says.
             Some(s) if s <= self.memory_limit => {
-                let data = load_file(path, self.sample_rate)?;
-                Ok(Loaded::Memory(Arc::new(data), info.sample_rate))
+                load_file_within(path, self.sample_rate, self.max_samples(&info))?
             }
-            _ => Ok(Loaded::Stream(info.sample_rate)),
+            _ => None,
+        };
+        Ok(match in_memory {
+            Some(data) => Loaded::Memory(Arc::new(data), info.sample_rate),
+            None => Loaded::Stream(info.sample_rate),
+        })
+    }
+
+    /// The memory limit in samples of the file `info` is of. The file picks
+    /// its own rate and channel count, so a second of it counts for no more
+    /// than [`NOMINAL_SAMPLES_PER_SECOND`]: past that it holds fewer seconds.
+    fn max_samples(&self, info: &AudioFileInfo) -> u64 {
+        let per_second =
+            (u64::from(info.sample_rate) * info.channels as u64).min(NOMINAL_SAMPLES_PER_SECOND);
+        // Saturates: no limit is `u64::MAX`, and NaN is none in memory.
+        (self.memory_limit * per_second as f64).ceil() as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use daw_media::{FlacBits, write_flac};
+
+    use super::*;
+
+    /// A second of mono FLAC at 48 kHz. With `honest` unset, its header says
+    /// it holds 10 frames.
+    fn flac(dir: &Path, honest: bool) -> PathBuf {
+        let path = dir.join(format!("second-{honest}.flac"));
+        write_flac(&path, &AudioData::silence(48_000, 1, 48_000), FlacBits::B16).unwrap();
+        if !honest {
+            let mut bytes = std::fs::read(&path).unwrap();
+            // The frame count is the low 36 bits of STREAMINFO's bytes
+            // 13..18, after "fLaC" and a 4-byte block header.
+            bytes[21] &= 0xf0;
+            bytes[22..26].copy_from_slice(&10u32.to_be_bytes());
+            std::fs::write(&path, bytes).unwrap();
         }
+        path
+    }
+
+    #[test]
+    fn a_file_longer_than_its_header_says_is_streamed_not_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pool = MediaPool::new(48_000);
+        pool.set_memory_limit(0.5);
+        assert!(matches!(
+            pool.get(&flac(dir.path(), false)).0,
+            Loaded::Stream(48_000)
+        ));
+        assert!(matches!(
+            pool.get(&flac(dir.path(), true)).0,
+            Loaded::Stream(48_000)
+        ));
+        pool.set_memory_limit(1.0);
+        for honest in [false, true] {
+            let Loaded::Memory(data, 48_000) = pool.get(&flac(dir.path(), honest)).0 else {
+                panic!("a file within the limit is held in memory");
+            };
+            assert_eq!(data.frames(), 48_000);
+        }
+    }
+
+    #[test]
+    fn the_memory_limit_counts_no_more_than_the_nominal_samples_a_second() {
+        let pool = MediaPool::new(48_000);
+        let info = |sample_rate, channels| AudioFileInfo {
+            path: PathBuf::new(),
+            sample_rate,
+            channels,
+            frames: None,
+            format: "wave",
+        };
+        assert_eq!(pool.max_samples(&info(48_000, 2)), 60 * 96_000);
+        assert_eq!(
+            pool.max_samples(&info(768_000, 64)),
+            60 * NOMINAL_SAMPLES_PER_SECOND
+        );
     }
 }

@@ -81,7 +81,7 @@ pub fn external_audio(project: &Project, bundle: &Bundle) -> Vec<AudioFile> {
 /// `path` relative to `root` if it is inside it, written with `/`. Compares
 /// the paths as written, after removing `.` and `..`, so it never touches
 /// the disk.
-fn relative_inside(root: &Path, path: &Path) -> Option<PathBuf> {
+pub(crate) fn relative_inside(root: &Path, path: &Path) -> Option<PathBuf> {
     let root = normalize(root);
     let path = normalize(path);
     let rest = path.strip_prefix(&root).ok()?;
@@ -163,8 +163,8 @@ pub struct Collected {
     pub copies: Vec<PathBuf>,
 }
 
-/// Removes files [`collect_files`] made. Each was a new file, so nothing of
-/// the user's is lost.
+/// Removes files that [`collect_files`] or a Save As made. Each was a new
+/// file, so nothing of the user's is lost.
 pub fn remove_copies(copies: &[PathBuf]) {
     for c in copies {
         let _ = std::fs::remove_file(c);
@@ -173,11 +173,20 @@ pub fn remove_copies(copies: &[PathBuf]) {
 
 /// Copies every external file clips play into the bundle's `audio/` folder
 /// and returns the edit that points the clips at the copies. `None` when
-/// nothing is outside the bundle. All or nothing: if one copy fails, the
-/// ones made so far are removed again. Missing files are skipped; relink
-/// them first.
-pub fn collect_files(project: &Project, bundle: &Bundle) -> Result<Option<Collected>, FormatError> {
-    let external = external_audio(project, bundle);
+/// there is nothing to copy. All or nothing: if one copy fails, the ones
+/// made so far are removed again. Missing files are skipped; relink them
+/// first.
+///
+/// So are files `is_audio` turns down. A project from someone else can name
+/// any file on this machine as a clip's source, and the bundle it would be
+/// copied into may be shared back: only what opens as audio is copied.
+pub fn collect_files(
+    project: &Project,
+    bundle: &Bundle,
+    is_audio: impl Fn(&Path) -> bool,
+) -> Result<Option<Collected>, FormatError> {
+    let mut external = external_audio(project, bundle);
+    external.retain(|f| is_audio(&f.path));
     if external.is_empty() {
         return Ok(None);
     }

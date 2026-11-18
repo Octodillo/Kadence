@@ -79,25 +79,23 @@ impl Command for TrimClip {
             .clip_location(self.id)
             .ok_or(ModelError::ClipNotFound(self.id))?;
         let clip = &project.track(track).expect("found above").clips[index];
-        if self.length.0 <= 0 || self.start.0 < 0 {
-            return Err(ModelError::Invalid(
-                "a clip must start at or after 0 and have a positive length".into(),
-            ));
-        }
+        // The same checks a project file gets, so a trim can't save one
+        // that will not load.
+        daw_model::check_tick(self.start, "clip start")?;
+        daw_model::check_length(self.length, "clip length")?;
         match &clip.content {
             ClipContent::Audio(_) => {
-                if self.offset.is_some_and(|o| o.0 < 0) {
-                    return Err(ModelError::Invalid(
-                        "audio offset must not be negative".into(),
-                    ));
+                if let Some(o) = self.offset {
+                    daw_model::check_audio_offset(o)?;
                 }
             }
             ClipContent::Midi(m) => {
                 let shift = clip.start.0 - self.start.0;
-                if m.notes.first().is_some_and(|n| n.start.0 + shift < 0) {
-                    return Err(ModelError::Invalid(
-                        "trimming would cut notes off the clip".into(),
-                    ));
+                // Sorted by start: the first and last are the extremes.
+                for n in m.notes.first().into_iter().chain(m.notes.last()) {
+                    daw_model::check_tick(TickTime(n.start.0 + shift), "note start").map_err(
+                        |_| ModelError::Invalid("trimming would cut notes off the clip".into()),
+                    )?;
                 }
             }
         }

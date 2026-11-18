@@ -24,6 +24,19 @@ impl NodeKey {
     pub const MASTER: NodeKey = NodeKey(u128::MAX);
 }
 
+/// Names an audio edge across graphs: the source node and channel, then the
+/// destination node and channel. Only an edge between nodes that can be told
+/// apart from graph to graph has one; see [`EdgeEnd`].
+pub(crate) type EdgeKey = ((EdgeEnd, u16), (EdgeEnd, u16));
+
+/// The node at one end of a named edge.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum EdgeEnd {
+    /// The input node, of which every graph has exactly one.
+    Input,
+    Keyed(NodeKey),
+}
+
 /// What a node is for. The compiler treats `Input` and `Master` specially;
 /// the rest are tags for introspection and UI.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -86,11 +99,14 @@ pub(crate) struct LiveNode {
     pub meter: Option<Arc<NodeMeter>>,
 }
 
-/// The keyed nodes of one sent graph.
+/// The keyed nodes of one sent graph, and the latency compensation delay
+/// lines on the edges between them.
 #[derive(Default)]
 pub(crate) struct LiveNodes {
     pub generation: u64,
     pub nodes: HashMap<NodeKey, LiveNode>,
+    /// Index of the delay line on each keyed edge that has one.
+    pub delays: HashMap<EdgeKey, usize>,
 }
 
 /// A description of an audio graph, built on a normal thread and handed to
@@ -360,15 +376,15 @@ impl GraphDesc {
         &self.event_edges
     }
 
+    /// A node's ports as the graph will be compiled with them: a reused node's are those it
+    /// has in the running graph.
+    pub fn ports(&self, id: NodeId) -> Option<PortLayout> {
+        self.nodes.get(id.0 as usize).map(|n| n.node.ports())
+    }
+
     fn channels_between(&self, from: NodeId, to: NodeId) -> u16 {
-        let outs = self
-            .nodes
-            .get(from.0 as usize)
-            .map_or(0, |n| n.node.ports().audio_out);
-        let ins = self
-            .nodes
-            .get(to.0 as usize)
-            .map_or(0, |n| n.node.ports().audio_in);
+        let outs = self.ports(from).map_or(0, |p| p.audio_out);
+        let ins = self.ports(to).map_or(0, |p| p.audio_in);
         outs.min(ins)
     }
 }

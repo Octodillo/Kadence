@@ -38,11 +38,21 @@ impl LinkLog {
         self.events().push((link, made));
     }
 
-    /// Forgets everything, and starts over from `links`.
-    pub(crate) fn reset(&self, links: Vec<Link>) {
-        let mut events = self.events();
-        events.clear();
-        events.extend(links.into_iter().map(|l| (l, true)));
+    /// Forgets everything. `start` calls it before it activates the client,
+    /// so the log has every notification from the first one on.
+    pub(crate) fn clear(&self) {
+        self.events().clear();
+    }
+
+    /// Puts `links`, the server's graph as read after activation, before
+    /// the notifications recorded so far. A notification is never older than
+    /// what the graph showed, so one that says otherwise wins: a link made
+    /// while the graph was read stays, and one removed stays removed. Call
+    /// it before the first [`begin_change`](Self::begin_change), whose marks
+    /// count from the front.
+    pub(crate) fn add_snapshot(&self, links: Vec<Link>) {
+        self.events()
+            .splice(0..0, links.into_iter().map(|l| (l, true)));
     }
 
     /// Records the end of every link of `port`, which we are removing: the
@@ -142,12 +152,39 @@ mod tests {
     fn folds_notifications_in_order() {
         let log = LinkLog::default();
         let (a, b) = (link("us:out", "hw:in"), link("hw:cap", "us:in"));
-        log.reset(vec![a.clone()]);
+        log.add_snapshot(vec![a.clone()]);
         log.record(b.clone(), true);
         log.record(a.clone(), false);
         log.record(a.clone(), true);
         log.record(b.clone(), false);
         assert_eq!(log.links(&[]), [a]);
+    }
+
+    /// `start` reads the server's graph while notifications already arrive.
+    #[test]
+    fn notifications_from_before_the_snapshot_outlive_it() {
+        let log = LinkLog::default();
+        let (kept, made, removed) = (
+            link("us:out", "hw:in"),
+            link("hw:cap", "us:in"),
+            link("us:out", "hw:in2"),
+        );
+        // Stale state from the last run must not leak into this one.
+        log.record(link("old:out", "us:in"), true);
+        log.clear();
+        // Made after the graph was read: only the notification has it.
+        log.record(made.clone(), true);
+        // Removed, but the graph the server answered from still showed it.
+        log.record(removed.clone(), false);
+        log.add_snapshot(vec![kept.clone(), removed]);
+        assert_eq!(log.links(&[]), [kept.clone(), made.clone()]);
+        // Marks taken from here on still point past the merged events.
+        let mut recent = Vec::new();
+        ours(&log, &mut recent, false, &kept);
+        assert!(!log.has_all(&recent));
+        log.record(kept, false);
+        assert!(log.has_all(&recent));
+        assert_eq!(log.links(&recent), [made]);
     }
 
     #[test]

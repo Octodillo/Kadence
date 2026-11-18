@@ -3,13 +3,15 @@
 # and publishes it by hand (docs/releasing.md).
 #
 # - Source tarball with every crate vendored (packaging/make-dist.sh).
-# - Arch package from packaging/arch/release/PKGBUILD, plus that PKGBUILD
-#   with its checksum filled in, ready for the AUR.
+# - Arch package, plus its PKGBUILD (written from packaging/arch/PKGBUILD by
+#   release-pkgbuild.sh, with the tarball's checksum).
 # - Fedora RPM and source RPM from packaging/fedora/kadence.spec.
 # - Flatpak bundle from the KDE runtime manifest.
 # - SHA256SUMS over all of them.
 #
-# Each package is installed and smoke-tested before it is attached.
+# Each package is built, installed and smoke-tested before it is attached,
+# by the scripts the Packaging workflow runs on every pull request
+# (ci/*-package.sh).
 #
 # Tags are vX.Y.Z for a release, or vX.Y.Z-suffix (for example
 # v0.1.0-test.1) for a trial run, which makes a draft marked as a
@@ -79,6 +81,13 @@ jobs:
       - name: Check the tag against every version in the tree
         id: version
         run: ci/check-release-version.sh "$TAG" >> "$GITHUB_OUTPUT"
+      - name: No known vulnerability or yanked crate in the dependencies
+        # A release is the one place this must hold. If an advisory does not
+        # apply to Kadence, list it under [advisories] ignore in deny.toml,
+        # with the reason.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -106,42 +115,14 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed base-devel git github-cli namcap sudo \
             weston xorg-server-xvfb xorg-xauth
-          useradd -m builder
-          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.source.outputs.ref }}
       - name: Source tarball from the source job
-        run: |
-          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n source -D /tmp/source
-          mkdir /home/builder/pkg
-          cp packaging/arch/release/PKGBUILD /tmp/source/kadence-"$VERSION".tar.gz /home/builder/pkg/
-          cd /home/builder/pkg
-          sum=$(sha256sum kadence-"$VERSION".tar.gz | cut -d' ' -f1)
-          sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" PKGBUILD
-          grep -qx "sha256sums=('$sum')" PKGBUILD
-          chown -R builder /home/builder/pkg
-      - name: makepkg
-        # The tarball sits next to the PKGBUILD, so makepkg uses it instead
-        # of downloading the (not yet published) release asset.
-        run: |
-          cd /home/builder/pkg
-          sudo -u builder makepkg --syncdeps --noconfirm
-      - name: namcap
-        # namcap exits 0 whatever it finds, so fail on its error lines.
-        run: |
-          set -o pipefail
-          namcap /home/builder/pkg/PKGBUILD /home/builder/pkg/kadence-"$VERSION"-*.pkg.tar.zst | tee namcap.log
-          ! grep -q ' E: ' namcap.log
-      - name: Install
-        run: pacman -U --noconfirm /home/builder/pkg/kadence-"$VERSION"-*.pkg.tar.zst
-      - name: Smoke test (installed)
-        run: sudo -u builder env REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence
-      - name: Collect
-        run: |
-          mkdir out
-          cp /home/builder/pkg/kadence-"$VERSION"-*.pkg.tar.zst out/
-          cp /home/builder/pkg/PKGBUILD out/PKGBUILD
+        run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n source -D /tmp/source
+      - name: makepkg, namcap, install, smoke test
+        # Leaves the package and its PKGBUILD, checksum filled in, in out/.
+        run: ci/arch-package.sh release out /tmp/source/kadence-"$VERSION".tar.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: arch
@@ -168,26 +149,9 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.ref }}
       - name: Source tarball from the source job
-        run: |
-          mkdir -p ~/rpmbuild/SOURCES
-          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n source -D ~/rpmbuild/SOURCES
-          test -f ~/rpmbuild/SOURCES/kadence-"$VERSION".tar.gz
-      - name: rpmbuild
-        run: |
-          dnf -y builddep packaging/fedora/kadence.spec
-          rpmbuild -ba packaging/fedora/kadence.spec
-      - name: rpmlint
-        run: rpmlint packaging/fedora/kadence.spec ~/rpmbuild/RPMS/*/kadence-"$VERSION"-*.rpm
-      - name: Install
-        run: dnf -y install ~/rpmbuild/RPMS/*/kadence-"$VERSION"-*.rpm
-      - name: Smoke test (installed)
-        run: |
-          useradd -m tester
-          su tester -c "REQUIRE_ALL=1 ci/smoke-matrix.sh /usr/bin/kadence"
-      - name: Collect
-        run: |
-          mkdir out
-          cp ~/rpmbuild/RPMS/*/kadence-"$VERSION"-*.rpm ~/rpmbuild/SRPMS/kadence-"$VERSION"-*.src.rpm out/
+        run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n source -D /tmp/source
+      - name: rpmbuild, rpmlint, install, smoke test
+        run: ci/fedora-package.sh /tmp/source/kadence-"$VERSION".tar.gz out
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fedora
@@ -205,38 +169,15 @@ jobs:
     env:
       VERSION: ${{ needs.source.outputs.version }}
     steps:
-      - name: Install Flatpak and the runtimes
-        run: |
-          dnf -y install flatpak flatpak-builder git python3
-          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install -y --noninteractive flathub \
-            org.kde.Sdk//6.11 org.kde.Platform//6.11 \
-            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
-            org.freedesktop.Sdk.Extension.llvm21//25.08
+      # Before git is installed, so this is a plain download; nothing
+      # below needs the history.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.source.outputs.ref }}
-      - name: Crate sources from Cargo.lock
-        run: packaging/flatpak/cargo-sources.py
-      - name: flatpak-builder
-        run: |
-          flatpak-builder --disable-rofiles-fuse --force-clean \
-            --state-dir=/tmp/flatpak-state --repo=/tmp/repo /tmp/build \
-            packaging/flatpak/io.github.octodillo.daw.yml
-          mkdir out
-          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
-            /tmp/repo out/kadence-"$VERSION"-x86_64.flatpak io.github.octodillo.daw
-      - name: Install and smoke test in the sandbox
-        run: |
-          flatpak install -y --noninteractive out/kadence-"$VERSION"-x86_64.flatpak
-          flatpak run --command=sh io.github.octodillo.daw -c 'ldconfig -p | grep -F libjack.so.0'
-          rm -rf ~/.var/app/io.github.octodillo.daw
-          set -o pipefail
-          flatpak run \
-            --env=QT_QPA_PLATFORM=offscreen --env=QT_QUICK_BACKEND=software \
-            --env=QT_FORCE_STDERR_LOGGING=1 \
-            io.github.octodillo.daw --smoke-test 2>&1 | tee smoke.log
-          grep -q "smoke test: passed" smoke.log
+      - name: Install Flatpak and the runtimes
+        run: ci/flatpak-package.sh setup
+      - name: Build, install and smoke test in the sandbox
+        run: ci/flatpak-package.sh build out/kadence-"$VERSION"-x86_64.flatpak
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: flatpak

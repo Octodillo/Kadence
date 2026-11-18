@@ -1,13 +1,16 @@
 //! What the Mix page needs, without naming Qt.
 //!
-//! [`MixerHandle`] is the mixer as the UI sees it: channel strips with
-//! volume, pan, mute, solo, sends and an insert chain, plus their meters.
-//! Like [`EngineHandle`](crate::engine::EngineHandle) it uses plain Rust
-//! types so another front end can share it.
+//! The mixer as the UI sees it: channel strips ([`StripInfo`]) with volume,
+//! pan, mute, solo, sends and an insert chain, plus their meters. These are
+//! plain Rust types, like [`EngineHandle`](crate::engine::EngineHandle)'s,
+//! so another front end can share them.
 //!
-//! The app's mixer is [`SessionMixer`](crate::session_mixer::SessionMixer):
+//! The mixer itself is [`SessionMixer`](crate::session_mixer::SessionMixer):
 //! the open project's tracks, edited through model commands (so they undo)
-//! and metered from the running session.
+//! and metered from the running session. The Mix page reaches it through
+//! [`AppMixer`](crate::session_mixer::AppMixer).
+
+use daw_core::level;
 
 /// A strip's track id, as a number.
 pub type StripId = u128;
@@ -53,7 +56,8 @@ pub struct StripInfo {
     pub id: StripId,
     pub name: String,
     pub kind: StripKind,
-    /// Fader level; [`SILENT_DB`] or lower is silence.
+    /// Fader level; [`FADER_FLOOR_DB`](level::FADER_FLOOR_DB) or lower is
+    /// silence.
     pub volume_db: f64,
     /// Balance, -1 (left) to 1 (right).
     pub pan: f64,
@@ -80,7 +84,7 @@ pub struct StripInfo {
     pub send_choices: Vec<RouteTarget>,
 }
 
-/// Meter readings since the last call to [`MixerHandle::levels`].
+/// Meter readings since the last call to [`AppMixer::levels`](crate::session_mixer::AppMixer::levels).
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct StripLevels {
     /// Linear peak per channel (mono strips repeat channel 0).
@@ -96,21 +100,8 @@ pub struct EffectChoice {
     pub name: String,
 }
 
-/// Fader positions at or below this are silence.
-pub const SILENT_DB: f64 = -60.0;
-/// Top of the fader.
-pub const MAX_DB: f64 = 6.0;
-
-/// Fader dB to linear gain.
-pub fn db_to_gain(db: f64) -> f64 {
-    if db <= SILENT_DB {
-        0.0
-    } else {
-        daw_devices::dsp::db_to_gain(db.min(MAX_DB))
-    }
-}
-
-/// What a meter shows: positions from 0 (-60 dB and below) to 1 (+6 dB).
+/// What a meter shows: positions on the fader scale
+/// ([`level::fader_position`]).
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct MeterDisplay {
     pub level: [f64; 2],
@@ -135,11 +126,10 @@ pub const HOLD_S: f64 = 1.5;
 
 /// A linear peak as a meter position.
 pub fn meter_position(linear: f32) -> f64 {
-    if linear <= 0.0 {
-        return 0.0;
-    }
-    let db = 20.0 * f64::from(linear).log10();
-    ((db - SILENT_DB) / (MAX_DB - SILENT_DB)).clamp(0.0, 1.0)
+    level::fader_position(level::gain_to_db_above(
+        f64::from(linear),
+        level::FADER_FLOOR_DB,
+    ))
 }
 
 impl MeterBallistics {
@@ -147,7 +137,7 @@ impl MeterBallistics {
         self.shown.resize(levels.len(), MeterDisplay::default());
         self.held_for.resize(levels.len(), [0.0; 2]);
         let fall = FALL_DB_PER_S * seconds.max(0.0);
-        let fall_pos = fall / (MAX_DB - SILENT_DB);
+        let fall_pos = fall / level::FADER_SPAN_DB;
         for ((shown, held_for), l) in self.shown.iter_mut().zip(&mut self.held_for).zip(levels) {
             for (ch, held) in held_for.iter_mut().enumerate() {
                 let level = meter_position(l.peak[ch])
@@ -169,67 +159,6 @@ impl MeterBallistics {
     }
 }
 
-/// The mixer as the UI sees it. Called on the UI thread only.
-pub trait MixerHandle {
-    /// Strips in display order: tracks, then buses, then master.
-    fn strips(&self) -> Vec<StripInfo>;
-    fn set_volume(&mut self, id: StripId, db: f64);
-    fn set_pan(&mut self, id: StripId, pan: f64);
-    fn set_muted(&mut self, id: StripId, muted: bool);
-    fn set_soloed(&mut self, id: StripId, soloed: bool);
-    fn set_send_level(&mut self, id: StripId, target: StripId, db: f64);
-    /// Adds a send to bus `target`, at 0 dB after the fader.
-    fn add_send(&mut self, id: StripId, target: StripId) -> bool;
-    fn remove_send(&mut self, id: StripId, target: StripId);
-    fn set_send_pre_fader(&mut self, id: StripId, target: StripId, pre_fader: bool);
-    /// Routes the strip's output to `target`, a bus or the master.
-    fn set_output(&mut self, id: StripId, target: StripId);
-    /// Appends a built-in effect to the strip's insert chain.
-    fn add_insert(&mut self, id: StripId, device_id: &str) -> bool;
-    /// Appends a plugin to the strip's insert chain, as a device called
-    /// `name`.
-    fn add_plugin_insert(
-        &mut self,
-        _id: StripId,
-        _format: daw_core::plugin::PluginFormatKind,
-        _plugin: &str,
-        _name: &str,
-    ) -> bool {
-        false
-    }
-    /// Removes the effect at `index` in [`StripInfo::inserts`].
-    fn remove_insert(&mut self, id: StripId, index: usize);
-    /// Puts `choice` in an instrument track's instrument slot.
-    fn set_instrument(&mut self, _id: StripId, _choice: &crate::instrument::InstrumentChoice) {}
-    fn effects(&self) -> Vec<EffectChoice>;
-    /// Meter readings, parallel to [`strips`](Self::strips). Resets them.
-    fn levels(&mut self) -> Vec<StripLevels>;
-    /// Called on the UI clock, `seconds` after the last call.
-    fn tick(&mut self, _playing: bool, _seconds: f64) {}
-    /// Changes whenever the strips may have changed from elsewhere (an
-    /// edit in another view, undo, another project opened).
-    fn revision(&self) -> u64 {
-        0
-    }
-    /// Touch writing: while on, moving a control during playback records
-    /// it as automation.
-    fn set_write_automation(&mut self, _on: bool) {}
-    fn write_automation(&self) -> bool {
-        false
-    }
-    /// The user grabbed (`pressed`) or let go of a control.
-    fn touch(&mut self, _id: StripId, _control: Control, _pressed: bool) {}
-    /// A double-click on a control: back to its default.
-    fn reset(&mut self, id: StripId, control: Control) {
-        match control {
-            Control::Volume => self.set_volume(id, 0.0),
-            Control::Pan => self.set_pan(id, 0.0),
-            Control::Send(target) => self.set_send_level(id, target, 0.0),
-            Control::Param { .. } => {}
-        }
-    }
-}
-
 /// A strip control that can be automated.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Control {
@@ -242,11 +171,6 @@ pub enum Control {
         device: daw_model::DeviceId,
         param: daw_core::event::ParamId,
     },
-}
-
-/// The mixer the app runs: the open project's, through the app state.
-pub fn default_mixer() -> Box<dyn MixerHandle> {
-    Box::new(crate::session_mixer::AppMixer)
 }
 
 /// Built-in devices that process their input: effects and utilities with

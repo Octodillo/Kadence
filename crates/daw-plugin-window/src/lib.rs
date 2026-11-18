@@ -5,7 +5,9 @@
 //! The window carries Kadence's `WM_CLASS` and process id, so the window manager groups it
 //! with Kadence's own windows, and asks for `WM_DELETE_WINDOW` so closing it is an event, not
 //! a lost connection. [`HostWindow::poll`] decodes its events into closes and resizes, and
-//! hands everything else (an embedded widget's own events) back to the format.
+//! hands everything else (an embedded widget's own events) back to the format;
+//! [`HostWindow::pump`] is the whole event loop for an editor that needs no more than that.
+//! [`EditorTitle`] is the rule for what an editor's window is called.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -224,6 +226,33 @@ impl HostWindow {
         })
     }
 
+    /// Handles everything that happened to the window since the last call, for an editor
+    /// with nothing of its own to do about the events. Returns false once the user has
+    /// closed the window (or it is gone).
+    ///
+    /// When the user has resized a window that is not fixed, `fit` is called once with the
+    /// newest size. It sizes the editor, as near to that as the plugin allows, and returns
+    /// the size the editor took; the window then snaps to it (clamped as in
+    /// [`resize`](Self::resize)). Returning the size it was given leaves the window as it
+    /// is. Events after a close stay unread.
+    pub fn pump(&self, fit: impl FnOnce(u32, u32) -> (u32, u32)) -> bool {
+        let mut resized = None;
+        while let Some(event) = self.poll() {
+            match event {
+                WindowEvent::Closed => return false,
+                WindowEvent::Resized(w, h) => resized = Some((w, h)),
+                WindowEvent::Other(_) => {}
+            }
+        }
+        if let (Some(wanted), false) = (resized, self.fixed) {
+            let actual = fit(wanted.0, wanted.1);
+            if actual != wanted {
+                self.resize(actual.0, actual.1);
+            }
+        }
+        true
+    }
+
     /// Writes both title properties. `WM_NAME` gets the same UTF-8 as `_NET_WM_NAME`, typed
     /// `UTF8_STRING` as Qt does: typed `STRING` it would be read as Latin-1, so a title with an
     /// em dash would show as mojibake in tools and window managers that read `WM_NAME`.
@@ -260,7 +289,45 @@ impl Drop for HostWindow {
     }
 }
 
+/// What an editor's window is called: the title the host set, or the plugin's name until
+/// it sets one. It outlives the window, so an editor opened later gets the same title.
+#[derive(Debug, Default)]
+pub struct EditorTitle(Option<String>);
+
+impl EditorTitle {
+    /// The title to show for the plugin called `plugin_name`.
+    pub fn or_name<'a>(&'a self, plugin_name: &'a str) -> &'a str {
+        self.0.as_deref().unwrap_or(plugin_name)
+    }
+
+    /// Takes the host's title. False when it is the one already set, so an open window
+    /// need not be touched.
+    #[must_use]
+    pub fn set(&mut self, title: &str) -> bool {
+        if self.0.as_deref() == Some(title) {
+            return false;
+        }
+        self.0 = Some(title.to_owned());
+        true
+    }
+}
+
 /// X11 sizes are 16-bit and may not be zero; plugins sometimes ask for either.
 fn clamp_dim(v: u32) -> u16 {
     u16::try_from(v.clamp(1, 16_384)).unwrap_or(u16::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_editor_is_called_after_its_plugin_until_the_host_names_it() {
+        let mut title = EditorTitle::default();
+        assert_eq!(title.or_name("Surge XT"), "Surge XT");
+        assert!(title.set("Surge XT — Keys"));
+        assert_eq!(title.or_name("Surge XT"), "Surge XT — Keys");
+        assert!(!title.set("Surge XT — Keys"), "the same title again");
+        assert!(title.set("Surge XT — Bass"));
+    }
 }

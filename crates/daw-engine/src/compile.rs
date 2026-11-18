@@ -1,14 +1,16 @@
 use std::cmp::Reverse;
+use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use daw_core::event::{Event, EventList, ParamId};
+use daw_core::event::{Event, EventKind, EventList, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
+use daw_core::time::SampleTime;
 
-use crate::automation::AutomationLane;
+use crate::automation::{AutomationLane, RAMP_INTERVAL, next_grid};
 use crate::delay::DelayLine;
-use crate::graph::{GraphDesc, LiveNode, LiveNodes, NodeId, NodeKey, NodeKind};
+use crate::graph::{EdgeEnd, EdgeKey, GraphDesc, LiveNode, LiveNodes, NodeId, NodeKey, NodeKind};
 use crate::meter::NodeMeter;
 
 /// Most audio channels one node may have on either side.
@@ -20,6 +22,33 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Parameter changes queued for one node between two cycles.
 const PARAM_QUEUE: usize = 64;
+
+/// Changes inside one block that every automation lane has room for in its
+/// node's event list, on top of the value at the start of the block and of
+/// [`EngineConfig::event_capacity`](crate::EngineConfig::event_capacity):
+/// every ramp update inside the longest block, and three breakpoints. So
+/// however many parameters of a node are automated, their ramps always
+/// fit, whatever the block size. A lane with more breakpoints than that in
+/// one block draws on what the event capacity has to spare, and loses
+/// (counted) what does not fit.
+fn lane_changes(max_frames: usize) -> usize {
+    max_frames.div_ceil(RAMP_INTERVAL as usize) + 3
+}
+
+/// One automated parameter of a step.
+struct Lane {
+    param: ParamId,
+    points: Arc<AutomationLane>,
+    /// Changes sent so far in the block being processed.
+    sent: usize,
+}
+
+fn param_event(param: ParamId, frame: usize, value: f64) -> Event {
+    Event {
+        frame: frame as u32,
+        kind: EventKind::ParamValue { param, value },
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
@@ -116,7 +145,7 @@ pub(crate) struct Step {
     key: Option<NodeKey>,
     ports: PortLayout,
     meter: Option<Arc<NodeMeter>>,
-    automation: Vec<(ParamId, Arc<AutomationLane>)>,
+    automation: Vec<Lane>,
     /// Reset by [`CompiledGraph::silence`].
     tail: bool,
     node: Box<dyn Node>,
@@ -138,6 +167,16 @@ pub(crate) struct Step {
     in_latency: u32,
 }
 
+impl Step {
+    /// This node as the end of a named edge, if it can be one.
+    fn end(&self) -> Option<EdgeEnd> {
+        match self.kind {
+            NodeKind::Input => Some(EdgeEnd::Input),
+            _ => self.key.map(EdgeEnd::Keyed),
+        }
+    }
+}
+
 /// A graph ready to run on the RT thread: nodes in process order, every
 /// buffer and delay line preallocated.
 pub struct CompiledGraph {
@@ -151,6 +190,9 @@ pub struct CompiledGraph {
     latency: u32,
     /// `(step in the previous graph, step here)` of every reused node.
     transfers: Vec<(usize, usize)>,
+    /// `(delay line in the previous graph, delay line here)` of every edge
+    /// that is delayed in both.
+    delay_transfers: Vec<(usize, usize)>,
     /// Generation of the graph the transfers refer to.
     pub(crate) base: u64,
     pub(crate) generation: u64,
@@ -270,6 +312,17 @@ impl CompiledGraph {
                 if let Some(old) = entry.reuse {
                     transfers.push((old, index[i]));
                 }
+                let automation: Vec<Lane> = entry
+                    .automation
+                    .into_iter()
+                    .map(|(param, points)| Lane {
+                        param,
+                        points,
+                        sent: 0,
+                    })
+                    .collect();
+                // Each lane's start value and changes; see `lane_changes`.
+                let automation_room = automation.len() * (1 + lane_changes(mf));
                 Step {
                     id: NodeId(i as u32),
                     kind: entry.kind,
@@ -277,7 +330,7 @@ impl CompiledGraph {
                     key: entry.key,
                     ports: ports.clone(),
                     meter: entry.meter,
-                    automation: entry.automation,
+                    automation,
                     tail: entry.tail,
                     latency: entry.node.latency(),
                     node: entry.node,
@@ -288,8 +341,9 @@ impl CompiledGraph {
                     sources: Vec::new(),
                     event_sources: Vec::new(),
                     external_events: External::of(&external_events, i),
+                    // Automation needs an event input; `validate` checked.
                     events_in: EventList::with_capacity(if ports.event_in {
-                        event_capacity
+                        event_capacity + automation_room
                     } else {
                         0
                     }),
@@ -322,13 +376,28 @@ impl CompiledGraph {
             out_latency[s] = latest.saturating_add(steps[s].latency).min(max_latency);
         }
 
+        // A delayed edge between keyed nodes (or from the input) is named,
+        // so the next graph can take over the audio in its delay line. Of several
+        // edges between the same two channels only the first is named.
         let mut delays = Vec::new();
+        let mut delay_keys = HashMap::new();
+        let mut delay_transfers = Vec::new();
         for e in &audio_edges {
             let (src_step, dst_step) = (index[e.from.0 as usize], index[e.to.0 as usize]);
             let lag = in_latency[dst_step] - out_latency[src_step];
             let delay = (lag > 0).then(|| {
+                let line = delays.len();
                 delays.push(DelayLine::new(lag as usize));
-                delays.len() - 1
+                if let (Some(from), Some(to)) = (steps[src_step].end(), steps[dst_step].end())
+                    && let Entry::Vacant(slot) =
+                        delay_keys.entry(((from, e.from_channel), (to, e.to_channel)))
+                {
+                    if let Some(&old) = live.delays.get(slot.key()) {
+                        delay_transfers.push((old, line));
+                    }
+                    slot.insert(line);
+                }
+                line
             });
             steps[dst_step].sources.push(Source {
                 dst: e.to_channel as usize * mf,
@@ -344,7 +413,7 @@ impl CompiledGraph {
 
         let master = index[master.0 as usize];
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-        let live_nodes = Arc::new(live_nodes(&steps, generation));
+        let live_nodes = Arc::new(live_nodes(&steps, delay_keys, generation));
         Ok(Self {
             latency: out_latency[master],
             steps,
@@ -354,6 +423,7 @@ impl CompiledGraph {
             max_frames: mf,
             sample_rate,
             transfers,
+            delay_transfers,
             base: live.generation,
             generation,
             live: live_nodes,
@@ -361,8 +431,10 @@ impl CompiledGraph {
     }
 
     /// Moves every reused node out of `old` into this graph, leaving the
-    /// placeholders behind. Swapping boxes neither allocates nor frees.
-    /// Does nothing unless `old` is the graph this one was built against.
+    /// placeholders behind, and takes over the audio in flight in the
+    /// latency compensation of every edge both graphs delay. Swapping boxes
+    /// neither allocates nor frees. Does nothing unless `old` is the graph
+    /// this one was built against.
     pub(crate) fn adopt(&mut self, old: &mut CompiledGraph) {
         if old.generation != self.base {
             return;
@@ -372,6 +444,9 @@ impl CompiledGraph {
             // Parameter changes queued on the old graph since its last block
             // follow the node. Both lists have the same capacity.
             std::mem::swap(&mut self.steps[to].params, &mut old.steps[from].params);
+        }
+        for &(from, to) in &self.delay_transfers {
+            self.delays[to].adopt(&mut old.delays[from]);
         }
     }
 
@@ -407,16 +482,6 @@ impl CompiledGraph {
         self.steps[self.master].n_out
     }
 
-    /// Calls `reset` on every node and clears every delay line.
-    pub fn reset(&mut self) {
-        for s in &mut self.steps {
-            s.node.reset();
-        }
-        for d in &mut self.delays {
-            d.reset();
-        }
-    }
-
     /// Cuts off what is still sounding: resets every node marked with
     /// [`GraphDesc::set_tail`] and clears every delay line, so reverb and
     /// delay tails and held voices stop at once. Other nodes (players,
@@ -443,8 +508,7 @@ impl CompiledGraph {
         if step.kind == NodeKind::Input || !step.ports.event_in {
             return false;
         }
-        let kind = daw_core::event::EventKind::ParamValue { param, value };
-        step.params.push(Event { frame: 0, kind }).is_ok()
+        step.params.push(param_event(param, 0, value)).is_ok()
     }
 
     /// The master's output for the last processed block.
@@ -455,6 +519,7 @@ impl CompiledGraph {
 
     /// Runs every node once for `frames` samples (at most `max_frames`).
     /// `audio_in[ch][offset..offset + frames]` feeds the input node.
+    /// Returns what did not fit a node's event list and was dropped.
     /// RT-safe.
     pub(crate) fn process(
         &mut self,
@@ -463,9 +528,10 @@ impl CompiledGraph {
         audio_in: &[&[f32]],
         offset: usize,
         external: &[EventList],
-    ) {
+    ) -> Dropped {
         debug_assert!(frames <= self.max_frames);
         let mf = self.max_frames;
+        let mut dropped = Dropped::default();
         let Self { steps, delays, .. } = self;
         for i in 0..steps.len() {
             let (done, rest) = steps.split_at_mut(i);
@@ -504,8 +570,9 @@ impl CompiledGraph {
                 }
             }
 
-            // Events that don't fit are dropped: a full list must not
-            // allocate.
+            // Events that don't fit are dropped, since a full list must not
+            // allocate; the list counts them, and each kind is read off it
+            // once its events are in.
             step.events_in.clear();
             for e in step.params.iter() {
                 let _ = step.events_in.push(*e);
@@ -522,15 +589,20 @@ impl CompiledGraph {
                 for &src in &step.event_sources {
                     reserve += done[src].events_out.len();
                 }
-                let limit = step.events_in.capacity().saturating_sub(reserve);
                 // The audio in this step's input left the timeline
                 // `in_latency` samples ago; before project start the lane
                 // holds its first value.
                 let now = transport.position.0 - i64::from(step.in_latency);
-                for (param, lane) in &step.automation {
-                    lane.emit(*param, now, frames, &mut step.events_in, limit);
-                }
+                dropped.params += emit_automation(
+                    &mut step.automation,
+                    now,
+                    frames,
+                    &mut step.events_in,
+                    reserve,
+                    lane_changes(mf),
+                );
             }
+            dropped.params += step.events_in.take_overflow();
             for list in step.external_events.lists(external) {
                 for e in list.iter() {
                     let _ = step.events_in.push(*e);
@@ -541,6 +613,7 @@ impl CompiledGraph {
                     let _ = step.events_in.push(*e);
                 }
             }
+            dropped.events += step.events_in.take_overflow();
 
             let mut ins: [&[f32]; MAX_CHANNELS] = [&[]; MAX_CHANNELS];
             for (slot, ch) in ins.iter_mut().zip(step.inputs.chunks_exact(mf)) {
@@ -562,17 +635,93 @@ impl CompiledGraph {
                 events_out: &mut step.events_out,
             };
             step.node.process(&mut ctx);
+            // What the node had no room to send on: a clip's notes, a
+            // plugin's MIDI output.
+            dropped.events += step.events_out.take_overflow();
             if let Some(meter) = &step.meter {
                 for (ch, out) in step.outputs.chunks_exact(mf).enumerate() {
                     meter.update(ch, &out[..frames]);
                 }
             }
         }
+        dropped
     }
 }
 
-/// The keyed nodes of `steps`.
-fn live_nodes(steps: &[Step], generation: u64) -> LiveNodes {
+/// What one block could not deliver because a node's event list was full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Dropped {
+    /// Parameter changes, queued or from automation.
+    pub params: u64,
+    /// Notes and other events: into a node from outside or from another
+    /// node, and out of a node that made more than its output list holds.
+    pub events: u64,
+}
+
+impl std::ops::AddAssign for Dropped {
+    fn add_assign(&mut self, other: Self) {
+        self.params += other.params;
+        self.events += other.events;
+    }
+}
+
+/// Pushes what `lanes` do in the block of `frames` samples starting at `now`.
+/// `reserve` slots of `out` are left free for the notes still to come, as far
+/// as that leaves every lane its own `own` changes. Returns how many changes
+/// were held back for that; those `out` had no room for at all are in its
+/// own [overflow count](EventList::take_overflow). RT-safe.
+fn emit_automation(
+    lanes: &mut [Lane],
+    now: i64,
+    frames: usize,
+    out: &mut EventList,
+    reserve: usize,
+    own: usize,
+) -> u64 {
+    let mut held_back = 0;
+    // Every lane's value at the start of the block goes first: whatever is
+    // dropped below, no parameter is left behind for longer than a block.
+    for lane in lanes.iter_mut() {
+        lane.sent = 0;
+        if let Some(value) = lane.points.value_at(SampleTime(now)) {
+            let _ = out.push(param_event(lane.param, 0, value));
+        }
+    }
+    // What the lanes may use between them beyond their own changes.
+    let mut spare = out
+        .capacity()
+        .saturating_sub(reserve)
+        .saturating_sub(out.len() + lanes.len() * own);
+    // Then the changes inside the block, one stretch of the ramp grid at a
+    // time, so that events are pushed (nearly) in time order: the list
+    // keeps itself sorted, and appending is the cheap way to fill it.
+    let end = now + frames as i64;
+    let mut from = now;
+    while from + 1 < end {
+        // Up to and without the next grid time, which starts a stretch.
+        let to = next_grid(from + 1).min(end);
+        for lane in lanes.iter_mut() {
+            for (t, value) in lane.points.changes(from, (to - from) as usize) {
+                if lane.sent >= own && spare == 0 {
+                    held_back += 1;
+                    continue;
+                }
+                let event = param_event(lane.param, (t - now) as usize, value);
+                if out.push(event).is_ok() {
+                    if lane.sent >= own {
+                        spare -= 1;
+                    }
+                    lane.sent += 1;
+                }
+            }
+        }
+        from = to - 1;
+    }
+    held_back
+}
+
+/// The keyed nodes of `steps` and the delay lines between them.
+fn live_nodes(steps: &[Step], delays: HashMap<EdgeKey, usize>, generation: u64) -> LiveNodes {
     let nodes: HashMap<_, _> = steps
         .iter()
         .enumerate()
@@ -589,7 +738,11 @@ fn live_nodes(steps: &[Step], generation: u64) -> LiveNodes {
             Some((s.key?, live))
         })
         .collect();
-    LiveNodes { generation, nodes }
+    LiveNodes {
+        generation,
+        nodes,
+        delays,
+    }
 }
 
 /// Kahn's algorithm over audio and event edges. Ties go to the lowest

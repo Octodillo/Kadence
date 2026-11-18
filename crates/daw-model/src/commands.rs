@@ -22,7 +22,7 @@ use crate::command::Command;
 use crate::error::ModelError;
 use crate::id::{ClipId, DeviceId, LaneId, NoteUid, SendId, TrackId};
 use crate::model::*;
-use crate::model::{check_finite, check_points, invalid};
+use crate::model::{check_finite, check_points, check_tick, invalid};
 
 /// Fails if any of `ids` is already used anywhere in the project.
 fn check_ids_free(project: &Project, ids: &[Uuid]) -> Result<(), ModelError> {
@@ -147,6 +147,13 @@ impl Command for SetProjectName {
     }
 }
 
+/// Trades the project's tempo and meter map for `tempo`: both doing and
+/// undoing [`SetTempo`] and [`SetTimeSignature`].
+fn swap_tempo(project: &mut Project, tempo: &mut TempoData) -> ChangeSet {
+    mem::swap(&mut project.tempo, tempo);
+    ChangeSet::one(Change::Tempo)
+}
+
 /// Replaces the tempo and meter map.
 #[derive(Debug)]
 pub struct SetTempo {
@@ -160,13 +167,11 @@ impl Command for SetTempo {
 
     fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         self.tempo.validate()?;
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 
     fn merge(&mut self, next: &dyn Command) -> bool {
@@ -188,13 +193,11 @@ impl Command for SetTimeSignature {
 
     fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         self.tempo.validate()?;
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
-        mem::swap(&mut project.tempo, &mut self.tempo);
-        Ok(ChangeSet::one(Change::Tempo))
+        Ok(swap_tempo(project, &mut self.tempo))
     }
 }
 
@@ -499,9 +502,7 @@ impl Command for SetTrack {
             }) if c > 15 => {
                 return Err(invalid("MIDI channel must be within 0..15"));
             }
-            TrackField::Armed(true)
-                if !matches!(track.kind, TrackKind::Audio | TrackKind::Instrument) =>
-            {
+            TrackField::Armed(true) if !track.kind.records() => {
                 return Err(invalid("only audio and instrument tracks can record"));
             }
             TrackField::Output(TrackOutput::Bus(b)) => {
@@ -652,9 +653,7 @@ impl Command for MoveClip {
             .clip_location(self.id)
             .ok_or(ModelError::ClipNotFound(self.id))?;
         let dest = track_of(project, self.track)?;
-        if self.start.0 < 0 {
-            return Err(invalid("clips can't start before 0"));
-        }
+        check_tick(self.start, "clip start")?;
         if !dest
             .kind
             .accepts(&project.track(from).expect("found above").clips[i].content)
@@ -781,22 +780,6 @@ impl Command for SetClip {
         let clip = project
             .clip(self.id)
             .ok_or(ModelError::ClipNotFound(self.id))?;
-        match self.field {
-            ClipField::Length(l) if l.0 <= 0 => {
-                return Err(invalid("clip length must be positive"));
-            }
-            ClipField::AudioOffset(o) if o.0 < 0 => {
-                return Err(invalid("audio offset must not be negative"));
-            }
-            ClipField::AudioGainDb(g) => check_finite(g, "clip gain")?,
-            ClipField::AudioSource(ref p) if p.as_os_str().is_empty() => {
-                return Err(invalid("audio clip needs a source file"));
-            }
-            ClipField::FadeIn(f) | ClipField::FadeOut(f) if f.length.0 < 0 => {
-                return Err(invalid("fade length must not be negative"));
-            }
-            _ => {}
-        }
         let audio_only = matches!(
             self.field,
             ClipField::AudioOffset(_)
@@ -808,7 +791,14 @@ impl Command for SetClip {
         if audio_only && !matches!(clip.content, ClipContent::Audio(_)) {
             return Err(invalid("that property only applies to audio clips"));
         }
-        self.swap(project)
+        // The clip with the new value must pass the checks a loaded one
+        // does; if it doesn't, the old value goes back.
+        let changes = self.swap(project)?;
+        if let Err(e) = project.clip(self.id).expect("found above").check() {
+            self.swap(project)?;
+            return Err(e);
+        }
+        Ok(changes)
     }
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
@@ -843,7 +833,10 @@ fn midi(project: &Project, clip: ClipId) -> Result<&MidiClip, ModelError> {
     }
 }
 
-/// Adds notes to a MIDI clip.
+/// Adds notes to a MIDI clip. Edits of only those notes that follow in the
+/// same gesture (drawing a note and dragging it to length) merge into it,
+/// so undo takes the notes away in one step and redo brings them back as
+/// they ended up.
 #[derive(Debug)]
 pub struct AddNotes {
     pub clip: ClipId,
@@ -875,10 +868,26 @@ impl Command for AddNotes {
 
     fn revert(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         let ids: HashSet<NoteUid> = self.notes.iter().map(|n| n.id).collect();
-        midi_mut(project, self.clip)?
-            .notes
-            .retain(|n| !ids.contains(&n.id));
+        let m = midi_mut(project, self.clip)?;
+        let present: HashSet<NoteUid> = m.notes.iter().map(|n| n.id).collect();
+        if let Some(missing) = ids.iter().find(|id| !present.contains(id)) {
+            return Err(ModelError::NoteNotFound(*missing));
+        }
+        // Taken as they are now, which is how redo adds them again: merged
+        // edits changed them since they were added.
+        let (mine, others) = mem::take(&mut m.notes)
+            .into_iter()
+            .partition(|n| ids.contains(&n.id));
+        m.notes = others;
+        self.notes = mine;
         Ok(ChangeSet::one(Change::Clip(self.clip)))
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        next.downcast_ref::<EditNotes>().is_some_and(|edit| {
+            let mine: HashSet<NoteUid> = self.notes.iter().map(|n| n.id).collect();
+            edit.clip == self.clip && edit.notes.iter().all(|n| mine.contains(&n.id))
+        })
     }
 }
 

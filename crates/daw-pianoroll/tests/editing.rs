@@ -4,11 +4,11 @@ use daw_arrange::{Button, Env, Pointer, Prim, Snap};
 use daw_core::time::{PPQ, SegmentTempoMap, TickTime};
 use daw_midi::edit::Quantize;
 use daw_midi::grid::Grid;
-use daw_midi::model::new_note;
+use daw_midi::model::{compile_track, new_note};
 use daw_midi::{EditNote, NoteData};
 use daw_model::commands::{AddClip, AddTrack};
 use daw_model::{Clip, ClipContent, ClipId, Document, MidiClip, Note, Project, Track, TrackKind};
-use daw_pianoroll::{Area, PianoRoll, note_name};
+use daw_pianoroll::{Accidentals, Area, PianoRoll, note_name};
 
 const Q: i64 = PPQ;
 
@@ -131,8 +131,34 @@ fn layout_areas() {
     assert_eq!(r.pr.area(100.0, 100.0), Area::Notes);
     assert_eq!(r.pr.area(100.0, 590.0), Area::Velocity);
     assert_eq!(r.pr.area(10.0, 10.0), Area::Corner);
-    assert_eq!(note_name(60), "C4");
-    assert_eq!(note_name(61), "C♯4");
+    assert_eq!(note_name(60, Accidentals::Sharps), "C4");
+    assert_eq!(note_name(61, Accidentals::Sharps), "C♯4");
+    assert_eq!(note_name(61, Accidentals::Flats), "D♭4");
+    assert_eq!(note_name(60, Accidentals::Flats), "C4");
+    assert_eq!(note_name(0, Accidentals::Flats), "C-1");
+    assert_eq!(note_name(127, Accidentals::Flats), "G9");
+}
+
+#[test]
+fn a_finger_scrolls_from_the_empty_grid_and_edits_everywhere_else() {
+    let rig = Rig::new(vec![n(0, Q, 60)]);
+    let project = rig.doc.project();
+    let pans = |x, y| rig.pr.touch_pans(project, x, y);
+    assert!(pans(rig.x(2 * Q), rig.y(60)), "beside the note");
+    assert!(pans(rig.x(Q / 2), rig.y(64)), "above the note");
+    assert!(!pans(rig.x(Q / 2), rig.y(60)), "on the note");
+    assert!(!pans(rig.x(Q), rig.pr.ruler_height / 2.0), "on the ruler");
+    assert!(!pans(rig.pr.keyboard_width / 2.0, rig.y(60)), "on the keys");
+    let velocity = rig.pr.height - 1.0;
+    assert_eq!(rig.pr.area(rig.x(Q), velocity), Area::Velocity);
+    assert!(!pans(rig.x(Q), velocity), "on the velocity lane");
+    assert!(!pans(1.0, 1.0), "in the corner");
+    // Holding a finger still opens a menu only where a right click would:
+    // not on the keys (the note keeps sounding) or the velocity lane.
+    assert!(rig.pr.has_menu_at(rig.x(2 * Q), rig.y(60)));
+    assert!(!rig.pr.has_menu_at(rig.pr.keyboard_width / 2.0, rig.y(60)));
+    assert!(!rig.pr.has_menu_at(rig.x(Q), velocity));
+    assert!(!rig.pr.has_menu_at(rig.x(Q), rig.pr.ruler_height / 2.0));
 }
 
 #[test]
@@ -151,6 +177,156 @@ fn double_click_adds_and_deletes_notes() {
     let p = Pointer::left(r.x(5 * Q), y);
     let out = r.pr.double_click(&mut r.doc, p);
     assert!(out.error.is_some());
+}
+
+#[test]
+fn a_new_note_sounds_while_the_double_click_is_held() {
+    let mut r = Rig::new(vec![]);
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    r.press(x, y);
+    assert_eq!(r.pr.audition(), None, "empty space is silent");
+    r.pr.double_click(&mut r.doc, Pointer::left(x, y));
+    let sounding = r.pr.audition().expect("the new note sounds");
+    assert_eq!((sounding.key, sounding.velocity), (64, 0.8));
+    // A hand that is not quite still neither resizes it nor silences it.
+    r.pr.motion(&mut r.doc, Pointer::left(x + 2.0, y + 1.0));
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+    assert!(r.pr.audition().is_some());
+    let out = r.pr.release(&mut r.doc, Pointer::left(x + 2.0, y + 1.0));
+    assert_eq!(r.pr.audition(), None);
+    assert!(out.view, "the key is redrawn as released");
+    // Nothing follows the pointer once it is up.
+    r.pr.motion(&mut r.doc, Pointer::left(x + 200.0, y));
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+}
+
+#[test]
+fn dragging_a_held_new_note_sets_its_length_in_the_same_undo_step() {
+    let mut r = Rig::new(vec![]);
+    let steps = r.doc.history().undo_len();
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    r.press(x, y);
+    r.pr.double_click(&mut r.doc, Pointer::left(x, y));
+    // The end follows the pointer, on the grid, whatever row it is over.
+    for (to, length) in [(Q + 20, Q - Q / 4), (2 * Q - 20, 2 * Q - Q / 4)] {
+        let p = Pointer::left(r.x(to), r.y(70));
+        r.pr.motion(&mut r.doc, p);
+        assert_eq!(r.notes(), [NoteData::new(Q / 4, length, 64, 0.8)]);
+        assert_eq!(r.pr.audition().map(|a| a.key), Some(64), "still sounding");
+    }
+    // Back past its start: never shorter than a grid step.
+    let back = Pointer::left(r.x(0), y);
+    r.pr.motion(&mut r.doc, back);
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+    let end = Pointer::left(r.x(Q + Q / 2), y);
+    r.pr.motion(&mut r.doc, end);
+    r.pr.release(&mut r.doc, end);
+    let drawn = [NoteData::new(Q / 4, Q + Q / 4, 64, 0.8)];
+    assert_eq!(r.notes(), drawn);
+    assert_eq!(r.pr.audition(), None);
+
+    assert_eq!(r.doc.history().undo_len(), steps + 1);
+    r.doc.undo().unwrap();
+    assert!(r.notes().is_empty());
+    r.doc.redo().unwrap();
+    assert_eq!(r.notes(), drawn, "redo brings the note back at its length");
+}
+
+#[test]
+fn alt_sets_a_held_new_notes_length_off_the_grid() {
+    let mut r = Rig::new(vec![]);
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    r.press(x, y);
+    r.pr.double_click(&mut r.doc, Pointer::left(x, y));
+    let mut p = Pointer::left(r.x(Q + 20), y);
+    p.alt = true;
+    r.pr.motion(&mut r.doc, p);
+    r.pr.release(&mut r.doc, p);
+    let end = r.notes()[0].end().0;
+    assert!((end - (Q + 20)).abs() <= 1, "{end}");
+}
+
+#[test]
+fn a_wobble_inside_a_held_new_note_keeps_its_length() {
+    let mut r = Rig::new(vec![]);
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    // Off the grid the note starts under the pointer, a sixteenth long.
+    let mut p = Pointer::left(x, y);
+    p.alt = true;
+    r.press_with(p);
+    r.pr.double_click(&mut r.doc, p);
+    let drawn = r.notes();
+    assert_eq!(drawn[0].length.0, Q / 4);
+    for (dx, dy) in [(0.0, 5.0), (4.0, -3.0), (-6.0, 0.0), (10.0, 40.0)] {
+        let mut wobble = Pointer::left(x + dx, y + dy);
+        wobble.alt = true;
+        r.pr.motion(&mut r.doc, wobble);
+        assert_eq!(r.notes(), drawn, "moved by {dx}, {dy}");
+    }
+    assert!(r.pr.audition().is_some());
+}
+
+#[test]
+fn escape_ends_a_held_new_note_and_closes_its_undo_step() {
+    let mut r = Rig::new(vec![]);
+    let steps = r.doc.history().undo_len();
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    r.press(x, y);
+    r.pr.double_click(&mut r.doc, Pointer::left(x, y));
+    r.pr.cancel(&mut r.doc);
+    assert_eq!(r.pr.audition(), None);
+    // The pointer is still down, but no longer sets the length.
+    let far = Pointer::left(r.x(2 * Q), y);
+    r.pr.motion(&mut r.doc, far);
+    r.pr.release(&mut r.doc, far);
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+    // Resizing it afterwards is a step of its own.
+    r.drag((r.x(Q / 2 - 2), y), (r.x(Q), y));
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q - Q / 4, 64, 0.8)]);
+    assert_eq!(r.doc.history().undo_len(), steps + 2);
+    r.doc.undo().unwrap();
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+}
+
+#[test]
+fn releasing_a_note_that_sounded_redraws_the_keyboard() {
+    let mut r = Rig::new(vec![n(0, Q, 60)]);
+    let (x, y) = (r.x(Q / 2), r.y(60));
+    r.press(x, y);
+    assert!(r.pr.audition().is_some());
+    let out = r.pr.release(&mut r.doc, Pointer::left(x, y));
+    assert!(out.view);
+    assert_eq!(r.pr.audition(), None);
+    // Nothing sounded on empty space, so nothing to redraw.
+    let (x, y) = (r.x(3 * Q), r.y(70));
+    r.press(x, y);
+    assert!(!r.pr.release(&mut r.doc, Pointer::left(x, y)).view);
+}
+
+#[test]
+fn a_press_after_a_lost_release_leaves_the_new_note_alone() {
+    let mut r = Rig::new(vec![]);
+    let (x, y) = (r.x(Q / 4 + 30), r.y(64));
+    r.pr.double_click(&mut r.doc, Pointer::left(x, y));
+    // Elsewhere on empty space: a rubber band, not a resize.
+    r.drag((r.x(2 * Q), r.y(70)), (r.x(3 * Q), r.y(68)));
+    assert_eq!(r.notes(), [NoteData::new(Q / 4, Q / 4, 64, 0.8)]);
+    assert_eq!(r.pr.audition(), None);
+}
+
+#[test]
+fn note_names_follow_the_accidentals() {
+    // A B flat a beat long: wide enough for its name.
+    let mut r = Rig::new(vec![n(0, Q, 70)]);
+    let names = |r: &Rig| -> Vec<String> {
+        let scene = r.pr.scene(r.doc.project(), &r.env());
+        scene.texts().map(String::from).collect()
+    };
+    assert!(names(&r).iter().any(|t| t == "A♯4"), "{:?}", names(&r));
+    r.pr.accidentals = Accidentals::Flats;
+    let flat = names(&r);
+    assert!(flat.iter().any(|t| t == "B♭4"), "{flat:?}");
+    assert!(!flat.iter().any(|t| t.contains('♯')), "{flat:?}");
 }
 
 #[test]
@@ -577,4 +753,59 @@ fn opening_a_clip_shows_all_its_notes() {
     for key in [48, 60, 84] {
         assert!(visible.contains(&key), "{key} not in {visible:?}");
     }
+}
+
+#[test]
+fn double_click_before_the_clip_is_refused() {
+    let mut r = Rig::new(vec![]);
+    // Half a beat before the clip start, in the dimmed part.
+    let p = Pointer::left(r.x(-Q / 2), r.y(64));
+    let out = r.pr.double_click(&mut r.doc, p);
+    assert!(out.error.is_some());
+    assert!(r.notes().is_empty());
+    assert!(r.pr.selection.is_empty());
+}
+
+#[test]
+fn a_velocity_edit_never_silences_a_note() {
+    let mut r = Rig::new(vec![n(0, Q / 2, 60), n(Q, Q / 2, 62)]);
+    let played = |r: &Rig| {
+        let track = &r.doc.project().tracks[0];
+        compile_track(track, &r.tempo, 48_000.0).len()
+    };
+    // A stem dragged to the very bottom of the lane, and past it.
+    let vel = r.pr.velocity_rect();
+    r.drag((r.x(0), vel.y + 10.0), (r.x(0), vel.bottom() + 20.0));
+    assert!(r.notes()[0].velocity < 0.01);
+    assert_eq!(played(&r), 2);
+    r.pr.select_all(r.doc.project());
+    r.pr.set_velocity(&mut r.doc, 0.0);
+    assert_eq!(played(&r), 2);
+    r.pr.scale_velocity(&mut r.doc, 0.0);
+    assert_eq!(played(&r), 2);
+    for seed in 0..50 {
+        r.pr.humanize(&mut r.doc, seed);
+        assert_eq!(played(&r), 2, "seed {seed}");
+    }
+}
+
+#[test]
+fn notes_sit_on_the_grid_at_any_scroll_and_zoom() {
+    // Fully zoomed in, a tick is about two pixels wide: scrolled by a
+    // fraction of a tick, notes must still start on their grid line.
+    let mut r = Rig::new(vec![n(Q, Q, 60)]);
+    r.pr.view.px_per_beat = 2000.0;
+    r.pr.view.scroll_x = 3700.9;
+    let scene = r.pr.scene(r.doc.project(), &r.env());
+    let x = r.x(Q);
+    let drawn = scene.prims.iter().any(|p| match p {
+        Prim::RoundRect { r, .. } => (r.x - x).abs() < 1e-9 && (r.w - 2000.0).abs() < 1e-9,
+        _ => false,
+    });
+    assert!(drawn, "no note drawn at {x}");
+    // The pointer hits the note from its first pixel on, and not before.
+    r.press(x + 0.1, r.y(60));
+    assert_eq!(r.pr.selection.len(), 1);
+    r.press(x - 0.1, r.y(60));
+    assert!(r.pr.selection.is_empty());
 }

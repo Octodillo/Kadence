@@ -26,12 +26,13 @@ jobs:
         # jack-sys needs jack.pc to build; jackd2 runs the JACK integration tests.
         # lilv links daw-plugins-lv2; mda-lv2 and x42-plugins are its test
         # plugins; Xvfb lets its tests open plugin UIs. lv2-dev and
-        # lv2-examples are for the vendored livi's tests.
+        # lv2-examples are for the vendored livi's tests. gettext checks the
+        # translation template.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libjack-jackd2-dev jackd2 liblilv-dev mda-lv2 x42-plugins xvfb \
-            lv2-dev lv2-examples pipewire pipewire-jack wireplumber dbus
+            lv2-dev lv2-examples pipewire pipewire-jack wireplumber dbus gettext
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # The vendored livi is its own workspace with its own target dir.
@@ -57,7 +58,7 @@ jobs:
         # and drops the connection of a test opening a plugin UI in parallel.
         run: xvfb-run -a -s "-noreset" cargo nextest run --workspace --exclude daw-app --no-tests=warn
         env:
-          DAW_REQUIRE_LV2_PLUGINS: 1
+          KADENCE_REQUIRE_LV2_PLUGINS: 1
       - name: vendored livi tests
         # Its own workspace (see third_party/livi/KADENCE.md); its tests
         # build small C plugins and use the LV2 example plugins.
@@ -84,6 +85,11 @@ jobs:
         run: ci/pipewire-jack-tests.sh
       - name: doc tests
         run: cargo test --workspace --exclude daw-app --doc
+      - name: translation template
+        # po/kadence.pot must offer translators every message in the sources.
+        # Last and always, so a stale template does not hide the results above.
+        if: always()
+        run: po/extract-messages.sh --check
 
   licenses:
     name: cargo deny (licenses, sources)
@@ -94,6 +100,36 @@ jobs:
         with:
           command: check licenses bans sources
 
+  # The oldest Rust that Cargo.toml says can build Kadence (rust-version),
+  # which every other job, on current stable, would not notice breaking. The
+  # whole workspace, so in the Arch image for daw-app's Qt.
+  msrv:
+    name: Minimum Rust (rust-version)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      # Whether it builds, not what an older compiler's lints make of it.
+      RUSTFLAGS: ''
+    steps:
+      # Before git is installed, so this is a plain download; nothing
+      # below needs the history.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install system packages and that Rust
+        # As the default toolchain and through RUSTUP_TOOLCHAIN, which
+        # outranks rust-toolchain.toml's "stable".
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          test -n "$msrv"
+          ci/arch-build-deps.sh "$msrv"
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv
+      - name: cargo check
+        run: |
+          rustc --version
+          cargo check --workspace --all-targets --locked
+
   # The desktop images install the system libraries later crates link
   # against (Qt 6, Kirigami, JACK via PipeWire, lilv), build and test the
   # whole workspace, and check the CMake install layout.
@@ -102,18 +138,11 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - name: Install system packages
-        run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel git rustup cmake ninja clang \
-            qt6-base qt6-declarative qt6-wayland kirigami qqc2-desktop-style \
-            kcoreaddons ki18n kcrash kconfig kcolorscheme kiconthemes \
-            breeze breeze-icons noto-fonts lld gettext python \
-            extra-cmake-modules pipewire-jack lilv \
-            desktop-file-utils appstream xorg-server-xvfb
-          rustup default stable
-          rustup component add rustfmt clippy
+      # Before git is installed, so this is a plain download; nothing
+      # below needs the history.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install system packages
+        run: ci/arch-build-deps.sh stable rustfmt clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: arch
@@ -188,13 +217,7 @@ jobs:
           desktop-file-utils appstream xvfb
       - name: Install Rust
         if: steps.neon.outputs.available == 'true'
-        run: |
-          # A pinned rustup-init, checked against its sha256, rather than curl | sh.
-          curl -fsSL -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.29.2/x86_64-unknown-linux-gnu/rustup-init
-          echo '5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4  /tmp/rustup-init' | sha256sum -c -
-          chmod +x /tmp/rustup-init
-          /tmp/rustup-init -y --profile minimal --component clippy
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        run: ci/install-rustup.sh --component clippy
       - if: steps.neon.outputs.available == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:

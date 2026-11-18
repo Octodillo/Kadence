@@ -13,17 +13,17 @@ import io.github.octodillo.daw
 Kirigami.Dialog {
     id: browser
 
-    // What the opener wants: 0 any plugin, 1 instruments, 2 effects. The
-    // user can change the type filter from there.
-    property int kind: 0
+    // What the opener wants, a Plugins.PluginKind. The user can change the
+    // type filter from there.
+    property int kind: Plugins.AnyPlugin
 
     // `format` is a Plugins `formatId`, as Mixer.addPluginInsert takes it.
     signal chosen(string format, string pluginId, string name)
     // The user wants to change where plugins are looked for.
     signal configureRequested()
 
-    title: kind === 1 ? i18nc("@title:window", "Choose Instrument Plugin")
-         : kind === 2 ? i18nc("@title:window", "Add Effect Plugin")
+    title: kind === Plugins.InstrumentPlugin ? i18nc("@title:window", "Choose Instrument Plugin")
+         : kind === Plugins.EffectPlugin ? i18nc("@title:window", "Add Effect Plugin")
          : i18nc("@title:window", "Plugins")
     preferredWidth: Kirigami.Units.gridUnit * 30
     preferredHeight: Kirigami.Units.gridUnit * 28
@@ -70,8 +70,9 @@ Kirigami.Dialog {
                 id: typeBox
                 // Effects go into insert chains and instruments into the
                 // instrument slot, so the opener's choice holds there.
-                visible: browser.kind === 0
+                visible: browser.kind === Plugins.AnyPlugin
                 Accessible.name: i18nc("@label:listbox", "Plugin type")
+                // The rows are the Plugins.PluginKind values, in order.
                 model: [
                     i18nc("@item:inlistbox plugin type filter", "All Types"),
                     i18nc("@item:inlistbox plugin type filter", "Instruments"),
@@ -165,7 +166,7 @@ Kirigami.Dialog {
                         : i18nc("@info:placeholder", "No matching plugins")
                     explanation: Plugins.hasScanned && Plugins.installedCount === 0
                         ? i18nc("@info:placeholder",
-                                 "Kadence looks for CLAP, VST3 and LV2 plugins in their usual folders. Add other folders in the plugin settings.")
+                                 "Kadence looks for CLAP, VST3 and LV2 plugins. The plugin settings list the folders it searches, and you can add others there.")
                         : ""
                     helpfulAction: Plugins.hasScanned && Plugins.installedCount === 0 ? foldersAction : null
                 }

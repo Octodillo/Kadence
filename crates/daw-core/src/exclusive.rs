@@ -80,11 +80,6 @@ impl<T> Exclusive<T> {
         // SAFETY: as in `try_audio`.
         self.value.with_mut(|v| f(unsafe { &mut *v }))
     }
-
-    /// Whether some thread is inside the value right now. Only a hint: it can change at once.
-    pub fn is_busy(&self) -> bool {
-        self.state.load(Ordering::Relaxed) != FREE
-    }
 }
 
 /// Frees the state word, also when the closure panics.
@@ -106,10 +101,8 @@ mod tests {
         assert_eq!(x.try_audio(|v| *v + 1), Some(2));
         x.main(|v| {
             *v = 5;
-            assert!(x.is_busy());
             assert_eq!(x.try_audio(|v| *v), None, "the main side holds it");
         });
-        assert!(!x.is_busy());
         assert_eq!(x.try_audio(|v| *v), Some(5));
     }
 

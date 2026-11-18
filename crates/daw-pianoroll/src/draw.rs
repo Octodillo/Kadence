@@ -97,7 +97,7 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
                 };
                 s.text(
                     Rect::new(r.x + 3.0, r.y, r.w - 4.0, r.h),
-                    note_name(d.key),
+                    note_name(d.key, pr.accidentals),
                     text,
                     false,
                 );
@@ -204,7 +204,7 @@ pub(crate) fn scene(pr: &PianoRoll, project: &Project, env: &Env) -> Scene {
                     pr.keyboard_width * 0.38 - 2.0,
                     pr.key_height,
                 ),
-                text: note_name(key),
+                text: note_name(key, pr.accidentals),
                 color: dark.mix(light, 0.35),
                 bold: false,
                 align: Align::Left,

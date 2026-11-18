@@ -6,9 +6,10 @@
 use daw_core::event::{NoteId, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 
-use crate::dsp::{Adsr, Smoother, Svf, SvfMode, Waveform, db_to_gain, key_to_hz};
+use crate::dsp::{Adsr, DEVICE_FLOOR_DB, Smoother, Svf, SvfMode, Waveform, device_gain, key_to_hz};
 use crate::events::{Note, Segmented, output, process_segmented};
 use crate::param::{ParamSpec, ParamStore, ParamUnit};
+use crate::voices::{self, VoicePool};
 use crate::{DeviceCategory, DeviceInfo, impl_device};
 
 pub static INFO: DeviceInfo = DeviceInfo {
@@ -197,7 +198,15 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
         0.7,
         ParamUnit::Percent,
     ),
-    ParamSpec::new(GAIN, "gain", "Gain", -70.0, 12.0, -6.0, ParamUnit::Decibels),
+    ParamSpec::new(
+        GAIN,
+        "gain",
+        "Gain",
+        DEVICE_FLOOR_DB,
+        12.0,
+        -6.0,
+        ParamUnit::Decibels,
+    ),
     ParamSpec::new(
         POLYPHONY,
         "polyphony",
@@ -222,24 +231,15 @@ pub(crate) static PARAMS: &[ParamSpec] = &[
 
 /// Highest value of the polyphony parameter.
 pub const MAX_POLYPHONY: usize = 32;
-/// Extra voices so stolen voices can fade out while their replacement starts.
-const SPARE_VOICES: usize = 8;
-const POOL: usize = MAX_POLYPHONY + SPARE_VOICES;
-/// Fade-out time for a stolen voice.
-const STEAL_FADE_MS: f64 = 3.0;
+const POOL: usize = MAX_POLYPHONY + voices::SPARE_VOICES;
 /// Headroom so a handful of full-scale voices don't clip.
 const VOICE_GAIN: f32 = 0.25;
 
 #[derive(Clone, Copy, Default)]
 struct Voice {
-    active: bool,
-    /// Being faded out after a steal; doesn't count towards polyphony.
-    stolen: bool,
-    fade: f32,
     key: u8,
     id: NoteId,
     velocity_gain: f32,
-    age: u64,
     phase1: f32,
     phase2: f32,
     amp_env: Adsr,
@@ -247,13 +247,21 @@ struct Voice {
     filter: Svf,
 }
 
+impl voices::Stealable for Voice {
+    fn is_releasing(&self) -> bool {
+        self.amp_env.is_releasing()
+    }
+
+    fn level(&self) -> f32 {
+        self.amp_env.level()
+    }
+}
+
 pub struct Synth {
     params: ParamStore,
-    voices: [Voice; POOL],
+    voices: VoicePool<Voice, POOL>,
     sample_rate: f64,
-    clock: u64,
     bend: f32,
-    fade_step: f32,
     gain: Smoother,
 }
 
@@ -267,11 +275,9 @@ impl Synth {
     pub fn new() -> Self {
         let mut s = Self {
             params: ParamStore::new(PARAMS),
-            voices: [Voice::default(); POOL],
+            voices: VoicePool::new(48000.0),
             sample_rate: 48000.0,
-            clock: 0,
             bend: 0.0,
-            fade_step: 0.0,
             gain: Smoother::new(0.0),
         };
         s.prepare(48000.0, 0);
@@ -280,7 +286,7 @@ impl Synth {
 
     /// Voices currently sounding, not counting stolen ones fading out.
     pub fn active_voices(&self) -> usize {
-        self.voices.iter().filter(|v| v.active && !v.stolen).count()
+        self.voices.playing()
     }
 
     fn polyphony(&self) -> usize {
@@ -290,92 +296,35 @@ impl Synth {
     fn apply_param(&mut self, id: ParamId) {
         match id {
             AMP_ATTACK..=FILTER_RELEASE => {
-                for v in &mut self.voices {
+                for v in self.voices.iter_all_mut() {
                     set_envelopes(&self.params, self.sample_rate, v);
                 }
             }
             GAIN => self
                 .gain
-                .set_target(db_to_gain(self.params.get(GAIN)) as f32),
+                .set_target(device_gain(self.params.get(GAIN)) as f32),
             _ => {}
         }
     }
 
-    fn steal(&mut self) {
-        let victim = self
-            .voices
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| v.active && !v.stolen)
-            .min_by(|(_, a), (_, b)| {
-                // Releasing voices first, quietest first; otherwise oldest.
-                b.amp_env
-                    .is_releasing()
-                    .cmp(&a.amp_env.is_releasing())
-                    .then(if a.amp_env.is_releasing() {
-                        a.amp_env.level().total_cmp(&b.amp_env.level())
-                    } else {
-                        a.age.cmp(&b.age)
-                    })
-            })
-            .map(|(i, _)| i);
-        if let Some(i) = victim {
-            let v = &mut self.voices[i];
-            v.stolen = true;
-            v.fade = 1.0;
-        }
-    }
-
     fn note_on(&mut self, key: u8, velocity: f32, id: NoteId) {
-        // Retriggering a held key reuses its voice so envelopes continue smoothly.
-        let existing = self
-            .voices
-            .iter()
-            .position(|v| v.active && !v.stolen && v.key == key);
-        let slot = match existing {
-            Some(i) => i,
-            None => {
-                while self.active_voices() >= self.polyphony() {
-                    self.steal();
-                }
-                match self.voices.iter().position(|v| !v.active) {
-                    Some(i) => i,
-                    // Every spare is still fading: cut the quietest fade short.
-                    None => self
-                        .voices
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, v)| v.stolen)
-                        .min_by(|(_, a), (_, b)| a.fade.total_cmp(&b.fade))
-                        .map(|(i, _)| i)
-                        .expect("a stolen voice exists when the pool is full"),
-                }
-            }
-        };
-        self.clock += 1;
         let sens = self.params.get_f32(VELOCITY);
-        let mut v = if existing.is_some() {
-            self.voices[slot]
-        } else {
-            Voice {
-                phase2: 0.25,
-                ..Voice::default()
-            }
-        };
-        v.active = true;
-        v.stolen = false;
+        let limit = self.polyphony();
+        // Retriggering a held key reuses its voice so envelopes continue smoothly.
+        let (v, retriggered) = self.voices.start_or_reuse(limit, |v| v.key == key);
+        if !retriggered {
+            v.phase2 = 0.25;
+        }
         v.key = key;
         v.id = id;
-        v.age = self.clock;
         v.velocity_gain = 1.0 - sens + sens * velocity;
-        set_envelopes(&self.params, self.sample_rate, &mut v);
+        set_envelopes(&self.params, self.sample_rate, v);
         v.amp_env.gate_on();
         v.filter_env.gate_on();
-        self.voices[slot] = v;
     }
 
     fn note_off(&mut self, key: Option<u8>, id: NoteId) {
-        for v in self.voices.iter_mut().filter(|v| v.active && !v.stolen) {
+        for v in self.voices.iter_playing_mut() {
             if crate::events::releases(key, id, v.key, v.id) {
                 v.amp_env.gate_off();
                 v.filter_env.gate_off();
@@ -408,25 +357,18 @@ impl_device!(Synth, INFO, PARAMS, {
 });
 
 impl Segmented for Synth {
-    fn param_event(&mut self, param: ParamId, value: f64) {
-        crate::Device::set_param(self, param, value);
-    }
-
     fn note_event(&mut self, note: Note) {
         match note {
             Note::On { key, velocity, id } => self.note_on(key, velocity, id),
             Note::Off { key, id } => self.note_off(key, id),
             Note::AllOff => {
-                for v in &mut self.voices {
+                for v in self.voices.iter_all_mut() {
                     v.amp_env.gate_off();
                     v.filter_env.gate_off();
                 }
             }
             Note::SoundOff => {
-                for v in self.voices.iter_mut().filter(|v| v.active && !v.stolen) {
-                    v.stolen = true;
-                    v.fade = 1.0;
-                }
+                self.voices.sound_off();
                 self.bend = 0.0;
             }
             Note::Bend(b) => self.bend = b,
@@ -451,11 +393,10 @@ impl Segmented for Synth {
         let env_amount = p.get_f32(FILTER_ENV_AMOUNT);
         let tracking = p.get_f32(KEY_TRACKING);
         let bend = self.bend * p.get_f32(BEND_RANGE);
-        let fade_step = self.fade_step;
 
         for i in start..end {
             let mut sum = 0.0;
-            for v in self.voices.iter_mut().filter(|v| v.active) {
+            self.voices.render(|v, fade| {
                 let pitch = v.key as f32 + bend;
                 let dt1 = (key_to_hz(pitch) / sr).min(0.5);
                 let dt2 = (dt1 * osc2_ratio).min(0.5);
@@ -469,25 +410,13 @@ impl Segmented for Synth {
                 let fc = cutoff * octaves.exp2();
                 let y = v.filter.process(osc, fc, resonance, sr, mode);
 
-                let mut amp = v.amp_env.tick() * v.velocity_gain;
-                if v.stolen {
-                    v.fade -= fade_step;
-                    if v.fade <= 0.0 {
-                        v.active = false;
-                        v.stolen = false;
-                        v.amp_env.kill();
-                        v.filter.reset();
-                        continue;
-                    }
-                    amp *= v.fade;
-                }
+                let amp = v.amp_env.tick() * v.velocity_gain * fade;
                 if !v.amp_env.is_active() {
-                    v.active = false;
-                    v.filter.reset();
-                    continue;
+                    return false;
                 }
                 sum += y * amp;
-            }
+                true
+            });
             let out = sum * VOICE_GAIN * self.gain.tick();
             output(ctx, i, out, out);
         }
@@ -506,9 +435,9 @@ impl Node for Synth {
 
     fn prepare(&mut self, sample_rate: f64, _max_frames: u32) {
         self.sample_rate = sample_rate;
-        self.fade_step = (1000.0 / (STEAL_FADE_MS * sample_rate)) as f32;
+        self.voices.set_sample_rate(sample_rate);
         self.gain.set_time(10.0, sample_rate);
-        self.gain.reset(db_to_gain(self.params.get(GAIN)) as f32);
+        self.gain.reset(device_gain(self.params.get(GAIN)) as f32);
         self.reset();
     }
 
@@ -517,7 +446,7 @@ impl Node for Synth {
     }
 
     fn reset(&mut self) {
-        self.voices = [Voice::default(); POOL];
+        self.voices.clear();
         self.bend = 0.0;
     }
 }
@@ -538,22 +467,12 @@ mod tests {
         // Release key 62; it should be stolen before older held keys.
         s.note_off(Some(62), -1);
         s.note_on(70, 1.0, -1);
-        let held: Vec<u8> = s
-            .voices
-            .iter()
-            .filter(|v| v.active && !v.stolen)
-            .map(|v| v.key)
-            .collect();
+        let held: Vec<u8> = s.voices.iter_playing().map(|v| v.key).collect();
         assert_eq!(held.len(), 4);
         assert!(!held.contains(&62));
         // No releasing voices left: the oldest (60) goes next.
         s.note_on(71, 1.0, -1);
-        let held: Vec<u8> = s
-            .voices
-            .iter()
-            .filter(|v| v.active && !v.stolen)
-            .map(|v| v.key)
-            .collect();
+        let held: Vec<u8> = s.voices.iter_playing().map(|v| v.key).collect();
         assert!(!held.contains(&60));
         assert!(held.contains(&71));
     }
