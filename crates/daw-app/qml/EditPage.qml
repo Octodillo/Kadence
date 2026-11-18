@@ -288,8 +288,8 @@ Kirigami.Page {
     }
     onStripShownChanged: page.refresh()
     Connections {
-        target: Project
-        function onRevisionChanged() { page.refresh(); }
+        target: UiClock
+        function onRevised() { page.refresh(); }
     }
     Connections {
         target: UiClock

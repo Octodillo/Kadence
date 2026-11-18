@@ -12,7 +12,7 @@ use std::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QList, QString, QVariant};
 use daw_midi::edit::{Quantize, QuantizeEnds};
-use daw_pianoroll::Accidentals;
+use daw_pianoroll::{Accidentals, PianoRoll as Roll};
 
 use crate::automation_bridge::qobject::PointShape;
 use crate::automation_bridge::{shape, shape_index};
@@ -389,7 +389,8 @@ impl qobject::PianoRoll {
         if !self.scene.wants_scene(self.is_visible()) {
             return;
         }
-        let scene = state::with(|s| s.with_piano(|p, doc, env| p.scene(doc.project(), env)));
+        let scene =
+            state::with(|s| s.with_view(|p: &mut Roll, doc, env| p.scene(doc.project(), env)));
         self.as_mut().rust_mut().scene.store(scene);
         self.update();
     }
@@ -420,7 +421,7 @@ impl qobject::PianoRoll {
     fn press(mut self: Pin<&mut Self>, x: f64, y: f64, button: i32, modifiers: i32) {
         self.as_mut().rust_mut().last_press = (x, y);
         let p = pointer(x, y, button, modifiers);
-        let out = state::with(|s| s.with_piano(|pr, doc, env| pr.press(doc, env, p)));
+        let out = state::with(|s| s.with_view(|pr: &mut Roll, doc, env| pr.press(doc, env, p)));
         self.after(out);
     }
 

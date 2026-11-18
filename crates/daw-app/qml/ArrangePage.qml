@@ -260,7 +260,7 @@ Kirigami.Page {
     ]
 
     // Shows a change to the project in the timeline. (The track headers
-    // follow by themselves: see UiClock.) Hidden, the timeline only notes
+    // have followed already: see UiClock.) Hidden, the timeline only notes
     // that it is stale, and draws when it shows again.
     function refresh(): void {
         view.refresh();
@@ -268,12 +268,8 @@ Kirigami.Page {
 
     // Redraw on any change, and every frame while the playhead moves.
     Connections {
-        target: Project
-        function onRevisionChanged() { page.refresh(); }
-    }
-    Connections {
-        target: Automation
-        function onRevisionChanged() { page.refresh(); }
+        target: UiClock
+        function onRevised() { page.refresh(); }
     }
     Connections {
         target: UiClock
