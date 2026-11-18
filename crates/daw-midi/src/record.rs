@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use daw_core::event::{EventKind, NoteId};
+use daw_core::event::{EventKind, NoteId, midi};
 use daw_core::time::{SampleTime, TempoMap, TickTime};
 
 use crate::note::NoteData;
@@ -95,20 +95,12 @@ fn edge(kind: &EventKind) -> Option<Edge> {
             note_id,
             ..
         } => Some(Edge::OffAny { channel, note_id }),
-        EventKind::Midi([status, key, vel]) => {
-            let channel = status & 0x0f;
-            let key = key & 0x7f;
-            match status & 0xf0 {
-                0x90 if vel & 0x7f > 0 => Some(Edge::On {
-                    channel,
-                    key,
-                    velocity: (vel & 0x7f) as f32 / 127.0,
-                    note_id: -1,
-                }),
-                0x80 | 0x90 => Some(Edge::Off { channel, key }),
-                _ => None,
-            }
-        }
+        // Raw MIDI is read by the one codec: a note in it comes back as a note event, and
+        // anything else (malformed bytes included) is no edge.
+        EventKind::Midi(raw) => match midi::decode_padded(raw)? {
+            EventKind::Midi(_) => None,
+            decoded => edge(&decoded),
+        },
         EventKind::ParamValue { .. } => None,
     }
 }
@@ -377,6 +369,21 @@ mod tests {
         assert_eq!(spans(&take), [(0, 5, 60), (6, 9, 61), (10, 12, 62)]);
         assert_eq!((take[0].channel, take[0].velocity), (1, 1.0));
         assert_eq!(take[1].channel, 2);
+    }
+
+    #[test]
+    fn malformed_raw_midi_is_no_note() {
+        let mut r = Recorder::new();
+        let midi = |time, b: [u8; 3]| Captured::Event {
+            time: SampleTime(time),
+            kind: EventKind::Midi(b),
+        };
+        r.feed(midi(0, [0x90, 60, 100]));
+        // Not the note off its masked velocity would make it, and not a note on.
+        r.feed(midi(5, [0x90, 60, 0x80]));
+        r.feed(midi(6, [0x90, 0xC1, 100]));
+        r.feed(midi(9, [0x80, 60, 0]));
+        assert_eq!(spans(&r.finish(None)), [(0, 9, 60)]);
     }
 
     #[test]

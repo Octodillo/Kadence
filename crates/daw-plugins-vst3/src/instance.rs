@@ -8,7 +8,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off};
+use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off, midi};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
     BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
@@ -350,6 +350,12 @@ impl Audio {
                 EventKind::NoteOff {
                     channel, key: None, ..
                 } => EventKind::Midi(all_notes_off(channel)),
+                // Raw MIDI is read by the one codec: a note in it is handled as a note below,
+                // and a malformed message is not passed on.
+                EventKind::Midi(raw) => match midi::decode_padded(raw) {
+                    Some(kind) => kind,
+                    None => continue,
+                },
                 kind => kind,
             };
             match kind {
@@ -395,24 +401,23 @@ impl Audio {
                     ));
                 }
                 EventKind::Midi(bytes) => {
-                    if let Some(e) = midi_to_vst_event(frame, bytes) {
+                    if let Some(e) = poly_pressure_event(frame, bytes) {
                         rt.in_events.push(e);
                         continue;
                     }
                     // Controllers, channel pressure and pitch bend become parameter changes
-                    // through the plugin's MIDI mapping.
+                    // through the plugin's MIDI mapping. The data bytes are 7 bits (the codec
+                    // above saw to it), so no value passes 1.
                     let channel = (bytes[0] & 0x0f) as usize;
                     let (cc, normalized) = match bytes[0] & 0xf0 {
-                        // Data bytes are 7 bits; a corrupt one must not push the value past 1.
-                        0xb0 => (bytes[1] as usize & 0x7f, (bytes[2] & 0x7f) as f64 / 127.0),
+                        0xb0 => (bytes[1] as usize, bytes[2] as f64 / 127.0),
                         0xd0 => (
                             ControllerNumbers_::kAfterTouch as usize,
-                            (bytes[1] & 0x7f) as f64 / 127.0,
+                            bytes[1] as f64 / 127.0,
                         ),
                         0xe0 => (
                             ControllerNumbers_::kPitchBend as usize,
-                            (((bytes[2] as u32 & 0x7f) << 7) | (bytes[1] as u32 & 0x7f)) as f64
-                                / 16383.0,
+                            ((bytes[2] as u32) << 7 | bytes[1] as u32) as f64 / 16383.0,
                         ),
                         _ => continue,
                     };
@@ -521,7 +526,7 @@ impl Audio {
                         EventKind::Midi([
                             0xa0 | (p.channel as u8 & 0x0f),
                             p.pitch as u8 & 0x7f,
-                            (p.pressure.clamp(0.0, 1.0) * 127.0).round() as u8,
+                            midi::to_7bit(p.pressure),
                         ])
                     }
                     EventTypes_::kLegacyMIDICCOutEvent => {
@@ -1231,50 +1236,22 @@ impl Vst3Instance {
     }
 }
 
-fn midi_to_vst_event(frame: u32, bytes: [u8; 3]) -> Option<VstEvent> {
-    let channel = (bytes[0] & 0x0f) as i16;
-    let pitch = (bytes[1] & 0x7f) as i16;
-    let value = (bytes[2] & 0x7f) as f32 / 127.0;
-    let body = match bytes[0] & 0xf0 {
-        0x90 if bytes[2] > 0 => (
-            EventTypes_::kNoteOnEvent,
-            Event__type0 {
-                noteOn: NoteOnEvent {
-                    channel,
-                    pitch,
-                    tuning: 0.0,
-                    velocity: value,
-                    length: 0,
-                    noteId: -1,
-                },
-            },
-        ),
-        0x80 | 0x90 => (
-            EventTypes_::kNoteOffEvent,
-            Event__type0 {
-                noteOff: NoteOffEvent {
-                    channel,
-                    pitch,
-                    velocity: value,
-                    noteId: -1,
-                    tuning: 0.0,
-                },
-            },
-        ),
-        0xa0 => (
+/// The VST3 event for a well-formed polyphonic key pressure message; `None` for any other.
+fn poly_pressure_event(frame: u32, bytes: [u8; 3]) -> Option<VstEvent> {
+    (bytes[0] & 0xf0 == 0xa0).then(|| {
+        vst_event(
+            frame,
             EventTypes_::kPolyPressureEvent,
             Event__type0 {
                 polyPressure: PolyPressureEvent {
-                    channel,
-                    pitch,
-                    pressure: value,
+                    channel: (bytes[0] & 0x0f) as i16,
+                    pitch: bytes[1] as i16,
+                    pressure: bytes[2] as f32 / 127.0,
                     noteId: -1,
                 },
             },
-        ),
-        _ => return None,
-    };
-    Some(vst_event(frame, body.0, body.1))
+        )
+    })
 }
 
 fn vst_event(
@@ -1888,11 +1865,53 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_midi_data_bytes_stay_in_range() {
+    fn malformed_midi_changes_nothing() {
         let mut p = instance();
+        let before = gain_heard_with(&mut p, &[]);
         // CC 7 is mapped to the gain; 0xff is not a valid data byte.
         let heard = gain_heard_with(&mut p, &[EventKind::Midi([0xb0, 7, 0xff])]);
-        assert!((0.0..=1.0).contains(&heard), "gain {heard} out of range");
+        assert_eq!(heard, before);
+        // The well-formed message does move it, so the one above was looked at.
+        let moved = gain_heard_with(&mut p, &[EventKind::Midi([0xb0, 7, 0])]);
+        assert_ne!(moved, before);
+    }
+
+    #[test]
+    fn raw_midi_notes_reach_the_plugin_as_notes() {
+        let mut p = instance();
+        gain_heard_with(
+            &mut p,
+            &[
+                EventKind::Midi([0x91, 60, 127]),
+                // Velocity 0: a note off.
+                EventKind::Midi([0x91, 61, 0]),
+                EventKind::Midi([0x81, 62, 0]),
+                // Malformed: not a note at all.
+                EventKind::Midi([0x91, 63, 0x80]),
+            ],
+        );
+        let sent: Vec<(u16, i16, i16, i32)> = p.audio.main(|a| {
+            a.rt.as_ref()
+                .unwrap()
+                .in_events
+                .iter()
+                .map(|e| {
+                    // Note on and note off start with the same two fields.
+                    let n = unsafe { e.__field0.noteOn };
+                    let id = if e.r#type == EventTypes_::kNoteOnEvent as u16 {
+                        n.noteId
+                    } else {
+                        unsafe { e.__field0.noteOff.noteId }
+                    };
+                    (e.r#type, n.channel, n.pitch, id)
+                })
+                .collect()
+        });
+        let (on, off) = (
+            EventTypes_::kNoteOnEvent as u16,
+            EventTypes_::kNoteOffEvent as u16,
+        );
+        assert_eq!(sent, [(on, 1, 60, -1), (off, 1, 61, -1), (off, 1, 62, -1)]);
     }
 
     #[test]
@@ -2244,17 +2263,14 @@ mod tests {
     }
 
     #[test]
-    fn midi_notes_and_pressure_convert() {
-        let on = midi_to_vst_event(3, [0x91, 60, 127]).unwrap();
-        assert_eq!(on.r#type, EventTypes_::kNoteOnEvent as u16);
-        assert_eq!(on.sampleOffset, 3);
-        let n = unsafe { on.__field0.noteOn };
-        assert_eq!((n.channel, n.pitch, n.velocity), (1, 60, 1.0));
-
-        let off = midi_to_vst_event(0, [0x90, 60, 0]).unwrap();
-        assert_eq!(off.r#type, EventTypes_::kNoteOffEvent as u16);
-        assert!(midi_to_vst_event(0, [0xa0, 1, 2]).is_some());
-        assert!(midi_to_vst_event(0, [0xb0, 1, 2]).is_none());
+    fn midi_key_pressure_converts() {
+        let e = poly_pressure_event(3, [0xa1, 60, 127]).unwrap();
+        assert_eq!(e.r#type, EventTypes_::kPolyPressureEvent as u16);
+        assert_eq!(e.sampleOffset, 3);
+        let p = unsafe { e.__field0.polyPressure };
+        assert_eq!((p.channel, p.pitch, p.pressure), (1, 60, 1.0));
+        assert!(poly_pressure_event(0, [0x91, 60, 127]).is_none());
+        assert!(poly_pressure_event(0, [0xb0, 1, 2]).is_none());
     }
 
     fn info() -> ParamInfo {

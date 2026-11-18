@@ -9,12 +9,12 @@ use jack::{
     MidiOut, NotificationHandler, Port, PortFlags, ProcessHandler, ProcessScope, RawMidi,
 };
 
-use crate::cycle::{PortBuffers, push_or_count};
+use crate::cycle::{PortBuffers, encode_or_count, push_midi_or_count};
 use crate::link_log::{Link, LinkLog, OwnChange};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
     AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback, midi,
+    PortFilter, PortInfo, PortKind, ProcessCallback,
 };
 use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
@@ -811,9 +811,7 @@ impl Processor {
         self.midi_out.clear();
         if let Some(port) = &self.ports.midi_in {
             for m in port.iter(ps) {
-                if let Some(e) = midi::decode(m.time, m.bytes) {
-                    push_or_count(&mut self.midi_in, e, &mut dropped);
-                }
+                push_midi_or_count(&mut self.midi_in, m.time, m.bytes, &mut dropped);
             }
         }
         let extra = &mut self.ports.extra;
@@ -821,9 +819,7 @@ impl Processor {
         for (port, list) in extra.ports.iter().zip(&mut extra.lists) {
             let Some(port) = port else { continue };
             for m in port.iter(ps) {
-                if let Some(e) = midi::decode(m.time, m.bytes) {
-                    push_or_count(list, e, &mut dropped);
-                }
+                push_midi_or_count(list, m.time, m.bytes, &mut dropped);
             }
         }
 
@@ -853,9 +849,7 @@ impl Processor {
         if let Some(port) = &mut self.ports.midi_out {
             let mut writer = port.writer(ps);
             for e in self.midi_out.iter() {
-                let mut bytes = [0; 3];
-                let Some(len) = midi::encode(&e.kind, &mut bytes) else {
-                    dropped += u64::from(midi::is_malformed(&e.kind));
+                let Some((bytes, len)) = encode_or_count(&e.kind, &mut dropped) else {
                     continue;
                 };
                 let time = e.frame.min(frames.saturating_sub(1));

@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use daw_core::event::EventList;
 use daw_core::queue::{Consumer, Producer, spsc};
 
-use crate::cycle::{PortBuffers, push_or_count};
+use crate::cycle::{PortBuffers, encode_or_count, push_midi_or_count};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
     AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback, midi,
+    PortFilter, PortInfo, PortKind, ProcessCallback,
 };
 use crate::{MAX_MIDI_INPUTS, MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
@@ -718,9 +718,7 @@ impl Worker {
         self.midi_out.clear();
         if let Some(rx) = &mut self.midi_in_rx {
             while let Some(m) = rx.pop() {
-                if let Some(e) = midi::decode(0, m.as_bytes()) {
-                    push_or_count(&mut self.midi_in, e, &mut dropped);
-                }
+                push_midi_or_count(&mut self.midi_in, 0, m.as_bytes(), &mut dropped);
             }
         }
         if let Some(l) = &mut self.loopback {
@@ -731,9 +729,7 @@ impl Worker {
         for (rx, list) in extra.ports.iter_mut().zip(&mut extra.lists) {
             let Some(rx) = rx else { continue };
             while let Some(m) = rx.pop() {
-                if let Some(e) = midi::decode(0, m.as_bytes()) {
-                    push_or_count(list, e, &mut dropped);
-                }
+                push_midi_or_count(list, 0, m.as_bytes(), &mut dropped);
             }
         }
         let xruns = self.shared.xruns.load(Relaxed);
@@ -759,9 +755,7 @@ impl Worker {
         );
         if let Some(tx) = &mut self.midi_out_tx {
             for e in self.midi_out.iter() {
-                let mut bytes = [0; 3];
-                let Some(len) = midi::encode(&e.kind, &mut bytes) else {
-                    dropped += u64::from(midi::is_malformed(&e.kind));
+                let Some((bytes, len)) = encode_or_count(&e.kind, &mut dropped) else {
                     continue;
                 };
                 let msg = RawMessage {

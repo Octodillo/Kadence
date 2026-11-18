@@ -20,7 +20,6 @@ mod cycle;
 mod dummy;
 mod jack_backend;
 mod link_log;
-pub mod midi;
 mod stats;
 
 pub use alloc::RtAllocCounter;

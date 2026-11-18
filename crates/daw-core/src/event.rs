@@ -1,5 +1,7 @@
 //! Timestamped events: notes, raw MIDI and parameter changes.
 
+pub mod midi;
+
 /// Identifies one note across on, off and expression events. `-1` = none.
 pub type NoteId = i32;
 
@@ -23,12 +25,11 @@ pub enum EventKind {
         velocity: f32,
         note_id: NoteId,
     },
+    /// One short MIDI message, zero-padded to three bytes. Anything may be in here: read it
+    /// with [`midi::decode_padded`], which also says whether it is a well-formed message.
     Midi([u8; 3]),
     /// Plain (not normalised) value.
-    ParamValue {
-        param: ParamId,
-        value: f64,
-    },
+    ParamValue { param: ParamId, value: f64 },
 }
 
 /// MIDI all notes off (CC 123) on `channel`: the MIDI form of a wildcard

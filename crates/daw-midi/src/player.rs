@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use daw_core::dispose::{Collector, Retirer, deferred_drop};
-use daw_core::event::{Event, EventKind, EventList, NoteId};
+use daw_core::event::{Event, EventKind, EventList, NoteId, midi};
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::queue::{Consumer, Producer, spsc};
 use daw_core::time::SampleTime;
@@ -113,7 +113,7 @@ pub struct Preview {
 fn pack_preview(serial: u32, preview: Option<Preview>) -> u32 {
     let note = preview.map_or(0, |p| {
         // At least 1: a note-on at velocity 0 is a note-off to instruments.
-        let velocity = ((p.velocity.clamp(0.0, 1.0) * 127.0).round() as u32).max(1);
+        let velocity = u32::from(midi::to_7bit(p.velocity).max(1));
         u32::from(p.key & 0x7F) | u32::from(p.channel & 0x0F) << 8 | velocity << 12 | 1 << 19
     });
     serial << 20 | note
@@ -314,7 +314,11 @@ pub struct MidiPlayer {
 
 /// The channel and value of a sustain pedal (CC 64) message.
 fn sustain(kind: &EventKind) -> Option<(u8, bool)> {
-    match *kind {
+    let EventKind::Midi(raw) = *kind else {
+        return None;
+    };
+    // Decoded first: instruments do not hear a malformed message either.
+    match midi::decode_padded(raw)? {
         EventKind::Midi([status, 64, value]) if status & 0xF0 == 0xB0 => {
             Some((status & 0x0F, value >= 64))
         }
