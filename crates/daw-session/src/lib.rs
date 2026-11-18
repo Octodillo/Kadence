@@ -786,7 +786,7 @@ impl Session {
     }
 
     /// Tells the plugin loader which plugins are installed, from a scan the
-    /// app ran (see [`catalog`]). Devices whose plugin was missing are tried
+    /// app ran (see [`catalog`]). Devices whose plugin did not load are tried
     /// again on the next sync.
     pub fn set_known_plugins(&mut self, plugins: &[daw_core::plugin::PluginDescriptor]) {
         self.plugins.set_known(plugins);

@@ -81,9 +81,16 @@ impl Scanner {
         program: impl Into<PathBuf>,
         args: impl IntoIterator<Item = impl Into<OsString>>,
     ) -> Self {
+        Self::with_program(
+            Ok(program.into()),
+            args.into_iter().map(Into::into).collect(),
+        )
+    }
+
+    fn with_program(program: Result<PathBuf, String>, args: Vec<OsString>) -> Self {
         Self {
-            program: Ok(program.into()),
-            args: args.into_iter().map(Into::into).collect(),
+            program,
+            args,
             timeout: Duration::from_secs(30),
             jobs: std::thread::available_parallelism().map_or(2, |n| n.get().min(8)),
         }
@@ -102,13 +109,14 @@ impl Scanner {
         }
     }
 
-    /// A scanner with no program to run. Every scan fails with [`ScanError::Unavailable`] and
-    /// `why`, which is reported for each bundle and never cached.
+    /// A scanner with no program to run: every [`scan`](Self::scan) fails with
+    /// [`ScanError::Unavailable`] and `why`.
+    ///
+    /// A registry scanning with it still lists the bundles its cache answers, which need no
+    /// scanner. Each bundle that is new or changed is reported as failed with `why`, and that
+    /// is never cached, so it is scanned once there is a scanner.
     pub fn unavailable(why: impl Into<String>) -> Self {
-        Self {
-            program: Err(why.into()),
-            ..Self::new(PathBuf::new(), Vec::<OsString>::new())
-        }
+        Self::with_program(Err(why.into()), Vec::new())
     }
 
     /// How long one bundle may take before its scanner is killed. Default 30 s.

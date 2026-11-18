@@ -904,15 +904,11 @@ fn the_catalog_scans_added_folders_in_the_background() {
     assert_ne!(catalog.list_revision(), list);
 }
 
-#[test]
-fn a_missing_plugin_loads_once_a_scan_finds_it() {
-    let mut rig = Rig::new();
-    // A loader looks nowhere by itself: until a scan's result arrives, every plugin is missing.
-    rig.session
-        .set_plugin_loader(Some(Box::new(blind_loader_with(|c| c))));
+/// Adds a second test-gain device to the rig's track.
+fn add_second_gain(rig: &mut Rig) -> DeviceId {
     let mut second = gain_plugin();
     second.name = "Second".into();
-    let second_id = second.id;
+    let id = second.id;
     rig.doc
         .execute(AddDevice {
             track: rig.track,
@@ -920,11 +916,35 @@ fn a_missing_plugin_loads_once_a_scan_finds_it() {
             device: second,
         })
         .unwrap();
+    id
+}
+
+#[test]
+fn a_plugin_waits_for_the_first_scan_and_loads_when_it_is_found() {
+    let mut rig = Rig::new();
+    // A loader looks nowhere by itself. Until a scan's result arrives it cannot say that a
+    // plugin is missing, so the device waits and nothing is reported.
+    rig.session
+        .set_plugin_loader(Some(Box::new(blind_loader_with(|c| c))));
+    let second = add_second_gain(&mut rig);
     rig.sync();
     assert_eq!(
-        rig.session.plugin_status(second_id),
+        rig.session.plugin_status(second),
+        Some(PluginStatus::Waiting)
+    );
+    assert!(rig.session.warnings().is_empty());
+
+    // A scan that did not find it: now it is known to be missing.
+    rig.session.set_known_plugins(&[]);
+    rig.sync();
+    assert_eq!(
+        rig.session.plugin_status(second),
         Some(PluginStatus::Missing)
     );
+    assert!(matches!(
+        rig.session.warnings(),
+        [Warning::PluginMissing { .. }, ..]
+    ));
 
     let (plugins, _) = binaries();
     let dir = tempfile::tempdir().unwrap();
@@ -934,10 +954,35 @@ fn a_missing_plugin_loads_once_a_scan_finds_it() {
     rig.session.set_known_plugins(catalog.plugins());
     rig.sync();
     assert_eq!(
-        rig.session.plugin_status(second_id),
+        rig.session.plugin_status(second),
         Some(PluginStatus::Running)
     );
     // Two gains of 1 in a row.
+    rig.settles_at(LEVEL);
+}
+
+#[test]
+fn a_plugin_that_failed_to_load_is_tried_again_when_a_scan_finds_it_elsewhere() {
+    let mut rig = Rig::new();
+    // The scan's list is from before the bundle moved.
+    let mut stale = known_plugins();
+    for d in &mut stale {
+        d.path = "/gone/test-gain.clap".into();
+    }
+    rig.session.set_known_plugins(&stale);
+    let second = add_second_gain(&mut rig);
+    rig.sync();
+    assert!(matches!(
+        rig.session.plugin_status(second),
+        Some(PluginStatus::Failed(_))
+    ));
+
+    rig.session.set_known_plugins(&known_plugins());
+    rig.sync();
+    assert_eq!(
+        rig.session.plugin_status(second),
+        Some(PluginStatus::Running)
+    );
     rig.settles_at(LEVEL);
 }
 

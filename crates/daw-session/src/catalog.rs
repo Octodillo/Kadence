@@ -265,9 +265,7 @@ impl PluginCatalog {
     }
 
     pub fn find(&self, format: &PluginFormatKind, id: &str) -> Option<&PluginDescriptor> {
-        self.plugins
-            .iter()
-            .find(|d| d.format == *format && d.id == id)
+        self.plugins.iter().find(|d| d.is(format, id))
     }
 
     /// What the last scan could not load: whole bundles, and plugins skipped in bundles that

@@ -116,8 +116,9 @@ pub struct AppState {
     /// Set by [`AppState::shutdown`]: autosave no more, so a last timer
     /// tick can't bring back what the user chose to discard.
     shut_down: bool,
-    /// The installed plugins, for the plugin browser. Scanned in the
-    /// background once the browser's model starts it.
+    /// The installed plugins: what the plugin browser lists, and what
+    /// playback and exports load. Scanned in the background from
+    /// [`AppState::start_plugin_scan`].
     pub plugins: PluginCatalog,
     /// The catalog list revision last handed to the session.
     pub known_plugins: Option<u64>,
@@ -135,10 +136,15 @@ fn canonical(path: &Path) -> PathBuf {
 /// plugins: playback and exports load what it lists.
 fn plugin_catalog() -> PluginCatalog {
     let catalog = PluginCatalog::new(Scanner::current_exe());
-    match crate::engine::plugin_cache_file() {
+    match plugin_cache_file() {
         Some(file) => catalog.with_cache_file(file),
         None => catalog,
     }
+}
+
+/// Where the plugin catalog keeps its scan results between runs.
+fn plugin_cache_file() -> Option<PathBuf> {
+    crate::paths::cache_dir().map(|dir| dir.join("plugins.json"))
 }
 
 thread_local! {
@@ -781,9 +787,32 @@ impl AppState {
         }
     }
 
+    /// Starts looking for the installed plugins, in the formats' folders
+    /// and the user's `extra` ones, unless that has started before. The app
+    /// calls this as it starts: until the scan ends, plugin devices wait
+    /// bypassed and a project that uses plugins is not exported. Not part of
+    /// [`start_session`](Self::start_session), so tests scan no plugins
+    /// unless they mean to.
+    pub fn start_plugin_scan(&mut self, extra: Vec<PathBuf>) {
+        if self.plugins.has_scanned() || self.plugins.is_scanning() {
+            return;
+        }
+        self.plugins.set_extra_folders(extra);
+        self.plugins.scan(false);
+    }
+
+    /// Whether any device in the project is a plugin.
+    pub(crate) fn uses_plugins(&self) -> bool {
+        self.doc.project().all_tracks().any(|t| {
+            t.devices
+                .iter()
+                .any(|d| matches!(d.source, daw_model::DeviceSource::Plugin { .. }))
+        })
+    }
+
     /// Picks up a finished plugin scan and tells the session's loader what
-    /// it found, so devices whose plugin was missing load now. Returns true
-    /// when the catalog changed.
+    /// it found, so devices whose plugin was waited for load now. Returns
+    /// true when the catalog changed.
     pub fn tick_plugins(&mut self) -> bool {
         if !self.plugins.poll() {
             return false;
@@ -800,7 +829,8 @@ impl AppState {
         }
         if let Some(session) = self.engine.session_mut() {
             session.set_known_plugins(self.plugins.plugins());
-            // Missing plugins are tried again; those still missing say so again.
+            // Plugins that did not load are tried again; those still missing
+            // say so again.
             if self
                 .status
                 .as_ref()

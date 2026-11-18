@@ -696,4 +696,8 @@ fn an_unavailable_scanner_reports_why_and_caches_nothing() {
 
     let report = registry.scan(&scanner(), &mut cache);
     assert_eq!((report.scanned, report.failed.len()), (1, 0));
+    // What the cache answers needs no scanner.
+    let report = registry.scan(&unavailable, &mut cache);
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(registry.plugins().len(), 1);
 }

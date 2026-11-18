@@ -251,13 +251,10 @@ pub fn filter_for(text: &str, format: i32, kind: qobject::PluginKind) -> Filter 
 
 impl cxx_qt::Initialize for qobject::Plugins {
     fn initialize(mut self: Pin<&mut Self>) {
+        // The app starts the scan as its session starts; this is for a
+        // browser shown without one (the self test).
         let folders = settings::load_plugin_folders(&KConfigStore);
-        state::with(|s| {
-            s.plugins.set_extra_folders(folders);
-            if !s.plugins.has_scanned() && !s.plugins.is_scanning() {
-                s.plugins.scan(false);
-            }
-        });
+        state::with(|s| s.start_plugin_scan(folders));
         self.as_mut().reload();
     }
 }

@@ -36,6 +36,10 @@ pub enum LoadError {
     /// No plugin with this format and id is installed.
     #[error("not installed")]
     NotFound,
+    /// The loader has not been told which plugins are installed yet (see
+    /// [`PluginLoader::set_known`]), so it cannot say whether this one is.
+    #[error("the installed plugins are not known yet")]
+    NotKnownYet,
     #[error(transparent)]
     Failed(#[from] PluginError),
 }
@@ -52,7 +56,8 @@ pub trait PluginLoader {
     ) -> Result<LoadedPlugin, LoadError>;
 
     /// The installed plugins, as a scan found them (the app's plugin catalog). Replaces what
-    /// the loader knew.
+    /// the loader knew. A loader that depends on being told answers
+    /// [`LoadError::NotKnownYet`] until then.
     fn set_known(&mut self, _plugins: &[PluginDescriptor]) {}
 }
 
@@ -61,24 +66,26 @@ pub trait PluginLoader {
 /// The loader does not look for plugins itself: it loads the ones it has been told about, as
 /// found by a [`PluginCatalog`](crate::catalog::PluginCatalog) scan, and reports any other as
 /// not installed. So playback and an export find exactly the plugins the plugin browser lists,
-/// in the user's folders too.
+/// in the user's folders too. Until it is told, it reports [`LoadError::NotKnownYet`]: the
+/// first scan may still run when a project is opened.
 pub struct SandboxLoader {
     config: SandboxConfig,
-    known: Vec<PluginDescriptor>,
+    /// `None` until a scan's result arrives.
+    known: Option<Vec<PluginDescriptor>>,
 }
 
 impl SandboxLoader {
-    /// A loader that sandboxes with `config` and knows no plugins yet.
+    /// A loader that sandboxes with `config` and has not been told the installed plugins.
     pub fn new(config: SandboxConfig) -> Self {
         Self {
             config,
-            known: Vec::new(),
+            known: None,
         }
     }
 
     /// Starts out knowing `plugins`, for a loader made once the scan is over (an export's).
     pub fn with_known(mut self, plugins: Vec<PluginDescriptor>) -> Self {
-        self.known = plugins;
+        self.known = Some(plugins);
         self
     }
 }
@@ -91,10 +98,10 @@ impl PluginLoader for SandboxLoader {
         sample_rate: f64,
         max_frames: u32,
     ) -> Result<LoadedPlugin, LoadError> {
-        let d = self
-            .known
+        let known = self.known.as_ref().ok_or(LoadError::NotKnownYet)?;
+        let d = known
             .iter()
-            .find(|d| d.format == *format && d.id == id)
+            .find(|d| d.is(format, id))
             .ok_or(LoadError::NotFound)?;
         let sandbox = SandboxFormat::new(d.format.clone(), Vec::new(), self.config.clone());
         let instance = sandbox.instantiate_sandboxed(d, sample_rate, max_frames)?;
@@ -105,7 +112,7 @@ impl PluginLoader for SandboxLoader {
     }
 
     fn set_known(&mut self, plugins: &[PluginDescriptor]) {
-        self.known = plugins.to_vec();
+        self.known = Some(plugins.to_vec());
     }
 }
 
@@ -119,6 +126,11 @@ pub enum PluginStatus {
     Crashed,
     /// The plugin is not installed; the device is bypassed.
     Missing,
+    /// The scan for installed plugins has not finished, so whether this one is installed is
+    /// not known; the device is bypassed until
+    /// [`Session::set_known_plugins`](crate::Session::set_known_plugins) loads it or finds it
+    /// [`Missing`](Self::Missing).
+    Waiting,
     /// The plugin would not load; the device is bypassed. The text is the plugin's or the
     /// format's own, in English.
     Failed(String),
@@ -227,8 +239,8 @@ const CONFIRM_EVERY: Duration = Duration::from_secs(1);
 
 pub(crate) enum Slot {
     Live(Box<Live>),
-    /// Tried and failed; not tried again until the device's source changes or the plugins are
-    /// cleared.
+    /// Tried and failed; not tried again until the device's source changes, the plugins are
+    /// cleared or, unless there is no loader, a scan's result arrives.
     Failed {
         source: DeviceSource,
         status: PluginStatus,
@@ -331,6 +343,8 @@ impl Plugins {
                 });
                 return failed(PluginStatus::Missing);
             }
+            // Not worth a warning: the scan is on its way, and its result tries again.
+            Err(LoadError::NotKnownYet) => return failed(PluginStatus::Waiting),
             Err(LoadError::Failed(e)) => {
                 warnings.push(Warning::PluginLoadFailed {
                     device: d.name.clone(),
@@ -398,21 +412,15 @@ impl Plugins {
         Slot::Live(Box::new(live))
     }
 
-    /// Hands the loader the plugins a scan found. Devices whose plugin was missing are tried
-    /// again on the next build, in case the scan found it.
+    /// Hands the loader the plugins a scan found. Devices whose plugin did not load are tried
+    /// again on the next build: the scan may have found a plugin that was missing or waited
+    /// for, or a new place for one whose bundle had moved.
     pub(crate) fn set_known(&mut self, plugins: &[PluginDescriptor]) {
-        if let Some(loader) = &mut self.loader {
-            loader.set_known(plugins);
-        }
-        self.slots.retain(|_, s| {
-            !matches!(
-                s,
-                Slot::Failed {
-                    status: PluginStatus::Missing,
-                    ..
-                }
-            )
-        });
+        let Some(loader) = &mut self.loader else {
+            return;
+        };
+        loader.set_known(plugins);
+        self.slots.retain(|_, s| matches!(s, Slot::Live(_)));
     }
 
     pub(crate) fn live(&self, device: DeviceId) -> Option<&Live> {

@@ -508,6 +508,7 @@ dependencies = [
  "daw-test-support",
  "libc",
  "log",
+ "serde_json",
  "tempfile",
  "uuid",
 ]

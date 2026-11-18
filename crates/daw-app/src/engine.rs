@@ -10,7 +10,6 @@
 //! tests of the settings UI; it still plays silently so the transport works.
 
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use daw_backend::{DummyBackend, Pacing, PortDirection, PortKind};
@@ -216,11 +215,6 @@ fn sandbox_loader(adjust: impl FnOnce(SandboxConfig) -> SandboxConfig) -> Option
     Some(SandboxLoader::new(adjust(SandboxConfig::new(launcher))))
 }
 
-/// Where the plugin catalog keeps its scan results between runs.
-pub(crate) fn plugin_cache_file() -> Option<PathBuf> {
-    crate::paths::cache_dir().map(|dir| dir.join("plugins.json"))
-}
-
 /// The client name of a quiet run, set by [`use_quiet_audio`].
 static QUIET: OnceLock<String> = OnceLock::new();
 
@@ -405,6 +399,10 @@ pub struct StubEngine {
     config: AudioConfig,
     running: bool,
     host: AudioHost,
+    /// The plugins each export was to load from, for tests of what the app
+    /// hands over.
+    #[cfg(test)]
+    pub(crate) exports_knew: std::rc::Rc<std::cell::RefCell<Vec<Vec<PluginDescriptor>>>>,
 }
 
 impl Default for StubEngine {
@@ -427,6 +425,8 @@ impl Default for StubEngine {
                 host.session_mut().set_plugin_loader(plugin_loader());
                 host
             },
+            #[cfg(test)]
+            exports_knew: Default::default(),
         }
     }
 }
@@ -456,6 +456,16 @@ impl StubEngine {
 }
 
 impl EngineHandle for StubEngine {
+    /// Exports load no plugins, as the trait has it.
+    #[cfg(test)]
+    fn export_plugin_loader(
+        &self,
+        known: Vec<PluginDescriptor>,
+    ) -> Option<daw_session::export::LoaderFactory> {
+        self.exports_knew.borrow_mut().push(known);
+        None
+    }
+
     fn backend_kind(&self) -> BackendKind {
         BackendKind::Stub
     }
