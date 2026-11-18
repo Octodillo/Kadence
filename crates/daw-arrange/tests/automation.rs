@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use daw_arrange::automation::static_value;
 use daw_arrange::{
-    Arrange, Env, Group, Hit, LaneScale, Outcome, ParamCatalog, PointShape, Pointer, Prim, RowKind,
-    Snap,
+    Arrange, Env, Group, Hit, Input, LaneScale, Outcome, ParamCatalog, PointShape, Pointer, Prim,
+    RowKind, Snap, Surface,
 };
 use daw_core::event::ParamId;
 use daw_core::level::SILENCE_DB;
@@ -95,27 +95,32 @@ fn env(tempo: &SegmentTempoMap) -> Env<'_> {
     }
 }
 
+// Through `Surface::input`, as the app sends pointer input, so these tests
+// also cover how each `Input` reaches the arrange view.
 impl Rig {
+    fn input(&mut self, input: Input) -> Outcome {
+        let tempo = self.tempo.clone();
+        self.arrange.input(&mut self.doc, &env(&tempo), input)
+    }
+
     fn click(&mut self, x: f64, y: f64) {
-        self.arrange.press(&mut self.doc, Pointer::left(x, y));
-        self.arrange.release(&mut self.doc, Pointer::left(x, y));
+        self.input(Input::Press(Pointer::left(x, y)));
+        self.input(Input::Release(Pointer::left(x, y)));
     }
 
     fn drag(&mut self, from: (f64, f64), to: (f64, f64), modify: impl Fn(&mut Pointer)) {
-        let tempo = self.tempo.clone();
-        let env = env(&tempo);
         let mk = |x, y| {
             let mut p = Pointer::left(x, y);
             modify(&mut p);
             p
         };
-        self.arrange.press(&mut self.doc, mk(from.0, from.1));
+        self.input(Input::Press(mk(from.0, from.1)));
         for i in 1..=4 {
             let f = f64::from(i) / 4.0;
             let p = mk(from.0 + (to.0 - from.0) * f, from.1 + (to.1 - from.1) * f);
-            self.arrange.motion(&mut self.doc, &env, p);
+            self.input(Input::Motion(p));
         }
-        self.arrange.release(&mut self.doc, mk(to.0, to.1));
+        self.input(Input::Release(mk(to.0, to.1)));
     }
 }
 

@@ -463,7 +463,7 @@ impl qobject::ArrangeView {
     }
 
     fn touch_pans(&self, x: f64, y: f64) -> bool {
-        state::with(|s| s.arrange.touch_pans(s.doc.project(), x, y))
+        paint::touch_pans::<Arrange>(x, y)
     }
 
     fn row_height(&self, row: i32) -> f64 {

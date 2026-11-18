@@ -456,7 +456,7 @@ impl qobject::PianoRoll {
     }
 
     fn touch_pans(&self, x: f64, y: f64) -> bool {
-        state::with(|s| s.piano.touch_pans(s.doc.project(), x, y))
+        paint::touch_pans::<Roll>(x, y)
     }
 
     fn has_menu_at(&self, x: f64, y: f64) -> bool {

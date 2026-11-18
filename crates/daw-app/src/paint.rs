@@ -244,6 +244,15 @@ pub fn route<S: Surface + View>(input: Input) -> Outcome {
     state::with(|s| s.with_view(|surface: &mut S, doc, env| surface.input(doc, env, input)))
 }
 
+/// Whether a one-finger touch drag from (`x`, `y`) scrolls the state's
+/// surface `S` rather than edit it.
+pub fn touch_pans<S: Surface + View>(x: f64, y: f64) -> bool {
+    state::with(|s| {
+        let project = s.doc.project();
+        S::of(&mut s.arrange, &mut s.piano).touch_pans(project, x, y)
+    })
+}
+
 /// Scrolls the state's surface `S` to where the item's scroll bars are.
 pub fn scroll_to<S: Surface + View>(x: f64, y: f64) {
     state::with(|s| {

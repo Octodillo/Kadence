@@ -1201,6 +1201,29 @@ impl PianoRoll {
     }
 }
 
+impl Surface for PianoRoll {
+    fn input(&mut self, doc: &mut Document, env: &Env, input: Input) -> Outcome {
+        match input {
+            Input::Press(p) => self.press(doc, env, p),
+            Input::Motion(p) => self.motion(doc, p),
+            Input::Release(p) => self.release(doc, p),
+            Input::DoubleClick(p) => self.double_click(doc, p),
+            Input::Cancel => self.cancel(doc),
+            Input::Wheel { at, dx, dy } => self.wheel(at, dx, dy),
+            Input::Pinch { scale, x } => self.pinch(scale, x),
+        }
+    }
+
+    fn scroll_to(&mut self, x: f64, y: f64) {
+        self.view.scroll_x = x.max(0.0);
+        self.scroll_y = y.max(0.0);
+    }
+
+    fn touch_pans(&self, project: &Project, x: f64, y: f64) -> bool {
+        PianoRoll::touch_pans(self, project, x, y)
+    }
+}
+
 /// How note names spell the black keys: A♯ or B♭.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum Accidentals {
@@ -1237,23 +1260,4 @@ pub fn note_name(key: u8, accidentals: Accidentals) -> String {
 /// Whether `key` is a black key.
 pub fn is_black(key: u8) -> bool {
     matches!(key % 12, 1 | 3 | 6 | 8 | 10)
-}
-
-impl Surface for PianoRoll {
-    fn input(&mut self, doc: &mut Document, env: &Env, input: Input) -> Outcome {
-        match input {
-            Input::Press(p) => self.press(doc, env, p),
-            Input::Motion(p) => self.motion(doc, p),
-            Input::Release(p) => self.release(doc, p),
-            Input::DoubleClick(p) => self.double_click(doc, p),
-            Input::Cancel => self.cancel(doc),
-            Input::Wheel { at, dx, dy } => self.wheel(at, dx, dy),
-            Input::Pinch { scale, x } => self.pinch(scale, x),
-        }
-    }
-
-    fn scroll_to(&mut self, x: f64, y: f64) {
-        self.view.scroll_x = x.max(0.0);
-        self.scroll_y = y.max(0.0);
-    }
 }

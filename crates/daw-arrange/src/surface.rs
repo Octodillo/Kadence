@@ -1,11 +1,11 @@
-//! What a frontend sees of a painted surface that takes pointer input: the
-//! arrange view here, the piano roll in `daw-pianoroll`.
+//! What a frontend hands a painted view of the document that is edited with
+//! the pointer: the arrange view (implemented here) and the piano roll
+//! (next to `daw_pianoroll::PianoRoll`).
 //!
-//! A frontend turns its toolkit's events into [`Input`] in one place and
-//! hands each to the surface it landed on, so the surfaces need no code of
-//! their own there for telling a release from a double click.
+//! Each piece of pointer input is one [`Input`] value, so a frontend can
+//! pass any of them to either view through the one [`Surface::input`] call.
 
-use daw_model::Document;
+use daw_model::{Document, Project};
 
 use crate::{Arrange, Env, Outcome, Pointer};
 
@@ -43,6 +43,10 @@ pub trait Surface {
     /// Scrolls to content position (`x`, `y`), as a scroll bar asks.
     /// Negative positions are the start.
     fn scroll_to(&mut self, x: f64, y: f64);
+
+    /// Whether a one-finger touch drag from (`x`, `y`) should scroll the
+    /// view rather than edit.
+    fn touch_pans(&self, project: &Project, x: f64, y: f64) -> bool;
 }
 
 impl Surface for Arrange {
@@ -61,5 +65,9 @@ impl Surface for Arrange {
     fn scroll_to(&mut self, x: f64, y: f64) {
         self.view.scroll_x = x.max(0.0);
         self.scroll_y = y.max(0.0);
+    }
+
+    fn touch_pans(&self, project: &Project, x: f64, y: f64) -> bool {
+        Arrange::touch_pans(self, project, x, y)
     }
 }
