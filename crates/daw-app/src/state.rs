@@ -8,12 +8,14 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use daw_arrange::{Arrange, Env};
 use daw_core::plugin::PluginError;
 use daw_core::time::{SegmentTempoMap, TickTime};
-use daw_media::Decoder;
+use daw_devices::SampleBuffer;
+use daw_media::{AudioFileInfo, Decoder};
 use daw_midi::player::Preview;
 use daw_model::bundle::Target;
 use daw_model::{Bundle, Document, FormatError, Project, TrackId};
@@ -1280,28 +1282,104 @@ impl AppState {
         track: Option<daw_model::TrackId>,
         at: TickTime,
     ) -> Result<(), Message> {
-        let owned = || file.to_path_buf();
-        let info = Decoder::open(file)
-            .map_err(|e| Message::ImportDecode(owned(), e))?
-            .info()
-            .clone();
-        let frames = info.frames.ok_or_else(|| Message::ImportLength(owned()))?;
-        let stored = match self.doc.bundle() {
-            Some(b) => {
-                let rel = b
-                    .import_audio(file)
-                    .map_err(|e| Message::ImportCopy(owned(), e))?;
-                b.resolve(&rel)
-            }
-            None => file.to_path_buf(),
-        };
+        let info = probe_audio(file)?;
+        let frames = info
+            .frames
+            .ok_or_else(|| Message::ImportLength(file.to_path_buf()))?;
+        let stored = self.store_audio(file)?;
         let r = self.with_view(|a: &mut Arrange, doc, env| {
-            a.import_audio(doc, env, &stored, frames, info.sample_rate, track, at)
+            a.import_audio(doc, env, &stored.path, frames, info.sample_rate, track, at)
         });
-        r.map_err(|e| Message::ImportEdit(owned(), e))?;
+        r.map_err(|e| {
+            stored.remove_copy();
+            Message::ImportEdit(file.to_path_buf(), e)
+        })?;
         self.sync();
         Ok(())
     }
+
+    /// Gives the sampler open in `panel` the audio file `file` to play,
+    /// brought into the project as [`import_audio`](Self::import_audio)
+    /// brings in a clip's file.
+    pub fn load_sample(
+        &mut self,
+        panel: &crate::device_panel::DevicePanel,
+        file: &Path,
+    ) -> Result<(), Message> {
+        if !panel.plays_samples(self.doc.project()) {
+            return Ok(());
+        }
+        // Decoded whole, as the sampler holds it: a header that opens says
+        // nothing true of the rest of the file, nor of how long it is.
+        let decoded = SampleBuffer::load(file)
+            .map(Arc::new)
+            .map_err(|e| Message::ImportDecode(file.to_path_buf(), e))?;
+        let stored = self.store_audio(file)?;
+        let r = match stored.source.to_str() {
+            Some(_) => panel.load_sample(&mut self.doc, &stored.source),
+            // Saved state names the file as text.
+            None => Err(Message::ImportName(file.to_path_buf())),
+        };
+        if r.is_err() {
+            stored.remove_copy();
+        } else if let Some(session) = self.engine.session_mut() {
+            // The sampler's node takes this buffer instead of decoding
+            // the file a second time.
+            session.hold_sample(stored.path, &decoded);
+        }
+        self.sync();
+        r
+    }
+
+    /// Brings an audio file the user picked into the project: a copy in the
+    /// bundle's audio folder when there is a bundle, else the file where it
+    /// is. Check it with [`probe_audio`] first, so a file that can't be
+    /// played isn't copied.
+    pub fn store_audio(&self, file: &Path) -> Result<StoredAudio, Message> {
+        Ok(match self.doc.bundle() {
+            Some(b) => {
+                let source = b
+                    .import_audio(file)
+                    .map_err(|e| Message::ImportCopy(file.to_path_buf(), e))?;
+                StoredAudio {
+                    path: b.resolve(&source),
+                    source,
+                }
+            }
+            None => StoredAudio {
+                path: file.to_path_buf(),
+                source: file.to_path_buf(),
+            },
+        })
+    }
+}
+
+/// An audio file the project holds, from [`AppState::store_audio`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredAudio {
+    /// Where it is on disk.
+    pub path: PathBuf,
+    /// As the model stores it: relative to the bundle root for a copy in
+    /// the bundle, else the same as `path`.
+    pub source: PathBuf,
+}
+
+impl StoredAudio {
+    /// Takes the copy made in the bundle away again, when the edit it was
+    /// made for did not happen. A file left where it is stays.
+    pub fn remove_copy(&self) {
+        if self.path != self.source {
+            daw_model::files::remove_copies(std::slice::from_ref(&self.path));
+        }
+    }
+}
+
+/// Opens `file` as audio, so a file that can't be played is refused before
+/// it is added, and returns what the file says about itself.
+pub fn probe_audio(file: &Path) -> Result<AudioFileInfo, Message> {
+    Decoder::open(file)
+        .map(|d| d.info().clone())
+        .map_err(|e| Message::ImportDecode(file.to_path_buf(), e))
 }
 
 #[cfg(test)]

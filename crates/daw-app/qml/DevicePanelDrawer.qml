@@ -8,7 +8,7 @@ import org.kde.kirigami as Kirigami
 import io.github.octodillo.daw
 
 // The open device's controls, in a drawer on the right: bypass, its place
-// in the chain, and a control per parameter. Open it with
+// in the chain, a sampler's sample, and a control per parameter. Open it with
 // DevicePanel.open(id) from anywhere; it closes when the device goes away.
 Kirigami.OverlayDrawer {
     id: drawer
@@ -52,6 +52,19 @@ Kirigami.OverlayDrawer {
         if (!reopening) {
             DevicePanel.close();
         }
+    }
+
+    Kirigami.Action {
+        id: loadSampleAction
+        icon.name: "document-open"
+        text: i18nc("@action:button", "Load Sample…")
+        onTriggered: sampleDialog.open()
+    }
+
+    AudioFileDialog {
+        id: sampleDialog
+        title: i18nc("@title:window", "Load Sample")
+        onAccepted: DevicePanel.loadSample(selectedFile)
     }
 
     Connections {
@@ -222,6 +235,20 @@ Kirigami.OverlayDrawer {
             ]
         }
 
+        // A sampler plays nothing until it is given a sample, or while
+        // the file it was given is gone.
+        Kirigami.InlineMessage {
+            objectName: "noSampleMessage"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: DevicePanel.sampler && (DevicePanel.sampleName === "" || DevicePanel.sampleMissing)
+            type: DevicePanel.sampleMissing ? Kirigami.MessageType.Warning : Kirigami.MessageType.Information
+            text: DevicePanel.sampleMissing
+                ? i18nc("@info %1 is a file name", "The sample %1 cannot be found. The sampler is silent until you load it again.", DevicePanel.sampleName)
+                : i18nc("@info", "No sample loaded. The sampler is silent until you load one.")
+            actions: [loadSampleAction]
+        }
+
         // A plugin that plays, but may drop out: its host runs at normal
         // priority. When no plugin gets real-time priority, the project
         // status also says so once.
@@ -244,6 +271,31 @@ Kirigami.OverlayDrawer {
             ColumnLayout {
                 width: scroll.availableWidth
                 spacing: 0
+
+                // The sample a sampler plays, and loading another.
+                RowLayout {
+                    objectName: "sampleRow"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: Kirigami.Units.largeSpacing
+                    Layout.rightMargin: Kirigami.Units.largeSpacing
+                    Layout.topMargin: Kirigami.Units.smallSpacing
+                    Layout.bottomMargin: Kirigami.Units.smallSpacing
+                    visible: DevicePanel.sampler && DevicePanel.sampleName !== ""
+                    Kirigami.Icon {
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        source: DevicePanel.sampleMissing ? "dialog-warning" : "audio-x-generic"
+                    }
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        text: DevicePanel.sampleName
+                        elide: Text.ElideMiddle
+                        Accessible.name: i18nc("@label %1 is a file name", "Sample: %1", DevicePanel.sampleName)
+                    }
+                    QQC2.Button {
+                        action: loadSampleAction
+                    }
+                }
 
                 Repeater {
                     model: DevicePanel

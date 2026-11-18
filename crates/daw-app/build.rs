@@ -54,6 +54,7 @@ const QML_FILES: &[&str] = &[
     "qml/TransportBar.qml",
     "qml/RecoveryDialog.qml",
     "qml/RelinkDialog.qml",
+    "qml/AudioFileDialog.qml",
     "qml/PluginBrowser.qml",
     "qml/PluginSettings.qml",
     "qml/ExportDialog.qml",

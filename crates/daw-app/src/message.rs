@@ -61,6 +61,8 @@ pub enum Reason {
     CannotDecode,
     /// The audio file does not say how long it is.
     UnknownLength,
+    /// The audio file's name or folder is not text a project can save.
+    NameNotText,
     /// The model refused an edit (a bug); `detail` is English.
     EditRefused,
     /// A note was drawn past the end of its clip.
@@ -259,6 +261,9 @@ pub enum Message {
     ImportDecode(PathBuf, MediaError),
     /// Adding `file` failed: it has no known length.
     ImportLength(PathBuf),
+    /// Adding `file` failed: its path is not Unicode text, which a project
+    /// that has no folder of its own yet would have to save.
+    ImportName(PathBuf),
     /// Adding `file` failed while copying it into the project.
     ImportCopy(PathBuf, FormatError),
     /// Adding `file` failed in the model.
@@ -392,6 +397,7 @@ impl Message {
                     .detail(detail)
             }
             Self::ImportLength(file) => Fields::new(C::Import, R::UnknownLength).file(file),
+            Self::ImportName(file) => Fields::new(C::Import, R::NameNotText).file(file),
             Self::ImportCopy(file, e) => file_fields(C::Import, e).file(file),
             Self::ImportEdit(file, e) => {
                 Fields::new(C::Import, R::EditRefused).file(file).detail(e)
@@ -565,6 +571,10 @@ mod tests {
         assert_eq!(
             Message::ImportLength(file.clone()).fields().reason,
             Reason::UnknownLength
+        );
+        assert_eq!(
+            Message::ImportName(file.clone()).fields().reason,
+            Reason::NameNotText
         );
     }
 

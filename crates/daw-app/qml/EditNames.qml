@@ -50,6 +50,7 @@ QtObject {
         "Humanize": i18nc("@item:inmenu name of an edit", "Humanize"),
         "Import Audio": i18nc("@item:inmenu name of an edit", "Import Audio"),
         "Legato": i18nc("@item:inmenu name of an edit", "Legato"),
+        "Load Sample": i18nc("@item:inmenu name of an edit", "Load Sample"),
         "Move Clip": i18nc("@item:inmenu name of an edit", "Move Clip"),
         "Move Clips": i18nc("@item:inmenu name of an edit", "Move Clips"),
         "Move Device": i18nc("@item:inmenu name of an edit", "Move Device"),

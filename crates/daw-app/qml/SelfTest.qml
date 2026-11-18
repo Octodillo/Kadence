@@ -506,6 +506,7 @@ Item {
             const keys = 2;
             check(DevicePanel.open(Mixer.instrumentDevice(keys)), "open the instrument's panel");
             check(DevicePanel.deviceKind === "daw.synth" && DevicePanel.instrument, "panel shows the synth");
+            check(!DevicePanel.sampler && DevicePanel.sampleName === "", "the synth takes no sample");
             DevicePanel.close();
             check(!DevicePanel.active, "panel closed");
         },

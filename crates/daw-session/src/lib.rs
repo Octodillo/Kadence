@@ -6,7 +6,10 @@
 //! engine match:
 //!
 //! * Routing, device chains or the track list changed: build a new
-//!   [`GraphDesc`] and swap it in.
+//!   [`GraphDesc`] and swap it in. Running nodes are kept; a built-in
+//!   device whose saved state changed (a sampler given a new sample) gets
+//!   a new node, its samples decoded here before the swap, so the audio
+//!   thread is only handed the finished node.
 //! * Only fader, pan, mute, solo, send level or device parameters changed:
 //!   send parameter changes to the running graph.
 //! * Only clips (or the tempo) changed: send each affected track's player a
@@ -29,6 +32,7 @@ mod media;
 pub mod player;
 pub mod plugins;
 pub mod record;
+mod samples;
 mod tempo;
 
 use std::collections::{HashMap, HashSet};
@@ -233,6 +237,7 @@ pub struct Session {
     controller: EngineController,
     config: SessionConfig,
     media: MediaPool,
+    samples: samples::SamplePool,
     tempo: daw_core::time::SegmentTempoMap,
     tempo_data: Option<daw_model::TempoData>,
     loop_points: Arc<LoopPoints>,
@@ -415,6 +420,7 @@ impl Session {
         let session = Self {
             controller,
             media: MediaPool::new(rate),
+            samples: Default::default(),
             config,
             tempo: Default::default(),
             tempo_data: None,
@@ -534,6 +540,14 @@ impl Session {
 
     pub fn media_mut(&mut self) -> &mut MediaPool {
         &mut self.media
+    }
+
+    /// Takes `sample` as the file at `path` already decoded, so a sampler
+    /// given that file by the next [`sync`](Self::sync) plays this buffer
+    /// instead of reading the file again. Nothing is kept past the
+    /// caller's own hold on `sample` unless a sampler takes it.
+    pub fn hold_sample(&mut self, path: PathBuf, sample: &Arc<daw_devices::SampleBuffer>) {
+        self.samples.hold(path, sample);
     }
 
     /// The directory relative clip paths are resolved against (the project

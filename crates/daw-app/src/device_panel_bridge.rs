@@ -9,11 +9,12 @@
 use std::pin::Pin;
 
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector};
+use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QUrl, QVariant, QVector};
 use daw_plugin_host::Realtime;
 use daw_session::PluginStatus;
 
 use crate::device_panel::{AppDevicePanel, DeviceView, ParamView};
+use crate::message::Context;
 use crate::model_roles;
 use crate::qt_lists::{ModelRole, string_list};
 
@@ -37,6 +38,8 @@ pub mod qobject {
         type QVector_i32 = cxx_qt_lib::QVector<i32>;
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qurl.h");
+        type QUrl = cxx_qt_lib::QUrl;
     }
 
     #[auto_cxx_name]
@@ -74,6 +77,15 @@ pub mod qobject {
         /// Why a "failed" plugin would not load, in the plugin's or format's
         /// own words (English).
         #[qproperty(QString, plugin_error, READ, NOTIFY)]
+        /// The device is a sampler, which plays a sample loaded with
+        /// `loadSample`.
+        #[qproperty(bool, sampler, READ, NOTIFY)]
+        /// The file name of the sample a sampler plays; empty while it has
+        /// none.
+        #[qproperty(QString, sample_name, READ, NOTIFY)]
+        /// The sampler's sample is not where the project says it is, so
+        /// the sampler is silent.
+        #[qproperty(bool, sample_missing, READ, NOTIFY)]
         /// The device's sandboxed plugin got no real-time priority, so its
         /// audio may drop out while the computer is busy.
         #[qproperty(bool, plugin_not_realtime, READ, NOTIFY)]
@@ -118,6 +130,11 @@ pub mod qobject {
         /// Restarts the device's crashed plugin, with its state.
         #[qinvokable]
         fn reload_plugin(self: Pin<&mut DevicePanel>);
+
+        /// Gives the open sampler the audio file at `url` to play, as an
+        /// undo step. A problem goes to `Project.status`.
+        #[qinvokable]
+        fn load_sample(self: Pin<&mut DevicePanel>, url: &QUrl);
     }
 
     unsafe extern "RustQt" {
@@ -200,6 +217,9 @@ pub struct DevicePanelRust {
     param_count: i32,
     plugin_status: QString,
     plugin_error: QString,
+    sampler: bool,
+    sample_name: QString,
+    sample_missing: bool,
     plugin_not_realtime: bool,
     /// The panel's revision when `view` was read.
     revision: u64,
@@ -298,6 +318,14 @@ impl qobject::DevicePanel {
         if self.panel.reload_plugin() {
             self.as_mut().update_plugin_status();
         }
+    }
+
+    fn load_sample(mut self: Pin<&mut Self>, url: &QUrl) {
+        match crate::project::local_file(url, Context::Import) {
+            Ok(path) => self.as_mut().rust_mut().panel.load_sample(&path),
+            Err(e) => crate::state::with(|s| s.report(e)),
+        }
+        self.reload();
     }
 
     fn update_plugin_status(mut self: Pin<&mut Self>) {
@@ -419,6 +447,22 @@ impl qobject::DevicePanel {
             v.map_or(0, |v| v.params.len() as i32)
         );
         self.as_mut().update_plugin_status();
+        let sampler = v.and_then(|v| v.sampler.as_ref());
+        update!(sampler, sampler_changed, sampler.is_some());
+        let sample_name = sampler
+            .and_then(|s| s.sample.as_deref()?.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        update!(
+            sample_name,
+            sample_name_changed,
+            QString::from(sample_name.as_str())
+        );
+        update!(
+            sample_missing,
+            sample_missing_changed,
+            sampler.is_some_and(|s| s.missing)
+        );
         update!(active, active_changed, v.is_some());
     }
 
