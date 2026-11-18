@@ -44,6 +44,8 @@ pub mod qobject {
         #[base = QAbstractListModel]
         #[qml_element]
         #[qml_singleton]
+        /// A built-in device's level at or below this many dB is silent.
+        #[qproperty(f64, silent_db, READ = silent_db, CONSTANT)]
         /// A device is open.
         #[qproperty(bool, active, READ, NOTIFY)]
         #[qproperty(QString, device_id, READ, NOTIFY)]
@@ -72,6 +74,8 @@ pub mod qobject {
         /// own words (English).
         #[qproperty(QString, plugin_error, READ, NOTIFY)]
         type DevicePanel = super::DevicePanelRust;
+
+        fn silent_db(self: &DevicePanel) -> f64;
 
         /// Opens the device with this id. Returns false if there is none.
         #[qinvokable]
@@ -199,6 +203,10 @@ pub struct DevicePanelRust {
 }
 
 impl qobject::DevicePanel {
+    fn silent_db(&self) -> f64 {
+        daw_devices::dsp::MIN_DB
+    }
+
     fn params(&self) -> &[ParamView] {
         self.view.as_ref().map_or(&[], |v| &v.params)
     }

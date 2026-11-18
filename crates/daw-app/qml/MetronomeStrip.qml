@@ -18,20 +18,10 @@ StripFrame {
     dimmed: !Project.metronome
     slack: fader.height - fader.Layout.minimumHeight
 
-    // MetronomeSettings::default() in daw-session.
-    readonly property real defaultLevel: -6
-
-    function setLevel(db: real, save: bool): void {
-        Project.setMetronomeLevel(Math.round(db * 2) / 2, save);
-    }
-
-    // The controls set their own values when used, which replaces a plain
-    // binding; follow the project (the transport bar's controls) from here,
-    // as TransportBar does.
+    // The button sets its own value when used, which replaces a plain
+    // binding; follow the project (the transport bar's button) from here.
     Connections {
         target: Project
-        function onMetronomeVolumeChanged() { fader.value = Project.metronomeVolume; }
-        function onCountInBarsChanged() { countIn.currentIndex = Project.countInBars; }
         function onMetronomeChanged() { onButton.checked = Project.metronome; }
     }
 
@@ -43,17 +33,8 @@ StripFrame {
             Layout.fillWidth: true
             text: i18nc("@title:group", "Count-in")
         }
-        QQC2.ComboBox {
-            id: countIn
+        CountInBox {
             Layout.fillWidth: true
-            model: [
-                i18nc("@item:inlistbox no count-in", "None"),
-                i18ncp("@item:inlistbox count-in length", "%1 bar", "%1 bars", 1),
-                i18ncp("@item:inlistbox count-in length", "%1 bar", "%1 bars", 2)
-            ]
-            currentIndex: Project.countInBars
-            onActivated: index => Project.setCountIn(index)
-            Accessible.name: i18nc("@label:listbox", "Count-in before recording")
             QQC2.ToolTip.text: i18nc("@info:tooltip", "Bars the metronome counts in before recording")
             QQC2.ToolTip.visible: hovered
             QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -75,38 +56,26 @@ StripFrame {
         Accessible.ignored: true
     }
 
-    QQC2.Slider {
+    MetronomeLevel {
         id: fader
         Layout.fillWidth: true
         Layout.fillHeight: true
         Layout.minimumHeight: Kirigami.Units.gridUnit * 6
         orientation: Qt.Vertical
-        from: -40
-        to: 6
-        value: Project.metronomeVolume
-        // Saved once the handle is let go, not on every move.
-        onMoved: strip.setLevel(value, !pressed)
-        onPressedChanged: {
-            if (!pressed) {
-                strip.setLevel(value, true);
-            }
-        }
-        Accessible.name: i18nc("@info:accessible", "Metronome level")
         QQC2.ToolTip.text: i18nc("@info:tooltip %1 is a level in decibels", "Metronome level (double-click for %1 dB)",
-                                 strip.defaultLevel.toLocaleString(Qt.locale(), "f", 1))
+                                 ValueText.number(defaultLevel, 1))
         QQC2.ToolTip.visible: hovered && !pressed
         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
         TapHandler {
             // After the slider's own release (see ChannelStrip.reset).
-            onDoubleTapped: Qt.callLater(() => strip.setLevel(strip.defaultLevel, true))
+            onDoubleTapped: Qt.callLater(() => fader.setLevel(fader.defaultLevel, true))
         }
     }
     QQC2.Label {
         Layout.fillWidth: true
         horizontalAlignment: Text.AlignHCenter
         font.features: { "tnum": 1 }
-        // As it is stored: in half decibels.
-        text: i18nc("@label decibels", "%1 dB", Number(Math.round(fader.value * 2) / 2).toLocaleString(Qt.locale(), "f", 1))
+        text: i18nc("@label decibels", "%1 dB", ValueText.number(fader.level, 1))
     }
 
     // Where the other strips have mute and solo.

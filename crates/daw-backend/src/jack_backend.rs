@@ -13,8 +13,8 @@ use crate::cycle::{PortBuffers, encode_or_count, push_midi_or_count};
 use crate::link_log::{Link, LinkLog, OwnChange};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback,
+    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendHealth, BackendStats, Latency,
+    PortDirection, PortFilter, PortInfo, PortKind, ProcessCallback,
 };
 use crate::{MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
@@ -56,6 +56,10 @@ pub struct JackBackend {
     /// Make the next `start` fail the way `jack_activate` failing does.
     #[cfg(test)]
     fail_next_activation: bool,
+    /// Make the next `stop` or `close` of a running backend fail the way
+    /// `jack_deactivate` failing does.
+    #[cfg(test)]
+    fail_next_deactivation: bool,
 }
 
 #[derive(Default)]
@@ -101,6 +105,88 @@ impl JackBackend {
             ports.extra.begin_cycle();
         }
         self.unregister_removed();
+    }
+
+    /// The client is gone: forgets everything that belonged to it.
+    fn set_closed(&mut self) {
+        self.state = State::Closed;
+        self.cfg = None;
+        self.extra = None;
+        self.links.clear();
+        self.recent.clear();
+    }
+
+    /// The links of our ports to restore on the next `start`, read while
+    /// still running.
+    fn settled_links(&self, client: &Client, cfg: &BackendConfig) -> Vec<Link> {
+        // Let notifications on their way arrive, and wait for those of our
+        // own changes. If the server stalls, our record of them stands in.
+        let cycles = self.shared.cycles.load(Relaxed) + SETTLE_CYCLES;
+        let end = Instant::now() + SETTLE;
+        while (self.shared.cycles.load(Relaxed) <= cycles || !self.log.has_all(&self.recent))
+            && Instant::now() < end
+            && !self.shared.server_gone.load(Relaxed)
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let ours = self.our_ports(client, cfg);
+        let is_ours = |n: &String| ours.iter().any(|(o, _)| o == n);
+        // Ports that went away took their links with them.
+        let exists = |n: &String| client.port_by_name(n).is_some();
+        self.log
+            .links(&self.recent)
+            .into_iter()
+            .filter(|(a, b)| (is_ours(a) || is_ours(b)) && exists(a) && exists(b))
+            .collect()
+    }
+
+    /// Ends the process callback, if running, and leaves the backend open.
+    /// `save_links` is for `stop`: it waits for the links to settle and
+    /// keeps them for the next `start`. `close` has no use for them.
+    ///
+    /// On an error the client is gone and the backend closed.
+    fn end_run(&mut self, save_links: bool) -> Result<(), BackendError> {
+        let active = match std::mem::take(&mut self.state) {
+            State::Running(active) => active,
+            other => {
+                self.state = other;
+                return Ok(());
+            }
+        };
+        // After a server shutdown there is nothing left to ask.
+        if save_links
+            && let Some(cfg) = &self.cfg
+            && !self.shared.server_gone.load(Relaxed)
+        {
+            self.links = self.settled_links(active.as_client(), cfg);
+        }
+        self.recent.clear();
+        #[cfg(test)]
+        let result = if std::mem::take(&mut self.fail_next_deactivation) {
+            // What the jack crate does when jack_deactivate fails.
+            drop(active);
+            Err(jack::Error::ClientDeactivationError)
+        } else {
+            active.deactivate()
+        };
+        #[cfg(not(test))]
+        let result = active.deactivate();
+        match result {
+            Ok((client, _, processor)) => {
+                // The callback drops here, on the caller's thread.
+                self.state = State::Open(client, Box::new(processor.ports));
+                self.apply_extra_now();
+                Ok(())
+            }
+            Err(e) => {
+                // The jack crate destroyed the client, and with it the
+                // ports, because it no longer knows what state it is in.
+                self.set_closed();
+                Err(BackendError::Other(format!(
+                    "could not deactivate the JACK client ({e}); the backend is closed and must be opened again"
+                )))
+            }
+        }
     }
 
     /// Full names of our ports, each with whether it is an output.
@@ -342,6 +428,9 @@ impl AudioBackend for JackBackend {
             panicked: false,
         };
         self.shared.callback_panicked.store(false, Relaxed);
+        // Notifications start with activation, before the graph can be
+        // read: the log must be empty by then, not emptied after.
+        self.log.clear();
         let notifications = Notifications {
             shared: self.shared.clone(),
             log: self.log.clone(),
@@ -373,17 +462,17 @@ impl AudioBackend for JackBackend {
                 }
                 // On any other error the crate dropped, and so closed, the
                 // client. Either way the ports are gone.
-                self.cfg = None;
-                self.extra = None;
-                self.links.clear();
+                self.set_closed();
                 return Err(BackendError::Other(format!(
                     "could not activate the JACK client ({e}); the backend is closed and must be opened again"
                 )));
             }
         };
-        // Notifications start now. Links already there (none on jackd, which
-        // won't link an inactive client) come from the server's graph.
-        self.log.reset(self.live_links(active.as_client(), &cfg));
+        // Links already there (none on jackd, which won't link an inactive
+        // client) come from the server's graph. A change since activation
+        // may or may not show in it, but its notification is in the log.
+        self.log
+            .add_snapshot(self.live_links(active.as_client(), &cfg));
         if cfg.auto_connect && !self.auto_connected {
             self.auto_connect(active.as_client(), &cfg);
             self.auto_connected = true;
@@ -408,56 +497,21 @@ impl AudioBackend for JackBackend {
     }
 
     fn stop(&mut self) -> Result<(), BackendError> {
-        match std::mem::take(&mut self.state) {
-            State::Running(active) => {
-                // After a server shutdown there is nothing left to ask.
-                if let Some(cfg) = &self.cfg
-                    && !self.shared.server_gone.load(Relaxed)
-                {
-                    let client = active.as_client();
-                    // Let notifications on their way arrive, and wait for
-                    // those of our own changes. If the server stalls, our
-                    // record of them stands in.
-                    let cycles = self.shared.cycles.load(Relaxed) + SETTLE_CYCLES;
-                    let end = Instant::now() + SETTLE;
-                    while (self.shared.cycles.load(Relaxed) <= cycles
-                        || !self.log.has_all(&self.recent))
-                        && Instant::now() < end
-                        && !self.shared.server_gone.load(Relaxed)
-                    {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    let ours = self.our_ports(client, cfg);
-                    let is_ours = |n: &String| ours.iter().any(|(o, _)| o == n);
-                    // Ports that went away took their links with them.
-                    let exists = |n: &String| client.port_by_name(n).is_some();
-                    self.links = self
-                        .log
-                        .links(&self.recent)
-                        .into_iter()
-                        .filter(|(a, b)| (is_ours(a) || is_ours(b)) && exists(a) && exists(b))
-                        .collect();
-                }
-                self.recent.clear();
-                let (client, _, processor) = active
-                    .deactivate()
-                    .map_err(|e| BackendError::Other(format!("could not deactivate: {e}")))?;
-                // The callback drops here, on the caller's thread.
-                self.state = State::Open(client, Box::new(processor.ports));
-                self.apply_extra_now();
-            }
-            other => self.state = other,
-        }
-        Ok(())
+        self.end_run(true)
     }
 
     fn close(&mut self) -> Result<(), BackendError> {
-        self.stop()?;
-        self.state = State::Closed;
-        self.cfg = None;
-        self.extra = None;
-        self.links.clear();
-        Ok(())
+        let result = self.end_run(false);
+        self.set_closed();
+        match result {
+            // A server that is gone cannot deactivate us, and there is
+            // nothing left to close: this is the close that was asked for.
+            Err(e) if self.shared.server_gone.load(Relaxed) => {
+                log::debug!("closing after the server went away: {e}");
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     fn is_running(&self) -> bool {
@@ -654,6 +708,10 @@ impl AudioBackend for JackBackend {
             s.dsp_load = Some(a.as_client().cpu_load());
         }
         s
+    }
+
+    fn health(&self) -> BackendHealth {
+        self.shared.health()
     }
 
     fn latency(&self) -> Latency {
@@ -878,15 +936,92 @@ impl Processor {
 mod tests {
     use super::*;
 
+    // Unique: PipeWire doesn't rename a second client with a taken name.
+    fn cfg(base: &str) -> BackendConfig {
+        BackendConfig {
+            client_name: format!("kt-{base}-{}", std::process::id()),
+            ..BackendConfig::default()
+        }
+    }
+
+    /// A running backend with an extra MIDI input, whose next deactivation
+    /// fails.
+    fn running_with_a_failing_deactivation(base: &str) -> JackBackend {
+        let mut b = JackBackend::new();
+        b.open(cfg(base)).unwrap();
+        b.add_midi_input("pads").unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        b.fail_next_deactivation = true;
+        b
+    }
+
+    fn assert_closed(b: &mut JackBackend) {
+        assert!(matches!(b.state, State::Closed));
+        assert!(b.cfg.is_none() && b.extra.is_none());
+        assert!(b.links.is_empty() && b.recent.is_empty());
+        assert!(!b.is_running());
+        assert!(b.midi_inputs().is_empty());
+        assert!(matches!(
+            b.start(Box::new(|_| {})),
+            Err(BackendError::NotOpen)
+        ));
+    }
+
+    #[test]
+    #[ignore = "needs a running JACK server"]
+    fn a_failed_stop_leaves_the_backend_closed() {
+        let mut b = running_with_a_failing_deactivation("stopfail");
+        let err = b.stop().unwrap_err();
+        assert!(err.to_string().contains("must be opened again"), "{err}");
+        assert_closed(&mut b);
+        // Nothing is left over to report or to undo.
+        b.close().unwrap();
+        b.open(cfg("stopfail")).unwrap();
+        assert!(b.midi_inputs().is_empty());
+        b.start(Box::new(|_| {})).unwrap();
+        b.close().unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs a running JACK server"]
+    fn a_failed_deactivation_does_not_keep_close_from_closing() {
+        let mut b = running_with_a_failing_deactivation("closefail");
+        assert!(matches!(b.close(), Err(BackendError::Other(_))));
+        assert_closed(&mut b);
+        b.close().unwrap();
+
+        // Once the server is gone, failing to deactivate is to be expected.
+        let mut b = running_with_a_failing_deactivation("closegone");
+        b.shared.server_gone.store(true, Relaxed);
+        b.close().unwrap();
+        assert_closed(&mut b);
+        assert_eq!(b.health(), BackendHealth::ServerGone);
+    }
+
+    /// `stop` waits for the links it saves to settle. `close` saves none,
+    /// so it must not wait: the host closes on every audio settings change
+    /// and on exit.
+    #[test]
+    #[ignore = "needs a running JACK server"]
+    fn close_does_not_wait_for_links_to_settle() {
+        let mut b = JackBackend::new();
+        b.open(cfg("closefast")).unwrap();
+        b.start(Box::new(|_| {})).unwrap();
+        // A change of ours the server never notifies: `stop` would wait
+        // for it as long as it is willing to.
+        let mark = b.log.begin_change(&mut b.recent);
+        b.note_change(true, ("kt-nobody:out".into(), "kt-nobody:in".into()), mark);
+        let started = Instant::now();
+        b.close().unwrap();
+        let took = started.elapsed();
+        assert!(took < SETTLE, "close took {took:?}");
+    }
+
     #[test]
     #[ignore = "needs a running JACK server"]
     fn failed_activation_closes_the_client_and_frees_its_name() {
-        // Unique: PipeWire doesn't rename a second client with a taken name.
-        let name = format!("kt-actfail-{}", std::process::id());
-        let cfg = BackendConfig {
-            client_name: name.clone(),
-            ..BackendConfig::default()
-        };
+        let cfg = cfg("actfail");
+        let name = cfg.client_name.clone();
         let mut b = JackBackend::new();
         b.open(cfg.clone()).unwrap();
         b.fail_next_activation = true;

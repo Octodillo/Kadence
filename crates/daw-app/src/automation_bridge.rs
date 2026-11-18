@@ -6,7 +6,7 @@
 
 use std::pin::Pin;
 
-use cxx_qt_lib::QString;
+use cxx_qt_lib::{QMap, QMapPair_QString_QVariant, QString, QVariant};
 use daw_arrange::PointShape;
 
 use crate::lanes::{LaneKind, LaneMode, TargetName};
@@ -17,6 +17,8 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qmap.h");
+        type QMap_QString_QVariant = cxx_qt_lib::QMap<cxx_qt_lib::QMapPair_QString_QVariant>;
     }
 
     /// What a lane automates: the `kind` of a lane (in the `lanes` role of
@@ -66,21 +68,15 @@ pub mod qobject {
         #[qinvokable]
         fn remove_lane(self: Pin<&mut Automation>, track: i32, lane: i32);
 
-        /// What the lane's target is at now, from 0 to 1 along the lane's
-        /// scale (as the timeline draws it); 0 for no such lane.
+        /// What the lane controls, as it is now, in one read: `position`
+        /// from 0 to 1 along the lane's scale (as the timeline draws it),
+        /// `value` in the target's own unit (dB, pan from -1 (left) to 1,
+        /// or the parameter's plain value), `following` when the lane
+        /// plays its points so its control follows them, and `writes` when
+        /// moving the control during playback records over the lane. All
+        /// zero and false for no such lane.
         #[qinvokable]
-        fn lane_position(self: &Automation, track: i32, lane: i32) -> f64;
-        /// The same in the target's own unit: dB, pan from -1 (left) to 1,
-        /// or the parameter's plain value.
-        #[qinvokable]
-        fn lane_value(self: &Automation, track: i32, lane: i32) -> f64;
-        /// Whether the lane plays its points, so its control follows them.
-        #[qinvokable]
-        fn lane_following(self: &Automation, track: i32, lane: i32) -> bool;
-        /// Whether moving the lane's control during playback records over
-        /// the lane, so it can move while the lane follows its points.
-        #[qinvokable]
-        fn lane_writes(self: &Automation, track: i32, lane: i32) -> bool;
+        fn lane_control(self: &Automation, track: i32, lane: i32) -> QMap_QString_QVariant;
         /// The user grabbed the lane's control (also around a key press):
         /// starts an undo step, and a take when writing during playback.
         #[qinvokable]
@@ -213,20 +209,27 @@ impl qobject::Automation {
         self.edit(|s| s.remove_lane(track, lane));
     }
 
-    fn lane_position(&self, track: i32, lane: i32) -> f64 {
-        state::with(|s| s.lane_control(track, lane).map_or(0.0, |c| c.norm))
-    }
-
-    fn lane_value(&self, track: i32, lane: i32) -> f64 {
-        state::with(|s| s.lane_control(track, lane).map_or(0.0, |c| c.value))
-    }
-
-    fn lane_following(&self, track: i32, lane: i32) -> bool {
-        state::with(|s| s.lane_control(track, lane).is_some_and(|c| c.following))
-    }
-
-    fn lane_writes(&self, track: i32, lane: i32) -> bool {
-        state::with(|s| s.lane_control(track, lane).is_some_and(|c| c.writes))
+    fn lane_control(&self, track: i32, lane: i32) -> QMap<QMapPair_QString_QVariant> {
+        let c = state::with(|s| s.lane_control(track, lane));
+        let mut map = QMap::<QMapPair_QString_QVariant>::default();
+        let mut put = |key: &str, value: QVariant| map.insert(QString::from(key), value);
+        put(
+            "position",
+            QVariant::from(&c.as_ref().map_or(0.0, |c| c.norm)),
+        );
+        put(
+            "value",
+            QVariant::from(&c.as_ref().map_or(0.0, |c| c.value)),
+        );
+        put(
+            "following",
+            QVariant::from(&c.as_ref().is_some_and(|c| c.following)),
+        );
+        put(
+            "writes",
+            QVariant::from(&c.as_ref().is_some_and(|c| c.writes)),
+        );
+        map
     }
 
     // These play the change and bump the view's revision themselves (see

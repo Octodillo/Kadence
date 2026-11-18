@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -11,8 +11,8 @@ use daw_core::queue::{Consumer, Producer, spsc};
 use crate::cycle::{PortBuffers, encode_or_count, push_midi_or_count};
 use crate::stats::{SharedStats, current_thread_is_realtime};
 use crate::{
-    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendStats, Latency, PortDirection,
-    PortFilter, PortInfo, PortKind, ProcessCallback,
+    AudioBackend, BackendConfig, BackendCycle, BackendError, BackendHealth, BackendStats, Latency,
+    PortDirection, PortFilter, PortInfo, PortKind, ProcessCallback,
 };
 use crate::{MAX_MIDI_INPUTS, MidiInputPort, MidiInputs, MidiInputsControl, midi_inputs};
 
@@ -86,16 +86,58 @@ struct World {
     connections: BTreeSet<(String, String)>,
 }
 
+/// Failures a test asked the pretend system for. The worker reads them
+/// between cycles.
+#[derive(Debug, Default)]
+struct Faults {
+    server_gone: AtomicBool,
+    callback_panic: AtomicBool,
+    /// The rate the server switches to, in Hz; 0 for none.
+    new_rate: AtomicU32,
+}
+
 /// The pretend system around a [`DummyBackend`]: other clients' ports, to
-/// add and remove the way devices are plugged in and out.
+/// add and remove the way devices are plugged in and out, and the failures
+/// of a real audio system, to bring about on demand.
 #[derive(Clone, Debug)]
-pub struct DummySystem(Arc<Mutex<World>>);
+pub struct DummySystem {
+    world: Arc<Mutex<World>>,
+    faults: Arc<Faults>,
+}
 
 impl DummySystem {
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
-        self.0
+        self.world
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The pretend server shuts down, as when `jackd` exits or PipeWire
+    /// restarts: a running backend ends its cycles before the next one and
+    /// reports [`BackendHealth::ServerGone`]. Until [`restore`](Self::restore)
+    /// there is no server: `start` fails and closes the backend, and `open`
+    /// fails to connect, as with JACK.
+    pub fn shut_down(&self) {
+        self.faults.server_gone.store(true, Relaxed);
+    }
+
+    /// The pretend server is there again, for the next `open`.
+    pub fn restore(&self) {
+        self.faults.server_gone.store(false, Relaxed);
+    }
+
+    /// The next cycle panics in place of calling the process callback, for
+    /// a callback the test cannot reach to make it panic itself. The
+    /// backend then reports [`BackendHealth::CallbackPanicked`].
+    pub fn panic_callback(&self) {
+        self.faults.callback_panic.store(true, Relaxed);
+    }
+
+    /// The pretend server switches to `rate` Hz under a running backend, as
+    /// PipeWire does when its clock rate is forced: from the next cycle on
+    /// the backend reports and runs at the new rate.
+    pub fn change_sample_rate(&self, rate: u32) {
+        self.faults.new_rate.store(rate, Relaxed);
     }
 
     /// Another client's port appears. `name` is the full `client:port`.
@@ -145,6 +187,8 @@ pub struct DummyBackend {
     /// Other clients' ports and every connection, shared with
     /// [`DummySystem`] handles.
     world: Arc<Mutex<World>>,
+    /// Shared with [`DummySystem`] handles and the worker.
+    faults: Arc<Faults>,
     midi_in_rx: Option<Consumer<RawMessage>>,
     midi_out_tx: Option<Producer<RawMessage>>,
     running: Option<Running>,
@@ -159,8 +203,7 @@ pub struct DummyBackend {
 
 struct Running {
     stop: Arc<AtomicBool>,
-    /// The worker, and whether the callback panicked.
-    thread: JoinHandle<(Worker, bool)>,
+    thread: JoinHandle<Worker>,
 }
 
 impl DummyBackend {
@@ -175,6 +218,7 @@ impl DummyBackend {
                 others: Self::system_ports(),
                 connections: BTreeSet::new(),
             })),
+            faults: Arc::default(),
             midi_in_rx: None,
             midi_out_tx: None,
             running: None,
@@ -206,10 +250,13 @@ impl DummyBackend {
         v
     }
 
-    /// A handle on the pretend system's other ports, for tests to plug
-    /// devices in and out while the backend is in use elsewhere.
+    /// A handle on the pretend system, for tests to plug devices in and
+    /// out, or make it fail, while the backend is in use elsewhere.
     pub fn system(&self) -> DummySystem {
-        DummySystem(self.world.clone())
+        DummySystem {
+            world: self.world.clone(),
+            faults: self.faults.clone(),
+        }
     }
 
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
@@ -361,6 +408,17 @@ impl Default for DummyBackend {
     }
 }
 
+impl DummyBackend {
+    /// Forgets the connection: ports, links and configuration.
+    fn set_closed(&mut self) {
+        self.cfg = None;
+        self.world().connections.clear();
+        self.extra = None;
+        self.extra_control = None;
+        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
+    }
+}
+
 impl AudioBackend for DummyBackend {
     fn name(&self) -> &'static str {
         "Dummy"
@@ -369,6 +427,11 @@ impl AudioBackend for DummyBackend {
     fn open(&mut self, cfg: BackendConfig) -> Result<(), BackendError> {
         if self.cfg.is_some() {
             return Err(BackendError::AlreadyOpen);
+        }
+        if self.faults.server_gone.load(Relaxed) {
+            return Err(BackendError::Connect(
+                "the pretend server is shut down".into(),
+            ));
         }
         let rate = cfg.sample_rate.unwrap_or(DEFAULT_RATE);
         let frames = cfg.buffer_size.unwrap_or(DEFAULT_FRAMES);
@@ -380,6 +443,9 @@ impl AudioBackend for DummyBackend {
         self.shared = Arc::new(SharedStats::new());
         self.shared.sample_rate.store(rate, Relaxed);
         self.shared.buffer_size.store(frames, Relaxed);
+        // Faults asked of the last connection do not reach this one.
+        self.faults.callback_panic.store(false, Relaxed);
+        self.faults.new_rate.store(0, Relaxed);
         self.world().connections.clear();
         let (extra, control) = midi_inputs(cfg.midi_capacity);
         self.extra = Some(extra);
@@ -394,10 +460,19 @@ impl AudioBackend for DummyBackend {
             return Err(BackendError::AlreadyRunning);
         }
         let cfg = self.cfg()?.clone();
+        if self.faults.server_gone.load(Relaxed) {
+            // A client of a server that is gone cannot be activated.
+            self.set_closed();
+            return Err(BackendError::Other(
+                "the pretend server is shut down".into(),
+            ));
+        }
         let frames = self.shared.buffer_size.load(Relaxed);
+        self.shared.callback_panicked.store(false, Relaxed);
         let mut worker = Worker {
             cb,
             shared: self.shared.clone(),
+            faults: self.faults.clone(),
             pacing: self.pacing,
             max_cycles: self.max_cycles,
             frames,
@@ -432,8 +507,10 @@ impl AudioBackend for DummyBackend {
             .spawn(move || {
                 daw_core::denormals::flush_to_zero();
                 // Catch a panic so `stop` gets the worker, and its queues, back.
+                // `health` reports the panic.
                 let panicked = catch_unwind(AssertUnwindSafe(|| worker.run(&stop2))).is_err();
-                (worker, panicked)
+                worker.shared.callback_panicked.store(panicked, Relaxed);
+                worker
             })
             .map_err(|e| BackendError::Other(e.to_string()))?;
         self.running = Some(Running { stop, thread });
@@ -450,7 +527,7 @@ impl AudioBackend for DummyBackend {
         running.stop.store(true, Relaxed);
         // Wake the worker from its wait for the next period.
         running.thread.thread().unpark();
-        let (worker, panicked) = running
+        let worker = running
             .thread
             .join()
             .map_err(|_| BackendError::Other("the dummy audio thread panicked".into()))?;
@@ -467,20 +544,14 @@ impl AudioBackend for DummyBackend {
         self.midi_out_tx = self.midi_out_tx.take().or(midi_out_tx);
         self.extra = Some(extra);
         self.apply_extra_now();
-        if panicked {
-            return Err(BackendError::Other("the process callback panicked".into()));
-        }
         Ok(())
     }
 
     fn close(&mut self) -> Result<(), BackendError> {
-        self.stop()?;
-        self.cfg = None;
-        self.world().connections.clear();
-        self.extra = None;
-        self.extra_control = None;
-        self.extra_tx.iter_mut().for_each(|tx| *tx = None);
-        Ok(())
+        // Close even if the run ended badly, then say that it did.
+        let result = self.stop();
+        self.set_closed();
+        result
     }
 
     fn is_running(&self) -> bool {
@@ -540,6 +611,10 @@ impl AudioBackend for DummyBackend {
 
     fn stats(&self) -> BackendStats {
         self.shared.snapshot()
+    }
+
+    fn health(&self) -> BackendHealth {
+        self.shared.health()
     }
 
     fn add_midi_input(&mut self, name: &str) -> Result<MidiInputPort, BackendError> {
@@ -665,6 +740,7 @@ impl Drop for DummyBackend {
 struct Worker {
     cb: ProcessCallback,
     shared: Arc<SharedStats>,
+    faults: Arc<Faults>,
     pacing: Pacing,
     max_cycles: Option<u64>,
     frames: u32,
@@ -685,10 +761,23 @@ impl Worker {
     fn run(&mut self, stop: &AtomicBool) {
         let shared = self.shared.clone();
         shared.set_realtime(current_thread_is_realtime());
-        let period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
+        let mut period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
         let mut deadline = Instant::now() + period;
         let mut cycles = 0u64;
         while !stop.load(Relaxed) && self.max_cycles.is_none_or(|m| cycles < m) {
+            if self.faults.server_gone.load(Relaxed) {
+                shared.server_gone.store(true, Relaxed);
+                break;
+            }
+            if self.faults.callback_panic.swap(false, Relaxed) {
+                panic!("DummySystem::panic_callback");
+            }
+            let rate = self.faults.new_rate.swap(0, Relaxed);
+            if rate != 0 {
+                self.sample_rate = f64::from(rate);
+                shared.sample_rate.store(rate, Relaxed);
+                period = Duration::from_secs_f64(f64::from(self.frames) / self.sample_rate);
+            }
             let started = Instant::now();
             crate::rt_guard(&shared, || self.cycle());
             cycles += 1;

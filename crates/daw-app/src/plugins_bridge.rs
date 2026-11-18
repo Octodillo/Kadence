@@ -42,6 +42,14 @@ pub mod qobject {
         type QUrl = cxx_qt_lib::QUrl;
     }
 
+    /// Which plugins a browser shows.
+    #[qenum(Plugins)]
+    enum PluginKind {
+        AnyPlugin,
+        InstrumentPlugin,
+        EffectPlugin,
+    }
+
     #[auto_cxx_name]
     extern "RustQt" {
         #[qobject]
@@ -68,7 +76,7 @@ pub mod qobject {
         #[qproperty(QStringList, extra_folders)]
         type Plugins = super::PluginsRust;
 
-        /// Picks up scan progress and results. Called by the UI's timer.
+        /// Picks up scan progress and results. Called by the UI's clock.
         #[qinvokable]
         fn tick(self: Pin<&mut Plugins>);
 
@@ -77,10 +85,9 @@ pub mod qobject {
         fn rescan(self: Pin<&mut Plugins>);
 
         /// Shows plugins whose name or vendor holds every word of `text`,
-        /// of `format` (0 any, 1 CLAP, 2 VST3, 3 LV2) and `kind` (0 any,
-        /// 1 instruments, 2 effects).
+        /// of `format` (0 any, 1 CLAP, 2 VST3, 3 LV2) and of `kind`.
         #[qinvokable]
-        fn set_filter(self: Pin<&mut Plugins>, text: &QString, format: i32, kind: i32);
+        fn set_filter(self: Pin<&mut Plugins>, text: &QString, format: i32, kind: PluginKind);
 
         /// Adds a folder to the search, saves it and rescans. False if it
         /// is not a local folder or already listed.
@@ -228,11 +235,11 @@ fn shown_folders(
 
 /// The filter for the browser's choices: `format` and `kind` as in
 /// `Plugins.setFilter`, out-of-range values meaning any.
-pub fn filter_for(text: &str, format: i32, kind: i32) -> Filter {
+pub fn filter_for(text: &str, format: i32, kind: qobject::PluginKind) -> Filter {
     let format = format_at(format);
     let kind = match kind {
-        1 => Some(PluginKind::Instrument),
-        2 => Some(PluginKind::Effect),
+        qobject::PluginKind::InstrumentPlugin => Some(PluginKind::Instrument),
+        qobject::PluginKind::EffectPlugin => Some(PluginKind::Effect),
         _ => None,
     };
     Filter {
@@ -320,7 +327,12 @@ impl qobject::Plugins {
         self.as_mut().reload();
     }
 
-    fn set_filter(mut self: Pin<&mut Self>, text: &QString, format: i32, kind: i32) {
+    fn set_filter(
+        mut self: Pin<&mut Self>,
+        text: &QString,
+        format: i32,
+        kind: qobject::PluginKind,
+    ) {
         let filter = filter_for(&text.to_string(), format, kind);
         if filter != self.filter {
             self.as_mut().rust_mut().filter = filter;
@@ -418,14 +430,16 @@ mod tests {
 
     #[test]
     fn filters_follow_the_browser_choices() {
-        assert_eq!(filter_for("", 0, 0), Filter::default());
-        let f = filter_for("eq", 3, 2);
+        use qobject::PluginKind as Qml;
+        assert_eq!(filter_for("", 0, Qml::AnyPlugin), Filter::default());
+        let f = filter_for("eq", 3, Qml::EffectPlugin);
         assert_eq!(f.text, "eq");
         assert_eq!(f.format, Some(PluginFormatKind::Lv2));
         assert_eq!(f.kind, Some(PluginKind::Effect));
-        assert_eq!(filter_for("", 1, 1).format, Some(PluginFormatKind::Clap));
-        assert_eq!(filter_for("", 2, 1).kind, Some(PluginKind::Instrument));
-        let odd = filter_for("", 9, -1);
+        let f = filter_for("", 1, Qml::InstrumentPlugin);
+        assert_eq!(f.format, Some(PluginFormatKind::Clap));
+        assert_eq!(f.kind, Some(PluginKind::Instrument));
+        let odd = filter_for("", 9, Qml { repr: -1 });
         assert_eq!((odd.format, odd.kind), (None, None));
     }
 

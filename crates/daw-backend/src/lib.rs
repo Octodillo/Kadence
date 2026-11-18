@@ -27,7 +27,7 @@ pub use cycle::BackendCycle;
 pub(crate) use cycle::{MidiInputs, MidiInputsControl, midi_inputs};
 pub use dummy::{DummyBackend, DummySystem, MidiInjector, MidiTap, Pacing};
 pub use jack_backend::JackBackend;
-pub use stats::BackendStats;
+pub use stats::{BackendHealth, BackendStats};
 
 /// Most MIDI input ports [`AudioBackend::add_midi_input`] adds at once.
 pub const MAX_MIDI_INPUTS: usize = 32;
@@ -167,9 +167,17 @@ pub trait AudioBackend: Send {
     /// still hold it, so don't rely on its drop to signal anything.
     fn start(&mut self, cb: ProcessCallback) -> Result<(), BackendError>;
 
+    /// Ends the callback and keeps the backend open.
+    ///
+    /// If the audio system fails to stop (JACK: deactivation fails, as it
+    /// can once the server is gone), the backend is left closed, as after
+    /// [`close`](Self::close), and the error says so. A callback that
+    /// panicked is no such failure: [`health`](Self::health) reports it.
     fn stop(&mut self) -> Result<(), BackendError>;
 
     /// Stop if running, then unregister ports and disconnect from the server.
+    /// The backend is closed afterwards even when this returns an error,
+    /// which then only tells what went wrong on the way.
     fn close(&mut self) -> Result<(), BackendError>;
 
     fn is_running(&self) -> bool;
@@ -192,6 +200,21 @@ pub trait AudioBackend: Send {
     /// Counters shared with the real-time thread. Cheap; safe to poll from a
     /// UI timer.
     fn stats(&self) -> BackendStats;
+
+    /// Whether the backend still works, since the last
+    /// [`open`](Self::open): the two failures a running backend cannot
+    /// report any other way, because they happen on the audio system's
+    /// threads. Poll it from a UI timer; it only reads flags those threads
+    /// set, and never waits for them.
+    ///
+    /// The backend does not recover by itself. After
+    /// [`ServerGone`](BackendHealth::ServerGone), [`close`](Self::close) it
+    /// and open one again; after
+    /// [`CallbackPanicked`](BackendHealth::CallbackPanicked),
+    /// [`stop`](Self::stop) and [`start`](Self::start) clear it. A server
+    /// that changes its sample rate is not a failure: compare
+    /// [`sample_rate`](Self::sample_rate) with the rate you built for.
+    fn health(&self) -> BackendHealth;
 
     /// Registers another MIDI input port, `name` on this client, while open
     /// or running, so MIDI from different sources stays apart. Its events

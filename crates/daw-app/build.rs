@@ -28,8 +28,9 @@ const QML_FILES: &[&str] = &[
     "qml/PointMenu.qml",
     "qml/SplitHandle.qml",
     "qml/LayoutSize.qml",
+    "qml/CountInBox.qml",
+    "qml/MetronomeLevel.qml",
     "qml/DevicePanelDrawer.qml",
-    "qml/DeviceNames.qml",
     "qml/LevelMeter.qml",
     "qml/GainReductionMeter.qml",
     "qml/EditPage.qml",
@@ -41,7 +42,6 @@ const QML_FILES: &[&str] = &[
     "qml/EngineErrorText.qml",
     "qml/ProjectMessageText.qml",
     "qml/EditNames.qml",
-    "qml/WorkspacePage.qml",
     "qml/SelfTest.qml",
     "qml/Benchmark.qml",
     "qml/TrackHeader.qml",
@@ -152,7 +152,10 @@ fn main() {
         QmlModule::new("io.github.octodillo.daw")
             .qml_files(QML_FILES.iter().copied())
             // Shared helpers without state: one instance for the whole app.
-            .qml_file(QmlFile::from("qml/ValueText.qml").singleton(true)),
+            .qml_file(QmlFile::from("qml/ValueText.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/DeviceNames.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/Wheel.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/UiClock.qml").singleton(true)),
     )
     .files([
         "src/bridge.rs",

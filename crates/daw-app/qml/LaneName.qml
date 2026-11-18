@@ -18,7 +18,7 @@ QtObject {
                 ? i18nc("@label automation lane", "Send")
                 : i18nc("@label automation lane, %1 is the bus the send goes to", "Send to %1", detail);
         case Automation.DeviceParamLane:
-            return i18nc("@label automation lane, %1 is a device, %2 one of its parameters", "%1: %2", detail, param);
+            return i18nc("@label automation lane, %1 is a device, %2 one of its parameters", "%1: %2", DeviceNames.name(detail), DeviceNames.name(param));
         default:
             return "";
         }
