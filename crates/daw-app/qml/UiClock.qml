@@ -84,8 +84,8 @@ QtObject {
         }
     }
 
-    // A change is shown in this order: the track list, whichever page is
-    // showing, then the views.
+    // A change is shown in this order: the track list first, then
+    // everything that listens to `revised`.
     function revise(): void {
         Tracks.sync();
         clock.revised();

@@ -1,8 +1,9 @@
 //! The application state shared by the QML-facing objects: the open
-//! document, the audio engine and the arrange view.
+//! document, the audio engine and the two painted views of it, the arrange
+//! view and the piano roll.
 //!
 //! It lives in a thread-local on the GUI thread. Every bridge object
-//! (`Engine`, `Project`, `ArrangeView`) runs its invokables there and reaches
+//! (`Engine`, `Project`, `ArrangeView`, `PianoRoll`) runs its invokables there and reaches
 //! the state through [`with`]. Nothing here is a Qt type.
 
 use std::cell::RefCell;
@@ -935,10 +936,7 @@ impl AppState {
     /// Calls `f` with a view (whichever `V` is: the arrange view or the
     /// piano roll), the document, and what the views need to know about
     /// playback and the open bundle.
-    pub fn with_view<V: View, R>(
-        &mut self,
-        f: impl FnOnce(&mut V, &mut Document, &Env) -> R,
-    ) -> R {
+    pub fn with_view<V: View, R>(&mut self, f: impl FnOnce(&mut V, &mut Document, &Env) -> R) -> R {
         let root = self.media_root();
         let session = self.engine.session();
         let env = Env {

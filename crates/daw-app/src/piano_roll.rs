@@ -389,7 +389,8 @@ impl qobject::PianoRoll {
         if !self.scene.wants_scene(self.is_visible()) {
             return;
         }
-        let scene = state::with(|s| s.with_view(|p: &mut Roll, doc, env| p.scene(doc.project(), env)));
+        let scene =
+            state::with(|s| s.with_view(|p: &mut Roll, doc, env| p.scene(doc.project(), env)));
         self.as_mut().rust_mut().scene.store(scene);
         self.update();
     }
