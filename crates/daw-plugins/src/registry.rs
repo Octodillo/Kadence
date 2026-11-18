@@ -6,15 +6,15 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use daw_core::plugin::{
-    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
 
 use crate::cache::{CacheEntry, ScanCache, modified_time};
 use crate::candidates::find_candidates;
 use crate::scanner::Scanner;
 
-/// The plugins in one bundle, or why its scan failed.
-type BundleResult = Result<Vec<PluginDescriptor>, String>;
+/// What one bundle's scan found, or why it failed.
+type BundleResult = Result<BundleScan, String>;
 
 /// What a [`PluginRegistry::scan`] did.
 #[derive(Debug, Default)]
@@ -23,7 +23,8 @@ pub struct ScanReport {
     pub scanned: usize,
     /// Bundles answered from the cache.
     pub cached: usize,
-    /// Bundles whose scan failed, now or in a cached earlier attempt, with the reason.
+    /// Bundles whose scan failed, now or in a cached earlier attempt, with the reason. A bundle
+    /// that loaded but skipped some of its plugins has one row per skipped plugin.
     pub failed: Vec<(PathBuf, String)>,
 }
 
@@ -190,7 +191,13 @@ impl PluginRegistry {
         let mut plugins = Vec::new();
         for (bundle, result) in slots {
             match result.expect("every slot is filled") {
-                Ok(found) => plugins.extend(found),
+                Ok(scan) => {
+                    plugins.extend(scan.plugins);
+                    let skipped = scan.skipped.into_iter();
+                    report
+                        .failed
+                        .extend(skipped.map(|why| (bundle.clone(), why)));
+                }
                 Err(e) => report.failed.push((bundle, e)),
             }
         }
@@ -207,7 +214,7 @@ fn scan_parallel(
     scanner: &Scanner,
     todo: &[(PluginFormatKind, PathBuf)],
     finished: &(dyn Fn() + Sync),
-) -> Vec<Result<Vec<PluginDescriptor>, crate::ScanError>> {
+) -> Vec<Result<BundleScan, crate::ScanError>> {
     let next = Mutex::new(0usize);
     let results: Vec<Mutex<Option<_>>> = todo.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
@@ -248,11 +255,8 @@ mod tests {
         fn kind(&self) -> PluginFormatKind {
             self.0.clone()
         }
-        fn default_search_paths(&self) -> Vec<PathBuf> {
-            Vec::new()
-        }
-        fn scan(&self, _path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
-            Ok(Vec::new())
+        fn scan(&self, _path: &Path) -> Result<BundleScan, PluginError> {
+            Ok(BundleScan::default())
         }
         fn shutdown(&self) {
             self.1.fetch_add(1, Ordering::Relaxed);

@@ -35,9 +35,14 @@ folders inside them, in this order:
 
 | Format | Folders |
 |---|---|
-| CLAP | the folders in `$CLAP_PATH`, `~/.clap`, `/usr/lib/clap` |
-| VST3 | the folders in `$VST3_PATH`, `~/.vst3`, `/usr/lib/vst3`, `/usr/local/lib/vst3` |
-| LV2 | `~/.lv2`, `/usr/local/lib/lv2`, `/usr/local/lib64/lv2`, `/usr/lib/lv2`, `/usr/lib64/lv2`, `/usr/lib/x86_64-linux-gnu/lv2`, `/usr/lib/aarch64-linux-gnu/lv2` |
+| CLAP | the folders in `$CLAP_PATH`, `~/.clap`, then `clap` in each system folder |
+| VST3 | the folders in `$VST3_PATH`, `~/.vst3`, then `vst3` in each system folder |
+| LV2 | `~/.lv2`, then `lv2` in each system folder |
+
+The system folders are `/usr/local/lib`, `/usr/local/lib64`, `/usr/lib`,
+`/usr/lib64` and, on Debian and Ubuntu, `/usr/lib/x86_64-linux-gnu` (or the
+one named after your computer's architecture). So CLAP plugins from your
+distribution are found in `/usr/lib/clap` or `/usr/lib64/clap`, for example.
 
 `CLAP_PATH`, `VST3_PATH` and `LV2_PATH` are optional environment variables
 that each hold a list of folders separated by colons. The folders in
@@ -79,6 +84,12 @@ audio it uses, so it can be copied or backed up as one. **New Project**
 - While a project has unsaved changes, Kadence keeps a recovery copy (you
   can turn this off in **General** settings). After a crash, Kadence offers
   to **Recover** it the next time you open the project.
+- Audio recorded before a project's first save is kept with its recovery
+  copy and moves into the project folder when you save. Discarding the
+  recovery copy deletes those recordings with it. If Kadence crashes when
+  there is no recovery copy, the next start moves the recordings to a
+  folder of their own in `recordings` in Kadence's data folder (usually
+  `~/.local/share/kadence`).
 - If audio files were moved, **Find Missing Audio Files…** relinks them.
   **Collect Audio Files** copies audio from outside the project folder into
   it. Only files that open as audio are copied.

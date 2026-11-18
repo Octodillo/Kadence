@@ -2853,11 +2853,6 @@ msgid "The take was outside the song, so nothing was added."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml:104
-msgctxt "@info"
-msgid "There is no folder to record into. Save the project first."
-msgstr ""
-
-#: crates/daw-app/qml/ProjectMessageText.qml:104
 msgctxt "@info %2 is a file path"
 msgid "Exported %1 second of audio to “%2”."
 msgid_plural "Exported %1 seconds of audio to “%2”."

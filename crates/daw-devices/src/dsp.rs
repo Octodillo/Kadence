@@ -43,12 +43,25 @@ pub fn flush64(x: f64) -> f64 {
     }
 }
 
-/// Coefficient for a one-pole filter that moves ~63% of the way in `ms`.
-pub fn one_pole_coef(ms: f64, sample_rate: f64) -> f32 {
+/// What is left, after one sample, of a value that decays to 1/e (~37%) in
+/// `ms`. No time at all leaves nothing.
+fn decay_per_sample(ms: f64, sample_rate: f64) -> f64 {
     if ms <= 0.0 || sample_rate <= 0.0 {
-        return 1.0;
+        return 0.0;
     }
-    (1.0 - (-1000.0 / (ms * sample_rate)).exp()) as f32
+    (-1000.0 / (ms * sample_rate)).exp()
+}
+
+/// Factor that, applied every sample, decays a value to 1/e (~37%) in `ms`:
+/// an envelope's release, or `y = target + (y - target) * coef` for a follower.
+pub fn decay_coef(ms: f64, sample_rate: f64) -> f32 {
+    decay_per_sample(ms, sample_rate) as f32
+}
+
+/// Coefficient for a one-pole filter that moves ~63% of the way in `ms`:
+/// `y += (target - y) * coef`. The complement of [`decay_coef`].
+pub fn one_pole_coef(ms: f64, sample_rate: f64) -> f32 {
+    (1.0 - decay_per_sample(ms, sample_rate)) as f32
 }
 
 /// One-pole parameter smoother, used to avoid zipper noise.

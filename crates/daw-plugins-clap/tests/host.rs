@@ -61,7 +61,10 @@ fn build_test_plugin() -> PathBuf {
 
 fn descriptor() -> PluginDescriptor {
     let path = test_plugin();
-    let mut found = ClapFormat.scan(&path).expect("the test plugin loads");
+    let mut found = ClapFormat
+        .scan(&path)
+        .expect("the test plugin loads")
+        .plugins;
     assert_eq!(found.len(), 1, "one plugin in the test bundle");
     found.remove(0)
 }

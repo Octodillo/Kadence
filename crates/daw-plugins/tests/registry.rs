@@ -60,6 +60,9 @@ fn sh(script: &str) -> Scanner {
     Scanner::new("sh", ["-c", script, "sh"])
 }
 
+/// What a scanner prints for a bundle that loads and holds no plugins.
+const NO_PLUGINS: &str = r#"{"plugins":[]}"#;
+
 /// A plugin folder with the test plugin in a vendor subdirectory and a file that is not a plugin.
 fn plugin_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -106,6 +109,8 @@ fn scanner_child_describes_the_plugin() {
             &dir.path().join("Vendor/test.clap"),
         )
         .unwrap();
+    assert!(found.skipped.is_empty(), "{:?}", found.skipped);
+    let found = found.plugins;
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].id, "org.daw.test.gain");
     assert_eq!(found[0].ports, (2, 2));
@@ -258,11 +263,11 @@ fn scan_child_ignores_other_arguments() {
 #[test]
 fn a_helper_process_holding_the_pipe_cannot_hang_the_scan() {
     let start = std::time::Instant::now();
-    let found = sh("sleep 10 & echo '[]'")
+    let found = sh(&format!("sleep 10 & echo '{NO_PLUGINS}'"))
         .with_timeout(Duration::from_secs(5))
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap();
-    assert!(found.is_empty());
+    assert!(found.plugins.is_empty());
     assert!(start.elapsed() < Duration::from_secs(3));
 }
 
@@ -397,11 +402,11 @@ fn registry_scans_and_instantiates_lv2() {
 #[test]
 fn a_scanner_that_crashes_after_a_complete_result_keeps_it() {
     // Plugins often crash in exit-time destructors, after the result is already written.
-    let found = sh("echo '[]'; kill -SEGV $$")
+    let found = sh(&format!("echo '{NO_PLUGINS}'; kill -SEGV $$"))
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap();
-    assert!(found.is_empty());
-    let err = sh("printf '[{'; kill -SEGV $$")
+    assert!(found.plugins.is_empty());
+    let err = sh(r#"printf '{"plugins":['; kill -SEGV $$"#)
         .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
         .unwrap_err();
     assert!(matches!(err, ScanError::Crashed(_)), "{err}");
@@ -442,11 +447,48 @@ fn bundles_without_plugins_are_retried_with_failures() {
     let mut registry = clap_only_registry();
     registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
     let mut cache = ScanCache::new();
-    registry.scan(&sh("echo '[]'"), &mut cache);
+    registry.scan(&sh(&format!("echo '{NO_PLUGINS}'")), &mut cache);
     assert_eq!(cache.len(), 1);
     cache.forget_failures();
     assert!(cache.is_empty());
     let report = registry.scan(&scanner(), &mut cache);
     assert_eq!((report.scanned, report.failed.len()), (1, 0));
     assert_eq!(registry.plugins().len(), 1);
+}
+
+/// A bundle that loads but cannot describe one of its plugins lists the others, reports the
+/// skipped one as a failure, and is scanned again by "rescan failed plugins".
+#[test]
+fn skipped_plugins_are_reported_and_retried() {
+    let dir = plugin_dir();
+    let bundle = dir.path().join("Vendor/test.clap");
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    let partial = concat!(
+        r#"{"plugins":[{"format":"Clap","id":"a","name":"A","vendor":"","#,
+        r#""path":"/x.clap","is_instrument":false,"ports":[2,2]}],"#,
+        r#""skipped":["B: no licence"]}"#
+    );
+    let report = registry.scan(&sh(&format!("echo '{partial}'")), &mut cache);
+    assert_eq!(registry.plugins().len(), 1);
+    assert_eq!(
+        report.failed,
+        [(bundle.clone(), "B: no licence".to_owned())]
+    );
+
+    // From the cache, the skipped plugin is still reported.
+    let report = registry.scan(&sh("exit 1"), &mut cache);
+    assert_eq!((report.cached, report.failed.len()), (1, 1));
+
+    cache.forget_failures();
+    assert!(cache.is_empty(), "a partial result is retried");
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!((report.scanned, report.failed.len()), (1, 0));
+    assert!(
+        registry
+            .find(&PluginFormatKind::Clap, "org.daw.test.gain")
+            .is_some()
+    );
 }

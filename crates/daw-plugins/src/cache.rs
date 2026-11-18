@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
+use daw_core::plugin::{BundleScan, PluginFormatKind};
 use serde::{Deserialize, Serialize};
 
 /// The scan result for one bundle.
@@ -14,8 +14,8 @@ pub struct CacheEntry {
     pub format: PluginFormatKind,
     /// The bundle's modification time, in nanoseconds since the Unix epoch.
     pub mtime_ns: u128,
-    /// The plugins found, or why the scan failed.
-    pub result: Result<Vec<PluginDescriptor>, String>,
+    /// What the scan found, or why it failed.
+    pub result: Result<BundleScan, String>,
 }
 
 /// Scan results keyed by bundle path.
@@ -31,7 +31,7 @@ pub struct ScanCache {
 
 /// The cache's format. Bump it whenever scanning describes plugins differently, so caches
 /// written by an older build of the same release are not trusted either.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// The release scanning, stored with the cache.
 const SCANNER: &str = env!("CARGO_PKG_VERSION");
@@ -76,11 +76,15 @@ impl ScanCache {
     }
 
     /// Drops cached failures so the next scan tries those bundles again, for a "rescan failed
-    /// plugins" action. Bundles that gave no plugins are retried too, since an LV2 bundle whose
-    /// data did not parse gives an empty list rather than an error.
+    /// plugins" action. That includes bundles that skipped some of their plugins, and bundles
+    /// that gave no plugins, since an LV2 bundle whose data did not parse gives an empty list
+    /// rather than an error.
     pub fn forget_failures(&mut self) {
-        self.entries
-            .retain(|_, e| e.result.as_ref().is_ok_and(|found| !found.is_empty()));
+        self.entries.retain(|_, e| {
+            e.result
+                .as_ref()
+                .is_ok_and(|scan| !scan.plugins.is_empty() && scan.skipped.is_empty())
+        });
     }
 
     /// Drops entries for bundles that no longer exist.

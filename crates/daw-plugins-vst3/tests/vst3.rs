@@ -25,7 +25,7 @@ fn testgain_bundle() -> &'static Path {
 }
 
 fn testgain() -> PluginDescriptor {
-    let found = Vst3Format.scan(testgain_bundle()).unwrap();
+    let found = Vst3Format.scan(testgain_bundle()).unwrap().plugins;
     assert_eq!(found.len(), 1, "{found:?}");
     found.into_iter().next().unwrap()
 }
@@ -97,7 +97,21 @@ fn scans_the_test_plugin() {
     assert_eq!(d.id.len(), 32);
     // A directory scan finds the same bundle.
     let dir = testgain_bundle().parent().unwrap();
-    assert_eq!(Vst3Format.scan(dir).unwrap().len(), 1);
+    assert_eq!(Vst3Format.scan(dir).unwrap().plugins.len(), 1);
+}
+
+/// Under a directory, a module that does not load is skipped and named; the others still count.
+#[test]
+fn a_directory_scan_reports_the_modules_it_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(testgain_bundle(), dir.path().join("TestGain.vst3")).unwrap();
+    std::fs::write(dir.path().join("Broken.vst3"), b"not an elf").unwrap();
+    let scan = Vst3Format.scan(dir.path()).unwrap();
+    assert_eq!(scan.plugins.len(), 1, "{scan:?}");
+    assert_eq!(scan.plugins[0].name, "Test Gain");
+    assert_eq!(scan.skipped.len(), 1, "{scan:?}");
+    assert!(scan.skipped[0].contains("Broken.vst3"), "{scan:?}");
+    assert!(!scan.skipped[0].starts_with("load:"), "{scan:?}");
 }
 
 #[test]
@@ -238,7 +252,7 @@ fn many_instances_share_one_module() {
 fn again() -> Option<Vec<PluginDescriptor>> {
     match std::env::var_os("KADENCE_VST3_AGAIN") {
         Some(path) => {
-            let found = Vst3Format.scan(Path::new(&path)).unwrap();
+            let found = Vst3Format.scan(Path::new(&path)).unwrap().plugins;
             assert!(!found.is_empty(), "no classes in {path:?}");
             Some(found)
         }

@@ -3,8 +3,9 @@
 //! MIDI take as another.
 //!
 //! Audio takes are recorded by `daw-session` ([`AudioTakes`]) into the
-//! project bundle's audio folder, or a recordings folder in the user's data
-//! directory while the project is unsaved.
+//! project bundle's audio folder. A project that was never saved keeps them
+//! the same way in the folder it lives in until then (see
+//! [`AppState::media_root`]), and saving brings them into the bundle.
 //!
 //! MIDI arms the target track's clip player and collects what it captures
 //! while playing. The take is overdubbed into the clip open in the piano
@@ -15,8 +16,7 @@
 
 use daw_core::time::{SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::model::{meter, midi_clip, new_note, take_command, tempo_map};
-use daw_midi::record::{RecordedNote, Recorder, TakeMode, merge_take, to_clip_notes};
-use std::path::PathBuf;
+use daw_midi::record::{RecordedNote, Recorder, to_clip_notes};
 
 use daw_model::commands::AddClip;
 use daw_model::{Clip, ClipContent, ClipId, Command, MidiClip, Project, TrackId, TrackKind};
@@ -35,8 +35,6 @@ pub struct Recording {
     /// Whether dropped input was reported for this take.
     dropped: bool,
     recorder: Recorder,
-    /// Where playback was when recording started.
-    from: TickTime,
     /// The tempo and rate the take's sample times were recorded under.
     tempo: SegmentTempoMap,
     sample_rate: f64,
@@ -49,16 +47,6 @@ pub struct AudioRecording {
     xruns: u64,
     /// Whether xruns were reported for this recording.
     xruns_reported: bool,
-}
-
-/// Where takes of an unsaved project go: `recordings` in Kadence's data
-/// folder, if the user has one (see [`crate::paths::data_dir`]). Never the
-/// shared temporary folder, where another user of the machine could make
-/// the path first and read the takes.
-fn unsaved_recordings_dir() -> Result<PathBuf, Message> {
-    crate::paths::data_dir()
-        .map(|data| data.join("recordings"))
-        .ok_or(Message::Record(RecordProblem::NoTakeFolder))
 }
 
 /// Where takes of a saved project go: its `audio/` folder. Not made anew
@@ -195,9 +183,11 @@ impl AppState {
         if armed_audio_tracks(project).next().is_none() {
             return Ok(false);
         }
+        // An unsaved project's takes go into the folder it lives in until
+        // it is saved.
         let dir = match self.doc.bundle() {
             Some(bundle) => bundle_recordings_dir(bundle)?,
-            None => unsaved_recordings_dir()?,
+            None => crate::recovery::audio_dir(&self.media_root()),
         };
         let latency = self.engine.round_trip_latency();
         let xruns = self.engine.xruns();
@@ -221,7 +211,6 @@ impl AppState {
 
     /// Arms the MIDI player of `track` for a take into `clip`, if given.
     fn start_midi(&mut self, track: TrackId, clip: Option<ClipId>) -> Result<(), Message> {
-        let from = self.playhead();
         let sample_rate = self.sample_rate();
         let tempo = tempo_map(&self.doc.project().tempo);
         let Some(session) = self.engine.session_mut() else {
@@ -239,7 +228,6 @@ impl AppState {
             name: self.arrange.names.recording.clone(),
             dropped: false,
             recorder: Recorder::new(),
-            from,
             tempo,
             sample_rate,
         });
@@ -363,14 +351,12 @@ impl AppState {
         }
         self.engine.stop();
         if let Some(mut rec) = self.audio_recording.take() {
-            let root = self.root();
+            let root = self.media_root();
             // Port latencies settle a while after connections change; the
             // value now is more trustworthy than the one at the start.
             rec.takes.set_io_latency(self.engine.round_trip_latency());
             if let Some(session) = self.engine.session_mut() {
-                let done = rec
-                    .takes
-                    .finish(session, self.doc.project(), root.as_deref());
+                let done = rec.takes.finish(session, self.doc.project(), Some(&root));
                 commands.extend(done.command);
                 for p in done.problems {
                     self.report(Message::Record(RecordProblem::Take(p)));
@@ -379,6 +365,10 @@ impl AppState {
         }
         // Each kind of take is its own undo step, so a take the model
         // refuses can't take the other kind down with it.
+        // A take can't be made again: don't leave it to the autosave timer.
+        if !commands.is_empty() {
+            self.autosave_soon();
+        }
         for cmd in commands {
             if let Err(e) = self.doc.execute_boxed(cmd) {
                 self.report(Message::Record(RecordProblem::Refused(e)));
@@ -459,10 +449,7 @@ fn take_into(
         Some(clip) => {
             let range = clip.start..TickTime(clip.start.0 + clip.length.0);
             let notes = to_clip_notes(take, tempo, sample_rate, range);
-            let existing = midi_clip(project, clip.id).map_or(&[][..], |m| &m.notes);
-            let span = TickTime(rec.from.0 - clip.start.0)..TickTime(i64::MAX);
-            let plan = merge_take(existing, notes, TakeMode::Overdub, span);
-            take_command(clip.id, existing, plan)
+            take_command(clip.id, notes)
         }
         None => {
             let (start, end) = take_span(project, take, tempo, sample_rate);
@@ -549,7 +536,6 @@ mod tests {
             name: "Recording".into(),
             dropped: false,
             recorder: Recorder::new(),
-            from: TickTime(0),
             tempo: SegmentTempoMap::default(),
             sample_rate: SR,
         };
@@ -591,7 +577,6 @@ mod tests {
             name: "Recording".into(),
             dropped: false,
             recorder: Recorder::new(),
-            from: TickTime(0),
             tempo: SegmentTempoMap::default(),
             sample_rate: SR,
         };

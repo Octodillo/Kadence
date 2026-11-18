@@ -433,11 +433,11 @@ Kirigami.Page {
             clip: true
 
             Repeater {
-                model: roll.hasClip ? roll.laneCount : 0
+                model: roll.hasClip ? roll.lanes : []
 
                 QQC2.Label {
-                    required property int index
-                    readonly property int revision: Project.revision + Automation.revision
+                    // One lane, as the `lanes` role of Tracks describes it.
+                    required property var modelData
                     width: roll.keyboardWidth
                     // Rows share the space when many lanes would not fit.
                     height: roll.lanesHeight / Math.max(1, roll.laneCount)
@@ -446,11 +446,7 @@ Kirigami.Page {
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideRight
                     font: Kirigami.Theme.smallFont
-                    text: revision >= 0 && roll.trackIndex >= 0
-                        ? laneName.text(Automation.laneKind(roll.trackIndex, index),
-                                        Automation.laneDetail(roll.trackIndex, index),
-                                        Automation.laneParam(roll.trackIndex, index))
-                        : ""
+                    text: laneName.text(modelData.kind, modelData.detail, modelData.param)
                     QQC2.ToolTip.text: text
                     QQC2.ToolTip.visible: tip.hovered && truncated
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay

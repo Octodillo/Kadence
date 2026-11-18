@@ -6,6 +6,11 @@
 //! Kadence. At startup, autosaves that no running Kadence owns are offered
 //! for recovery.
 //!
+//! Audio recorded into a never-saved project goes into the scratch folder
+//! too, under `audio/` as in a bundle, and its clips name it relative to the
+//! folder. So the takes are recovered, discarded or removed together with
+//! the autosave, and saving the project only has to bring them along.
+//!
 //! Ownership is an advisory lock (`flock`) on the folder: on the scratch
 //! folder for as long as Kadence runs, and on the bundle folder of the open
 //! project. The kernel drops it when the process ends, crash or not, so a
@@ -26,6 +31,110 @@ const SCRATCH_FILE: &str = "Untitled.kadence.autosave";
 /// (see [`crate::paths::data_dir`]).
 pub fn default_base() -> Option<PathBuf> {
     crate::paths::data_dir().map(|data| data.join("recovery"))
+}
+
+/// Where the audio recorded into the project kept in `root` goes: a
+/// bundle's `audio/` folder, and the same in a scratch folder.
+pub fn audio_dir(root: &Path) -> PathBuf {
+    root.join(bundle::AUDIO_DIR)
+}
+
+/// Brings the audio recorded into the unsaved project kept in `root` into
+/// the `audio/` folder of the bundle at `bundle_root`, under the same names,
+/// so the clips' relative paths stay right. Returns the files it made. All
+/// or nothing: it refuses before making any if a name is taken, and removes
+/// what it made if one fails.
+pub fn bring_audio(root: &Path, bundle_root: &Path) -> Result<Vec<PathBuf>, FormatError> {
+    let from = audio_dir(root);
+    let to = audio_dir(bundle_root);
+    let names: Vec<_> = match fs::read_dir(&from) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| e.file_name())
+            .collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(FormatError::Io {
+                path: from,
+                source: e,
+            });
+        }
+    };
+    if let Some(taken) = names.iter().map(|n| to.join(n)).find(|p| p.exists()) {
+        return Err(FormatError::Io {
+            path: taken,
+            source: io::ErrorKind::AlreadyExists.into(),
+        });
+    }
+    fs::create_dir_all(&to).map_err(|e| FormatError::Io {
+        path: to.clone(),
+        source: e,
+    })?;
+    let mut made = Vec::with_capacity(names.len());
+    for name in &names {
+        let (src, dst) = (from.join(name), to.join(name));
+        // A link costs nothing where both folders are on one disk; the
+        // scratch folder's name for the file is removed after the save.
+        let brought = fs::hard_link(&src, &dst).or_else(|_| fs::copy(&src, &dst).map(drop));
+        if let Err(e) = brought {
+            remove_files(&made);
+            // A copy that failed half way.
+            let _ = fs::remove_file(&dst);
+            return Err(FormatError::Io {
+                path: src,
+                source: e,
+            });
+        }
+        made.push(dst);
+    }
+    Ok(made)
+}
+
+/// Removes files [`bring_audio`] made.
+fn remove_files(files: &[PathBuf]) {
+    for f in files {
+        let _ = fs::remove_file(f);
+    }
+}
+
+/// Takes back what [`bring_audio`] put into `bundle_root`, after the save
+/// it was for failed: the files, and the `audio/` folder if that leaves it
+/// empty.
+pub fn take_back_audio(files: &[PathBuf], bundle_root: &Path) {
+    remove_files(files);
+    // Only an empty folder goes.
+    let _ = fs::remove_dir(audio_dir(bundle_root));
+}
+
+/// A folder of this process's own in the temporary folder, made by whoever
+/// first writes into it and removed when dropped. It stands in for the
+/// scratch folder while there is none (before the session starts, as in
+/// tests and the self test), so an unsaved project's takes have a place.
+#[derive(Debug)]
+pub struct TempFolder(PathBuf);
+
+impl TempFolder {
+    pub fn new() -> Self {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        Self(std::env::temp_dir().join(format!("kadence-{}-{}", std::process::id(), &id[..8])))
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Default for TempFolder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TempFolder {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// An exclusive advisory lock on a folder, held until dropped.
@@ -144,6 +253,20 @@ pub struct Candidate {
 }
 
 impl Candidate {
+    /// The folder a running Kadence would hold a lock on while it has this
+    /// work open: the bundle, or the scratch folder.
+    fn folder(&self) -> Option<&Path> {
+        self.bundle.as_deref().or_else(|| self.autosave.parent())
+    }
+
+    /// The folder, if a running Kadence has this work open: it was recovered
+    /// there since it was offered here.
+    pub fn in_use(&self) -> Option<PathBuf> {
+        self.folder()
+            .filter(|dir| is_locked(dir))
+            .map(Path::to_path_buf)
+    }
+
     /// The bundle's name; empty for a project that was never saved.
     pub fn name(&self) -> String {
         self.bundle
@@ -153,28 +276,54 @@ impl Candidate {
             .unwrap_or_default()
     }
 
-    /// Deletes the autosave, and an orphaned scratch folder with it.
+    /// Whether the work is no longer there: recovered and then saved or
+    /// dropped by another Kadence since it was offered here.
+    pub fn is_gone(&self) -> bool {
+        !self.autosave.exists()
+    }
+
+    /// Deletes the autosave, and an orphaned scratch folder (with the audio
+    /// recorded into its project) with it. Fine if it is gone already.
     pub fn discard(&self) -> io::Result<()> {
-        match &self.bundle {
-            Some(_) => match fs::remove_file(&self.autosave) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-                _ => Ok(()),
-            },
-            None => match self.autosave.parent() {
-                Some(dir) => fs::remove_dir_all(dir),
-                None => Ok(()),
-            },
+        let removed = match (&self.bundle, self.autosave.parent()) {
+            (Some(_), _) => fs::remove_file(&self.autosave),
+            (None, Some(dir)) => fs::remove_dir_all(dir),
+            (None, None) => Ok(()),
+        };
+        match removed {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
         }
     }
 }
 
+/// Moves the takes out of an ownerless scratch folder that holds no
+/// project to recover them into, to a folder named after it in `recordings`
+/// next to `base`: audio nobody was asked about is not deleted. Returns
+/// whether the scratch folder holds nothing worth keeping any more.
+fn rescue_takes(scratch: &Path, base: &Path) -> bool {
+    let takes = audio_dir(scratch);
+    let has_takes = fs::read_dir(&takes).is_ok_and(|mut entries| entries.next().is_some());
+    if !has_takes {
+        return true;
+    }
+    let Some(name) = scratch.file_name() else {
+        return false;
+    };
+    let rescued = base.with_file_name("recordings");
+    fs::create_dir_all(&rescued).is_ok() && fs::rename(&takes, rescued.join(name)).is_ok()
+}
+
 /// Autosaves nobody owns: from scratch folders under `base` and from the
-/// `recent` bundles. Newest first. Scratch folders left empty by a crash
-/// are removed on the way.
+/// `recent` bundles. Newest first. Scratch folders a crash left without an
+/// autosave are removed on the way, after their takes are moved to safety
+/// (see [`rescue_takes`]).
 pub fn find(base: Option<&Path>, recent: &[PathBuf]) -> Vec<Candidate> {
     let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
     let mut found = Vec::new();
-    if let Some(entries) = base.and_then(|b| fs::read_dir(b).ok()) {
+    if let Some(base) = base
+        && let Ok(entries) = fs::read_dir(base)
+    {
         for dir in entries.flatten().map(|e| e.path()) {
             let hidden = dir
                 .file_name()
@@ -193,7 +342,7 @@ pub fn find(base: Option<&Path>, recent: &[PathBuf]) -> Vec<Candidate> {
                     autosave: file,
                     bundle: None,
                 });
-            } else {
+            } else if rescue_takes(&dir, base) {
                 drop(lock);
                 let _ = fs::remove_dir_all(&dir);
             }
@@ -342,5 +491,60 @@ mod tests {
             found.iter().map(|c| &c.autosave).collect::<Vec<_>>(),
             vec![&new_file, &old_file]
         );
+    }
+
+    #[test]
+    fn work_another_kadence_holds_is_in_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scratch = Scratch::create(tmp.path()).unwrap();
+        scratch.write(&project()).unwrap();
+        let candidate = Candidate {
+            autosave: scratch.file(),
+            bundle: None,
+            modified: None,
+        };
+        assert_eq!(candidate.in_use().as_deref(), Some(scratch.dir()));
+        drop(scratch);
+        assert_eq!(candidate.in_use(), None);
+    }
+
+    #[test]
+    fn takes_without_a_project_are_moved_to_safety_not_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("recovery");
+        // A crash during the first take: audio, but no autosave yet.
+        let scratch = Scratch::create(&base).unwrap();
+        let name = scratch.dir().file_name().unwrap().to_owned();
+        let takes = audio_dir(scratch.dir());
+        fs::create_dir_all(&takes).unwrap();
+        fs::write(takes.join("Guitar.wav"), b"take").unwrap();
+        drop(scratch);
+
+        assert!(find(Some(&base), &[]).is_empty());
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+        let rescued = tmp.path().join("recordings").join(name).join("Guitar.wav");
+        assert_eq!(fs::read(rescued).unwrap(), b"take");
+    }
+
+    #[test]
+    fn bringing_audio_is_all_or_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (from, to) = (tmp.path().join("scratch"), tmp.path().join("Song"));
+        // Nothing recorded: nothing to bring.
+        assert!(bring_audio(&from, &to).unwrap().is_empty());
+
+        fs::create_dir_all(audio_dir(&from)).unwrap();
+        for name in ["a.wav", "b.wav"] {
+            fs::write(audio_dir(&from).join(name), name).unwrap();
+        }
+        let made = bring_audio(&from, &to).unwrap();
+        assert_eq!(made.len(), 2);
+        assert_eq!(fs::read(audio_dir(&to).join("b.wav")).unwrap(), b"b.wav");
+
+        // A name already taken there: refused, and nothing else is added.
+        fs::write(audio_dir(&from).join("c.wav"), "c").unwrap();
+        assert!(bring_audio(&from, &to).is_err());
+        assert!(!audio_dir(&to).join("c.wav").exists());
+        assert_eq!(fs::read(audio_dir(&to).join("a.wav")).unwrap(), b"a.wav");
     }
 }
