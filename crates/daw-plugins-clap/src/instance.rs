@@ -18,7 +18,7 @@ use clack_host::process::PluginAudioProcessor;
 use daw_core::event::ParamId;
 use daw_core::node::{Node, PortLayout, ProcessContext};
 use daw_core::plugin::{self, ParamInfo, PluginDescriptor, PluginError};
-use daw_plugin_window::{HostWindow, WindowEvent};
+use daw_plugin_window::{EditorTitle, HostWindow};
 
 use crate::events;
 use crate::host::{AudioThreadScope, DawHost, HostShared};
@@ -107,8 +107,7 @@ struct EditorState {
     created: bool,
     /// The host window an embedded editor lives in.
     window: Option<HostWindow>,
-    /// From `set_editor_title`; the plugin's name until then.
-    title: Option<String>,
+    title: EditorTitle,
 }
 
 /// What `process` uses: the plugin's audio processor and the buffers it fills. Present while
@@ -656,11 +655,7 @@ impl plugin::PluginInstance for ClapInstance {
                     height: 600,
                 });
                 let resizable = gui.can_resize(&handle);
-                let title = self
-                    .editor
-                    .title
-                    .as_deref()
-                    .unwrap_or(&self.descriptor.name);
+                let title = self.editor.title.or_name(&self.descriptor.name);
                 let window = match HostWindow::new(title, size.width, size.height, !resizable) {
                     Ok(window) => window,
                     Err(e) => {
@@ -680,11 +675,7 @@ impl plugin::PluginInstance for ClapInstance {
                 }
                 self.editor.window = Some(window);
             } else {
-                let title = self
-                    .editor
-                    .title
-                    .as_deref()
-                    .unwrap_or(&self.descriptor.name);
+                let title = self.editor.title.or_name(&self.descriptor.name);
                 if let Ok(title) = CString::new(title) {
                     gui.suggest_title(&handle, &title);
                 }
@@ -719,11 +710,7 @@ impl plugin::PluginInstance for ClapInstance {
     }
 
     fn set_editor_title(&mut self, title: &str) {
-        if self.editor.title.as_deref() == Some(title) {
-            return;
-        }
-        self.editor.title = Some(title.to_owned());
-        if !self.editor.created {
+        if !self.editor.title.set(title) || !self.editor.created {
             return;
         }
         if let Some(window) = &self.editor.window {
@@ -805,35 +792,33 @@ impl ClapInstance {
     /// Applies window-manager events to an embedded editor and the plugin's resize requests to
     /// the host window.
     fn pump_editor_window(&mut self) {
-        let Some(window) = self.editor.window.as_ref() else {
-            return;
-        };
-        let mut resized = None;
-        let mut closed = false;
-        while let Some(event) = window.poll() {
-            match event {
-                WindowEvent::Closed => {
-                    closed = true;
-                    break;
-                }
-                WindowEvent::Resized(w, h) => resized = Some((w, h)),
-                WindowEvent::Other(_) => {}
-            }
-        }
-        if closed {
-            plugin::PluginInstance::close_editor(self);
-            return;
-        }
-        let Some(gui) = self.ext.gui else {
+        let (Some(window), Some(gui)) = (self.editor.window.as_ref(), self.ext.gui) else {
             return;
         };
         let instance = self.instance.get_mut();
         let requested =
             instance.access_shared_handler(|s| s.pending_resize.swap(0, Ordering::AcqRel));
         let handle = instance.plugin_handle();
-        let Some(window) = self.editor.window.as_ref() else {
+        let open = window.pump(|width, height| {
+            let wanted = GuiSize { width, height };
+            if requested != 0 {
+                // The plugin's own request, applied below, wins over the user's resize.
+                return (width, height);
+            }
+            // The user resized the window: let the plugin pick the nearest size it supports,
+            // and snap the window to whatever size the plugin ends up at.
+            let size = gui.adjust_size(&handle, wanted).unwrap_or(wanted);
+            let actual = if gui.set_size(&handle, size).is_ok() {
+                size
+            } else {
+                gui.get_size(&handle).unwrap_or(size)
+            };
+            (actual.width, actual.height)
+        });
+        if !open {
+            plugin::PluginInstance::close_editor(self);
             return;
-        };
+        }
         if requested != 0 {
             // The plugin has already sized its own window; follow it, then confirm the size.
             #[allow(clippy::cast_possible_truncation)]
@@ -843,22 +828,6 @@ impl ClapInstance {
             };
             window.resize(size.width, size.height);
             let _ = gui.set_size(&handle, size);
-        } else if let (Some((w, h)), false) = (resized, window.is_fixed()) {
-            // The user resized the window: let the plugin pick the nearest size it supports,
-            // and snap the window to whatever size the plugin ends up at.
-            let wanted = GuiSize {
-                width: w,
-                height: h,
-            };
-            let size = gui.adjust_size(&handle, wanted).unwrap_or(wanted);
-            let actual = if gui.set_size(&handle, size).is_ok() {
-                size
-            } else {
-                gui.get_size(&handle).unwrap_or(size)
-            };
-            if actual != wanted {
-                window.resize(actual.width, actual.height);
-            }
         }
     }
 }

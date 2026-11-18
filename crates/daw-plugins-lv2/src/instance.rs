@@ -7,6 +7,7 @@ use daw_core::event::{Event, EventKind, EventList, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor};
 use daw_core::split::{SharedAudio, SplitAudio};
+use daw_plugin_window::EditorTitle;
 use livi::event::{LV2AtomEventBuilder, LV2AtomSequence};
 use livi::{EmptyPortConnections, PortIndex, PortType};
 
@@ -35,8 +36,7 @@ const ATOM_CAPACITY: usize = 8192;
 pub struct Lv2Instance {
     // Declared first so it is dropped before the plugin it points into.
     editor: Option<ui::Editor>,
-    /// From `set_editor_title`; the plugin's name until then.
-    editor_title: Option<String>,
+    editor_title: EditorTitle,
     /// The UI changed a value, and `take_state_changed` has not said so yet.
     state_changed: bool,
     ui_info: Option<ui::UiInfo>,
@@ -344,7 +344,7 @@ impl Lv2Instance {
         }
         Ok(Self {
             editor: None,
-            editor_title: None,
+            editor_title: EditorTitle::default(),
             state_changed: false,
             ui_info,
             ui_ends: Some(ui::UiEnds { to_dsp, from_dsp }),
@@ -396,7 +396,7 @@ impl Lv2Instance {
         let reopen = self.editor.is_some();
         // Also collects an edit the editor has not reported yet.
         self.close_editor();
-        fresh.editor_title = self.editor_title.take();
+        fresh.editor_title = std::mem::take(&mut self.editor_title);
         fresh.state_changed = self.state_changed;
         *self = fresh;
         if reopen {
@@ -873,10 +873,7 @@ impl PluginInstance for Lv2Instance {
             features: &self.features,
             urids: &self.urids,
             plugin_uri: &self.descriptor.id,
-            title: self
-                .editor_title
-                .as_deref()
-                .unwrap_or(&self.descriptor.name),
+            title: self.editor_title.or_name(&self.descriptor.name),
             handle,
             extension_data,
         };
@@ -911,10 +908,11 @@ impl PluginInstance for Lv2Instance {
     }
 
     fn set_editor_title(&mut self, title: &str) {
-        if let Some(editor) = &mut self.editor {
+        if self.editor_title.set(title)
+            && let Some(editor) = &mut self.editor
+        {
             editor.set_title(title);
         }
-        self.editor_title = Some(title.to_owned());
     }
 
     fn split(&mut self) -> Option<Box<dyn PluginProcessor>> {

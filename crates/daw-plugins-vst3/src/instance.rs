@@ -15,6 +15,7 @@ use daw_core::plugin::{
     PluginProcessor, ScanBuilder,
 };
 use daw_core::split::{SharedAudio, SplitAudio};
+use daw_plugin_window::EditorTitle;
 use vst3::Steinberg::Vst::{
     AudioBusBuffers, AudioBusBuffers__type0, BusDirections_, BusInfo, ControllerNumbers_,
     Event as VstEvent, Event_::EventTypes_, Event__type0, IAudioProcessor, IAudioProcessorTrait,
@@ -552,8 +553,7 @@ impl Audio {
 pub struct Vst3Instance {
     descriptor: PluginDescriptor,
     editor: Option<Editor>,
-    /// From `set_editor_title`; the plugin's name until then.
-    editor_title: Option<String>,
+    editor_title: EditorTitle,
     /// The same list `process` uses; replaced together with `audio`'s.
     params: Arc<Params>,
     /// Values for ids `params` does not list, from `process` to the controller.
@@ -839,7 +839,7 @@ impl Vst3Instance {
             let mut instance = Vst3Instance {
                 descriptor: d.clone(),
                 editor: None,
-                editor_title: None,
+                editor_title: EditorTitle::default(),
                 params,
                 unknown_rx: Mutex::new(unknown_rx),
                 buses,
@@ -1468,10 +1468,7 @@ impl PluginInstance for Vst3Instance {
         if self.editor.is_some() {
             return Ok(());
         }
-        let title = self
-            .editor_title
-            .as_deref()
-            .unwrap_or(&self.descriptor.name);
+        let title = self.editor_title.or_name(&self.descriptor.name);
         let editor = Editor::open(&self.controller, title)?;
         self.editor = Some(editor);
         Ok(())
@@ -1486,13 +1483,11 @@ impl PluginInstance for Vst3Instance {
     }
 
     fn set_editor_title(&mut self, title: &str) {
-        if self.editor_title.as_deref() == Some(title) {
-            return;
-        }
-        if let Some(editor) = &self.editor {
+        if self.editor_title.set(title)
+            && let Some(editor) = &self.editor
+        {
             editor.set_title(title);
         }
-        self.editor_title = Some(title.to_owned());
     }
 
     fn take_state_changed(&mut self) -> bool {
@@ -1505,7 +1500,7 @@ impl PluginInstance for Vst3Instance {
         self.flush_to_controller();
         self.handle_restart();
         self.reset_by_reactivating();
-        if let Some(editor) = &mut self.editor
+        if let Some(editor) = &self.editor
             && !editor.pump()
         {
             self.editor = None;
