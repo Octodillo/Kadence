@@ -265,6 +265,9 @@ impl AppState {
             }
         }
         self.synced = Some(revision);
+        // Plugins load as the session takes the document: from here the
+        // lanes know their parameters.
+        self.refresh_lane_params();
         // The timeline's rows follow the document, also when it changed
         // somewhere else (undo, a recorded take, the piano roll).
         self.arrange.relayout(self.doc.project());

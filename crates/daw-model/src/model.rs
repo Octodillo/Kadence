@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use daw_core::event::ParamId;
+use daw_core::level::FADER_FLOOR_DB;
 use daw_core::plugin::PluginFormatKind;
 use daw_core::time::{SampleTime, TickTime};
 use serde::{Deserialize, Serialize};
@@ -1034,22 +1035,20 @@ pub enum AutomationTarget {
     DeviceParam { device: DeviceId, param: ParamId },
 }
 
-/// Level lanes ramp from this level up: a ramp between silence (or any
-/// lower level) and a louder level plays from here, as the arrange view
-/// draws it, instead of spending most of its length far below hearing.
-pub const LEVEL_FLOOR_DB: f64 = -60.0;
-
 impl AutomationTarget {
     /// Whether the target is a level in dB (volume, send level).
     pub fn is_level(self) -> bool {
         matches!(self, Self::Volume | Self::SendLevel { .. })
     }
 
-    /// The lowest value ramps on this target pass through: see
-    /// [`LEVEL_FLOOR_DB`]. Other targets ramp over their whole range.
+    /// The lowest value ramps on this target pass through. Level lanes ramp
+    /// from [`FADER_FLOOR_DB`] up: a ramp between silence (or any lower
+    /// level) and a louder level plays from there, as the arrange view draws
+    /// it, instead of spending most of its length far below hearing. Other
+    /// targets ramp over their whole range.
     pub fn ramp_floor(self) -> f64 {
         if self.is_level() {
-            LEVEL_FLOOR_DB
+            FADER_FLOOR_DB
         } else {
             f64::NEG_INFINITY
         }

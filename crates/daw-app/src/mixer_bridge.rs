@@ -286,7 +286,7 @@ impl cxx_qt::Initialize for qobject::Mixer {
 
 impl qobject::Mixer {
     fn silent_db(&self) -> f64 {
-        crate::mixer::SILENT_DB
+        daw_core::level::FADER_FLOOR_DB
     }
 
     fn strip_id(&self, row: i32) -> Option<StripId> {

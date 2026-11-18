@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::double_click::Clicks;
 use crate::instrument::{InstrumentChoice, effects_start, instrument_of, set_instrument};
 use crate::message::Message;
+use daw_core::level::{self, FADER_FLOOR_DB};
 use daw_core::plugin::PluginFormatKind;
 use daw_model::commands::{
     AddDevice, AddSend, RemoveDevice, RemoveSend, SendField, SetParam, SetSend, SetTrack,
@@ -38,25 +39,13 @@ use daw_model::{
 use daw_session::{Session, effective_mutes};
 
 use crate::mixer::{
-    Control, EffectChoice, InsertInfo, MAX_DB, RouteTarget, SILENT_DB, SendInfo, StripId,
-    StripInfo, StripKind, StripLevels, effect_choices,
+    Control, EffectChoice, InsertInfo, RouteTarget, SendInfo, StripId, StripInfo, StripKind,
+    StripLevels, effect_choices,
 };
 use crate::state;
 
-/// The fader's bottom stored as a level the session plays as silence.
-const SILENCE_DB: f64 = -144.0;
-
 pub(crate) fn strip_id(track: TrackId) -> StripId {
     track.0.as_u128()
-}
-
-/// A fader position as the level stored in the model.
-fn fader_db(db: f64) -> f64 {
-    if db <= SILENT_DB {
-        SILENCE_DB
-    } else {
-        db.min(MAX_DB)
-    }
 }
 
 /// The mixer on a [`Document`] and the [`Session`] playing it. See the
@@ -204,7 +193,7 @@ impl SessionMixer {
                 },
                 volume_db: held(t.id, Control::Volume)
                     .unwrap_or(t.volume_db)
-                    .max(SILENT_DB),
+                    .max(FADER_FLOOR_DB),
                 pan: held(t.id, Control::Pan).unwrap_or(t.pan),
                 muted: t.mute,
                 soloed: t.solo,
@@ -229,7 +218,7 @@ impl SessionMixer {
                                 .unwrap_or_default(),
                             level_db: held(t.id, Control::Send(target))
                                 .unwrap_or(s.level_db)
-                                .max(SILENT_DB),
+                                .max(FADER_FLOOR_DB),
                             pre_fader: s.pre_fader,
                         }
                     })
@@ -356,7 +345,7 @@ impl SessionMixer {
             return Ok(());
         };
         let value = match control {
-            Control::Volume | Control::Send(_) => fader_db(value),
+            Control::Volume | Control::Send(_) => level::fader_to_stored_db(value),
             Control::Pan => value.clamp(-1.0, 1.0),
             Control::Param { .. } => value,
         };
@@ -805,10 +794,10 @@ mod tests {
         let mut r = rig();
         r.set("Drums", Control::Volume, -12.0);
         r.set("Drums", Control::Volume, -70.0);
-        assert_eq!(r.track("Drums").volume_db, SILENCE_DB);
+        assert_eq!(r.track("Drums").volume_db, level::SILENCE_DB);
         assert_eq!(
             r.mixer.strips(r.doc.project(), Some(&r.session))[0].volume_db,
-            SILENT_DB
+            FADER_FLOOR_DB
         );
         r.set("Drums", Control::Pan, 0.5);
         let reverb = r.id("Reverb");

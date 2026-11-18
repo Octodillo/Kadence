@@ -32,6 +32,9 @@ Rectangle {
     property bool following: false
     // Moving the control during playback records over the lane.
     property bool writes: false
+    // False for a parameter nothing describes (its plugin is not loaded):
+    // there is no scale to move it along.
+    property bool editable: true
     // How a device parameter's value is worded (see ValueText.param).
     readonly property string paramControl: placeholder ? "" : info.control
     readonly property string paramUnit: placeholder ? "" : info.unit
@@ -45,6 +48,7 @@ Rectangle {
         value = control.value;
         following = control.following;
         writes = control.writes;
+        editable = control.editable;
         if (!levelSlider.pressed) {
             levelSlider.value = control.position;
         }
@@ -155,7 +159,7 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
             from: 0
             to: 1
-            enabled: !laneHeader.following || laneHeader.writes
+            enabled: laneHeader.editable && (!laneHeader.following || laneHeader.writes)
             // A press and its release are one gesture, and one undo step;
             // a key press is a gesture of its own.
             function move(): void {

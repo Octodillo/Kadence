@@ -4,10 +4,11 @@
 //! What a device's parameters are comes from a [`ParamSource`]. Built-in
 //! devices describe theirs with [`BuiltinParams`]; plugins add a source of
 //! their own (their parameters are known once the plugin is loaded), and
-//! the panel shows them the same way. [`BuiltinParams`] is also the
-//! automation lanes' [`ParamCatalog`], so a built-in parameter has one
-//! range, taper and unit wherever it shows, and [`ParamDesc::scale`] is the
-//! one mapping between values and slider or lane positions.
+//! the panel shows them the same way. The automation lanes describe
+//! parameters with the same [`ParamDesc`] (see
+//! [`LaneParams`](crate::lanes::LaneParams)), so a parameter has one range,
+//! taper and unit wherever it shows, and [`ParamDesc::scale`] is the one
+//! mapping between values and slider or lane positions.
 //!
 //! A parameter drag is one undo step: [`DevicePanel::set_value`] runs
 //! [`SetParam`], which merges with the previous edit of the same parameter
@@ -81,18 +82,40 @@ impl ParamDesc {
     }
 
     /// A plugin parameter: a plain linear slider, as `ParamInfo` says no
-    /// more. A plugin source may refine the control and unit.
+    /// more. A plugin source may refine the control and unit. The range is
+    /// given low end first, whichever way round the plugin gave it.
     pub fn from_info(info: &daw_core::plugin::ParamInfo) -> Self {
+        let (min, max) = Self::info_range(info);
         Self {
             id: info.id,
             name: info.name.clone(),
-            min: info.min,
-            max: info.max,
+            min,
+            max,
             default: info.default,
             control: ParamControl::Continuous { log: false },
             unit: ParamUnit::None,
             automatable: info.automatable,
         }
+    }
+
+    fn info_range(info: &daw_core::plugin::ParamInfo) -> (f64, f64) {
+        (info.min.min(info.max), info.min.max(info.max))
+    }
+
+    /// Whether this is what [`from_info`](Self::from_info) makes of `info`,
+    /// without making it.
+    pub fn describes(&self, info: &daw_core::plugin::ParamInfo) -> bool {
+        self.id == info.id
+            && self.name == info.name
+            && (self.min, self.max) == Self::info_range(info)
+            && self.default == info.default
+            && self.automatable == info.automatable
+    }
+
+    /// Whether values can be placed along the range: it is finite and not
+    /// empty. (A plugin may describe anything.)
+    pub fn has_range(&self) -> bool {
+        self.min.is_finite() && self.max.is_finite() && self.min < self.max
     }
 
     fn is_discrete(&self) -> bool {
@@ -554,7 +577,7 @@ struct PluginSnapshot {
 
 /// How often a plugin's own values are read again while the document
 /// changes (an undo, its editor's state stored) or the plugin is down.
-const PLUGIN_REREAD: Duration = Duration::from_millis(500);
+pub(crate) const PLUGIN_REREAD: Duration = Duration::from_millis(500);
 
 /// Plugins with more parameters than this don't have their own values
 /// read: each read is a round trip to the sandbox, and the plugin plays
