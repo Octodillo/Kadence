@@ -130,6 +130,12 @@ pub trait ParamCatalog: Send + Sync {
     /// Whether `device`, first in an instrument track's chain, is the
     /// track's instrument rather than an effect.
     fn is_instrument(&self, device: &Device) -> bool;
+    /// Changes whenever `automatable` may answer differently for a device
+    /// it answered before (a plugin loaded and described its parameters),
+    /// so rows made from it are made again.
+    fn revision(&self) -> u64 {
+        0
+    }
 }
 
 impl std::fmt::Debug for dyn ParamCatalog {

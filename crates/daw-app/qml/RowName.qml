@@ -31,6 +31,8 @@ QtObject {
             return i18nc("@title:group a track's controls", "Sends");
         case Automation.DeviceGroup:
             return DeviceNames.name(detail);
+        case Automation.MoreGroup:
+            return i18nc("@title:group a device's parameters past the first few", "More Parameters");
         default:
             return "";
         }

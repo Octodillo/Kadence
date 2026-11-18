@@ -404,23 +404,27 @@ pub struct Arrange {
 }
 
 /// The rows under one track, and what they were made from: the track as it
-/// was (edits replace a track, so the same `Arc` means the same track) and
-/// its open groups. [`Arrange::relayout`] keeps them while both stay the
-/// same, so laying out every frame doesn't list every device's parameters.
+/// was (edits replace a track, so the same `Arc` means the same track), its
+/// open groups and the parameter catalog's revision. [`Arrange::relayout`]
+/// keeps them while all stay the same, so laying out every frame doesn't
+/// list every device's parameters.
 #[derive(Debug, Default)]
 struct TrackRows {
     track: Option<Arc<Track>>,
     open: Vec<Group>,
+    params: u64,
     rows: Vec<LaneRow>,
 }
 
 impl TrackRows {
-    /// Whether these are the rows of `track` with the groups `open`.
-    fn of(&self, track: &Track, open: &[Group]) -> bool {
+    /// Whether these are the rows of `track` with the groups `open`, from
+    /// the catalog at revision `params`.
+    fn of(&self, track: &Track, open: &[Group], params: u64) -> bool {
         self.track
             .as_deref()
             .is_some_and(|t| std::ptr::eq(t, track))
             && self.open == open
+            && self.params == params
     }
 }
 
@@ -472,7 +476,7 @@ impl Arrange {
             .retain(|id| project.tracks.iter().any(|t| t.id == *id));
         self.open.retain(|(id, group)| {
             project.track(*id).is_some_and(|t| match group {
-                Group::Device(d) => t.devices.iter().any(|x| x.id == *d),
+                Group::Device(d) | Group::More(d) => t.devices.iter().any(|x| x.id == *d),
                 _ => true,
             })
         });
@@ -483,17 +487,19 @@ impl Arrange {
             .filter_map(|r| Some((r.track.as_ref()?.id, r)))
             .collect();
         self.rows.reserve(project.tracks.len());
+        let params = self.params.as_deref().map_or(0, |p| p.revision());
         let mut y = 0.0;
         self.tops.push(y);
         for t in &project.tracks {
             let rows = if self.expanded.contains(&t.id) {
                 let open = self.open_groups(t.id);
                 match laid.remove(&t.id) {
-                    Some(r) if r.of(t, &open) => r,
+                    Some(r) if r.of(t, &open, params) => r,
                     _ => TrackRows {
                         rows: rows::track_rows(t, self.params.as_deref(), &self.open),
                         track: Some(Arc::clone(t)),
                         open,
+                        params,
                     },
                 }
             } else {
@@ -519,7 +525,8 @@ impl Arrange {
     /// the track headers can ask right after an edit, and cheaply.
     pub fn rows_of(&self, track: &Track) -> Vec<LaneRow> {
         let open = self.open_groups(track.id);
-        match self.rows.iter().find(|r| r.of(track, &open)) {
+        let params = self.params.as_deref().map_or(0, |p| p.revision());
+        match self.rows.iter().find(|r| r.of(track, &open, params)) {
             Some(r) => r.rows.clone(),
             None => rows::track_rows(track, self.params.as_deref(), &self.open),
         }

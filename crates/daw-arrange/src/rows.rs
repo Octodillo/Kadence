@@ -31,7 +31,14 @@ pub enum Group {
     Device(DeviceId),
     /// The levels of the track's sends.
     Sends,
+    /// A device's parameters past its first [`FIRST_PARAMS`]: a plugin
+    /// may have thousands, too many to list at once.
+    More(DeviceId),
 }
+
+/// How many of a device's parameters an open device lists before the rest
+/// fold into [`Group::More`].
+pub const FIRST_PARAMS: usize = 32;
 
 /// What a row under a track is for.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -118,18 +125,24 @@ impl Rows<'_> {
     }
 
     /// The parameters of `device`: all that can be automated when `all`,
-    /// otherwise those with a lane. A lane whose parameter the catalog
-    /// doesn't list (a plugin's, say) always shows, after the listed ones.
+    /// otherwise those with a lane. Past the first [`FIRST_PARAMS`] the
+    /// rest fold into [`Group::More`]. A lane whose parameter the catalog
+    /// doesn't list (a plugin's that is not loaded, say) always shows,
+    /// after the listed ones.
     fn params(&mut self, depth: u8, device: &Device, all: bool) {
         let listed = self.params.map_or_else(Vec::new, |c| c.automatable(device));
         let target = |param| AutomationTarget::DeviceParam {
             device: device.id,
             param,
         };
-        for &param in &listed {
-            if all || self.lane(target(param)).is_some() {
-                self.control(depth, target(param));
-            }
+        let (first, rest) = listed.split_at(listed.len().min(FIRST_PARAMS));
+        self.listed(depth, first.iter().map(|&p| target(p)), all);
+        if !rest.is_empty() {
+            let more = all && self.group(depth, Group::More(device.id));
+            // Closed (or the device itself is), the rest show only where
+            // automated, where they would be without the fold.
+            let depth = if all { depth + 1 } else { depth };
+            self.listed(depth, rest.iter().map(|&p| target(p)), more);
         }
         let track = self.track;
         for lane in &track.automation {
@@ -138,6 +151,15 @@ impl Rows<'_> {
                 && !listed.contains(&param)
             {
                 self.control(depth, lane.target);
+            }
+        }
+    }
+
+    /// Rows for `targets`: all of them when `all`, else those with a lane.
+    fn listed(&mut self, depth: u8, targets: impl Iterator<Item = AutomationTarget>, all: bool) {
+        for t in targets {
+            if all || self.lane(t).is_some() {
+                self.control(depth, t);
             }
         }
     }
@@ -189,12 +211,12 @@ pub fn track_rows(
 
     if !master {
         let all = r.group(0, Group::Sends);
-        for s in &track.sends {
-            let target = AutomationTarget::SendLevel { send: s.id };
-            if all || r.lane(target).is_some() {
-                r.control(1, target);
-            }
-        }
+        let sends = track.sends.iter();
+        r.listed(
+            1,
+            sends.map(|s| AutomationTarget::SendLevel { send: s.id }),
+            all,
+        );
     }
     r.out
 }

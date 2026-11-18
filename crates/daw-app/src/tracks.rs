@@ -8,7 +8,7 @@
 //! a header makes are here too, each one undo step.
 
 use daw_arrange::Rgba;
-use daw_arrange::rows::{Group, RowKind};
+use daw_arrange::rows::{Group, LaneRow, RowKind};
 use daw_model::commands::{MoveTrack, RemoveTrack, SetTrack, TrackField};
 use daw_model::{
     AudioInput, AutomationTarget, InputChannels, MidiInput, Monitoring, Track, TrackId,
@@ -160,34 +160,44 @@ impl AppState {
             return Vec::new();
         };
         let rows = self.arrange.rows_of(t);
-        let all = rows.iter().enumerate();
-        all.map(|(i, r)| match r.kind {
-            RowKind::Group(g) => HeaderRow {
-                name: group_name(t, g),
-                depth: r.depth,
-                open: r.open,
-                lane: None,
-                mode: LaneMode::Read,
-                param: None,
-                item: match g {
-                    Group::Device(id) => instrument::effect_index(t, id),
-                    _ => None,
-                },
-            },
-            RowKind::Control(target) => {
-                // The heading the row is under: the nearest shallower row.
-                let heading = rows[..i].iter().rev().find(|x| x.depth < r.depth);
-                let named = matches!(
-                    heading.and_then(daw_arrange::LaneRow::group),
-                    Some(Group::Device(_) | Group::Instrument)
-                );
-                HeaderRow {
-                    depth: r.depth,
-                    ..self.control_row(row, t, target, named)
-                }
+        // The headings above the current row, outermost first.
+        let mut headings: Vec<&LaneRow> = Vec::new();
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            while headings.last().is_some_and(|h| h.depth >= r.depth) {
+                headings.pop();
             }
-        })
-        .collect()
+            out.push(match r.kind {
+                RowKind::Group(g) => HeaderRow {
+                    name: group_name(t, g),
+                    depth: r.depth,
+                    open: r.open,
+                    lane: None,
+                    mode: LaneMode::Read,
+                    param: None,
+                    item: match g {
+                        Group::Device(id) => instrument::effect_index(t, id),
+                        _ => None,
+                    },
+                },
+                RowKind::Control(target) => {
+                    // Under its device's heading (or the fold of the rest
+                    // of its parameters) a parameter needs no device name.
+                    let named = matches!(
+                        headings.last().and_then(|h| h.group()),
+                        Some(Group::Device(_) | Group::Instrument | Group::More(_))
+                    );
+                    HeaderRow {
+                        depth: r.depth,
+                        ..self.control_row(row, t, target, named)
+                    }
+                }
+            });
+            if r.group().is_some() {
+                headings.push(r);
+            }
+        }
+        out
     }
 
     /// The automation lanes of the track at `row` alone, in lane order;

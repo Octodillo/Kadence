@@ -831,6 +831,9 @@ impl AppState {
         }
         self.known_plugins = Some(list);
         crate::instrument::set_plugin_effects(self.plugins.plugins());
+        // Which plugins are instruments may have changed with the list, and
+        // with it which group a plugin's rows are in.
+        self.lanes.params.changed();
         self.instruments.clear_plugins();
         for choice in crate::instrument::plugin_choices(self.plugins.plugins()) {
             self.instruments.push(choice);
@@ -846,8 +849,8 @@ impl AppState {
             {
                 self.status = None;
             }
-            self.resync();
         }
+        self.resync();
         true
     }
 
