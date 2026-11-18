@@ -22,7 +22,7 @@ use daw_model::{
     AudioClip, AutomationLane, AutomationPoint, AutomationTarget, Clip, ClipContent, Device,
     DeviceId, DeviceSource, Document, Project, Track, TrackId, TrackKind,
 };
-use daw_plugin_host::{HostLauncher, SandboxConfig};
+use daw_plugin_host::{HostLauncher, Realtime, SandboxConfig};
 use daw_session::catalog::{Filter, PluginCatalog, PluginKind};
 use daw_session::{
     LoadedPlugin, PluginLoader, PluginStatus, SandboxLoader, Session, SessionConfig, Warning,
@@ -185,6 +185,11 @@ struct Rig {
 impl Rig {
     /// An audio track playing a constant `LEVEL` through the test plugin.
     fn new() -> Self {
+        Self::loading_with(Box::new(loader()))
+    }
+
+    /// Like [`new`](Self::new), loading the plugin with `loader`.
+    fn loading_with(loader: Box<dyn PluginLoader>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dc.wav");
         let data = AudioData {
@@ -213,7 +218,7 @@ impl Rig {
             device,
         })
         .unwrap();
-        Self::with_doc(doc, id, device_id, dir)
+        Self::with_loader(doc, id, device_id, dir, loader)
     }
 
     fn with_doc(doc: Document, track: TrackId, device: DeviceId, dir: tempfile::TempDir) -> Self {
@@ -329,6 +334,20 @@ impl Rig {
         self.proc = proc;
         self.sync();
         self.session.play().unwrap();
+    }
+
+    /// Runs until the plugin's host has an answer about real-time priority.
+    fn realtime_answer(&mut self) -> Realtime {
+        let start = Instant::now();
+        loop {
+            let answer = self.session.plugin_realtime(self.device).unwrap();
+            if answer != Realtime::Pending {
+                return answer;
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "no answer");
+            self.run(BLOCK);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Kills the plugin's sandbox host and runs until the session notices.
@@ -739,6 +758,43 @@ fn a_crashed_plugin_is_reported_bypassed_and_reloaded() {
 
     rig.reload();
     rig.settles_at(LEVEL * 0.5);
+}
+
+/// A host refused real-time priority is said once: it is about the system, not one plugin,
+/// so neither another host nor the next session says it again. Whether this machine grants
+/// it differs (a container may give it directly, a desktop through a broker, a build machine
+/// not at all), so the test follows what the host was told.
+#[test]
+fn a_host_refused_real_time_priority_is_reported_once() {
+    let asks = |mut c: SandboxConfig| {
+        c.rt_priority = Some(1);
+        c
+    };
+    let mut rig = Rig::loading_with(Box::new(loader_with(asks)));
+    let answer = rig.realtime_answer();
+    let said = |rig: &Rig| {
+        let warnings = rig.news.iter();
+        warnings
+            .filter(|w| **w == Warning::PluginsNotRealtime)
+            .count()
+    };
+    let once = usize::from(answer == Realtime::Refused);
+    assert_eq!(said(&rig), once, "{answer:?}");
+    assert_eq!(rig.session.plugin_realtime(rig.device), Some(answer));
+
+    rig.restart_audio();
+    assert_eq!(rig.realtime_answer(), answer);
+    rig.run(BLOCK * 8);
+    assert_eq!(said(&rig), once);
+}
+
+/// A plugin that does not ask for real-time priority is not refused it.
+#[test]
+fn a_host_that_does_not_ask_for_real_time_priority_says_nothing() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.realtime_answer(), Realtime::Off);
+    rig.run(BLOCK * 8);
+    assert!(!rig.news.contains(&Warning::PluginsNotRealtime));
 }
 
 /// A crashed plugin's sandbox remembers the state it last saved or loaded; an audio restart

@@ -67,6 +67,9 @@ QtObject {
         case Project.PluginCrashed:
             return i18nc("@info %1 is a device name, %2 a plugin id",
                          "The plugin of “%1” (%2) stopped working and is bypassed.", m.name, m.detail);
+        case Project.PluginsNotRealtime:
+            return i18nc("@info",
+                         "This computer gives plugins no real-time priority, so their sound may drop out while it is busy. Check that RealtimeKit (rtkit) is installed and running.");
         case Project.PluginStateNotSaved:
             return i18nc("@info %1 is a device name, %2 a message which may be in English",
                          "“%1” did not hand over its plugin settings, so the project keeps the ones saved before (%2).", m.name, m.detail);

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 18:30+0000\n"
+"POT-Creation-Date: 2026-11-18 19:44+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1062,6 +1062,13 @@ msgstr ""
 #: crates/daw-app/qml/DevicePanelDrawer.qml
 msgctxt "@action:button restart a crashed plugin"
 msgid "Reload Plugin"
+msgstr ""
+
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@info"
+msgid ""
+"This plugin gets no real-time priority, so its sound may drop out while the "
+"computer is busy. Check that RealtimeKit (rtkit) is installed and running."
 msgstr ""
 
 #: crates/daw-app/qml/DevicePanelDrawer.qml
@@ -2622,6 +2629,14 @@ msgstr ""
 #: crates/daw-app/qml/ProjectMessageText.qml
 msgctxt "@info %1 is a device name, %2 a plugin id"
 msgid "The plugin of “%1” (%2) stopped working and is bypassed."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info"
+msgid ""
+"This computer gives plugins no real-time priority, so their sound may drop "
+"out while it is busy. Check that RealtimeKit (rtkit) is installed and "
+"running."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml

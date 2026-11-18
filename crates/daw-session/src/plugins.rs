@@ -158,6 +158,9 @@ pub struct Plugins {
     /// Editors that were open in an earlier session, by their window title, to open again
     /// when the plugin is loaded again.
     reopen: HashMap<DeviceId, String>,
+    /// [`Warning::PluginsNotRealtime`] was given: it is about the system, not one plugin, so
+    /// it is said once.
+    pub(crate) realtime_warned: bool,
 }
 
 /// A freed plugin's state, with the plugin it is of: a device that comes back naming another
@@ -498,6 +501,7 @@ impl Plugins {
             removed: std::mem::take(&mut self.removed),
             reopen,
             owed,
+            realtime_warned: self.realtime_warned,
         }
     }
 }

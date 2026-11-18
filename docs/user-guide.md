@@ -57,6 +57,13 @@ another folder, which is searched after these for all three formats, and
 runs in a process of its own, so a plugin that crashes is switched off and
 reported instead of closing Kadence.
 
+That process asks for real-time priority, directly or through RealtimeKit
+(`rtkit`) or the desktop portal, so the plugin's audio keeps up while the
+computer is busy. If none of them grants it, Kadence says so once, and the
+plugin's device panel shows it: the plugin still plays, but its sound may
+drop out under load. Most Plasma desktops run RealtimeKit; check that the
+`rtkit` package is installed and its service running.
+
 In the Flatpak, install plugins from Flathub (their IDs start with
 `org.freedesktop.LinuxAudio.Plugins.`) or put them in `~/.clap`, `~/.vst3`
 or `~/.lv2`, which the Flatpak may read; if you had to create the folder,
