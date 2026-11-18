@@ -17,12 +17,12 @@ QQC2.Slider {
 
     // Sets the level to `db`; `save` keeps it as the user's setting.
     function setLevel(db: real, save: bool): void {
-        Project.setMetronomeLevel(Math.round(db * 2) / 2, save);
+        Transport.setMetronomeLevel(Math.round(db * 2) / 2, save);
     }
 
     from: -40
     to: 6
-    value: Project.metronomeVolume
+    value: Transport.metronomeVolume
     // Saved once the handle is let go, not on every move.
     onMoved: setLevel(value, !pressed)
     onPressedChanged: {
@@ -35,7 +35,7 @@ QQC2.Slider {
     // Moving the handle replaces the binding above; follow the project (the
     // other level slider) from here.
     Connections {
-        target: Project
-        function onMetronomeVolumeChanged() { slider.value = Project.metronomeVolume; }
+        target: Transport
+        function onMetronomeVolumeChanged() { slider.value = Transport.metronomeVolume; }
     }
 }

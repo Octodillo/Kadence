@@ -6,6 +6,7 @@
 //! second, non-Qt front end can reuse the same engine API ([`engine`]).
 
 pub mod arrange_view;
+pub mod arrangement_bridge;
 pub mod automation_bridge;
 pub mod bridge;
 mod demo;
@@ -41,6 +42,7 @@ mod test_helper;
 pub mod tracks;
 pub mod tracks_bridge;
 mod transport;
+pub mod transport_bridge;
 
 /// Runs a plugin sandbox host or scanner if the arguments ask for one
 /// (`--plugin-host <socket>` or `--scan <format> <bundle>`), which the

@@ -108,7 +108,7 @@ Item {
             check(header.edgeChange(-30, 10, 1, 1, 10, 2000, 500) === -20, "an edge scrolls to the top, then shares the rest");
             // What the header's menu does is also a page action on the
             // selected track, for the keyboard.
-            check(Project.selectedTrack === 0 && arrange.trackActions[0].enabled, "a new track is selected");
+            check(Arrangement.selectedTrack === 0 && arrange.trackActions[0].enabled, "a new track is selected");
             arrange.trackActions[0].trigger();
             check(header.renaming, "Rename Track opens the selected track's name");
             header.dismiss();
@@ -328,38 +328,38 @@ Item {
         },
         () => {
             // Tempo and time signature: edits in a row are one undo step.
-            check(Project.bpm === 120 && Project.meterNumerator === 4 && Project.meterDenominator === 4,
+            check(Transport.bpm === 120 && Transport.meterNumerator === 4 && Transport.meterDenominator === 4,
                   "demo starts at 120 bpm in 4/4");
-            Project.setTempo(96);
-            Project.setTempo(98.5);
-            check(Project.bpm === 98.5, "tempo set");
+            Transport.setTempo(96);
+            Transport.setTempo(98.5);
+            check(Transport.bpm === 98.5, "tempo set");
             check(Project.undoText === "Change Tempo" && Project.undoText in editNames.names, "tempo edit undoes");
-            Project.setTimeSignature(6, 7);
-            check(Project.meterNumerator === 6 && Project.meterDenominator === 4, "time signature set, rounded");
+            Transport.setTimeSignature(6, 7);
+            check(Transport.meterNumerator === 6 && Transport.meterDenominator === 4, "time signature set, rounded");
             check(Project.undoText === "Change Time Signature" && Project.undoText in editNames.names,
                   "time signature edit undoes");
             Project.undo();
-            check(Project.meterNumerator === 4 && Project.bpm === 98.5, "undo the time signature");
+            check(Transport.meterNumerator === 4 && Transport.bpm === 98.5, "undo the time signature");
             Project.undo();
-            check(Project.bpm === 120, "undo the tempo drag in one step");
+            check(Transport.bpm === 120, "undo the tempo drag in one step");
             Project.redo();
-            check(Project.bpm === 98.5, "redo");
-            Project.setTimeSignature(3, 4);
+            check(Transport.bpm === 98.5, "redo");
+            Transport.setTimeSignature(3, 4);
             // The metronome, with its settings open, for a screenshot.
-            Project.setMetronomeEnabled(true);
-            Project.setCountIn(1);
-            check(Project.metronome && Project.countInBars === 1, "metronome settings");
+            Transport.setMetronomeEnabled(true);
+            Transport.setCountIn(1);
+            check(Transport.metronome && Transport.countInBars === 1, "metronome settings");
             const arrange = window.pageStack.currentItem;
             arrange.transportBar.openClickSettings();
         },
         () => {
             shoot(window.title, "arrange-metronome");
             window.pageStack.currentItem.transportBar.closeClickSettings();
-            Project.setMetronomeEnabled(false);
-            Project.setCountIn(0);
+            Transport.setMetronomeEnabled(false);
+            Transport.setCountIn(0);
             Project.undo();
             Project.undo();
-            check(Project.bpm === 120 && Project.meterNumerator === 4, "back to the demo's tempo");
+            check(Transport.bpm === 120 && Transport.meterNumerator === 4, "back to the demo's tempo");
         },
         () => {
             const dialog = window.openExport();
@@ -377,14 +377,14 @@ Item {
             check(Exporter.running, "export started");
         },
         () => {
-            Project.toggleLoop();
-            check(Project.looping, "loop on");
-            Project.togglePlay();
+            Transport.toggleLoop();
+            check(Transport.looping, "loop on");
+            Transport.togglePlay();
         },
         () => {
-            check(Project.timeText !== "0:00.0", "playhead moves while playing");
-            Project.togglePlay();
-            Project.toggleLoop();
+            check(Transport.timeText !== "0:00.0", "playhead moves while playing");
+            Transport.togglePlay();
+            Transport.toggleLoop();
             shoot(window.title, "arrange-played");
         },
         () => {
@@ -695,9 +695,9 @@ Item {
         },
         () => {
             window.playAction.trigger();
-            check(Project.playing, "play");
+            check(Transport.playing, "play");
             window.playAction.trigger();
-            check(!Project.playing, "stop");
+            check(!Transport.playing, "stop");
         },
         () => {
             // The export ran in the background meanwhile; give a slow
@@ -793,16 +793,16 @@ Item {
             // itself has no changes yet.
             Tracks.setArmed(0, true);
             check(Project.save().context === undefined && !Project.modified, "save with the track armed");
-            Project.toggleRecord();
-            check(Project.recording && !Project.modified, "a take in progress is not in the project yet");
+            Transport.toggleRecord();
+            check(Transport.recording && !Project.modified, "a take in progress is not in the project yet");
         },
         () => {
             // Until the take holds some audio.
-            if (Project.timeText === "0:00.0" && test.waits < 75) {
+            if (Transport.timeText === "0:00.0" && test.waits < 75) {
                 return false;
             }
             window.fileActions[0].trigger();
-            check(!Project.recording && Project.undoText === "Record Audio", "New ends the take and keeps it");
+            check(!Transport.recording && Project.undoText === "Record Audio", "New ends the take and keeps it");
             check(window.unsavedDialog.visible, "New asks about the take");
             window.unsavedDialog.reject();
             check(Project.name === "Files" && Tracks.count === 1, "cancel keeps the project and the take");

@@ -38,18 +38,18 @@ QQC2.ToolBar {
         taps = kept.slice(-8);
         if (taps.length >= 2) {
             const gap = (taps[taps.length - 1] - taps[0]) / (taps.length - 1);
-            Project.setTempo(Math.round(60000 / gap * 10) / 10);
+            Transport.setTempo(Math.round(60000 / gap * 10) / 10);
         }
     }
 
     // The controls set their own values when used, which replaces a plain
     // binding; follow the project (undo, moving the playhead) from here.
     Connections {
-        target: Project
-        function onBpmChanged() { tempoField.value = Math.round(Project.bpm * tempoField.scale); }
-        function onMeterNumeratorChanged() { numeratorField.value = Project.meterNumerator; }
-        function onMeterDenominatorChanged() { denominatorField.currentIndex = bar.denominators.indexOf(Project.meterDenominator); }
-        function onMetronomeChanged() { metronomeButton.checked = Project.metronome; }
+        target: Transport
+        function onBpmChanged() { tempoField.value = Math.round(Transport.bpm * tempoField.scale); }
+        function onMeterNumeratorChanged() { numeratorField.value = Transport.meterNumerator; }
+        function onMeterDenominatorChanged() { denominatorField.currentIndex = bar.denominators.indexOf(Transport.meterDenominator); }
+        function onMetronomeChanged() { metronomeButton.checked = Transport.metronome; }
     }
 
     contentItem: Flow {
@@ -67,7 +67,7 @@ QQC2.ToolBar {
                 id: positionLabel
                 readonly property string countInText: i18nc("@info:status the metronome counts in before recording", "Count-in")
                 Layout.minimumWidth: Math.ceil(Math.max(positionMetrics.advanceWidth, countInMetrics.advanceWidth))
-                text: Project.countingIn ? countInText : Project.positionText
+                text: Transport.countingIn ? countInText : Transport.positionText
                 font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.4
                 font.features: { "tnum": 1 }
                 Accessible.name: i18nc("@info:accessible", "Playhead position in bars and beats")
@@ -86,7 +86,7 @@ QQC2.ToolBar {
             QQC2.Label {
                 id: timeLabel
                 Layout.minimumWidth: Math.ceil(timeMetrics.advanceWidth)
-                text: Project.timeText
+                text: Transport.timeText
                 font.features: { "tnum": 1 }
                 opacity: 0.7
                 Accessible.name: i18nc("@info:accessible", "Playhead position in minutes and seconds")
@@ -117,7 +117,7 @@ QQC2.ToolBar {
                 from: 20 * scale
                 to: 999 * scale
                 stepSize: scale
-                value: Math.round(Project.bpm * scale)
+                value: Math.round(Transport.bpm * scale)
                 editable: true
                 wheelEnabled: true
                 Layout.preferredWidth: Kirigami.Units.gridUnit * 6
@@ -129,7 +129,7 @@ QQC2.ToolBar {
                     decimals: 2
                     notation: DoubleValidator.StandardNotation
                 }
-                onValueModified: Project.setTempo(value / scale)
+                onValueModified: Transport.setTempo(value / scale)
 
                 QQC2.ToolTip.text: i18nc("@info:tooltip", "Tempo in beats per minute at the playhead. Scroll or drag up and down to change it.")
                 QQC2.ToolTip.visible: hovered && !dragger.active
@@ -142,11 +142,11 @@ QQC2.ToolBar {
                     target: null
                     xAxis.enabled: false
                     property real startValue: 0
-                    onActiveChanged: if (active) startValue = Project.bpm
+                    onActiveChanged: if (active) startValue = Transport.bpm
                     onTranslationChanged: {
                         if (active) {
                             const steps = Math.round(-translation.y / (Kirigami.Units.gridUnit / 3));
-                            Project.setTempo(Math.max(20, Math.min(999, startValue + steps)));
+                            Transport.setTempo(Math.max(20, Math.min(999, startValue + steps)));
                         }
                     }
                 }
@@ -178,11 +178,11 @@ QQC2.ToolBar {
                 id: numeratorField
                 from: 1
                 to: 32
-                value: Project.meterNumerator
+                value: Transport.meterNumerator
                 editable: true
                 wheelEnabled: true
                 Layout.preferredWidth: Kirigami.Units.gridUnit * 4
-                onValueModified: Project.setTimeSignature(value, Project.meterDenominator)
+                onValueModified: Transport.setTimeSignature(value, Transport.meterDenominator)
                 Accessible.name: i18nc("@info:accessible", "Beats per bar")
             }
             QQC2.Label {
@@ -191,8 +191,8 @@ QQC2.ToolBar {
             QQC2.ComboBox {
                 id: denominatorField
                 model: bar.denominators
-                currentIndex: bar.denominators.indexOf(Project.meterDenominator)
-                onActivated: (index) => Project.setTimeSignature(Project.meterNumerator, bar.denominators[index])
+                currentIndex: bar.denominators.indexOf(Transport.meterDenominator)
+                onActivated: (index) => Transport.setTimeSignature(Transport.meterNumerator, bar.denominators[index])
                 Accessible.name: i18nc("@info:accessible", "Beat note value")
             }
         }
@@ -207,8 +207,8 @@ QQC2.ToolBar {
                 text: i18nc("@action:button", "Metronome")
                 display: QQC2.AbstractButton.IconOnly
                 checkable: true
-                checked: Project.metronome
-                onToggled: Project.setMetronomeEnabled(checked)
+                checked: Transport.metronome
+                onToggled: Transport.setMetronomeEnabled(checked)
                 QQC2.ToolTip.text: i18nc("@info:tooltip", "Metronome: click on every beat while playing")
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay

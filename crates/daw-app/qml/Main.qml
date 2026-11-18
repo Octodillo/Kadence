@@ -76,22 +76,22 @@ Kirigami.ApplicationWindow {
 
     // Shared by every page's toolbar.
     readonly property Kirigami.Action playAction: Kirigami.Action {
-        text: Project.playing ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Play")
-        icon.name: Project.playing ? "media-playback-stop" : "media-playback-start"
+        text: Transport.playing ? i18nc("@action:button", "Stop") : i18nc("@action:button", "Play")
+        icon.name: Transport.playing ? "media-playback-stop" : "media-playback-start"
         // A window shortcut gets Space before the focused control does, so
         // step aside while a button has keyboard focus and let Space press it.
         shortcut: root.buttonHasKeyboardFocus ? "" : "Space"
         displayHint: Kirigami.DisplayHint.KeepVisible
-        onTriggered: Project.togglePlay()
+        onTriggered: Transport.togglePlay()
     }
 
     readonly property Kirigami.Action recordAction: Kirigami.Action {
-        text: Project.recording ? i18nc("@action:button", "Stop Recording") : i18nc("@action:button", "Record")
+        text: Transport.recording ? i18nc("@action:button", "Stop Recording") : i18nc("@action:button", "Record")
         icon.name: "media-record"
         shortcut: "R"
         tooltip: i18nc("@info:tooltip", "Record onto the armed tracks; with none armed, record MIDI into the open clip or onto the selected instrument track")
         displayHint: Kirigami.DisplayHint.KeepVisible
-        onTriggered: Project.toggleRecord()
+        onTriggered: Transport.toggleRecord()
     }
 
     // Stop leaves reverb and delay tails ringing; this cuts them off.
@@ -101,7 +101,7 @@ Kirigami.ApplicationWindow {
         icon.name: "media-playback-stop"
         shortcut: root.buttonHasKeyboardFocus ? "" : "Shift+Space"
         tooltip: i18nc("@info:tooltip", "Stop playback and cut off every effect tail and held note")
-        onTriggered: Project.stopAllSound()
+        onTriggered: Transport.stopAllSound()
     }
 
     Kirigami.Action {
@@ -109,7 +109,7 @@ Kirigami.ApplicationWindow {
         text: i18nc("@action", "Go to Start")
         icon.name: "media-skip-backward"
         shortcut: root.controlHasHomeKey ? "" : "Home"
-        onTriggered: Project.goToStart()
+        onTriggered: Transport.goToStart()
     }
 
     readonly property list<Kirigami.Action> fileActions: [
@@ -279,8 +279,8 @@ Kirigami.ApplicationWindow {
     // this ends it first: it becomes an edit like any other, or nothing if
     // nothing was recorded.
     function hasUnsavedWork(): bool {
-        if (Project.recording) {
-            Project.stop();
+        if (Transport.recording) {
+            Transport.stop();
         }
         return Project.modified;
     }
