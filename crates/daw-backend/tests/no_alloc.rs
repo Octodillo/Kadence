@@ -14,7 +14,6 @@ fn dummy_cycles_do_not_allocate() {
     let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(2_000);
     b.open(BackendConfig {
         midi_output: true,
-        auto_connect: false,
         ..BackendConfig::default()
     })
     .unwrap();
@@ -63,7 +62,6 @@ fn allocating_cycles_are_counted_silently() {
     if std::env::var_os(CHILD).is_some() {
         let mut b = DummyBackend::new(Pacing::Freewheel).with_max_cycles(CYCLES);
         b.open(BackendConfig {
-            auto_connect: false,
             ..BackendConfig::default()
         })
         .unwrap();
