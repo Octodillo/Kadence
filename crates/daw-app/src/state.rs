@@ -1101,6 +1101,9 @@ impl AppState {
             // The new document's plugins start from its own saved state, even where it
             // has the same devices (reopening a project).
             s.clear_plugins();
+            // And its audio files are looked at afresh: one that could not be read last
+            // time, or was replaced since, may be there now.
+            s.reload_media();
         }
         self.doc = doc;
         self.autosave_failed = None;
