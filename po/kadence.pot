@@ -1613,6 +1613,25 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: crates/daw-app/qml/EngineErrorText.qml
+msgctxt "@info"
+msgid "The audio server went away. Kadence reconnects when it is back."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml
+msgctxt "@info"
+msgid ""
+"The audio engine stopped after an internal error. To start it again, open "
+"the audio settings and choose any setting."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml
+msgctxt "@info"
+msgid ""
+"The audio system keeps failing, so Kadence stopped restarting it. To try "
+"again, open the audio settings and choose any setting."
+msgstr ""
+
+#: crates/daw-app/qml/EngineErrorText.qml
 msgctxt "@info %1 is a message from the audio system, which may be in English"
 msgid "The audio system reported: %1"
 msgstr ""
@@ -2820,6 +2839,13 @@ msgid_plural ""
 "gaps or clicks."
 msgstr[0] ""
 msgstr[1] ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info"
+msgid ""
+"Recording stopped because the audio system restarted. What was recorded "
+"until then is kept."
+msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml
 msgctxt "@info"

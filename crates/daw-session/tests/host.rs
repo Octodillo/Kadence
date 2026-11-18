@@ -1,8 +1,9 @@
-//! The audio host's MIDI inputs on the dummy backend: a port per chosen
-//! source, connected whenever the source is there.
+//! The audio host on the dummy backend: its MIDI inputs (a port per chosen
+//! source, connected whenever the source is there) and how it reports audio
+//! that stopped working.
 
 use daw_backend::{DummyBackend, Pacing, PortDirection, PortKind};
-use daw_session::host::{AudioHost, HostConfig};
+use daw_session::host::{AudioHost, HostConfig, HostHealth, HostKind};
 
 fn host() -> (AudioHost, daw_backend::DummySystem) {
     let dummy = DummyBackend::new(Pacing::RealTime);
@@ -198,4 +199,50 @@ fn an_unplugged_device_keeps_its_port_name_when_picked_again() {
     system.add_port("keys:out", PortKind::Midi, PortDirection::Output, true);
     assert!(host.refresh_midi());
     assert!(linked(&system, "keys:out", "Kadence:out"));
+}
+
+/// Polls until `host` reports `health`, as the app's timer would.
+fn wait_for_health(host: &AudioHost, health: HostHealth) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while host.health() != health {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "health stayed {:?}",
+            host.health()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_lost_server_shows_in_health_until_the_restart() {
+    let (mut host, system) = host();
+    assert_eq!(host.health(), HostHealth::Ok);
+    system.shut_down();
+    wait_for_health(&host, HostHealth::ServerGone);
+    // No server to go back to in this test: the restart ends up silent,
+    // but on a backend that runs.
+    let config = host.config().clone();
+    host.restart(config);
+    assert_eq!(host.kind(), HostKind::Silent);
+    assert_eq!(host.health(), HostHealth::Ok);
+    assert!(!host.server_appeared(), "this host does not want a server");
+}
+
+#[test]
+fn a_panic_in_the_callback_shows_in_health() {
+    let (host, system) = host();
+    system.panic_callback();
+    wait_for_health(&host, HostHealth::Crashed);
+}
+
+#[test]
+fn a_server_rate_change_is_reported_while_the_engine_keeps_its_rate() {
+    let (host, system) = host();
+    assert_eq!(host.sample_rate(), 48_000);
+    system.change_sample_rate(44_100);
+    wait_for_health(&host, HostHealth::RateChanged(44_100));
+    // The engine still runs at the rate it was built for, and says so.
+    assert_eq!(host.sample_rate(), 48_000);
+    assert_eq!(host.session().sample_rate(), 48_000.0);
 }
