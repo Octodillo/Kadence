@@ -41,11 +41,12 @@ Rectangle {
         if (placeholder) {
             return;
         }
-        value = Automation.laneValue(track, lane);
-        following = Automation.laneFollowing(track, lane);
-        writes = Automation.laneWrites(track, lane);
+        const control = Automation.laneControl(track, lane);
+        value = control.value;
+        following = control.following;
+        writes = control.writes;
         if (!levelSlider.pressed) {
-            levelSlider.value = Automation.lanePosition(track, lane);
+            levelSlider.value = control.position;
         }
     }
 
@@ -69,11 +70,10 @@ Rectangle {
     }
 
     // A playing lane moves its control.
-    Timer {
-        interval: 50
-        repeat: true
-        running: laneHeader.following && Project.playing && laneHeader.visible
-        onTriggered: laneHeader.readValue()
+    Connections {
+        target: UiClock
+        enabled: laneHeader.following && Project.playing && laneHeader.visible
+        function onTicked() { laneHeader.readValue(); }
     }
     // So does moving the playhead while stopped.
     Connections {
@@ -160,7 +160,7 @@ Rectangle {
             // a key press is a gesture of its own.
             function move(): void {
                 Automation.setLanePosition(laneHeader.track, laneHeader.lane, value);
-                laneHeader.value = Automation.laneValue(laneHeader.track, laneHeader.lane);
+                laneHeader.readValue();
             }
             onMoved: {
                 if (pressed) {

@@ -133,7 +133,7 @@ Item {
         },
         () => {
             // Pick up the state now: on a slow first start the step timer can
-            // fire before Project's own timer has ticked.
+            // fire before the application's clock has ticked.
             Project.tick();
             check(Project.status.context === Project.ImportContext
                   && Project.status.reason === Project.CannotDecode
@@ -144,13 +144,13 @@ Item {
         },
         () => {
             check(TestHelper.loadDemoProject(), "load demo project");
-            // Building the demo can outlast the 33 ms tick, and then this
+            // Building the demo can outlast the clock's beat, and then this
             // timer may fire before it: refresh Project's properties now.
             Project.tick();
         },
         () => {
             // A slow load can block the event loop past this step's timer,
-            // so both timers are overdue at once; refresh before reading.
+            // so this timer and the clock are overdue at once; refresh before reading.
             Project.tick();
             check(Tracks.count === 4, "demo has three tracks and a bus");
             // Show an armed instrument track listening to one channel.
@@ -202,25 +202,27 @@ Item {
             check(lane().mode === Automation.LaneOff && Project.undoText === "Toggle Automation", "lane off");
             // An off lane's control sets the fader; a playing one follows
             // its points and can't be moved.
-            check(!Automation.laneFollowing(0, 0), "an off lane doesn't follow its points");
-            check(!Automation.laneWrites(0, 0), "a lane in read mode doesn't write");
-            const volume = Automation.laneValue(0, 0);
+            const off = Automation.laneControl(0, 0);
+            check(!off.following, "an off lane doesn't follow its points");
+            check(!off.writes, "a lane in read mode doesn't write");
+            const volume = off.value;
             Automation.beginLaneControl(0, 0);
             Automation.setLanePosition(0, 0, 0.25);
             Automation.setLanePosition(0, 0, 1);
             Automation.endLaneControl(0, 0);
             Project.tick();
-            check(Automation.laneValue(0, 0) > volume && Automation.lanePosition(0, 0) === 1, "lane control sets the volume");
+            const moved = Automation.laneControl(0, 0);
+            check(moved.value > volume && moved.position === 1, "lane control sets the volume");
             // The next gesture (a key press) is its own undo step.
             Automation.beginLaneControl(0, 0);
             Automation.setLanePosition(0, 0, 0.5);
             Automation.endLaneControl(0, 0);
             Project.undo();
-            check(Automation.lanePosition(0, 0) === 1, "each lane control gesture is its own undo step");
+            check(Automation.laneControl(0, 0).position === 1, "each lane control gesture is its own undo step");
             Project.undo();
-            check(Automation.laneValue(0, 0) === volume, "a lane control drag is one undo step");
+            check(Automation.laneControl(0, 0).value === volume, "a lane control drag is one undo step");
             Automation.setLaneMode(0, 0, Automation.LaneWrite);
-            check(lane().mode === Automation.LaneWrite && Automation.laneWrites(0, 0), "lane in write mode writes");
+            check(lane().mode === Automation.LaneWrite && Automation.laneControl(0, 0).writes, "lane in write mode writes");
             Automation.setLaneMode(0, 0, Automation.LaneRead);
             Project.undo();
             Project.undo();

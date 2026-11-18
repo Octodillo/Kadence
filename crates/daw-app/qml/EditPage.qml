@@ -288,11 +288,10 @@ Kirigami.Page {
         target: Project
         function onRevisionChanged() { page.refresh(); }
     }
-    Timer {
-        interval: 16
-        repeat: true
-        running: Project.playing && page.visible
-        onTriggered: roll.refresh()
+    Connections {
+        target: UiClock
+        enabled: page.visible
+        function onFrame() { roll.refresh(); }
     }
     onVisibleChanged: if (visible) page.refresh()
     MeterClock {

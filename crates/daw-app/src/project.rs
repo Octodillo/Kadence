@@ -237,7 +237,8 @@ pub mod qobject {
         #[qinvokable]
         fn collect_files(self: Pin<&mut Project>) -> i32;
 
-        /// Called by a timer: picks up engine position and background work.
+        /// Called by the UI's clock (`UiClock.qml`): picks up engine position
+        /// and background work.
         #[qinvokable]
         fn tick(self: Pin<&mut Project>);
 

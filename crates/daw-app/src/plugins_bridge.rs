@@ -76,7 +76,7 @@ pub mod qobject {
         #[qproperty(QStringList, extra_folders)]
         type Plugins = super::PluginsRust;
 
-        /// Picks up scan progress and results. Called by the UI's timer.
+        /// Picks up scan progress and results. Called by the UI's clock.
         #[qinvokable]
         fn tick(self: Pin<&mut Plugins>);
 

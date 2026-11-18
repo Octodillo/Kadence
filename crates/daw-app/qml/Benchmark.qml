@@ -129,7 +129,8 @@ Item {
         enabled: bench.phase >= 0 && !bench.done
         function onFrameSwapped(): void {
             const now = TestHelper.nowMs();
-            // Since the last swap: the move made then and this frame's paint.
+            // Since the last swap: the moves made then (their layout, and
+            // the one picture built for them) and this frame's paint.
             const costs = bench.view().takeCosts();
             if (now - bench.phaseStart > bench.warmupMs && bench.last > 0) {
                 if (bench.frames.length === 0) {

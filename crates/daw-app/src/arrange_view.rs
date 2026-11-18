@@ -67,8 +67,14 @@ pub mod qobject {
 
         #[cxx_override]
         unsafe fn paint(self: Pin<&mut ArrangeView>, painter: *mut QPainter);
+        /// Builds the picture, if it is stale and the view shows: once a
+        /// frame at most, however many changes there were.
+        #[cxx_override]
+        #[cxx_name = "updatePolish"]
+        fn update_polish(self: Pin<&mut ArrangeView>);
 
-        /// Rebuilds the picture from the current state.
+        /// Shows the current state: the properties at once, the picture on
+        /// the next frame.
         #[qinvokable]
         fn refresh(self: Pin<&mut ArrangeView>);
 
@@ -149,6 +155,16 @@ pub mod qobject {
     unsafe extern "RustQt" {
         #[inherit]
         fn update(self: Pin<&mut ArrangeView>);
+        #[inherit]
+        fn polish(self: Pin<&mut ArrangeView>);
+        /// The item was shown or hidden (itself or with what holds it).
+        #[inherit]
+        #[qsignal]
+        #[cxx_name = "visibleChanged"]
+        fn visible_changed(self: Pin<&mut ArrangeView>);
+        #[inherit]
+        #[cxx_name = "isVisible"]
+        fn is_visible(self: &ArrangeView) -> bool;
         #[inherit]
         fn width(self: &ArrangeView) -> f64;
         #[inherit]
@@ -232,6 +248,12 @@ impl cxx_qt::Constructor<()> for qobject::ArrangeView {
     fn new(_: ()) -> ArrangeViewRust {
         ArrangeViewRust::default()
     }
+
+    fn initialize(self: Pin<&mut Self>, _: ()) {
+        // A hidden item keeps a stale picture (see `update_polish`): draw
+        // it afresh when the item shows again.
+        self.on_visible_changed(|item| item.polish()).release();
+    }
 }
 
 impl qobject::ArrangeView {
@@ -268,7 +290,7 @@ impl qobject::ArrangeView {
         let palette = paint::theme_palette!(self);
         let ruler = self.ruler_height;
         let lane_height = self.lane_height;
-        let (scene, geometry) = state::with(|s| {
+        let (sx, sy, cw, ch, th) = state::with(|s| {
             s.arrange.palette = palette;
             s.arrange.ruler_height = ruler;
             // Unclamped (but never zero), so rows stay level with the lane
@@ -276,30 +298,41 @@ impl qobject::ArrangeView {
             s.arrange.lane_height = lane_height.max(1.0);
             let project = s.doc.project().clone();
             s.arrange.resize(&project, w, h);
-            s.arrange.peaks.poll();
-            let scene = s.with_arrange(|a, doc, env| a.scene(doc.project(), env));
             let a = &s.arrange;
-            let geometry = (
+            (
                 a.view.scroll_x,
                 a.scroll_y,
                 a.content_width(&project),
                 a.content_height(&project),
                 a.track_height,
-            );
-            (scene, geometry)
+            )
         });
-        self.as_mut().rust_mut().scene.store(scene);
-        // Not the setters below: they run QML bindings (the headers follow
-        // the scroll position).
-        let costs = &mut self.as_mut().rust_mut().costs;
-        costs.refresh_ms += millis_since(start);
-        costs.refreshes += 1;
-        let (sx, sy, cw, ch, th) = geometry;
         self.as_mut().set_scroll_x(sx);
         self.as_mut().set_scroll_y(sy);
         self.as_mut().set_content_width(cw);
         self.as_mut().set_content_height(ch);
         self.as_mut().set_track_height(th);
+        let mut rust = self.as_mut().rust_mut();
+        // The setters too: they run QML bindings (the headers follow the
+        // scroll position).
+        rust.costs.refresh_ms += millis_since(start);
+        rust.scene.invalidate();
+        self.polish();
+    }
+
+    fn update_polish(mut self: Pin<&mut Self>) {
+        if !self.scene.wants_scene(self.is_visible()) {
+            return;
+        }
+        let start = Instant::now();
+        let scene = state::with(|s| {
+            s.arrange.peaks.poll();
+            s.with_arrange(|a, doc, env| a.scene(doc.project(), env))
+        });
+        let mut rust = self.as_mut().rust_mut();
+        rust.scene.store(scene);
+        rust.costs.refresh_ms += millis_since(start);
+        rust.costs.refreshes += 1;
         self.update();
     }
 

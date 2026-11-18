@@ -403,16 +403,6 @@ Kirigami.ApplicationWindow {
         Project.shutdown();
     }
 
-    // Engine position, peak loading, autosave, plugin scan progress.
-    Timer {
-        interval: 33
-        repeat: true
-        running: true
-        onTriggered: {
-            Project.tick();
-            Plugins.tick();
-        }
-    }
 
     // One browser for every place that adds a plugin; see browsePlugins().
     PluginBrowser {
@@ -425,14 +415,6 @@ Kirigami.ApplicationWindow {
         }
         onClosed: pickHandler = null
         onConfigureRequested: root.openSettings()
-    }
-
-    // MIDI devices plugged in or out.
-    Timer {
-        interval: 1000
-        repeat: true
-        running: true
-        onTriggered: AppSettings.refreshMidi()
     }
 
     Kirigami.Action {
