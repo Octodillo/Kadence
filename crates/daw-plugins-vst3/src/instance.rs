@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
-    ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance, PluginProcessor,
+    BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
+    PluginProcessor, ScanBuilder,
 };
 use daw_core::split::{SharedAudio, SplitAudio};
 use vst3::Steinberg::Vst::{
@@ -690,34 +691,26 @@ fn channel_total(channels: &[i32]) -> u16 {
 }
 
 /// Lists the processor classes of one module as descriptors. Classes whose component cannot be
-/// created are left out; when that is every class, the scan fails, naming the first.
-pub fn scan_module(path: &Path) -> Result<Vec<PluginDescriptor>, PluginError> {
+/// created are reported as skipped; when that is every class, the scan fails, naming the first.
+pub fn scan_module(path: &Path) -> Result<BundleScan, PluginError> {
     let module = Module::load(path).map_err(PluginError::Load)?;
     let factory_vendor = module.factory_vendor();
-    let mut found = Vec::new();
-    let mut first_error = None;
+    let mut scan = ScanBuilder::default();
     for class in module
         .classes()
         .into_iter()
         .filter(|c| c.category == AUDIO_EFFECT_CLASS)
     {
         match probe_ports(&module, &class) {
-            Some(ports) => found.push(descriptor_for(path, &class, &factory_vendor, ports)),
-            None => {
-                let e = format!(
-                    "{}: {} could not be created and initialized",
-                    path.display(),
-                    class.name
-                );
-                log::warn!("vst3 scan: {e}");
-                first_error.get_or_insert(e);
-            }
+            Some(ports) => scan.found(descriptor_for(path, &class, &factory_vendor, ports)),
+            None => scan.skip(PluginError::Load(format!(
+                "{}: {} could not be created and initialized",
+                path.display(),
+                class.name
+            ))),
         }
     }
-    match first_error {
-        Some(e) if found.is_empty() => Err(PluginError::Load(e)),
-        _ => Ok(found),
-    }
+    scan.finish()
 }
 
 fn descriptor_for(
@@ -1678,7 +1671,7 @@ mod tests {
         static BUNDLE: OnceLock<PathBuf> = OnceLock::new();
         let bundle = BUNDLE
             .get_or_init(|| crate::test_support::example_bundle("testgain", "TestGain", "unit").0);
-        scan_module(bundle).unwrap().pop().unwrap()
+        scan_module(bundle).unwrap().plugins.pop().unwrap()
     }
 
     fn instance() -> Vst3Instance {

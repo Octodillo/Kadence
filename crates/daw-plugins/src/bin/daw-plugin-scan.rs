@@ -1,4 +1,4 @@
-//! Scans one plugin bundle and prints its descriptors as JSON: `daw-plugin-scan --scan <format>
+//! Scans one plugin bundle and prints what it found as JSON: `daw-plugin-scan --scan <format>
 //! <bundle>`. The registry runs this in a child process so that a crashing plugin only takes
 //! this process down.
 
