@@ -1,6 +1,6 @@
 //! Automation lanes under the piano roll, against a real document.
 
-use daw_arrange::{Button, Env, PointShape, Pointer, Prim, Snap};
+use daw_arrange::{Button, Env, Input, Outcome, PointShape, Pointer, Prim, Snap, Surface};
 use daw_core::time::{PPQ, SegmentTempoMap, TickTime};
 use daw_midi::NoteData;
 use daw_midi::model::new_note;
@@ -64,7 +64,9 @@ impl Rig {
         }
     }
 
-    fn press(&mut self, p: Pointer) {
+    /// Through `Surface::input`, as the app sends pointer input, so these
+    /// tests also cover how each `Input` reaches the piano roll.
+    fn input(&mut self, input: Input) -> Outcome {
         let tempo = self.tempo.clone();
         let env = Env {
             tempo: &tempo,
@@ -73,12 +75,16 @@ impl Rig {
             playhead: TickTime(0),
             loop_range: None,
         };
-        self.pr.press(&mut self.doc, &env, p);
+        self.pr.input(&mut self.doc, &env, input)
+    }
+
+    fn press(&mut self, p: Pointer) {
+        self.input(Input::Press(p));
     }
 
     fn click(&mut self, x: f64, y: f64) {
         self.press(Pointer::left(x, y));
-        self.pr.release(&mut self.doc, Pointer::left(x, y));
+        self.input(Input::Release(Pointer::left(x, y)));
     }
 
     /// Where pan `value` at `tick` is in the pan lane.
@@ -121,8 +127,8 @@ fn a_click_adds_a_point_where_the_lane_is_drawn_and_drags_in_one_step() {
     assert_eq!(x, r.pr.keyboard_width + r.pr.view.tick_to_x(TickTime(Q)));
     r.press(Pointer::left(x, y));
     let (x2, y2) = r.at(2 * Q, -1.0);
-    r.pr.motion(&mut r.doc, Pointer::left(x2, y2));
-    r.pr.release(&mut r.doc, Pointer::left(x2, y2));
+    r.input(Input::Motion(Pointer::left(x2, y2)));
+    r.input(Input::Release(Pointer::left(x2, y2)));
     let pts = r.points();
     assert_eq!(pts.len(), 1);
     assert_eq!(pts[0].tick, TickTime(2 * Q));
@@ -197,7 +203,7 @@ fn ending_drags_before_another_edit_stops_a_lane_drag() {
     assert!(r.points().is_empty());
     // Motion afterwards doesn't bring the point back.
     let (x2, y2) = r.at(2 * Q, 1.0);
-    r.pr.motion(&mut r.doc, Pointer::left(x2, y2));
+    r.input(Input::Motion(Pointer::left(x2, y2)));
     assert!(r.points().is_empty());
 }
 
@@ -213,14 +219,14 @@ fn double_click_deletes_a_point_and_the_menu_sets_shapes() {
     let mut right = Pointer::left(x, y);
     right.button = Button::Right;
     r.press(right);
-    r.pr.release(&mut r.doc, right);
+    r.input(Input::Release(right));
     assert_eq!(r.pr.take_lane_menu_request(), Some(true));
     assert_eq!(r.pr.take_lane_menu_request(), None);
     r.pr.set_point_shape(&mut r.doc, PointShape::Step);
     assert!(r.points()[0].step);
     assert_eq!(r.pr.point_shape(r.doc.project()), Some(PointShape::Step));
 
-    r.pr.double_click(&mut r.doc, Pointer::left(x2, y2));
+    r.input(Input::DoubleClick(Pointer::left(x2, y2)));
     assert_eq!(r.points().len(), 1);
 }
 
@@ -230,7 +236,7 @@ fn escape_undoes_a_lane_gesture_and_a_press_ends_a_lost_one() {
     let (x, y) = r.at(Q, 0.0);
     r.press(Pointer::left(x, y));
     assert_eq!(r.points().len(), 1);
-    r.pr.cancel(&mut r.doc);
+    r.input(Input::Cancel);
     assert!(r.points().is_empty());
 
     // A drag whose release never comes, then a press among the notes:
@@ -240,7 +246,7 @@ fn escape_undoes_a_lane_gesture_and_a_press_ends_a_lost_one() {
     r.press(Pointer::left(notes.x + 400.0, notes.y + 10.0));
     let before = r.points();
     let (x2, y2) = r.at(3 * Q, 1.0);
-    r.pr.motion(&mut r.doc, Pointer::left(x2, y2));
+    r.input(Input::Motion(Pointer::left(x2, y2)));
     assert_eq!(r.points(), before);
 }
 

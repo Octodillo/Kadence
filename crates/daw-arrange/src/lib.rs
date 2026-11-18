@@ -21,6 +21,7 @@ pub mod peaks;
 pub mod rows;
 pub mod scene;
 pub mod snap;
+pub mod surface;
 pub mod view;
 
 use std::collections::{BTreeSet, HashMap};
@@ -45,6 +46,7 @@ pub use peaks::{PeakPool, Peaks};
 pub use rows::{Group, LaneRow, OpenGroups, RowKind};
 pub use scene::{Palette, Prim, Rect, Rgba, Scene};
 pub use snap::Snap;
+pub use surface::{Input, Surface};
 pub use view::TimelineView;
 
 /// Smallest and largest track height in logical pixels.
