@@ -112,7 +112,10 @@ Every edit can be undone with Ctrl+Z and redone with Ctrl+Shift+Z.
 Kadence has three pages, switched from the sidebar on the left:
 
 - **Arrange** (Ctrl+1): tracks and clips on a timeline.
-- **Mix** (Ctrl+2): a channel strip per track, with effects and sends.
+- **Mix** (Ctrl+2): every channel strip side by side, with its meter. You
+  never need it: the Arrange page has all of each track's controls (see
+  [Controls and automation in the Arrange page](#controls-and-automation-in-the-arrange-page)).
+  It is there for an overview of the whole mix.
 - **Edit** (Ctrl+3): the piano roll for the open MIDI clip.
 
 **Play**/**Stop** (Space) and **Record** (R) are on the toolbar of the
@@ -205,8 +208,10 @@ Double-click a MIDI clip to open it on the **Edit** page.
 
 ## Mixing
 
-The **Mix** page has a channel strip for every track, then the buses and the
-master.
+You can mix entirely in the Arrange page, where each track unfolds into its
+controls (see below). The **Mix** page shows the same controls as a mixing
+desk, for an overview: a channel strip for every track, then the buses and
+the master, with level meters.
 
 - The fader sets the volume (double-click for 0 dB) and the knob the pan
   (double-click to centre).
@@ -235,7 +240,9 @@ them under the track:
 - **Volume** and **Pan**, each a row with its slider.
 - **Instrument** (on instrument tracks), **Effects** and **Sends**. These
   are groups: click one to open it. Effects lists each effect, and an effect
-  opens to its parameters; Sends lists the level of each send.
+  (or the instrument) opens to its parameters; Sends lists the level of each
+  send. A plugin lists the parameters it lets a host automate, once it has
+  loaded.
 
 Each control has a row in the timeline beside it. Click there to start
 automating the control: the click adds the first point. Drag points to move

@@ -916,3 +916,70 @@ fn select_all_selects_clips_instead_of_points() {
     assert!(r.doc.project().tracks[0].clips.is_empty());
     assert_eq!(r.points(lane).len(), 1, "Delete took the point");
 }
+
+/// A catalog whose devices' parameters become known later, as a plugin's
+/// do once it loads.
+#[derive(Default)]
+struct Loading {
+    params: std::sync::Mutex<Vec<ParamId>>,
+    revision: std::sync::atomic::AtomicU64,
+}
+
+impl ParamCatalog for Loading {
+    fn automatable(&self, _: &Device) -> Vec<ParamId> {
+        self.params.lock().unwrap().clone()
+    }
+    fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
+        Catalog.scale(device, param)
+    }
+    fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
+        Catalog.default_value(device, param)
+    }
+    fn is_instrument(&self, _: &Device) -> bool {
+        false
+    }
+    fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[test]
+fn an_open_device_lists_its_parameters_once_they_are_known() {
+    let mut r = Rig::new();
+    let track = r.tracks[0];
+    let dev = Device::new(
+        "Filter",
+        DeviceSource::Builtin {
+            kind: "daw.eq".into(),
+        },
+    );
+    let id = dev.id;
+    r.doc
+        .execute(AddDevice {
+            track,
+            index: 0,
+            device: dev,
+        })
+        .unwrap();
+    let catalog = Arc::new(Loading::default());
+    r.arrange.params = Some(catalog.clone());
+    r.arrange.expanded.insert(track);
+    r.arrange.open.insert((track, Group::Effects));
+    r.arrange.open.insert((track, Group::Device(id)));
+    r.arrange.relayout(r.doc.project());
+    let before = r.arrange.lane_rows(0).len();
+
+    // Laid out again with nothing changed: the same rows.
+    *catalog.params.lock().unwrap() = vec![0, 1];
+    r.arrange.relayout(r.doc.project());
+    assert_eq!(r.arrange.lane_rows(0).len(), before);
+
+    // The catalog says it changed: the device's parameters show.
+    catalog
+        .revision
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    r.arrange.relayout(r.doc.project());
+    assert_eq!(r.arrange.lane_rows(0).len(), before + 2);
+    let track = r.doc.project().track(track).unwrap().clone();
+    assert_eq!(r.arrange.rows_of(&track).len(), before + 2);
+}

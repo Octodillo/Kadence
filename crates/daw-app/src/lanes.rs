@@ -15,6 +15,7 @@
 //! slider all move along one scale.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 
@@ -80,6 +81,8 @@ pub struct LaneParams {
     /// Behind a lock only because the views hold the catalog as a shared
     /// `Send + Sync` object; it is written on the thread that reads it.
     plugins: RwLock<HashMap<DeviceId, PluginLanes>>,
+    /// Counts the changes to `plugins` (see [`ParamCatalog::revision`]).
+    revision: AtomicU64,
 }
 
 /// One loaded plugin, as the lanes know it.
@@ -89,6 +92,8 @@ struct PluginLanes {
     /// lane can show.
     described: usize,
     params: HashMap<ParamId, ParamDesc>,
+    /// Those the plugin lets a host automate, in its own order.
+    automatable: Vec<ParamId>,
     /// The plugin's own values for parameters the document doesn't store,
     /// where they were read ([`LaneParams::set_value`]).
     values: HashMap<ParamId, f64>,
@@ -96,14 +101,21 @@ struct PluginLanes {
 
 impl PluginLanes {
     fn new(infos: &[daw_core::plugin::ParamInfo]) -> Self {
+        let params: HashMap<ParamId, ParamDesc> = infos
+            .iter()
+            .map(ParamDesc::from_info)
+            .filter(ParamDesc::has_range)
+            .map(|p| (p.id, p))
+            .collect();
+        let automatable = infos
+            .iter()
+            .filter(|i| i.automatable && params.contains_key(&i.id))
+            .map(|i| i.id)
+            .collect();
         Self {
             described: infos.len(),
-            params: infos
-                .iter()
-                .map(ParamDesc::from_info)
-                .filter(ParamDesc::has_range)
-                .map(|p| (p.id, p))
-                .collect(),
+            params,
+            automatable,
             values: HashMap::new(),
         }
     }
@@ -165,15 +177,22 @@ impl LaneParams {
     ) {
         let mut plugins = self.plugins.write().unwrap_or_else(PoisonError::into_inner);
         let mut known = std::mem::take(&mut *plugins);
+        let mut changed = false;
         for device in devices {
             let Some(infos) = describe(device.id) else {
                 continue;
             };
-            let plugin = known
-                .remove(&device.id)
-                .filter(|p| p.describes(infos))
-                .unwrap_or_else(|| PluginLanes::new(infos));
+            let plugin = match known.remove(&device.id).filter(|p| p.describes(infos)) {
+                Some(p) => p,
+                None => {
+                    changed = true;
+                    PluginLanes::new(infos)
+                }
+            };
             plugins.insert(device.id, plugin);
+        }
+        if changed || !known.is_empty() {
+            self.revision.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -190,11 +209,21 @@ impl LaneParams {
 }
 
 impl ParamCatalog for LaneParams {
-    /// The built-in devices' only: a plugin may have thousands of
-    /// parameters, too many to offer in a menu. A plugin parameter gets
-    /// its lane when it is moved with Write Automation on.
+    /// A built-in device's, or those a loaded plugin lets a host automate
+    /// (and that have a range), in the plugin's order. An unloaded
+    /// plugin's are unknown: none.
     fn automatable(&self, device: &Device) -> Vec<ParamId> {
-        self.builtin.automatable(device)
+        if matches!(device.source, DeviceSource::Builtin { .. }) {
+            return self.builtin.automatable(device);
+        }
+        let plugins = self.plugins.read().unwrap_or_else(PoisonError::into_inner);
+        plugins
+            .get(&device.id)
+            .map_or_else(Vec::new, |p| p.automatable.clone())
+    }
+
+    fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
     }
 
     fn is_instrument(&self, device: &Device) -> bool {
@@ -743,13 +772,29 @@ mod tests {
             default: 1_000.0,
             automatable: true,
         };
-        let infos = [cutoff];
+        // One a host may not automate: known, but not listed as a row.
+        let meter = ParamInfo {
+            id: 8,
+            name: "Meter".into(),
+            automatable: false,
+            ..cutoff.clone()
+        };
+        let infos = [meter, cutoff];
         let p = LaneParams::default();
         assert_eq!(p.scale(&plugin, 7), None, "unknown until it loads");
+        assert!(p.automatable(&plugin).is_empty());
 
         let devices = [plugin.clone(), eq_device()];
         let loaded = |id| (id == plugin.id).then_some(&infos[..]);
+        let before = p.revision();
         p.set_plugins(devices.iter(), loaded);
+        assert_ne!(
+            p.revision(),
+            before,
+            "rows made before it loaded are made again"
+        );
+        assert_eq!(p.automatable(&plugin), [7]);
+        let loaded_at = p.revision();
         let scale = p.scale(&plugin, 7).expect("a range");
         assert_eq!(scale.from_norm(0.0), 20.0);
         assert_eq!(scale.from_norm(1.0), 20_000.0);
@@ -760,10 +805,9 @@ mod tests {
         p.set_value(plugin.id, 7, 5_000.0);
         p.set_value(plugin.id, 7, f64::NAN);
         p.set_plugins(devices.iter(), loaded);
+        assert_eq!(p.revision(), loaded_at, "the same plugin, the same rows");
         assert_eq!(p.default_value(&plugin, 7), Some(5_000.0));
-        assert_eq!(p.scale(&plugin, 8), None, "not one of its parameters");
-        // Too many to offer in the Add Automation Lane menu.
-        assert!(p.automatable(&plugin).is_empty());
+        assert_eq!(p.scale(&plugin, 9), None, "not one of its parameters");
         // Built-in devices are known as before.
         assert!(!p.automatable(&devices[1]).is_empty());
 
