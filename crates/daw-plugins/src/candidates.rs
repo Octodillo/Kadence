@@ -5,15 +5,6 @@ use std::path::{Path, PathBuf};
 
 use daw_core::plugin::PluginFormatKind;
 
-/// The file or directory extension of one plugin bundle of `kind`.
-pub fn bundle_extension(kind: &PluginFormatKind) -> &'static str {
-    match kind {
-        PluginFormatKind::Clap => "clap",
-        PluginFormatKind::Lv2 => "lv2",
-        PluginFormatKind::Vst3 => "vst3",
-    }
-}
-
 /// Every bundle of `kind` under `roots`, each once. Roots keep their order, so earlier search
 /// paths take precedence; each directory's entries are visited in sorted order. A root may
 /// itself be a bundle.
@@ -25,7 +16,8 @@ pub fn bundle_extension(kind: &PluginFormatKind) -> &'static str {
 /// led to it. A link to a bundle is that bundle whatever the link is called.
 pub fn find_candidates(kind: &PluginFormatKind, roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut walk = Walk {
-        extension: bundle_extension(kind),
+        // Every format's bundles are named after it.
+        extension: kind.as_str(),
         walked: HashMap::new(),
         reported: HashSet::new(),
         found: Vec::new(),

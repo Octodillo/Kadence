@@ -24,6 +24,49 @@ pub enum PluginFormatKind {
     Vst3,
 }
 
+impl PluginFormatKind {
+    /// Every format.
+    pub const ALL: [Self; 3] = [Self::Clap, Self::Lv2, Self::Vst3];
+
+    /// The format's name wherever one is written down or passed along: the
+    /// scanner's command line, QML's `formatId`, the extension of the
+    /// format's bundles and the name of the folders they are installed in.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Clap => "clap",
+            Self::Lv2 => "lv2",
+            Self::Vst3 => "vst3",
+        }
+    }
+
+    /// The format's name as users know it. Not translated: it is a name.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Clap => "CLAP",
+            Self::Lv2 => "LV2",
+            Self::Vst3 => "VST3",
+        }
+    }
+}
+
+/// A name that is not the [`as_str`](PluginFormatKind::as_str) of any
+/// format.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unknown plugin format {0:?}")]
+pub struct UnknownPluginFormat(pub String);
+
+impl std::str::FromStr for PluginFormatKind {
+    type Err = UnknownPluginFormat;
+
+    /// The format whose [`as_str`](Self::as_str) is `name`.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == name)
+            .ok_or_else(|| UnknownPluginFormat(name.to_owned()))
+    }
+}
+
 /// What a scan finds out about one plugin.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginDescriptor {
@@ -251,6 +294,18 @@ pub trait PluginFormat: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_format_is_found_again_by_its_name() {
+        let unknown = |name: &str| Err(UnknownPluginFormat(name.to_owned()));
+        for kind in PluginFormatKind::ALL {
+            assert_eq!(kind.as_str().parse(), Ok(kind.clone()));
+            // The display name is for people, not a name to parse.
+            let shown = kind.display_name();
+            assert_eq!(shown.parse::<PluginFormatKind>(), unknown(shown));
+        }
+        assert_eq!("".parse::<PluginFormatKind>(), unknown(""));
+    }
 
     fn plugin(id: &str) -> PluginDescriptor {
         PluginDescriptor {

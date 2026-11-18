@@ -53,8 +53,8 @@ Kirigami.FormLayout {
         spacing: Kirigami.Units.smallSpacing
 
         Repeater {
-            // CLAP, VST3 and LV2: names, so not translated.
-            model: Plugins.formatNames()
+            // The formats' names, which are not translated.
+            model: Plugins.formats
             delegate: ColumnLayout {
                 id: formatGroup
                 required property int index

@@ -158,7 +158,7 @@ pub fn plugin_choices(plugins: &[PluginDescriptor]) -> Vec<InstrumentChoice> {
     instruments
         .iter()
         .map(|d| {
-            let format = crate::plugins_bridge::format_label(&d.format);
+            let format = d.format.display_name();
             let name = if shared(d, true) && !d.vendor.is_empty() {
                 format!("{} ({}, {format})", d.name, d.vendor)
             } else if shared(d, false) {

@@ -17,20 +17,6 @@ use crate::registry::PluginRegistry;
 /// The argument that selects scan mode in the child.
 const SCAN_ARG: &str = "--scan";
 
-/// The name of `kind` on the scanner's command line, which is also its bundle extension.
-pub fn kind_name(kind: &PluginFormatKind) -> &'static str {
-    crate::candidates::bundle_extension(kind)
-}
-
-pub fn kind_from_name(name: &str) -> Option<PluginFormatKind> {
-    match name {
-        "clap" => Some(PluginFormatKind::Clap),
-        "lv2" => Some(PluginFormatKind::Lv2),
-        "vst3" => Some(PluginFormatKind::Vst3),
-        _ => None,
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
     #[error("could not start the scanner: {0}")]
@@ -145,7 +131,7 @@ impl Scanner {
         command
             .args(&self.args)
             .arg(SCAN_ARG)
-            .arg(kind_name(kind))
+            .arg(kind.as_str())
             .arg(bundle)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -270,7 +256,7 @@ pub fn run_scan_child(
     };
     let Some(format) = kind
         .to_str()
-        .and_then(kind_from_name)
+        .and_then(|name| name.parse::<PluginFormatKind>().ok())
         .and_then(|k| registry.format(&k))
     else {
         log::error!("unsupported plugin format {kind:?}");

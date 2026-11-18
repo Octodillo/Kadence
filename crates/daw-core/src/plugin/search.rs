@@ -33,7 +33,8 @@ const FLATPAK_DIRS: [&str; 2] = ["/app/extensions/Plugins", "/app/lib"];
 
 /// How one format names its directories.
 struct Layout {
-    /// The directory inside each library directory, and after the dot in the home directory.
+    /// The directory inside each library directory, and after the dot in the home directory:
+    /// the format's [`as_str`](PluginFormatKind::as_str).
     dir: &'static str,
     /// The environment variable that lists more directories, in `PATH` syntax.
     env: &'static str,
@@ -44,19 +45,20 @@ struct Layout {
 }
 
 fn layout(kind: &PluginFormatKind) -> Layout {
+    let dir = kind.as_str();
     match kind {
         PluginFormatKind::Clap => Layout {
-            dir: "clap",
+            dir,
             env: "CLAP_PATH",
             env_replaces: false,
         },
         PluginFormatKind::Lv2 => Layout {
-            dir: "lv2",
+            dir,
             env: "LV2_PATH",
             env_replaces: true,
         },
         PluginFormatKind::Vst3 => Layout {
-            dir: "vst3",
+            dir,
             env: "VST3_PATH",
             env_replaces: false,
         },
@@ -158,11 +160,8 @@ mod tests {
     #[test]
     fn every_format_covers_lib64_and_this_builds_multiarch() {
         let arch = std::env::consts::ARCH;
-        for (kind, dir) in [
-            (PluginFormatKind::Clap, "clap"),
-            (PluginFormatKind::Lv2, "lv2"),
-            (PluginFormatKind::Vst3, "vst3"),
-        ] {
+        for kind in PluginFormatKind::ALL {
+            let dir = kind.as_str();
             assert_eq!(
                 paths(kind, None, false),
                 [
