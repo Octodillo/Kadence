@@ -983,3 +983,76 @@ fn an_open_device_lists_its_parameters_once_they_are_known() {
     let track = r.doc.project().track(track).unwrap().clone();
     assert_eq!(r.arrange.rows_of(&track).len(), before + 2);
 }
+
+#[test]
+fn a_device_with_many_parameters_folds_the_rest() {
+    use daw_arrange::rows::FIRST_PARAMS;
+    let mut r = Rig::new();
+    let track = r.tracks[0];
+    let dev = Device::new(
+        "Big",
+        DeviceSource::Builtin {
+            kind: "daw.eq".into(),
+        },
+    );
+    let id = dev.id;
+    r.doc
+        .execute(AddDevice {
+            track,
+            index: 0,
+            device: dev,
+        })
+        .unwrap();
+    let count = FIRST_PARAMS as ParamId + 8;
+    let catalog = Arc::new(Loading::default());
+    *catalog.params.lock().unwrap() = (0..count).collect();
+    r.arrange.params = Some(catalog);
+    r.arrange.expanded.insert(track);
+    r.arrange.open.insert((track, Group::Effects));
+    r.arrange.open.insert((track, Group::Device(id)));
+    r.arrange.relayout(r.doc.project());
+    let params = |r: &Rig| {
+        r.arrange
+            .lane_rows(0)
+            .iter()
+            .filter(|x| {
+                matches!(
+                    x.kind,
+                    RowKind::Control(AutomationTarget::DeviceParam { .. })
+                )
+            })
+            .count()
+    };
+    let more = |r: &Rig| {
+        r.arrange
+            .lane_rows(0)
+            .iter()
+            .position(|x| x.kind == RowKind::Group(Group::More(id)))
+    };
+    // The first ones, then the fold of the rest, closed.
+    assert_eq!(params(&r), FIRST_PARAMS);
+    let at = more(&r).expect("a More heading");
+    assert_eq!(r.arrange.lane_rows(0)[at].depth, 2);
+
+    // Opened, the rest show inside it.
+    r.arrange.open.insert((track, Group::More(id)));
+    r.arrange.relayout(r.doc.project());
+    assert_eq!(params(&r), count as usize);
+    assert!(
+        r.arrange.lane_rows(0)[at + 1..=at + 8]
+            .iter()
+            .all(|x| x.depth == 3)
+    );
+
+    // A closed device keeps an automated one of the rest in view, and
+    // no fold.
+    let last = AutomationTarget::DeviceParam {
+        device: id,
+        param: count - 1,
+    };
+    r.add_lane(0, last);
+    r.arrange.open.remove(&(track, Group::Device(id)));
+    r.arrange.relayout(r.doc.project());
+    assert_eq!(params(&r), 1);
+    assert_eq!(more(&r), None);
+}

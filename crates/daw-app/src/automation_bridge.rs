@@ -35,6 +35,8 @@ pub mod qobject {
         SendsGroup,
         /// One effect, under Effects.
         DeviceGroup,
+        /// A device's parameters past its first few.
+        MoreGroup,
     }
 
     /// A lane's mode. Off: the control keeps its own value. Read: the lane
@@ -160,6 +162,7 @@ pub(crate) fn lane_kind_value(kind: LaneKind) -> i32 {
         LaneKind::Effects => Qml::EffectsGroup,
         LaneKind::Sends => Qml::SendsGroup,
         LaneKind::Device => Qml::DeviceGroup,
+        LaneKind::More => Qml::MoreGroup,
     };
     kind.repr
 }

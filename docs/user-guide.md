@@ -242,7 +242,7 @@ them under the track:
   are groups: click one to open it. Effects lists each effect, and an effect
   (or the instrument) opens to its parameters; Sends lists the level of each
   send. A plugin lists the parameters it lets a host automate, once it has
-  loaded.
+  loaded; past the first 32 the rest fold under **More Parameters**.
 
 Each control has a row in the timeline beside it. Click there to start
 automating the control: the click adds the first point. Drag points to move

@@ -43,6 +43,7 @@ pub enum LaneKind {
     Effects,
     Sends,
     Device,
+    More,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -107,17 +108,27 @@ impl PluginLanes {
             .filter(ParamDesc::has_range)
             .map(|p| (p.id, p))
             .collect();
-        let automatable = infos
-            .iter()
-            .filter(|i| i.automatable && params.contains_key(&i.id))
-            .map(|i| i.id)
-            .collect();
+        let automatable = Self::automatable_of(infos, &params);
         Self {
             described: infos.len(),
             params,
             automatable,
             values: HashMap::new(),
         }
+    }
+
+    /// The parameters of `infos` a host may automate and a lane can show
+    /// (those in `params`), in the plugin's order, each once.
+    fn automatable_of(
+        infos: &[daw_core::plugin::ParamInfo],
+        params: &HashMap<ParamId, ParamDesc>,
+    ) -> Vec<ParamId> {
+        let mut seen = HashSet::new();
+        infos
+            .iter()
+            .filter(|i| i.automatable && params.contains_key(&i.id) && seen.insert(i.id))
+            .map(|i| i.id)
+            .collect()
     }
 
     /// Whether this is still what `infos` describes. A plugin's parameters
@@ -130,6 +141,8 @@ impl PluginLanes {
                 // Left out for its range: still left out?
                 None => !(i.min.is_finite() && i.max.is_finite() && i.min != i.max),
             })
+            // In the same order: the rows list them so.
+            && self.automatable == Self::automatable_of(infos, &self.params)
     }
 }
 
@@ -192,8 +205,14 @@ impl LaneParams {
             plugins.insert(device.id, plugin);
         }
         if changed || !known.is_empty() {
-            self.revision.fetch_add(1, Ordering::Relaxed);
+            self.changed();
         }
+    }
+
+    /// Says that what `automatable` answers may have changed for some
+    /// device, so rows made from it are made again.
+    pub fn changed(&self) {
+        self.revision.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Notes the value a loaded plugin itself holds for a parameter the
@@ -286,6 +305,7 @@ pub fn group_name(track: &Track, group: Group) -> TargetName {
         Group::Instrument => (LaneKind::Instrument, String::new()),
         Group::Effects => (LaneKind::Effects, String::new()),
         Group::Sends => (LaneKind::Sends, String::new()),
+        Group::More(_) => (LaneKind::More, String::new()),
         Group::Device(id) => {
             let name = track.devices.iter().find(|d| d.id == id);
             (
@@ -844,9 +864,17 @@ mod tests {
         let p = LaneParams::default();
         p.set_plugins(std::iter::once(&plugin), |_| Some(&infos[..]));
         assert!(p.scale(&plugin, 1).is_some());
+        assert_eq!(p.automatable(&plugin), [1]);
+        let loaded = p.revision();
         // Removed from the project, or its plugin is gone.
         p.set_plugins(std::iter::once(&plugin), |_| None);
         assert_eq!(p.scale(&plugin, 1), None);
+        assert!(p.automatable(&plugin).is_empty());
+        let forgotten = p.revision();
+        assert_ne!(forgotten, loaded, "its rows go");
+        // Looking again with it still gone changes nothing.
+        p.set_plugins(std::iter::once(&plugin), |_| None);
+        assert_eq!(p.revision(), forgotten);
     }
 
     /// A plugin may describe any range: one given high end first is turned
@@ -891,6 +919,14 @@ mod tests {
         let other = [info(1, 0.0, 10.0)];
         p.set_plugins(std::iter::once(&plugin), |_| Some(&other[..]));
         assert_eq!(p.default_value(&plugin, 1), Some(0.0));
+        // A parameter named twice is one row; the same ones in another
+        // order are listed in that order.
+        let twice = [info(5, 0.0, 1.0), info(6, 0.0, 1.0), info(5, 0.0, 1.0)];
+        p.set_plugins(std::iter::once(&plugin), |_| Some(&twice[..]));
+        assert_eq!(p.automatable(&plugin), [5, 6]);
+        let turned = [info(6, 0.0, 1.0), info(5, 0.0, 1.0), info(5, 0.0, 1.0)];
+        p.set_plugins(std::iter::once(&plugin), |_| Some(&turned[..]));
+        assert_eq!(p.automatable(&plugin), [6, 5]);
     }
 
     #[test]

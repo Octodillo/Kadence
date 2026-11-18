@@ -476,7 +476,7 @@ impl Arrange {
             .retain(|id| project.tracks.iter().any(|t| t.id == *id));
         self.open.retain(|(id, group)| {
             project.track(*id).is_some_and(|t| match group {
-                Group::Device(d) => t.devices.iter().any(|x| x.id == *d),
+                Group::Device(d) | Group::More(d) => t.devices.iter().any(|x| x.id == *d),
                 _ => true,
             })
         });
