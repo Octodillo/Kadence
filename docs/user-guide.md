@@ -255,6 +255,19 @@ automation.
 Closing a group puts away the controls that have no automation and keeps the
 automated ones in view. Closing the track's arrow hides all of its rows.
 
+The rows also change what the track has, as its channel strip on the Mix
+page does:
+
+- The **+** on **Effects** adds an effect (a built-in one, or a plugin from
+  the browser) at the end of the chain; the **+** on **Sends** adds a send
+  to a bus.
+- An effect's heading has buttons to show its settings and to remove it.
+  The **Instrument** heading shows the instrument's settings; pick another
+  instrument with the instrument button in the track header.
+- Right-click a send's row to remove it or to take it **Pre-Fader**.
+- Right-click the track header and choose **Output** to send the track to
+  the master or to a bus.
+
 To record moves instead of drawing them, set a row to **Write** and move its
 slider while the song plays, or turn on **Write Automation** on the Mix page
 and move the controls there.

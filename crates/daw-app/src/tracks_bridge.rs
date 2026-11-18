@@ -20,7 +20,7 @@ use daw_model::commands::TrackField;
 use crate::automation_bridge::{lane_kind_value, lane_mode_value};
 use crate::model_roles;
 use crate::paint::to_qcolor;
-use crate::qt_lists::{ModelRole, row, string_list};
+use crate::qt_lists::{ModelRole, role_map, row, string_list};
 use crate::state::{self, AppState};
 use crate::tracks::{HeaderRow, TrackKind, TrackRow};
 
@@ -205,6 +205,9 @@ model_roles!(
         Instrument => "instrument",
         /// The instrument's row in `Instruments`, or -1.
         InstrumentChoice => "instrumentChoice",
+        /// The track's strip among the Mixer's rows, for the Mixer's
+        /// actions on it; -1 for none.
+        Strip => "strip",
         /// Whether the track shows the rows under it.
         Expanded => "expanded",
         /// The rows under the track while it is expanded: its controls,
@@ -214,7 +217,9 @@ model_roles!(
         /// name), `depth` (how many groups it is inside), `open` (a
         /// heading whose group is unfolded), `lane` (the control's lane as
         /// an index for `Automation`, or -1), `mode` (an
-        /// `Automation.LaneMode`) and, for device parameters, how
+        /// `Automation.LaneMode`), `item` (an effect heading's insert or a
+        /// send level's send, as the Mixer counts them on the track's
+        /// strip, or -1) and, for device parameters, how
         /// `ValueText.param` words the value: `control`, `unit` and
         /// `choices`.
         Rows => "rows",
@@ -250,6 +255,11 @@ fn text(s: &str) -> QVariant {
     QVariant::from(&QString::from(s))
 }
 
+/// An index for QML: -1 for none.
+fn index_or_none(index: Option<usize>) -> i32 {
+    index.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1)
+}
+
 fn row_map(lane: &HeaderRow) -> QVariant {
     let param = lane.param.as_ref();
     let mut map = QMap::<QMapPair_QString_QVariant>::default();
@@ -259,9 +269,9 @@ fn row_map(lane: &HeaderRow) -> QVariant {
     put("param", text(&lane.name.param));
     put("depth", QVariant::from(&i32::from(lane.depth)));
     put("open", QVariant::from(&lane.open));
-    let index = lane.lane.and_then(|l| i32::try_from(l).ok());
-    put("lane", QVariant::from(&index.unwrap_or(-1)));
+    put("lane", QVariant::from(&index_or_none(lane.lane)));
     put("mode", QVariant::from(&lane_mode_value(lane.mode)));
+    put("item", QVariant::from(&index_or_none(lane.item)));
     put("control", text(param.map_or("", |p| p.control_name())));
     put("unit", text(param.map_or("", |p| p.unit_name())));
     let choices = param.map_or(&[][..], |p| p.choices());
@@ -300,11 +310,8 @@ fn value(t: &TrackRow, role: Role) -> QVariant {
         Role::MidiDevice => text(t.midi_input.device.as_deref().unwrap_or_default()),
         Role::MidiChannel => QVariant::from(&t.midi_input.channel.map_or(-1, i32::from)),
         Role::Instrument => text(instrument.map_or("", |i| i.name.as_str())),
-        Role::InstrumentChoice => QVariant::from(
-            &instrument
-                .and_then(|i| i32::try_from(i.choice?).ok())
-                .unwrap_or(-1),
-        ),
+        Role::InstrumentChoice => QVariant::from(&index_or_none(instrument.and_then(|i| i.choice))),
+        Role::Strip => QVariant::from(&index_or_none(t.strip)),
         Role::Expanded => QVariant::from(&t.expanded),
         Role::Rows => QVariant::from(&row_list(&t.rows)),
     }
@@ -373,14 +380,10 @@ impl qobject::Tracks {
     }
 
     fn get(&self, row: i32) -> QMap<QMapPair_QString_QVariant> {
-        let mut map = QMap::<QMapPair_QString_QVariant>::default();
-        let track = usize::try_from(row).ok().and_then(|r| self.rows.get(r));
-        if let Some(t) = track {
-            for (role, name) in Role::ALL {
-                map.insert(QString::from(*name), value(t, *role));
-            }
+        match usize::try_from(row).ok().and_then(|r| self.rows.get(r)) {
+            Some(t) => role_map(|role| value(t, role)),
+            None => QMap::default(),
         }
-        map
     }
 
     fn add(self: Pin<&mut Self>, kind: QmlKind, name: &QString) {

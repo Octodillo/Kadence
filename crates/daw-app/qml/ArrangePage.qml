@@ -260,7 +260,15 @@ Kirigami.Page {
     // that it is stale, and draws when it shows again.
     function refresh(): void {
         view.refresh();
+        // The rows under the tracks act on the tracks' strips through the
+        // Mixer, by the strips' rows, so the Mixer's rows must follow the
+        // project while the page is on screen, as on the Edit page.
+        if (page.visible) {
+            Mixer.sync();
+        }
     }
+    onVisibleChanged: if (visible) Mixer.sync()
+    Component.onCompleted: Mixer.sync()
 
     // Redraw on any change, and every frame while the playhead moves.
     Connections {
