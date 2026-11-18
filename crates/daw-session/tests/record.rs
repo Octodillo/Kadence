@@ -216,7 +216,8 @@ fn record_take<B: AudioBackend>(
         &rig.session,
         after.max(beat + 20_000 + i64::from(latency) + slack),
     );
-    assert!(takes.poll().is_empty());
+    let problems = takes.poll();
+    assert!(problems.is_empty(), "{problems:?}");
     let stopped_at = rig.session.controller().position().0;
     let finished = takes.finish(&mut rig.session, rig.doc.project(), Some(rig.dir.path()));
     rig.session.stop().unwrap();

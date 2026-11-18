@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// `kadence` in the user's data directory (`$XDG_DATA_HOME`, else
-/// `~/.local/share`): recovery copies and recordings of unsaved projects.
+/// `~/.local/share`): unsaved projects' recovery copies and recordings.
 pub fn data_dir() -> Option<PathBuf> {
     xdg_dir("XDG_DATA_HOME", ".local/share")
 }
