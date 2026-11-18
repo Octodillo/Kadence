@@ -28,6 +28,7 @@ mod client;
 mod control;
 mod format;
 mod protocol;
+mod realtime;
 mod shm;
 mod supervisor;
 
@@ -42,4 +43,5 @@ pub use client::{
     SandboxedInstance,
 };
 pub use format::SandboxFormat;
+pub use realtime::Realtime;
 pub use shm::{EVENT_CAPACITY, MAX_CHANNELS};

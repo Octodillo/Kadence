@@ -9,6 +9,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList};
 
 use crate::engine::{AudioConfig, BackendKind, EngineError, EngineHandle, EngineStatus};
+use crate::message::{Message, RecordProblem};
 use crate::qt_lists::{list, string_list};
 use crate::settings::{self, KConfigStore};
 use crate::state;
@@ -53,6 +54,12 @@ pub mod qobject {
         UnsupportedBufferSize,
         /// `errorDetail` is the audio system's own (untranslated) message.
         BackendError,
+        /// The audio server went away and is not back yet.
+        ServerLost,
+        /// The engine stopped after an internal error.
+        EngineCrashed,
+        /// Audio kept failing and the engine stopped restarting it.
+        AudioUnstable,
         /// `errorNumber` is the device combo box index.
         InvalidDeviceChoice,
         /// `errorNumber` is the sample rate given.
@@ -103,6 +110,13 @@ pub mod qobject {
             sample_rate: i32,
             buffer_size: i32,
         ) -> bool;
+
+        /// Looks at the audio system again: it may have gone away, come
+        /// back or changed its sample rate since the last look. Restarts
+        /// audio where that mends it and updates the properties. Call it
+        /// every second or so.
+        #[qinvokable]
+        fn poll(self: Pin<&mut Engine>);
     }
 
     impl cxx_qt::Initialize for Engine {}
@@ -124,6 +138,8 @@ pub struct EngineRust {
     buffer_size: i32,
     /// Device ids, parallel to `device_names` (minus the default entry).
     device_ids: Vec<String>,
+    /// The engine status the properties were last made from.
+    status: Option<EngineStatus>,
 }
 
 /// Something the UI has to tell the user about, as data. Kept free of Qt
@@ -150,6 +166,9 @@ impl Problem {
             Self::Engine(EngineError::UnsupportedBufferSize(size)) => {
                 (K::UnsupportedBufferSize, number(*size), "")
             }
+            Self::Engine(EngineError::ServerLost) => (K::ServerLost, 0, ""),
+            Self::Engine(EngineError::Crashed) => (K::EngineCrashed, 0, ""),
+            Self::Engine(EngineError::Unstable) => (K::AudioUnstable, 0, ""),
             Self::Engine(EngineError::Backend(message)) => (K::BackendError, 0, message),
             Self::InvalidDeviceChoice(index) => (K::InvalidDeviceChoice, *index, ""),
             Self::InvalidSampleRate(rate) => (K::InvalidSampleRate, *rate, ""),
@@ -163,12 +182,29 @@ impl Problem {
 /// server picks its own rate), then to plain defaults. Returns what to tell the
 /// user, if anything: the first refusal if a fallback worked (that is why
 /// the saved settings are not in use), else the last one.
+///
+/// With nothing saved there is nothing to apply or refuse: the engine
+/// keeps what it runs at. And an audio server picks its own sample rate, so
+/// a saved one it does not run at (saved while there was no server, or
+/// before the server changed) gives way without a message.
 fn start_audio(
     engine: &mut dyn EngineHandle,
-    saved: &AudioConfig,
+    saved: Option<&AudioConfig>,
 ) -> Option<(qobject::ErrorContext, EngineError)> {
+    let saved = saved?;
     let current = engine.audio_config();
     let first = engine.apply_audio_config(saved).err()?;
+    if matches!(first, EngineError::UnsupportedSampleRate(_))
+        && engine.backend_kind() == BackendKind::Jack
+    {
+        let at_server_rate = AudioConfig {
+            sample_rate: engine.audio_config().sample_rate,
+            ..saved.clone()
+        };
+        if engine.apply_audio_config(&at_server_rate).is_ok() {
+            return None;
+        }
+    }
     let fallbacks = [
         AudioConfig {
             device: None,
@@ -185,6 +221,39 @@ fn start_audio(
         }
     }
     Some((qobject::ErrorContext::StartupFailed, last))
+}
+
+/// Runs `change`, which may restart audio and with it replace the session.
+/// The take made so far is kept, and the fresh session gets the project
+/// and the play position back (after the tempo map, so the position maps
+/// to the same bar).
+fn replacing_session<R>(
+    s: &mut state::AppState,
+    change: impl FnOnce(&mut dyn EngineHandle) -> R,
+) -> R {
+    s.stop_recording();
+    let position = s.playhead();
+    let r = change(s.engine.as_mut());
+    s.resync();
+    if let Some(session) = s.engine.session_mut() {
+        let _ = session.locate(position);
+    }
+    r
+}
+
+/// Restarts audio when the engine says that mends it (see
+/// [`EngineHandle::wants_restart`]) and returns the status after that. A
+/// recording does not survive the restart, and the user is told.
+fn poll_audio(s: &mut state::AppState) -> EngineStatus {
+    if s.engine.wants_restart() {
+        if s.is_recording() {
+            // First, so that a problem with the take itself, reported as
+            // the recording stops, is what stays on show.
+            s.report(Message::Record(RecordProblem::AudioRestarted));
+        }
+        replacing_session(s, |engine| engine.restart_audio());
+    }
+    s.engine.status()
 }
 
 /// What `sync` does to the error properties for an engine status.
@@ -220,7 +289,7 @@ impl cxx_qt::Initialize for qobject::Engine {
         // Most likely failure: the saved device was unplugged.
         let saved = settings::load_audio_config(&KConfigStore);
         let error = state::with(|s| {
-            let error = start_audio(s.engine.as_mut(), &saved);
+            let error = start_audio(s.engine.as_mut(), saved.as_ref());
             // The engine may have restarted with a new session.
             s.resync();
             error
@@ -243,21 +312,11 @@ impl qobject::Engine {
             .as_ref()
             .audio_config_from(device_index, sample_rate, buffer_size);
         let result = result.and_then(|config| {
-            state::with(|s| {
-                // The session is replaced: keep the take made so far.
-                s.stop_recording();
-                let position = s.playhead();
-                let r = s.engine.apply_audio_config(&config);
-                // A restart brings a fresh session: give it the project and
-                // the play position back (after the tempo map, so the
-                // position maps to the same bar).
-                s.resync();
-                if let Some(session) = s.engine.session_mut() {
-                    let _ = session.locate(position);
-                }
-                r
-            })
-            .map_err(Problem::Engine)?;
+            state::with(|s| replacing_session(s, |engine| engine.apply_audio_config(&config)))
+                .map_err(Problem::Engine)?;
+            // What runs now, which is not what was asked for when the
+            // audio server came or went during the restart.
+            let config = state::with(|s| s.engine.audio_config());
             settings::save_audio_config(&mut KConfigStore, &config);
             Ok(())
         });
@@ -280,6 +339,22 @@ impl qobject::Engine {
         }
         self.sync();
         ok
+    }
+
+    fn poll(mut self: Pin<&mut Self>) {
+        let status = state::with(poll_audio);
+        if self.status.as_ref() == Some(&status) {
+            return;
+        }
+        // A failure that is new outranks a settings refusal still on show
+        // from earlier, which `sync` alone would keep.
+        if let EngineStatus::Failed(e) = status {
+            self.as_mut().set_error(
+                qobject::ErrorContext::AudioFailed,
+                Some(&Problem::Engine(e)),
+            );
+        }
+        self.sync();
     }
 
     /// Show `problem` (or nothing, with `NoError`) through the error
@@ -374,6 +449,7 @@ impl qobject::Engine {
         self.as_mut().refresh_devices();
         let (config, status) = state::with(|s| (s.engine.audio_config(), s.engine.status()));
         let running = matches!(status, EngineStatus::Running { .. });
+        self.as_mut().rust_mut().status = Some(status.clone());
         let device_index = config
             .device
             .as_ref()
@@ -405,11 +481,47 @@ mod tests {
     use crate::engine::StubEngine;
 
     #[test]
+    fn a_lost_audio_server_shows_and_is_mended_by_the_next_poll() {
+        let engine = StubEngine::default();
+        let system = engine.system().clone();
+        let mut s = state::AppState::with_engine(Box::new(engine));
+        s.set_bpm(90.0).unwrap();
+        assert_eq!(poll_audio(&mut s), EngineStatus::Stopped);
+
+        system.shut_down();
+        // The audio thread notices at its next cycle.
+        let lost = EngineStatus::Failed(EngineError::ServerLost);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while s.engine.status() != lost && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(s.engine.status(), lost);
+        // The restart brings a fresh session, which gets the project back.
+        assert_eq!(poll_audio(&mut s), EngineStatus::Stopped);
+        assert!(!s.engine.wants_restart());
+        assert_eq!(s.tempo_at_playhead().0, 90.0);
+        let session = s.engine.session().unwrap();
+        assert_eq!(session.tempo().segments()[0].bpm, 90.0);
+    }
+
+    #[test]
     fn problems_become_kind_number_and_detail() {
         let cases = [
             (
                 Problem::Engine(EngineError::UnknownDevice("usb:1".into())),
                 (ErrorKind::UnknownDevice, 0, "usb:1"),
+            ),
+            (
+                Problem::Engine(EngineError::ServerLost),
+                (ErrorKind::ServerLost, 0, ""),
+            ),
+            (
+                Problem::Engine(EngineError::Crashed),
+                (ErrorKind::EngineCrashed, 0, ""),
+            ),
+            (
+                Problem::Engine(EngineError::Unstable),
+                (ErrorKind::AudioUnstable, 0, ""),
             ),
             (
                 Problem::Engine(EngineError::UnsupportedSampleRate(12_345)),
@@ -449,7 +561,7 @@ mod tests {
 
     /// `start_audio` with the context as its value (qenums are not Debug).
     fn start(engine: &mut dyn EngineHandle, saved: &AudioConfig) -> Option<(i32, EngineError)> {
-        start_audio(engine, saved).map(|(context, e)| (context.repr, e))
+        start_audio(engine, Some(saved)).map(|(context, e)| (context.repr, e))
     }
 
     #[test]

@@ -143,16 +143,8 @@ Rectangle {
 
     // An edit or an undo can move the control without changing `info`.
     Connections {
-        target: Project
-        function onRevisionChanged() {
-            rowHeader.readValue();
-        }
-    }
-    Connections {
-        target: Automation
-        function onRevisionChanged() {
-            rowHeader.readValue();
-        }
+        target: UiClock
+        function onRevised() { rowHeader.readValue(); }
     }
 
     // A playing lane moves its control.

@@ -1,8 +1,9 @@
 //! The application state shared by the QML-facing objects: the open
-//! document, the audio engine and the arrange view.
+//! document, the audio engine and the two painted views of it, the arrange
+//! view and the piano roll.
 //!
 //! It lives in a thread-local on the GUI thread. Every bridge object
-//! (`Engine`, `Project`, `ArrangeView`) runs its invokables there and reaches
+//! (`Engine`, `Project`, `ArrangeView`, `PianoRoll`) runs its invokables there and reaches
 //! the state through [`with`]. Nothing here is a Qt type.
 
 use std::cell::RefCell;
@@ -178,21 +179,22 @@ fn device_label(d: &daw_model::Device) -> String {
     }
 }
 
-/// What the views need to know about playback and the open bundle. Takes
-/// the state's fields one by one, so the caller can hand out a view and the
-/// document next to it.
-fn view_env<'a>(
-    engine: &'a dyn EngineHandle,
-    fallback_tempo: &'a SegmentTempoMap,
-    root: &'a Path,
-) -> Env<'a> {
-    let session = engine.session();
-    Env {
-        tempo: session.map_or(fallback_tempo, |s| s.tempo()),
-        sample_rate: session.map_or(48_000.0, |s| s.sample_rate()),
-        root: Some(root),
-        playhead: session.map_or(TickTime(0), |s| s.position()),
-        loop_range: session.and_then(|s| s.loop_range()),
+/// One of the state's two painted views of the document, the arrange view
+/// and the piano roll, for [`AppState::with_view`].
+pub trait View {
+    /// This view, of the two the state holds.
+    fn of<'a>(arrange: &'a mut Arrange, piano: &'a mut PianoRoll) -> &'a mut Self;
+}
+
+impl View for Arrange {
+    fn of<'a>(arrange: &'a mut Arrange, _: &'a mut PianoRoll) -> &'a mut Self {
+        arrange
+    }
+}
+
+impl View for PianoRoll {
+    fn of<'a>(_: &'a mut Arrange, piano: &'a mut PianoRoll) -> &'a mut Self {
+        piano
     }
 }
 
@@ -931,18 +933,21 @@ impl AppState {
         self.piano.end_drag(&mut self.doc);
     }
 
-    /// Calls `f` with the arrange view, the document and an [`Env`].
-    pub fn with_arrange<R>(&mut self, f: impl FnOnce(&mut Arrange, &mut Document, &Env) -> R) -> R {
+    /// Calls `f` with a view (whichever `V` is: the arrange view or the
+    /// piano roll), the document, and what the views need to know about
+    /// playback and the open bundle.
+    pub fn with_view<V: View, R>(&mut self, f: impl FnOnce(&mut V, &mut Document, &Env) -> R) -> R {
         let root = self.media_root();
-        let env = view_env(self.engine.as_ref(), &self.fallback_tempo, &root);
-        f(&mut self.arrange, &mut self.doc, &env)
-    }
-
-    /// Calls `f` with the piano roll, the document and an [`Env`].
-    pub fn with_piano<R>(&mut self, f: impl FnOnce(&mut PianoRoll, &mut Document, &Env) -> R) -> R {
-        let root = self.media_root();
-        let env = view_env(self.engine.as_ref(), &self.fallback_tempo, &root);
-        f(&mut self.piano, &mut self.doc, &env)
+        let session = self.engine.session();
+        let env = Env {
+            tempo: session.map_or(&self.fallback_tempo, |s| s.tempo()),
+            sample_rate: session.map_or(48_000.0, |s| s.sample_rate()),
+            root: Some(&root),
+            playhead: session.map_or(TickTime(0), |s| s.position()),
+            loop_range: session.and_then(|s| s.loop_range()),
+        };
+        let view = V::of(&mut self.arrange, &mut self.piano);
+        f(view, &mut self.doc, &env)
     }
 
     /// Plays the note the piano roll is auditioning, if any, through the
@@ -1282,7 +1287,7 @@ impl AppState {
             }
             None => file.to_path_buf(),
         };
-        let r = self.with_arrange(|a, doc, env| {
+        let r = self.with_view(|a: &mut Arrange, doc, env| {
             a.import_audio(doc, env, &stored, frames, info.sample_rate, track, at)
         });
         r.map_err(|e| Message::ImportEdit(owned(), e))?;

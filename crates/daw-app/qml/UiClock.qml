@@ -13,13 +13,23 @@ import io.github.octodillo.daw
 //
 // Each beat, in order: the project (engine position, peak loading,
 // autosave), the plugin scan, a running export, then `ticked` for views;
-// on every third beat `slow`, and about once a second the MIDI devices.
+// on every third beat `slow`, and about once a second the audio engine's
+// health and the MIDI devices.
 // While the transport runs the clock also beats `frame` at the display's
 // pace, after the beat's own work, so a view draws what the beat read.
+//
+// It also says in which order a change to the project is shown: see
+// `revised`.
 //
 // It runs from its first use, which is the pages' own (they listen to it).
 QtObject {
     id: clock
+
+    // The project changed, whoever changed it (`Project.revision` or
+    // `Automation.revision` moved). The track list has followed already,
+    // so a view that listens here lays out against the tracks and lanes
+    // as they are now. Views redraw from this, not from the two revisions.
+    signal revised()
 
     // About 30 times a second: `seconds` since the last one. For meters
     // and controls that follow playback.
@@ -64,8 +74,11 @@ QtObject {
                 if (beats % clock.slowBeats === 0) {
                     clock.slow();
                 }
-                // MIDI devices plugged in or out.
+                // The audio engine's health, then MIDI devices plugged in
+                // or out: in this order, so the MIDI ports are made on the
+                // audio that is left after a restart.
                 if (beats % clock.midiBeats === 0) {
+                    Engine.poll();
                     AppSettings.refreshMidi();
                 }
             }
@@ -75,17 +88,19 @@ QtObject {
         }
     }
 
-    // The track list follows the project whoever changed it and whichever
-    // page is showing. (Before the pages redraw for the same change, as
-    // long as they are made after the clock, which their listening to it
-    // sees to; a late header would only lag the timeline by a frame.)
+    // A change is shown in this order: the track list first, then
+    // everything that listens to `revised`.
+    function revise(): void {
+        Tracks.sync();
+        clock.revised();
+    }
     property Connections projectChanges: Connections {
         target: Project
-        function onRevisionChanged() { Tracks.sync(); }
+        function onRevisionChanged() { clock.revise(); }
     }
     property Connections laneChanges: Connections {
         target: Automation
-        function onRevisionChanged() { Tracks.sync(); }
+        function onRevisionChanged() { clock.revise(); }
     }
     // An edit in a track header shows everywhere at once, not on the next
     // beat.

@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QList, QString, QUrl};
-use daw_arrange::Hit;
+use daw_arrange::{Arrange, Hit};
 
 use crate::message::{Context, Message};
 use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
@@ -327,7 +327,7 @@ impl qobject::ArrangeView {
         let start = Instant::now();
         let scene = state::with(|s| {
             s.arrange.peaks.poll();
-            s.with_arrange(|a, doc, env| a.scene(doc.project(), env))
+            s.with_view(|a: &mut Arrange, doc, env| a.scene(doc.project(), env))
         });
         let mut rust = self.as_mut().rust_mut();
         rust.scene.store(scene);
@@ -385,7 +385,7 @@ impl qobject::ArrangeView {
 
     fn motion(self: Pin<&mut Self>, x: f64, y: f64, modifiers: i32) {
         let p = pointer(x, y, 1, modifiers);
-        let out = state::with(|s| s.with_arrange(|a, doc, env| a.motion(doc, env, p)));
+        let out = state::with(|s| s.with_view(|a: &mut Arrange, doc, env| a.motion(doc, env, p)));
         self.after(out);
     }
 

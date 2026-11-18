@@ -164,6 +164,9 @@ QtObject {
                           "The audio system missed %1 cycle while recording, so the take may have a gap or click.",
                           "The audio system missed %1 cycles while recording, so the takes may have gaps or clicks.",
                           m.number);
+        case Project.RecordAudioRestarted:
+            return i18nc("@info",
+                         "Recording stopped because the audio system restarted. What was recorded until then is kept.");
         case Project.AlreadyOpen:
             return i18nc("@info", "It is open in another Kadence window.");
         }
