@@ -3,8 +3,9 @@
 //! MIDI take as another.
 //!
 //! Audio takes are recorded by `daw-session` ([`AudioTakes`]) into the
-//! project bundle's audio folder, or a recordings folder in the user's data
-//! directory while the project is unsaved.
+//! project bundle's audio folder. A project that was never saved keeps them
+//! the same way in the folder it lives in until then (see
+//! [`AppState::media_root`]), and saving brings them into the bundle.
 //!
 //! MIDI arms the target track's clip player and collects what it captures
 //! while playing. The take is overdubbed into the clip open in the piano
@@ -16,7 +17,6 @@
 use daw_core::time::{SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::model::{meter, midi_clip, new_note, take_command, tempo_map};
 use daw_midi::record::{RecordedNote, Recorder, to_clip_notes};
-use std::path::PathBuf;
 
 use daw_model::commands::AddClip;
 use daw_model::{Clip, ClipContent, ClipId, Command, MidiClip, Project, TrackId, TrackKind};
@@ -47,17 +47,6 @@ pub struct AudioRecording {
     xruns: u64,
     /// Whether xruns were reported for this recording.
     xruns_reported: bool,
-}
-
-/// Where takes of an unsaved project go: `kadence/recordings` in the
-/// user's data directory.
-fn unsaved_recordings_dir() -> PathBuf {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-    data.join("kadence").join("recordings")
 }
 
 /// The instrument track that hears live MIDI while none is armed: the one
@@ -179,10 +168,7 @@ impl AppState {
         if armed_audio_tracks(project).next().is_none() {
             return Ok(false);
         }
-        let dir = self
-            .doc
-            .bundle()
-            .map_or_else(unsaved_recordings_dir, |b| b.audio_dir());
+        let dir = crate::recovery::audio_dir(&self.media_root());
         let latency = self.engine.round_trip_latency();
         let xruns = self.engine.xruns();
         let Some(session) = self.engine.session_mut() else {
@@ -345,14 +331,12 @@ impl AppState {
         }
         self.engine.stop();
         if let Some(mut rec) = self.audio_recording.take() {
-            let root = self.root();
+            let root = self.media_root();
             // Port latencies settle a while after connections change; the
             // value now is more trustworthy than the one at the start.
             rec.takes.set_io_latency(self.engine.round_trip_latency());
             if let Some(session) = self.engine.session_mut() {
-                let done = rec
-                    .takes
-                    .finish(session, self.doc.project(), root.as_deref());
+                let done = rec.takes.finish(session, self.doc.project(), Some(&root));
                 commands.extend(done.command);
                 for p in done.problems {
                     self.report(Message::Record(RecordProblem::Take(p)));
@@ -361,6 +345,10 @@ impl AppState {
         }
         // Each kind of take is its own undo step, so a take the model
         // refuses can't take the other kind down with it.
+        // A take can't be made again: don't leave it to the autosave timer.
+        if !commands.is_empty() {
+            self.autosave_soon();
+        }
         for cmd in commands {
             if let Err(e) = self.doc.execute_boxed(cmd) {
                 self.report(Message::Record(RecordProblem::Refused(e)));

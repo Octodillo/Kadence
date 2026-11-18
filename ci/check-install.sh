@@ -30,5 +30,8 @@ done
 grep -q '^symphonia .*: MPL-2.0$' "$stage/usr/share/licenses/kadence/THIRD-PARTY-LICENSES" ||
     { echo "THIRD-PARTY-LICENSES lacks the symphonia notice"; exit 1; }
 
+# The spec's License tag and the PKGBUILD's license array cover what was linked.
+packaging/check-license-fields.py "$stage/usr/share/licenses/kadence/THIRD-PARTY-LICENSES"
+
 desktop-file-validate "$stage/usr/share/applications/$id.desktop"
 appstreamcli validate --no-net --pedantic "$stage/usr/share/metainfo/$id.metainfo.xml"
