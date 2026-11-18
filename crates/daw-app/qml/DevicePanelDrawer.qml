@@ -222,6 +222,18 @@ Kirigami.OverlayDrawer {
             ]
         }
 
+        // A plugin that plays, but may drop out: its host runs at normal
+        // priority. When no plugin gets real-time priority, the project
+        // status also says so once.
+        Kirigami.InlineMessage {
+            objectName: "realtimeMessage"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: DevicePanel.pluginStatus === "running" && DevicePanel.pluginNotRealtime
+            type: Kirigami.MessageType.Warning
+            text: i18nc("@info", "This plugin got no real-time priority, so its sound may drop out while the computer is busy. RealtimeKit (rtkit) grants it to a limited number of programs; allowing your user real-time priority, often by joining the realtime or audio group, lifts the limit.")
+        }
+
         QQC2.ScrollView {
             id: scroll
             Layout.fillWidth: true

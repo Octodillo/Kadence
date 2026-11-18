@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginFormatKind};
 use daw_engine::PluginHandle;
 use daw_model::{Device, DeviceId, DeviceSource, StateBlob};
-use daw_plugin_host::{SandboxConfig, SandboxFormat, SandboxMonitor};
+use daw_plugin_host::{Realtime, SandboxConfig, SandboxFormat, SandboxMonitor};
 
 use crate::Warning;
 
@@ -158,6 +158,9 @@ pub struct Plugins {
     /// Editors that were open in an earlier session, by their window title, to open again
     /// when the plugin is loaded again.
     reopen: HashMap<DeviceId, String>,
+    /// [`Warning::PluginsNotRealtime`] was given: it is about the system, not one plugin, so
+    /// it is said once.
+    realtime_warned: bool,
 }
 
 /// A freed plugin's state, with the plugin it is of: a device that comes back naming another
@@ -471,6 +474,20 @@ impl Plugins {
         self.owed.clear();
     }
 
+    /// Whether [`Warning::PluginsNotRealtime`] is to be said now: the running hosts' answers
+    /// show the system grants none of them real-time priority, and it has not been said yet.
+    pub(crate) fn says_not_realtime(&mut self) -> bool {
+        if self.realtime_warned {
+            return false;
+        }
+        let answers = self.slots.values().filter_map(|s| match s {
+            Slot::Live(l) if !l.crashed => Some(l.monitor.as_ref()?.realtime()),
+            _ => None,
+        });
+        self.realtime_warned = system_refuses_realtime(answers);
+        self.realtime_warned
+    }
+
     /// Frees the plugins, keeping the state of each that has one of its own (see
     /// [`Live::state_to_keep`]) for the next session to restore.
     pub(crate) fn detach(&mut self) -> Plugins {
@@ -498,6 +515,7 @@ impl Plugins {
             removed: std::mem::take(&mut self.removed),
             reopen,
             owed,
+            realtime_warned: self.realtime_warned,
         }
     }
 }
@@ -614,6 +632,18 @@ impl Live {
     }
 }
 
+/// Whether the hosts' answers show that the system grants plugins no real-time priority: one
+/// was refused and none got it. A refusal while others got it is RealtimeKit rationing its
+/// grants (per user, and per 20 s), which hosts that ask later may still get past.
+fn system_refuses_realtime(answers: impl IntoIterator<Item = Realtime>) -> bool {
+    let (mut refused, mut granted) = (false, false);
+    for answer in answers {
+        refused |= answer == Realtime::Refused;
+        granted |= answer.is_granted();
+    }
+    refused && !granted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +651,18 @@ mod tests {
     fn kept(len: usize) -> KeptState {
         let source = DeviceSource::Builtin { kind: "x".into() };
         (source, vec![0; len])
+    }
+
+    #[test]
+    fn only_a_refusal_with_no_grant_means_the_system_refuses_real_time() {
+        use Realtime::*;
+        assert!(system_refuses_realtime([Refused]));
+        assert!(system_refuses_realtime([Off, Refused, Pending]));
+        // RealtimeKit ran out of grants for the rest, or no host has an answer yet.
+        assert!(!system_refuses_realtime([Brokered, Refused]));
+        assert!(!system_refuses_realtime([Refused, Direct]));
+        assert!(!system_refuses_realtime([Pending, Off]));
+        assert!(!system_refuses_realtime([]));
     }
 
     #[test]

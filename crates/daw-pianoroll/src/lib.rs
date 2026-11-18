@@ -41,8 +41,8 @@ use std::sync::Arc;
 
 use daw_arrange::gesture::DRAG_THRESHOLD;
 use daw_arrange::{
-    Button, Cursor, Env, LaneEditor, Outcome, Palette, ParamCatalog, Pointer, Rect, Refusal, Scene,
-    Snap, TimelineView,
+    Button, Cursor, Env, Input, LaneEditor, Outcome, Palette, ParamCatalog, Pointer, Rect, Refusal,
+    Scene, Snap, Surface, TimelineView,
 };
 use daw_core::time::{PPQ, TickTime};
 use daw_midi::edit::{self, Quantize, Snap as ClipSnap};
@@ -1198,6 +1198,29 @@ impl PianoRoll {
             Some(Gesture::Band { x0, y0, x1, y1, .. }) => Some(Rect::spanning(*x0, *y0, *x1, *y1)),
             _ => None,
         }
+    }
+}
+
+impl Surface for PianoRoll {
+    fn input(&mut self, doc: &mut Document, env: &Env, input: Input) -> Outcome {
+        match input {
+            Input::Press(p) => self.press(doc, env, p),
+            Input::Motion(p) => self.motion(doc, p),
+            Input::Release(p) => self.release(doc, p),
+            Input::DoubleClick(p) => self.double_click(doc, p),
+            Input::Cancel => self.cancel(doc),
+            Input::Wheel { at, dx, dy } => self.wheel(at, dx, dy),
+            Input::Pinch { scale, x } => self.pinch(scale, x),
+        }
+    }
+
+    fn scroll_to(&mut self, x: f64, y: f64) {
+        self.view.scroll_x = x.max(0.0);
+        self.scroll_y = y.max(0.0);
+    }
+
+    fn touch_pans(&self, project: &Project, x: f64, y: f64) -> bool {
+        PianoRoll::touch_pans(self, project, x, y)
     }
 }
 

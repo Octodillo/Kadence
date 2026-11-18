@@ -80,6 +80,8 @@ pub enum Reason {
     PluginLoadFailed,
     /// Plugin `detail` of device `name` crashed; it is bypassed.
     PluginCrashed,
+    /// No plugin host gets real-time priority, so their audio may drop out.
+    PluginsNotRealtime,
     /// Device `name` did not save its plugin state; `detail`.
     PluginStateNotSaved,
     /// The plugin of device `name` would not show its editor; `detail`.
@@ -448,6 +450,7 @@ impl Message {
                         .name(device)
                         .detail(plugin)
                 }
+                Warning::PluginsNotRealtime => Fields::new(C::Playback, R::PluginsNotRealtime),
                 Warning::PluginStateNotSaved { device, detail } => {
                     Fields::new(C::Save, R::PluginStateNotSaved)
                         .name(device)
