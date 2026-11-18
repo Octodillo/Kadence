@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
 use daw_devices::DeviceCategory;
 use daw_model::commands::{AddDevice, AddTrack, Batch, RemoveDevice};
-use daw_model::{Command, Device, DeviceSource, Project, Track, TrackId, TrackKind};
+use daw_model::{Command, Device, DeviceId, DeviceSource, Project, Track, TrackId, TrackKind};
 
 /// The instrument a new instrument track starts with.
 pub const DEFAULT_INSTRUMENT: &str = "daw.synth";
@@ -190,6 +190,13 @@ pub fn instrument_of(track: &Track) -> Option<&Device> {
 /// (0 or 1); effects follow them.
 pub fn effects_start(track: &Track) -> usize {
     usize::from(instrument_of(track).is_some())
+}
+
+/// The effect `device`'s place among the track's effects (the devices
+/// after its instrument), as the Mixer counts its inserts.
+pub fn effect_index(track: &Track, device: DeviceId) -> Option<usize> {
+    let at = track.devices.iter().position(|d| d.id == device)?;
+    at.checked_sub(effects_start(track))
 }
 
 /// Adds `track` at `at`. An instrument track gets `instrument` as its first

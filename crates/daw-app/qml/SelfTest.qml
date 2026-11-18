@@ -23,6 +23,8 @@ Item {
     property int waits: 0
     // The Edit strip's row before a track is put in front of it.
     property int stripRow: -1
+    // A strip as the demo has it (see Mixer.get), to compare with later.
+    property var demoStrip: ({})
     // What the export dialog reported last, and where it exported to.
     property var exportMessage: ({})
     property url exportUrl
@@ -266,6 +268,58 @@ Item {
         },
         () => {
             shoot(window.title, "arrange-automation");
+        },
+        () => {
+            // The rows do what Bass's channel strip does: Effects adds an
+            // effect, which is its own heading there, and Sends a send.
+            const rows = () => Tracks.get(0).rows;
+            const strip = Tracks.get(0).strip;
+            check(strip >= 0 && Mixer.get(strip).name === Tracks.get(0).name, "a track knows its strip");
+            const effects = rows().findIndex(r => r.kind === Automation.EffectsGroup);
+            Automation.setRowOpen(0, effects, true);
+            const sends = rows().findIndex(r => r.kind === Automation.SendsGroup);
+            Automation.setRowOpen(0, sends, true);
+            demoStrip = Mixer.get(strip);
+            check(Mixer.addInsert(strip, 0), "add an effect from the Effects row");
+            check(Mixer.get(strip).sendChoices.length > 0 && Mixer.addSend(strip, 0), "add a send from the Sends row");
+        },
+        () => {
+            const rows = () => Tracks.get(0).rows;
+            const strip = Tracks.get(0).strip;
+            const inserts = Mixer.get(strip).inserts.length;
+            const effect = rows().findIndex(r => r.kind === Automation.DeviceGroup && r.item === inserts - 1);
+            check(effect >= 0 && rows()[effect].depth === 1, "the new effect is a heading under Effects");
+            const send = rows().findIndex(r => r.kind === Automation.SendLane && r.item >= 0);
+            check(send >= 0 && rows()[send].depth === 1 && rows()[send].lane === -1, "the new send's level is a row under Sends");
+            // What the rows' Remove actions do.
+            const arrange = window.pageStack.currentItem;
+            arrange.trackHeaders.forceLayout();
+            const header = arrange.trackHeaders.itemAtIndex(0)?.rowHeader(effect) ?? null;
+            check(header !== null && header.removeAction.visible && header.settingsAction.visible, "an effect's heading can remove it");
+            const sendItem = rows()[send].item;
+            // The removal shows in the rows at once.
+            header?.removeAction.trigger();
+            check(Mixer.get(strip).inserts.length === inserts - 1
+                  && rows().filter(r => r.kind === Automation.DeviceGroup).length === inserts - 1, "the effect's row goes with it");
+            Mixer.removeSend(strip, sendItem);
+        },
+        () => {
+            const strip = Tracks.get(0).strip;
+            const rows = Tracks.get(0).rows;
+            const now = Mixer.get(strip);
+            check(now.sends.length === demoStrip.sends.length
+                  && rows.filter(r => r.kind === Automation.SendLane).length === demoStrip.sends.length, "remove the send");
+            check(now.inserts.length === demoStrip.inserts.length
+                  && rows.filter(r => r.kind === Automation.DeviceGroup).length === demoStrip.inserts.length, "remove the effect");
+            // Back as the demo was.
+            for (let i = 0; i < 4; ++i) {
+                Project.undo();
+            }
+            check(JSON.stringify(Mixer.get(strip).inserts) === JSON.stringify(demoStrip.inserts)
+                  && Mixer.get(strip).sends.length === demoStrip.sends.length, "undo takes the effect and send back off");
+            Automation.setRowOpen(0, rows.findIndex(r => r.kind === Automation.SendsGroup), false);
+            const effects = Tracks.get(0).rows.findIndex(r => r.kind === Automation.EffectsGroup);
+            Automation.setRowOpen(0, effects, false);
         },
         () => {
             Automation.setExpanded(0, false);

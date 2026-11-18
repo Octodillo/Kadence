@@ -36,6 +36,7 @@ Column {
     required property int midiChannel
     required property string instrument
     required property int instrumentChoice
+    required property int strip
     required property bool expanded
     // The rows under the track while it is expanded (see Tracks).
     required property var rows
@@ -92,6 +93,11 @@ Column {
         nameField.visible = true;
         nameField.forceActiveFocus();
         nameField.selectAll();
+    }
+
+    // The header of row `i` under the track, or null.
+    function rowHeader(i: int): RowHeader {
+        return rowHeaders.itemAt(i) as RowHeader;
     }
 
     function dismiss(): void {
@@ -395,6 +401,28 @@ Column {
                     icon.name: row.expanded ? "arrow-down" : "arrow-right"
                     onTriggered: Automation.setExpanded(header.index, !row.expanded)
                 }
+                // Where the track's sound goes: the master or a bus, as
+                // the strip's output list on the Mix page.
+                QQC2.Menu {
+                    id: outputMenu
+                    title: i18nc("@title:menu where the track's sound goes", "Output")
+                    // The strip as the menu opened.
+                    readonly property var stripInfo: Mixer.get(row.strip)
+                    Repeater {
+                        model: outputMenu.stripInfo.outputChoices ?? []
+                        delegate: QQC2.MenuItem {
+                            required property int index
+                            required property string modelData
+                            text: modelData || i18nc("@title name of the master bus", "Master")
+                            checkable: true
+                            checked: index === outputMenu.stripInfo.outputIndex
+                            onTriggered: {
+                                Mixer.setOutput(row.strip, index);
+                                Project.tick();
+                            }
+                        }
+                    }
+                }
                 QQC2.MenuSeparator {}
                 QQC2.MenuItem { action: row.trackActions[3] }
             }
@@ -461,6 +489,8 @@ Column {
             width: row.width
             height: row.arrange.laneHeight
             track: row.index
+            strip: row.strip
+            hasInstrument: row.instrument !== ""
             info: row.rows[index] ?? null
 
             // Drag the lower edge to resize every automation lane,

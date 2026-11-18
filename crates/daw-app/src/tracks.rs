@@ -18,6 +18,7 @@ use daw_model::{
 use crate::device_panel::ParamDesc;
 use crate::instrument::{self, InstrumentChoice};
 use crate::lanes::{LaneKind, LaneMode, TargetName, group_name, target_name};
+use crate::session_mixer;
 use crate::state::AppState;
 
 /// The kinds of track the list holds (the master is not in it).
@@ -77,6 +78,10 @@ pub struct HeaderRow {
     /// How a device parameter's value is worded; `None` for other rows
     /// and for parameters nothing describes.
     pub param: Option<ParamDesc>,
+    /// What the row's actions address in the Mixer: an effect's heading
+    /// its place among the strip's inserts, a send's level its place
+    /// among the strip's sends.
+    pub item: Option<usize>,
 }
 
 /// One track, as its header shows it.
@@ -98,6 +103,8 @@ pub struct TrackRow {
     /// The live MIDI an instrument track listens to.
     pub midi_input: MidiInput,
     pub instrument: Option<InstrumentRow>,
+    /// The track's strip among the Mixer's rows.
+    pub strip: Option<usize>,
     /// Whether the track shows the rows under it.
     pub expanded: bool,
     /// The rows under it while it is expanded.
@@ -110,6 +117,7 @@ impl AppState {
     /// among a project's tracks.
     pub fn track_rows(&self) -> Vec<TrackRow> {
         let project = self.doc.project();
+        let strips = session_mixer::strip_rows(project);
         project
             .tracks
             .iter()
@@ -133,6 +141,7 @@ impl AppState {
                     audio_input: t.audio_input,
                     midi_input: t.midi_input.clone(),
                     instrument,
+                    strip: strips.get(&t.id).copied(),
                     expanded,
                     rows: if expanded {
                         self.header_rows(row)
@@ -160,6 +169,10 @@ impl AppState {
                 lane: None,
                 mode: LaneMode::Read,
                 param: None,
+                item: match g {
+                    Group::Device(id) => instrument::effect_index(t, id),
+                    _ => None,
+                },
             },
             RowKind::Control(target) => {
                 // The heading the row is under: the nearest shallower row.
@@ -211,6 +224,10 @@ impl AppState {
             lane,
             mode: lane.map_or(LaneMode::Read, |l| self.lane_mode(row as i32, l as i32)),
             param: self.target_param(row as i32, target),
+            item: match target {
+                AutomationTarget::SendLevel { send } => t.sends.iter().position(|s| s.id == send),
+                _ => None,
+            },
         }
     }
 
@@ -436,5 +453,41 @@ mod tests {
 
         s.set_track_monitor_auto(0, !monitor);
         assert_ne!(s.doc.revision(), steps);
+    }
+
+    #[test]
+    fn rows_say_what_the_mixer_calls_their_strip_effect_and_send() {
+        use crate::session_mixer::strip_id;
+        let mut s = state();
+        // The bus comes first in the list, but last among the strips.
+        s.add_track(TrackKind::Bus, "Bus".into());
+        s.add_track(TrackKind::Instrument, "Keys".into());
+        let rows = s.track_rows();
+        let (bus, keys) = (rows[0].id, rows[1].id);
+        assert_eq!(rows[1].strip, Some(0));
+        assert_eq!(rows[0].strip, Some(1));
+
+        let effect = s.mixer.effects()[0].id.clone();
+        for _ in 0..2 {
+            assert!(s.mixer.add_insert(&mut s.doc, strip_id(keys), &effect));
+        }
+        assert!(s.mixer.add_send(&mut s.doc, strip_id(keys), strip_id(bus)));
+        for group in [Group::Effects, Group::Sends] {
+            s.arrange.open.insert((keys, group));
+        }
+        s.arrange.expanded.insert(keys);
+
+        // The instrument comes first in the chain; the effects after it
+        // count from 0, as the Mixer's inserts do.
+        let rows = s.header_rows(1);
+        let items = |kind| -> Vec<Option<usize>> {
+            rows.iter()
+                .filter(|r| r.name.kind == kind)
+                .map(|r| r.item)
+                .collect()
+        };
+        assert_eq!(items(LaneKind::Device), [Some(0), Some(1)]);
+        assert_eq!(items(LaneKind::Send), [Some(0)]);
+        assert_eq!(items(LaneKind::Volume), [None]);
     }
 }

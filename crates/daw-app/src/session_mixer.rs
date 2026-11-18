@@ -20,7 +20,7 @@ mod automation_write;
 pub use automation_write::ParamStart;
 use automation_write::Take;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::double_click::Clicks;
@@ -112,6 +112,15 @@ fn ordered(project: &Project) -> Vec<&Arc<Track>> {
 /// The row of `track`'s strip, in the order the mixer shows strips.
 pub fn strip_row(project: &Project, track: TrackId) -> Option<usize> {
     ordered(project).iter().position(|t| t.id == track)
+}
+
+/// Every track's strip row (see [`strip_row`]), worked out at once.
+pub fn strip_rows(project: &Project) -> HashMap<TrackId, usize> {
+    ordered(project)
+        .iter()
+        .enumerate()
+        .map(|(row, t)| (t.id, row))
+        .collect()
 }
 
 fn find(project: &Project, id: StripId) -> Option<&Arc<Track>> {

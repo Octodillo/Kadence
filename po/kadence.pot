@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 19:55+0000\n"
+"POT-Creation-Date: 2026-11-18 20:38+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -335,7 +335,7 @@ msgid "%1 ms"
 msgstr ""
 
 #: crates/daw-app/qml/ChannelStrip.qml crates/daw-app/qml/DevicePanelDrawer.qml
-#: crates/daw-app/qml/Main.qml
+#: crates/daw-app/qml/Main.qml crates/daw-app/qml/TrackHeader.qml
 msgctxt "@title name of the master bus"
 msgid "Master"
 msgstr ""
@@ -3015,6 +3015,36 @@ msgid "Locate…"
 msgstr ""
 
 #: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action"
+msgid "Add Effect"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action"
+msgid "Add Send"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action %1 is an effect's name"
+msgid "Show the Settings of %1"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action"
+msgid "Show Instrument Settings"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action %1 is an effect's name"
+msgid "Remove %1"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action %1 is a bus"
+msgid "Remove Send to %1"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
 msgctxt "@info:whatsthis a group of controls"
 msgid "Open. Closing it leaves only the automated controls in view."
 msgstr ""
@@ -3079,6 +3109,11 @@ msgstr ""
 #: crates/daw-app/qml/RowHeader.qml
 msgctxt "@action:inmenu"
 msgid "Remove Automation"
+msgstr ""
+
+#: crates/daw-app/qml/RowHeader.qml
+msgctxt "@action:inmenu a send taken before the fader"
+msgid "Pre-Fader"
 msgstr ""
 
 #: crates/daw-app/qml/RowHeader.qml crates/daw-app/qml/TrackHeader.qml
@@ -3206,6 +3241,11 @@ msgstr ""
 #: crates/daw-app/qml/TrackHeader.qml
 msgctxt "@action:inmenu"
 msgid "Show Controls"
+msgstr ""
+
+#: crates/daw-app/qml/TrackHeader.qml
+msgctxt "@title:menu where the track's sound goes"
+msgid "Output"
 msgstr ""
 
 #: crates/daw-app/qml/TransportBar.qml
