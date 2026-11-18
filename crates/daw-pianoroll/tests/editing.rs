@@ -140,6 +140,19 @@ fn layout_areas() {
 }
 
 #[test]
+fn a_finger_scrolls_from_the_empty_grid_and_edits_everywhere_else() {
+    let rig = Rig::new(vec![n(0, Q, 60)]);
+    let project = rig.doc.project();
+    let pans = |x, y| rig.pr.touch_pans(project, x, y);
+    assert!(pans(rig.x(2 * Q), rig.y(60)), "beside the note");
+    assert!(pans(rig.x(Q / 2), rig.y(64)), "above the note");
+    assert!(!pans(rig.x(Q / 2), rig.y(60)), "on the note");
+    assert!(!pans(rig.x(Q), rig.pr.ruler_height / 2.0), "on the ruler");
+    assert!(!pans(rig.pr.keyboard_width / 2.0, rig.y(60)), "on the keys");
+    assert!(!pans(rig.x(Q), 599.0), "on the velocity lane");
+}
+
+#[test]
 fn double_click_adds_and_deletes_notes() {
     let mut r = Rig::new(vec![]);
     // A quarter-beat and a bit into the clip, on key 64.

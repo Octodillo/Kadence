@@ -922,6 +922,14 @@ impl PianoRoll {
         outcome_view()
     }
 
+    /// Whether a one-finger touch drag from `(x, y)` should scroll the view
+    /// rather than edit: on the grid where there is no note (as on empty
+    /// lane space in the arrangement). On a note, the keyboard, the ruler,
+    /// the velocity lane or an automation lane it edits, as a mouse would.
+    pub fn touch_pans(&self, project: &Project, x: f64, y: f64) -> bool {
+        self.area(x, y) == Area::Notes && self.hit(project, x, y).is_none()
+    }
+
     pub fn pinch(&mut self, scale: f64, x: f64) -> Outcome {
         self.view.zoom_at(scale, x - self.keyboard_width);
         self.clamp_scroll();

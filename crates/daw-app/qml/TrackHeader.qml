@@ -78,6 +78,15 @@ Column {
     ListView.onPooled: dismiss()
     onTrackIdChanged: dismiss()
 
+    readonly property bool renaming: nameField.visible
+    // Opens the name for editing.
+    function rename(): void {
+        nameField.text = row.name;
+        nameField.visible = true;
+        nameField.forceActiveFocus();
+        nameField.selectAll();
+    }
+
     function dismiss(): void {
         nameField.focus = false;
         nameField.visible = false;
@@ -200,12 +209,7 @@ Column {
                 visible: !nameField.visible
 
                 TapHandler {
-                    onDoubleTapped: {
-                        nameField.text = row.name;
-                        nameField.visible = true;
-                        nameField.forceActiveFocus();
-                        nameField.selectAll();
-                    }
+                    onDoubleTapped: row.rename()
                 }
             }
 
@@ -376,12 +380,7 @@ Column {
                 QQC2.MenuItem {
                     text: i18nc("@action:inmenu", "Rename…")
                     icon.name: "edit-rename"
-                    onTriggered: {
-                        nameField.text = row.name;
-                        nameField.visible = true;
-                        nameField.forceActiveFocus();
-                        nameField.selectAll();
-                    }
+                    onTriggered: row.rename()
                 }
                 QQC2.MenuItem {
                     text: i18nc("@action:inmenu", "Move Up")
@@ -418,6 +417,15 @@ Column {
             onTapped: {
                 Project.selectTrack(header.index);
                 menu.popup();
+            }
+        }
+        // The keyboard's way to the same menu, under the header.
+        Keys.forwardTo: [menuKey]
+        MenuKey {
+            id: menuKey
+            onRequested: {
+                Project.selectTrack(header.index);
+                menu.popup(header, Kirigami.Units.gridUnit, header.height);
             }
         }
         // Touch screens have no right button: hold a finger instead.

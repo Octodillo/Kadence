@@ -38,6 +38,9 @@ Kirigami.Page {
     readonly property bool stripShown: AppSettings.editStripShown
     readonly property bool lanesShown: AppSettings.editLanesShown
     readonly property alias roll: roll
+    // Up and Down belong to a focused fader or combo box before they
+    // transpose (see Main.qml).
+    readonly property bool arrowKeysFree: !applicationWindow().controlHasArrowKeys
     readonly property alias trackStrip: trackStrip
 
     title: roll.hasClip ? i18nc("@title %1 is a clip name", "Edit — %1", roll.clipName)
@@ -76,7 +79,7 @@ Kirigami.Page {
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Transpose Up")
             icon.name: "go-up"
-            shortcut: "Up"
+            shortcut: page.arrowKeysFree ? "Up" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(1)
@@ -84,21 +87,21 @@ Kirigami.Page {
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Transpose Down")
             icon.name: "go-down"
-            shortcut: "Down"
+            shortcut: page.arrowKeysFree ? "Down" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(-1)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Octave Up")
-            shortcut: "Shift+Up"
+            shortcut: page.arrowKeysFree ? "Shift+Up" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(12)
         },
         Kirigami.Action {
             text: i18nc("@action:inmenu", "Octave Down")
-            shortcut: "Shift+Down"
+            shortcut: page.arrowKeysFree ? "Shift+Down" : ""
             enabled: page.visible && roll.hasSelection
             displayHint: Kirigami.DisplayHint.AlwaysHide
             onTriggered: roll.transpose(-12)
@@ -363,40 +366,33 @@ Kirigami.Page {
             Accessible.name: i18nc("@info:accessible", "Piano roll")
         }
 
-        MouseArea {
+        CanvasPointer {
             anchors.fill: roll
+            canvas: roll
             enabled: page.visible && roll.hasClip
-            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-            hoverEnabled: true
-            preventStealing: true
-            cursorShape: roll.cursorShape
-            activeFocusOnTab: true
 
-            onPressed: (m) => {
-                forceActiveFocus();
-                roll.press(m.x, m.y, m.button, m.modifiers);
-            }
-            onPositionChanged: (m) => {
-                if (pressed) {
-                    roll.motion(m.x, m.y, m.modifiers);
-                } else {
-                    roll.hover(m.x, m.y);
-                }
-            }
-            onReleased: (m) => roll.release(m.x, m.y, m.modifiers)
             onDoubleClicked: (m) => {
                 if (m.button === Qt.LeftButton) {
                     roll.doubleClick(m.x, m.y, m.modifiers);
                 }
             }
-            onCanceled: roll.cancelDrag()
             onWheel: (w) => {
                 const by = Wheel.pixels(w);
                 roll.wheel(w.x, w.y, by.x, by.y, w.modifiers);
                 w.accepted = true;
             }
+            // What a right click would open, for the selection: no place
+            // on the grid is the keyboard's.
+            onMenuKeyPressed: {
+                const at = Qt.point(roll.keyboardWidth + Kirigami.Units.gridUnit, roll.rulerHeight + Kirigami.Units.gridUnit);
+                if (roll.hasPoints) {
+                    pointMenu.shape = roll.pointShape();
+                    pointMenu.popup(roll, at.x, at.y);
+                } else {
+                    noteMenu.popup(roll, at.x, at.y);
+                }
+            }
 
-            Keys.onEscapePressed: roll.cancelDrag()
             Keys.onLeftPressed: (e) => roll.nudge(-1)
             Keys.onRightPressed: (e) => roll.nudge(1)
         }
