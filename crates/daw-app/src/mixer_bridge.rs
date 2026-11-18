@@ -74,9 +74,12 @@ pub mod qobject {
         #[qproperty(bool, write_automation, READ, NOTIFY)]
         /// A fader or send at or below this many dB is silent.
         #[qproperty(f64, silent_db, READ = silent_db, CONSTANT)]
+        /// The top of the fader, send and meter range, in dB.
+        #[qproperty(f64, max_db, READ = max_db, CONSTANT)]
         type Mixer = super::MixerRust;
 
         fn silent_db(self: &Mixer) -> f64;
+        fn max_db(self: &Mixer) -> f64;
 
         #[qinvokable]
         fn set_volume(self: Pin<&mut Mixer>, row: i32, db: f64);
@@ -287,6 +290,10 @@ impl cxx_qt::Initialize for qobject::Mixer {
 impl qobject::Mixer {
     fn silent_db(&self) -> f64 {
         daw_core::level::FADER_FLOOR_DB
+    }
+
+    fn max_db(&self) -> f64 {
+        daw_core::level::FADER_MAX_DB
     }
 
     fn strip_id(&self, row: i32) -> Option<StripId> {

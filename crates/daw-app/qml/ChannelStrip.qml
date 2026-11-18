@@ -193,9 +193,9 @@ StripFrame {
                         spacing: 0
                         QQC2.Slider {
                             Layout.fillWidth: true
-                            from: -60
-                            to: 6
-                            value: strip.sendLevels[sendRow.index] ?? -60
+                            from: Mixer.silentDb
+                            to: Mixer.maxDb
+                            value: strip.sendLevels[sendRow.index] ?? Mixer.silentDb
                             onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
                             onPressedChanged: Mixer.touch(strip.index, Mixer.SendControl, sendRow.index, pressed)
                             QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2 (double-click for 0 dB)", sendRow.target, ValueText.level(value))
@@ -293,8 +293,8 @@ StripFrame {
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignHCenter
             orientation: Qt.Vertical
-            from: -60
-            to: 6
+            from: Mixer.silentDb
+            to: Mixer.maxDb
             value: strip.volumeDb
             onMoved: Mixer.setVolume(strip.index, value)
             onPressedChanged: Mixer.touch(strip.index, Mixer.VolumeControl, -1, pressed)
