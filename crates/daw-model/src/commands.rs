@@ -1437,17 +1437,11 @@ impl Command for AddLane {
 
     fn apply(&mut self, project: &mut Project) -> Result<ChangeSet, ModelError> {
         let t = track_of(project, self.track)?;
-        let target_ok = match self.lane.target {
-            AutomationTarget::Volume | AutomationTarget::Pan => true,
-            AutomationTarget::SendLevel { send } => t.sends.iter().any(|s| s.id == send),
-            AutomationTarget::DeviceParam { device, .. } => {
-                t.devices.iter().any(|d| d.id == device)
-            }
-        };
+        let target_ok = t.has_target(self.lane.target);
         if !target_ok {
             return Err(invalid("automation target isn't on this track"));
         }
-        if t.automation.iter().any(|l| l.target == self.lane.target) {
+        if t.lane_for(self.lane.target).is_some() {
             return Err(invalid("that target already has a lane"));
         }
         check_points(&self.lane.points)?;

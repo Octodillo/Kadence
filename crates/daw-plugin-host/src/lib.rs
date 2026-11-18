@@ -18,8 +18,8 @@
 //!   `on_main_thread`) starts a new host and restores the last saved or loaded state plus the
 //!   parameter changes made since.
 //!
-//! [`SandboxFormat`] wraps a format so a [`daw_plugins::PluginRegistry`] hands out sandboxed
-//! instances; [`sandboxed_registry`] does that for every format in this build.
+//! [`SandboxFormat`] is a format whose instances are sandboxed, for a
+//! [`daw_plugins::PluginRegistry`] or to load one plugin directly.
 //!
 //! [`PluginError::Busy`]: daw_core::plugin::PluginError::Busy
 
@@ -42,6 +42,6 @@ pub use client::{
     CrashHook, CrashReason, HostLauncher, SandboxConfig, SandboxMonitor, SandboxStatus,
     SandboxedInstance,
 };
-pub use format::{SandboxFormat, sandboxed_registry};
+pub use format::SandboxFormat;
 pub use realtime::Realtime;
 pub use shm::{EVENT_CAPACITY, MAX_CHANNELS};

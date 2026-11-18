@@ -129,30 +129,9 @@ StripFrame {
                 icon.name: "list-add"
                 text: i18nc("@action:button", "Add Effect")
                 onClicked: effectMenu.popup()
-                QQC2.Menu {
+                AddEffectMenu {
                     id: effectMenu
-                    Repeater {
-                        model: Mixer.effectNames
-                        delegate: QQC2.MenuItem {
-                            required property int index
-                            required property string modelData
-                            text: DeviceNames.name(modelData)
-                            onTriggered: Mixer.addInsert(strip.index, index)
-                        }
-                    }
-                    QQC2.MenuSeparator {}
-                    QQC2.MenuItem {
-                        icon.name: "preferences-plugin"
-                        text: i18nc("@action:inmenu", "Browse Plugins…")
-                        onTriggered: {
-                            // The row now: the delegate may be gone by the time a
-                            // plugin is chosen.
-                            const row = strip.index;
-                            applicationWindow().browsePlugins(Plugins.EffectPlugin, (format, pluginId, name) => {
-                                Mixer.addPluginInsert(row, format, pluginId, name);
-                            });
-                        }
-                    }
+                    row: strip.index
                 }
             }
             // Gain reduction of the strip's compressor.
@@ -214,9 +193,9 @@ StripFrame {
                         spacing: 0
                         QQC2.Slider {
                             Layout.fillWidth: true
-                            from: -60
-                            to: 6
-                            value: strip.sendLevels[sendRow.index] ?? -60
+                            from: Mixer.silentDb
+                            to: Mixer.maxDb
+                            value: strip.sendLevels[sendRow.index] ?? Mixer.silentDb
                             onMoved: Mixer.setSendLevel(strip.index, sendRow.index, value)
                             onPressedChanged: Mixer.touch(strip.index, Mixer.SendControl, sendRow.index, pressed)
                             QQC2.ToolTip.text: i18nc("@info:tooltip send level to bus", "Send to %1: %2 (double-click for 0 dB)", sendRow.target, ValueText.level(value))
@@ -256,17 +235,10 @@ StripFrame {
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                 onClicked: sendMenu.popup()
-                QQC2.Menu {
+                AddSendMenu {
                     id: sendMenu
-                    Repeater {
-                        model: strip.sendChoices
-                        delegate: QQC2.MenuItem {
-                            required property int index
-                            required property string modelData
-                            text: modelData
-                            onTriggered: Mixer.addSend(strip.index, index)
-                        }
-                    }
+                    row: strip.index
+                    choices: strip.sendChoices
                 }
             }
         }
@@ -321,8 +293,8 @@ StripFrame {
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignHCenter
             orientation: Qt.Vertical
-            from: -60
-            to: 6
+            from: Mixer.silentDb
+            to: Mixer.maxDb
             value: strip.volumeDb
             onMoved: Mixer.setVolume(strip.index, value)
             onPressedChanged: Mixer.touch(strip.index, Mixer.VolumeControl, -1, pressed)

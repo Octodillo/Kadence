@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use daw_core::plugin::{
     BundleScan, PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
 };
-use daw_plugins::{PluginRegistry, ScanError};
+use daw_plugins::ScanError;
 
 use crate::client::{SandboxConfig, SandboxedInstance};
 
@@ -25,11 +25,6 @@ impl SandboxFormat {
             search_paths,
             config,
         }
-    }
-
-    /// Sandboxes the same kind as `format`, with its search paths.
-    pub fn wrapping(format: &dyn PluginFormat, config: SandboxConfig) -> Self {
-        Self::new(format.kind(), format.default_search_paths(), config)
     }
 
     /// Starts a host and loads `d` in it, keeping the concrete type (for its monitor).
@@ -83,13 +78,4 @@ impl PluginFormat for SandboxFormat {
             max_frames,
         )?))
     }
-}
-
-/// A registry with every format this build has, each sandboxed with `config`.
-pub fn sandboxed_registry(config: &SandboxConfig) -> PluginRegistry {
-    let mut registry = PluginRegistry::new();
-    for format in daw_plugins::default_registry().formats() {
-        registry.register(Box::new(SandboxFormat::wrapping(format, config.clone())));
-    }
-    registry
 }

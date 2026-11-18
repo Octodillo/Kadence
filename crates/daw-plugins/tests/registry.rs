@@ -672,3 +672,32 @@ fn a_bundle_that_changes_itself_when_loaded_is_cached() {
     let report = registry.scan(&sh("exit 1"), &mut cache);
     assert_eq!((report.scanned, report.cached), (0, 1));
 }
+
+/// With no program to run, every bundle is reported with the reason and nothing is cached, so
+/// a later scan that can run finds the plugins.
+#[test]
+fn an_unavailable_scanner_reports_why_and_caches_nothing() {
+    let dir = plugin_dir();
+    let mut registry = clap_only_registry();
+    registry.set_search_paths(PluginFormatKind::Clap, vec![dir.path().to_owned()]);
+    let mut cache = ScanCache::new();
+
+    let unavailable = Scanner::unavailable("no /proc");
+    let err = unavailable
+        .scan(&PluginFormatKind::Clap, Path::new("/x.clap"))
+        .unwrap_err();
+    assert!(matches!(err, ScanError::Unavailable(_)), "{err}");
+    assert!(!err.is_plugin_fault());
+
+    let report = registry.scan(&unavailable, &mut cache);
+    assert_eq!(report.failed.len(), 1);
+    assert!(report.failed[0].1.contains("no /proc"), "{report:?}");
+    assert!(cache.is_empty());
+
+    let report = registry.scan(&scanner(), &mut cache);
+    assert_eq!((report.scanned, report.failed.len()), (1, 0));
+    // What the cache answers needs no scanner.
+    let report = registry.scan(&unavailable, &mut cache);
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(registry.plugins().len(), 1);
+}

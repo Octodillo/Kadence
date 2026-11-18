@@ -39,6 +39,13 @@ pub struct PluginDescriptor {
     pub ports: (u16, u16),
 }
 
+impl PluginDescriptor {
+    /// Whether this is the plugin a device names: ids are unique within a format only.
+    pub fn is(&self, format: &PluginFormatKind, id: &str) -> bool {
+        self.format == *format && self.id == id
+    }
+}
+
 /// What a scan of one bundle found.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BundleScan {

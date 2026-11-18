@@ -18,6 +18,7 @@ mod draw;
 pub mod gesture;
 pub mod lane_editor;
 pub mod peaks;
+pub mod rows;
 pub mod scene;
 pub mod snap;
 pub mod view;
@@ -41,6 +42,7 @@ use gesture::DRAG_THRESHOLD;
 pub use gesture::DragStep;
 pub use lane_editor::{LaneEditor, LaneFrame, LaneGrid};
 pub use peaks::{PeakPool, Peaks};
+pub use rows::{LaneRow, RowKind};
 pub use scene::{Palette, Prim, Rect, Rgba, Scene};
 pub use snap::Snap;
 pub use view::TimelineView;
@@ -141,12 +143,13 @@ pub enum Hit {
         row: usize,
         tick: TickTime,
     },
-    /// An automation lane under a track (see [`Arrange::expanded`]).
-    /// `lane` is `None` on the empty row an expanded track without lanes
-    /// shows; `point` is the index of the point under the pointer.
+    /// A row under an expanded track (see [`Arrange::lane_rows`]): `index`
+    /// counts the track's rows from 0. `lane` is the lane drawn there, if
+    /// the row has one; `point` is the index of the point under the pointer.
     Automation {
         track: TrackId,
         row: usize,
+        index: usize,
         lane: Option<LaneId>,
         tick: TickTime,
         point: Option<usize>,
@@ -391,6 +394,9 @@ pub struct Arrange {
     /// first track), and the bottom of the last: rows are as tall as a
     /// track plus its shown lanes. See [`Arrange::relayout`].
     tops: Vec<f64>,
+    /// The rows under each track, none for a collapsed one. Laid out with
+    /// `tops`.
+    rows: Vec<Vec<LaneRow>>,
 }
 
 impl Default for Arrange {
@@ -424,6 +430,7 @@ impl Arrange {
             drag: None,
             rates: HashMap::new(),
             tops: Vec::new(),
+            rows: Vec::new(),
         }
     }
 
@@ -435,26 +442,33 @@ impl Arrange {
     /// every input method and [`scene`](Self::scene) call it themselves.
     pub fn relayout(&mut self, project: &Project) {
         self.lanes.check(project);
+        self.expanded
+            .retain(|id| project.tracks.iter().any(|t| t.id == *id));
         self.tops.clear();
         self.tops.reserve(project.tracks.len() + 1);
+        self.rows.clear();
+        self.rows.reserve(project.tracks.len());
         let mut y = 0.0;
         self.tops.push(y);
         for t in &project.tracks {
-            y += self.track_height + self.lanes_shown(t) as f64 * self.lane_height;
+            let rows = if self.expanded.contains(&t.id) {
+                rows::track_rows(t)
+            } else {
+                Vec::new()
+            };
+            y += self.track_height + rows.len() as f64 * self.lane_height;
             self.tops.push(y);
+            self.rows.push(rows);
         }
-        self.expanded
-            .retain(|id| project.tracks.iter().any(|t| t.id == *id));
     }
 
-    /// How many lane rows `track` shows under it: none when collapsed, and
-    /// at least one (an empty one to add lanes from) when expanded.
-    pub fn lanes_shown(&self, track: &Track) -> usize {
-        if self.expanded.contains(&track.id) {
-            track.automation.len().max(1)
-        } else {
-            0
-        }
+    /// The rows track row `row` shows under it, as last laid out: none
+    /// while it is collapsed. [`hit`](Self::hit) and
+    /// [`lane_frame`](Self::lane_frame) read these too, so whoever changes
+    /// the document or [`expanded`](Self::expanded) from outside calls
+    /// [`relayout`](Self::relayout) before asking.
+    pub fn lane_rows(&self, row: usize) -> &[LaneRow] {
+        self.rows.get(row).map_or(&[], Vec::as_slice)
     }
 
     /// Top of row `row` in content coordinates.

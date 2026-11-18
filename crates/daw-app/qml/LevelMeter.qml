@@ -2,18 +2,20 @@
 
 import QtQuick
 import org.kde.kirigami as Kirigami
+import io.github.octodillo.daw
 
-// A vertical stereo peak meter, -60 to +6 dBFS. Positions come in ready to
-// draw (ballistics and peak hold run in Rust, see MeterBallistics).
+// A vertical stereo peak meter over the fader range (Mixer.silentDb to
+// Mixer.maxDb, in dBFS). Positions come in ready to draw (ballistics and peak
+// hold run in Rust, see MeterBallistics).
 Item {
     id: meter
 
-    // Per channel, 0 (-60 dB) to 1 (+6 dB).
+    // Per channel, 0 (floorDb) to 1 (topDb).
     property list<real> levels: [0, 0]
     property list<real> holds: [0, 0]
 
-    readonly property real floorDb: -60
-    readonly property real topDb: 6
+    readonly property real floorDb: Mixer.silentDb
+    readonly property real topDb: Mixer.maxDb
     readonly property real span: topDb - floorDb
 
     implicitWidth: Kirigami.Units.smallSpacing * 4 + 1

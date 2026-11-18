@@ -92,15 +92,8 @@ impl PluginRegistry {
         &self.plugins
     }
 
-    /// Replaces the plugin list with one found elsewhere, such as a scan on another thread.
-    pub fn set_plugins(&mut self, plugins: Vec<PluginDescriptor>) {
-        self.plugins = plugins;
-    }
-
     pub fn find(&self, kind: &PluginFormatKind, id: &str) -> Option<&PluginDescriptor> {
-        self.plugins
-            .iter()
-            .find(|p| p.format == *kind && p.id == id)
+        self.plugins.iter().find(|p| p.is(kind, id))
     }
 
     /// Lets every format clean up before the process exits. Call it once, after dropping
