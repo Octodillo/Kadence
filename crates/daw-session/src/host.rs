@@ -263,7 +263,6 @@ impl AudioHost {
                 audio_outputs: 0,
                 midi_input: false,
                 midi_output: false,
-                auto_connect: false,
                 ..Default::default()
             })
             .is_ok();
