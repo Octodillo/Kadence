@@ -6,9 +6,19 @@ name: VST3
 on:
   push:
     branches: [main]
-    paths: ["crates/daw-plugins-vst3/**", "crates/daw-core/**", "crates/daw-test-support/**", ".github/workflows/vst3.yml", "Cargo.lock"]
+    paths: &sources
+      # daw-plugins-vst3 and the workspace crates it builds on, the editor
+      # window among them; then what decides how they are built.
+      - crates/daw-plugins-vst3/**
+      - crates/daw-core/**
+      - crates/daw-plugin-window/**
+      - crates/daw-test-support/**
+      - .github/workflows/vst3.yml
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
   pull_request:
-    paths: ["crates/daw-plugins-vst3/**", "crates/daw-core/**", "crates/daw-test-support/**", ".github/workflows/vst3.yml", "Cargo.lock"]
+    paths: *sources
 
 permissions:
   contents: read
