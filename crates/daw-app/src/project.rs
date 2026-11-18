@@ -90,6 +90,7 @@ pub mod qobject {
         NoLoop,
         EmptyRange,
         ExportBusy,
+        ExportPluginScan,
         EncodeFailed,
         DiskTooSlow,
         WrongExtension,
@@ -453,6 +454,7 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
         Reason::NoLoop => QR::NoLoop,
         Reason::EmptyRange => QR::EmptyRange,
         Reason::ExportBusy => QR::ExportBusy,
+        Reason::ExportPluginScan => QR::ExportPluginScan,
         Reason::EncodeFailed => QR::EncodeFailed,
         Reason::DiskTooSlow => QR::DiskTooSlow,
         Reason::WrongExtension => QR::WrongExtension,
@@ -805,6 +807,7 @@ impl qobject::Project {
                 Box::new(crate::settings::KConfigStore),
                 crate::recovery::default_base().as_deref(),
             );
+            s.start_plugin_scan(settings::load_plugin_folders(&KConfigStore));
         });
     }
 

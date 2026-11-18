@@ -119,6 +119,8 @@ QtObject {
             return i18nc("@info", "The range to export is empty.");
         case Project.ExportBusy:
             return i18nc("@info", "Another export is still running.");
+        case Project.ExportPluginScan:
+            return i18nc("@info", "Kadence is still looking for the installed plugins, which this project uses. Export again in a moment.");
         case Project.DiskTooSlow:
             return i18nc("@info", "Audio files could not be read from disk fast enough, so the export would have had gaps.");
         case Project.PluginTooSlow:

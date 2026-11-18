@@ -49,6 +49,8 @@ const QML_FILES: &[&str] = &[
     "qml/TrackHeader.qml",
     "qml/LaneHeader.qml",
     "qml/AddLaneMenu.qml",
+    "qml/AddEffectMenu.qml",
+    "qml/AddSendMenu.qml",
     "qml/LaneName.qml",
     "qml/TransportBar.qml",
     "qml/RecoveryDialog.qml",

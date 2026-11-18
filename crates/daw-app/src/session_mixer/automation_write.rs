@@ -267,7 +267,7 @@ impl SessionMixer {
         let armed = |m: &Self| {
             m.write
                 || target_of(&track, control, fallback)
-                    .and_then(|(target, _)| lane_of(&track, target))
+                    .and_then(|(target, _)| track.lane_for(target))
                     .is_some_and(|l| l.enabled && m.write_lanes.contains(&l.id))
         };
         match (pressed, running) {
@@ -277,7 +277,8 @@ impl SessionMixer {
                 };
                 // Start from what is heard: the lane's value, if it has one.
                 let now = session.samples_to_ticks(session.controller().position());
-                let value = lane_of(&track, target)
+                let value = track
+                    .lane_for(target)
                     .filter(|l| l.enabled)
                     .and_then(|l| l.value_at(now))
                     .unwrap_or(value);
@@ -431,7 +432,7 @@ impl SessionMixer {
         let lanes: HashSet<LaneId> = self
             .takes
             .iter()
-            .filter_map(|t| lane_of(project.track(t.track)?, t.target).map(|l| l.id))
+            .filter_map(|t| project.track(t.track)?.lane_for(t.target).map(|l| l.id))
             .collect();
         if &lanes == session.suspended_lanes() {
             return Ok(());
@@ -468,10 +469,6 @@ fn target_of(
             Some((AutomationTarget::DeviceParam { device, param }, value))
         }
     }
-}
-
-fn lane_of(track: &Track, target: AutomationTarget) -> Option<&AutomationLane> {
-    track.automation.iter().find(|l| l.target == target)
 }
 
 /// The engine parameter a take drives, and its value there.
@@ -511,7 +508,7 @@ fn commit(doc: &mut Document, session: &Session, take: Take) -> Result<(), Messa
     let Some((_, static_value)) = target_of(track, take.control, take.fallback) else {
         return Ok(());
     };
-    let existing = lane_of(track, take.target);
+    let existing = track.lane_for(take.target);
     let base = match existing {
         Some(l) if l.enabled && !l.points.is_empty() => session.engine_lane(&l.points),
         // A new lane, or one that was switched off (and so not heard while

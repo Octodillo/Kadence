@@ -698,13 +698,7 @@ impl Track {
         }
         let mut lane_targets = HashSet::new();
         for l in &self.automation {
-            let ok = match l.target {
-                AutomationTarget::Volume | AutomationTarget::Pan => true,
-                AutomationTarget::SendLevel { send } => self.sends.iter().any(|x| x.id == send),
-                AutomationTarget::DeviceParam { device, .. } => {
-                    self.devices.iter().any(|x| x.id == device)
-                }
-            };
+            let ok = self.has_target(l.target);
             if !ok {
                 return bad(format!("lane {} targets something not on its track", l.id));
             }
@@ -714,6 +708,23 @@ impl Track {
             check_points(&l.points)?;
         }
         Ok(())
+    }
+
+    /// Whether `target` is something on this track: its fader or pan, one
+    /// of its sends or a parameter of one of its devices.
+    pub fn has_target(&self, target: AutomationTarget) -> bool {
+        match target {
+            AutomationTarget::Volume | AutomationTarget::Pan => true,
+            AutomationTarget::SendLevel { send } => self.sends.iter().any(|x| x.id == send),
+            AutomationTarget::DeviceParam { device, .. } => {
+                self.devices.iter().any(|x| x.id == device)
+            }
+        }
+    }
+
+    /// The lane that automates `target`; a track has at most one.
+    pub fn lane_for(&self, target: AutomationTarget) -> Option<&AutomationLane> {
+        self.automation.iter().find(|l| l.target == target)
     }
 
     /// Every object ID in the track, including its clips' notes.

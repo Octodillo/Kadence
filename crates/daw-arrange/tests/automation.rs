@@ -717,6 +717,50 @@ fn clicking_a_point_does_not_move_it() {
     r.arrange.release(&mut r.doc, Pointer::left(x, y - 2.0));
 }
 
+#[test]
+fn rows_follow_the_lanes_and_say_where_a_hit_landed() {
+    use daw_arrange::RowKind;
+    let mut r = Rig::new();
+    // Collapsed: no rows. Expanded without lanes: one placeholder.
+    assert!(r.arrange.lane_rows(1).is_empty());
+    let project = r.doc.project().clone();
+    r.arrange.set_expanded(&project, r.tracks[1], true);
+    let rows = r.arrange.lane_rows(1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, RowKind::Placeholder);
+    assert_eq!(rows[0].target(), None);
+
+    let vol = r.add_lane(1, AutomationTarget::Volume);
+    let pan = r.add_lane(1, AutomationTarget::Pan);
+    let rows = r.arrange.lane_rows(1).to_vec();
+    assert_eq!(
+        rows.iter()
+            .map(|x| (x.target(), x.lane))
+            .collect::<Vec<_>>(),
+        [
+            (Some(AutomationTarget::Volume), Some(vol)),
+            (Some(AutomationTarget::Pan), Some(pan)),
+        ]
+    );
+    // A hit names the row it landed in, and frames come from the same rows.
+    let x = r.x(BAR);
+    let y = r.arrange.lane_rect(1, 1).y + 5.0;
+    match r.arrange.hit(r.doc.project(), x, y) {
+        Hit::Automation { index, lane, .. } => {
+            assert_eq!(index, 1);
+            assert_eq!(lane, Some(pan));
+        }
+        h => panic!("{h:?}"),
+    }
+    let frame = r.arrange.lane_frame(r.doc.project(), pan).unwrap();
+    assert_eq!(frame.rect, r.arrange.lane_rect(1, 1));
+    // Rows of a collapsed track are gone, and so are its frames.
+    let project = r.doc.project().clone();
+    r.arrange.set_expanded(&project, r.tracks[1], false);
+    assert!(r.arrange.lane_rows(1).is_empty());
+    assert!(r.arrange.lane_frame(&project, pan).is_none());
+}
+
 /// Issue #204 item 5.
 #[test]
 fn select_all_selects_clips_instead_of_points() {

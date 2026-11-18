@@ -1059,6 +1059,13 @@ msgstr ""
 
 #: crates/daw-app/qml/DevicePanelDrawer.qml
 msgctxt "@info"
+msgid ""
+"Kadence is still looking for the installed plugins. This one is bypassed "
+"until it is found."
+msgstr ""
+
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@info"
 msgid "Plugins can't be loaded right now, so this one is bypassed."
 msgstr ""
 
@@ -2817,6 +2824,13 @@ msgstr ""
 #: crates/daw-app/qml/ProjectMessageText.qml
 msgctxt "@info"
 msgid "Another export is still running."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info"
+msgid ""
+"Kadence is still looking for the installed plugins, which this project uses. "
+"Export again in a moment."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml

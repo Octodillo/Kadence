@@ -302,6 +302,7 @@ impl qobject::DevicePanel {
             Some(PluginStatus::Running) => ("running", ""),
             Some(PluginStatus::Crashed) => ("crashed", ""),
             Some(PluginStatus::Missing) => ("missing", ""),
+            Some(PluginStatus::Waiting) => ("waiting", ""),
             Some(PluginStatus::Failed(e)) => ("failed", e.as_str()),
             Some(PluginStatus::NoLoader) => ("unavailable", ""),
         };
