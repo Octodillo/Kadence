@@ -117,6 +117,7 @@ impl AppState {
     /// among a project's tracks.
     pub fn track_rows(&self) -> Vec<TrackRow> {
         let project = self.doc.project();
+        let strips = session_mixer::strip_rows(project);
         project
             .tracks
             .iter()
@@ -140,7 +141,7 @@ impl AppState {
                     audio_input: t.audio_input,
                     midi_input: t.midi_input.clone(),
                     instrument,
-                    strip: session_mixer::strip_row(project, t.id),
+                    strip: strips.get(&t.id).copied(),
                     expanded,
                     rows: if expanded {
                         self.header_rows(row)
@@ -169,10 +170,7 @@ impl AppState {
                 mode: LaneMode::Read,
                 param: None,
                 item: match g {
-                    Group::Device(id) => {
-                        let at = t.devices.iter().position(|d| d.id == id);
-                        at.and_then(|i| i.checked_sub(instrument::effects_start(t)))
-                    }
+                    Group::Device(id) => instrument::effect_index(t, id),
                     _ => None,
                 },
             },
@@ -455,5 +453,41 @@ mod tests {
 
         s.set_track_monitor_auto(0, !monitor);
         assert_ne!(s.doc.revision(), steps);
+    }
+
+    #[test]
+    fn rows_say_what_the_mixer_calls_their_strip_effect_and_send() {
+        use crate::session_mixer::strip_id;
+        let mut s = state();
+        // The bus comes first in the list, but last among the strips.
+        s.add_track(TrackKind::Bus, "Bus".into());
+        s.add_track(TrackKind::Instrument, "Keys".into());
+        let rows = s.track_rows();
+        let (bus, keys) = (rows[0].id, rows[1].id);
+        assert_eq!(rows[1].strip, Some(0));
+        assert_eq!(rows[0].strip, Some(1));
+
+        let effect = s.mixer.effects()[0].id.clone();
+        for _ in 0..2 {
+            assert!(s.mixer.add_insert(&mut s.doc, strip_id(keys), &effect));
+        }
+        assert!(s.mixer.add_send(&mut s.doc, strip_id(keys), strip_id(bus)));
+        for group in [Group::Effects, Group::Sends] {
+            s.arrange.open.insert((keys, group));
+        }
+        s.arrange.expanded.insert(keys);
+
+        // The instrument comes first in the chain; the effects after it
+        // count from 0, as the Mixer's inserts do.
+        let rows = s.header_rows(1);
+        let items = |kind| -> Vec<Option<usize>> {
+            rows.iter()
+                .filter(|r| r.name.kind == kind)
+                .map(|r| r.item)
+                .collect()
+        };
+        assert_eq!(items(LaneKind::Device), [Some(0), Some(1)]);
+        assert_eq!(items(LaneKind::Send), [Some(0)]);
+        assert_eq!(items(LaneKind::Volume), [None]);
     }
 }

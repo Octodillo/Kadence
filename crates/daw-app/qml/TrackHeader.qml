@@ -95,6 +95,11 @@ Column {
         nameField.selectAll();
     }
 
+    // The header of row `i` under the track, or null.
+    function rowHeader(i: int): RowHeader {
+        return rowHeaders.itemAt(i) as RowHeader;
+    }
+
     function dismiss(): void {
         nameField.focus = false;
         nameField.visible = false;
@@ -411,7 +416,10 @@ Column {
                             text: modelData || i18nc("@title name of the master bus", "Master")
                             checkable: true
                             checked: index === outputMenu.stripInfo.outputIndex
-                            onTriggered: Mixer.setOutput(row.strip, index)
+                            onTriggered: {
+                                Mixer.setOutput(row.strip, index);
+                                Project.tick();
+                            }
                         }
                     }
                 }
@@ -482,6 +490,7 @@ Column {
             height: row.arrange.laneHeight
             track: row.index
             strip: row.strip
+            hasInstrument: row.instrument !== ""
             info: row.rows[index] ?? null
 
             // Drag the lower edge to resize every automation lane,
