@@ -1,13 +1,18 @@
 //! What the painted items (the arrange view and the piano roll) share: the
 //! flat form of a `daw_arrange::Scene` that C++ paints with QPainter (see
 //! `cpp/scenepainter.cpp`), kept between paints in a [`DisplayList`], the
-//! theme colours they take from QML, and how Qt's pointer events and
-//! cursors map to `daw_arrange`'s.
+//! theme colours they take from QML, how Qt's pointer events and cursors
+//! map to `daw_arrange`'s, and how pointer input reaches the item's
+//! [`Surface`] in the application state ([`route`]).
 
 use std::pin::Pin;
 
 use cxx_qt_lib::QColor;
-use daw_arrange::{Button, Cursor, Pointer, Prim, Rgba, Scene, scene::Align};
+use daw_arrange::{
+    Button, Cursor, Input, Outcome, Pointer, Prim, Rgba, Scene, Surface, scene::Align,
+};
+
+use crate::state::{self, View};
 
 #[cxx::bridge(namespace = "kadence")]
 mod ffi {
@@ -231,6 +236,20 @@ pub fn pointer(x: f64, y: f64, button: i32, modifiers: i32) -> Pointer {
         ctrl: modifiers & CTRL != 0,
         alt: modifiers & ALT != 0,
     }
+}
+
+/// Hands pointer input to the state's surface `S` (the arrange view or the
+/// piano roll). The item then applies the outcome, each in its own way.
+pub fn route<S: Surface + View>(input: Input) -> Outcome {
+    state::with(|s| s.with_view(|surface: &mut S, doc, env| surface.input(doc, env, input)))
+}
+
+/// Scrolls the state's surface `S` to where the item's scroll bars are.
+pub fn scroll_to<S: Surface + View>(x: f64, y: f64) {
+    state::with(|s| {
+        S::of(&mut s.arrange, &mut s.piano).scroll_to(x, y);
+        s.touch();
+    });
 }
 
 /// Qt::CursorShape values.

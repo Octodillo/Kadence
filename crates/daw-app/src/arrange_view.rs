@@ -11,10 +11,10 @@ use std::time::Instant;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QColor, QList, QString, QUrl};
-use daw_arrange::{Arrange, Hit};
+use daw_arrange::{Arrange, Hit, Input};
 
 use crate::message::{Context, Message};
-use crate::paint::{self, DisplayList, cursor_shape, pointer, to_qcolor};
+use crate::paint::{self, DisplayList, cursor_shape, pointer, route, to_qcolor};
 use crate::state;
 
 #[cxx_qt::bridge]
@@ -376,29 +376,26 @@ impl qobject::ArrangeView {
         }
     }
 
+    /// Hands pointer input to the arrange view and shows what came of it.
+    fn input(self: Pin<&mut Self>, input: Input) {
+        self.after(route::<Arrange>(input));
+    }
+
     fn press(mut self: Pin<&mut Self>, x: f64, y: f64, button: i32, modifiers: i32) {
         self.as_mut().rust_mut().last_press = (x, y);
-        let p = pointer(x, y, button, modifiers);
-        let out = state::with(|s| s.arrange.press(&mut s.doc, p));
-        self.after(out);
+        self.input(Input::Press(pointer(x, y, button, modifiers)));
     }
 
     fn motion(self: Pin<&mut Self>, x: f64, y: f64, modifiers: i32) {
-        let p = pointer(x, y, 1, modifiers);
-        let out = state::with(|s| s.with_view(|a: &mut Arrange, doc, env| a.motion(doc, env, p)));
-        self.after(out);
+        self.input(Input::Motion(pointer(x, y, 1, modifiers)));
     }
 
     fn release(self: Pin<&mut Self>, x: f64, y: f64, modifiers: i32) {
-        let p = pointer(x, y, 1, modifiers);
-        let out = state::with(|s| s.arrange.release(&mut s.doc, p));
-        self.after(out);
+        self.input(Input::Release(pointer(x, y, 1, modifiers)));
     }
 
     fn double_click(self: Pin<&mut Self>, x: f64, y: f64, modifiers: i32) {
-        let p = pointer(x, y, 1, modifiers);
-        let out = state::with(|s| s.arrange.double_click(&mut s.doc, p));
-        self.after(out);
+        self.input(Input::DoubleClick(pointer(x, y, 1, modifiers)));
     }
 
     fn set_default_names(
@@ -417,8 +414,7 @@ impl qobject::ArrangeView {
     }
 
     fn cancel_drag(self: Pin<&mut Self>) {
-        let out = state::with(|s| s.arrange.cancel(&mut s.doc));
-        self.after(out);
+        self.input(Input::Cancel);
     }
 
     fn hover(mut self: Pin<&mut Self>, x: f64, y: f64) {
@@ -436,17 +432,12 @@ impl qobject::ArrangeView {
     }
 
     fn wheel(self: Pin<&mut Self>, x: f64, y: f64, dx: f64, dy: f64, modifiers: i32) {
-        let p = pointer(x, y, 0, modifiers);
-        let out = state::with(|s| s.arrange.wheel(s.doc.project(), p, dx, dy));
-        self.after(out);
+        let at = pointer(x, y, 0, modifiers);
+        self.input(Input::Wheel { at, dx, dy });
     }
 
     fn pinch(self: Pin<&mut Self>, scale: f64, x: f64) {
-        let out = state::with(|s| {
-            let project = s.doc.project().clone();
-            s.arrange.pinch(&project, scale, x)
-        });
-        self.after(out);
+        self.input(Input::Pinch { scale, x });
     }
 
     fn resize_tracks(self: Pin<&mut Self>, height: f64, anchor_y: f64) {
@@ -467,11 +458,7 @@ impl qobject::ArrangeView {
     }
 
     fn scroll_to(self: Pin<&mut Self>, x: f64, y: f64) {
-        state::with(|s| {
-            s.arrange.view.scroll_x = x.max(0.0);
-            s.arrange.scroll_y = y.max(0.0);
-            s.touch();
-        });
+        paint::scroll_to::<Arrange>(x, y);
         self.refresh();
     }
 
