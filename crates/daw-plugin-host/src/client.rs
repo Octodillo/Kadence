@@ -22,6 +22,7 @@ use daw_plugins::Scanner;
 use crate::child::HOST_ARG;
 use crate::control::{CallError, Control};
 use crate::protocol::{InstanceInfo, Reply, Request, blob_fits};
+use crate::realtime::Realtime;
 use crate::shm::{
     self, DONE, EVENT_CAPACITY, FLAG_RESET, Header, Layout, REQUEST, Shm, decode_event,
     encode_event, futex_wait, futex_wake, shm_dir,
@@ -98,8 +99,9 @@ pub struct SandboxConfig {
     /// silence. `None` (the default) waits at most one buffer's duration, since any longer is
     /// an xrun anyway.
     pub process_timeout: Option<Duration>,
-    /// `SCHED_FIFO` priority for the host's audio thread; `None` leaves it at normal
-    /// priority. Default 70, below JACK's own threads. Failure to get it is logged by the host.
+    /// Real-time priority for the host's audio thread; `None` leaves it at normal priority.
+    /// Default 70, below JACK's own threads. Whether the host got it, by itself or through a
+    /// broker (which may give less), is in [`SandboxMonitor::realtime`].
     pub rt_priority: Option<i32>,
     /// Told when a plugin crashes or hangs, so the UI can offer to reload it.
     pub on_crash: Option<CrashHook>,
@@ -171,6 +173,8 @@ struct Shared {
     reload_requested: AtomicBool,
     pid: AtomicU32,
     late_cycles: AtomicU64,
+    /// A [`Realtime`] as its `u32`.
+    realtime: AtomicU32,
     on_crash: Option<CrashHook>,
     /// The last generation the crash hook was called for.
     notified: AtomicU64,
@@ -228,6 +232,20 @@ impl Shared {
         }
     }
 
+    /// Takes over how the host's audio thread is scheduled from the block, where the host
+    /// writes it some time after it has started the thread.
+    fn note_realtime(&self, header: &Header) {
+        let now = Realtime::from_wire(header.realtime.load(Ordering::Acquire));
+        let before = Realtime::from_wire(self.realtime.swap(now as u32, Ordering::AcqRel));
+        if now == Realtime::Refused && before != now {
+            log::warn!(
+                "{}: its host's audio thread got no real-time scheduling, so its audio \
+                 may drop out while the machine is busy",
+                self.descriptor.name
+            );
+        }
+    }
+
     /// Calls the crash hook once for `generation`, if it crashed and is still current.
     fn notify(self: &Arc<Self>, generation: u64) {
         let current = self.generation.load(Ordering::Acquire) == generation;
@@ -280,6 +298,14 @@ impl SandboxMonitor {
     /// Audio cycles that got silence because the host was not done in time.
     pub fn late_cycles(&self) -> u64 {
         self.0.late_cycles.load(Ordering::Relaxed)
+    }
+
+    /// How the host's audio thread is scheduled, as of the last
+    /// [`PluginInstance::on_main_thread`] call. [`Realtime::Refused`] explains late cycles:
+    /// the user's system grants this host no real-time priority, directly or through
+    /// RealtimeKit or the desktop portal, which ration it.
+    pub fn realtime(&self) -> Realtime {
+        Realtime::from_wire(self.0.realtime.load(Ordering::Acquire))
     }
 }
 
@@ -742,6 +768,7 @@ impl SandboxedInstance {
             reload_requested: AtomicBool::new(false),
             pid: AtomicU32::new(0),
             late_cycles: AtomicU64::new(0),
+            realtime: AtomicU32::new(Realtime::Off as u32),
             on_crash: config.on_crash.clone(),
             notified: AtomicU64::new(0),
         });
@@ -1546,6 +1573,7 @@ impl PluginInstance for SandboxedInstance {
             return;
         };
         let header = link.shm.header();
+        self.shared.note_realtime(header);
         let layout_changed = header.layout_changed.swap(0, Ordering::AcqRel) != 0;
         let state_changed = header.state_changed.swap(0, Ordering::AcqRel) != 0;
         // The user closed the window. (A host that is down keeps the editor "open", so a
