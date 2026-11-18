@@ -14,13 +14,15 @@
 //! is lost. With nothing armed, Record records MIDI on the open clip's
 //! track, the selected track or the first instrument track.
 
+use std::path::PathBuf;
+
 use daw_core::time::{SegmentTempoMap, TempoMap, TickTime};
 use daw_midi::model::{meter, midi_clip, new_note, take_command, tempo_map};
 use daw_midi::record::{RecordedNote, Recorder, to_clip_notes};
 
 use daw_model::commands::AddClip;
 use daw_model::{Clip, ClipContent, ClipId, Command, MidiClip, Project, TrackId, TrackKind};
-use daw_session::record::{AudioTakes, armed_audio_tracks};
+use daw_session::record::{AudioTakes, TakeProblem, armed_audio_tracks};
 
 use crate::message::{Message, RecordProblem};
 use crate::state::AppState;
@@ -47,6 +49,21 @@ pub struct AudioRecording {
     xruns: u64,
     /// Whether xruns were reported for this recording.
     xruns_reported: bool,
+}
+
+/// Where takes of a saved project go: its `audio/` folder. Not made anew
+/// where the bundle used to be if its folder was moved since.
+fn bundle_recordings_dir(bundle: &daw_model::Bundle) -> Result<PathBuf, Message> {
+    bundle.audio_dir_for_writing().map_err(|e| {
+        let (path, detail) = match e {
+            daw_model::FormatError::Io { path, source } => (path, source.to_string()),
+            e => (bundle.audio_dir(), e.to_string()),
+        };
+        Message::Record(RecordProblem::Take(TakeProblem::CannotCreate {
+            path,
+            detail,
+        }))
+    })
 }
 
 /// The instrument track that hears live MIDI while none is armed: the one
@@ -168,7 +185,12 @@ impl AppState {
         if armed_audio_tracks(project).next().is_none() {
             return Ok(false);
         }
-        let dir = crate::recovery::audio_dir(&self.media_root());
+        // An unsaved project's takes go into the folder it lives in until
+        // it is saved.
+        let dir = match self.doc.bundle() {
+            Some(bundle) => bundle_recordings_dir(bundle)?,
+            None => crate::recovery::audio_dir(&self.media_root()),
+        };
         let latency = self.engine.round_trip_latency();
         let xruns = self.engine.xruns();
         let Some(session) = self.engine.session_mut() else {

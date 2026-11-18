@@ -14,7 +14,8 @@ use daw_core::plugin::PluginError;
 use daw_core::time::{SegmentTempoMap, TickTime};
 use daw_media::Decoder;
 use daw_midi::player::Preview;
-use daw_model::{Document, FormatError, Project, TrackId};
+use daw_model::bundle::Target;
+use daw_model::{Bundle, Document, FormatError, Project, TrackId};
 use daw_pianoroll::PianoRoll;
 use daw_plugins::Scanner;
 use daw_session::catalog::PluginCatalog;
@@ -1061,26 +1062,31 @@ impl AppState {
         self.doc.save()
     }
 
-    /// Saves into a new bundle at `dir`. A take in progress ends first and
-    /// is saved with the rest: its files belong with the project it was
-    /// started in. The audio recorded so far comes along, so the bundle
-    /// holds what the project plays.
-    pub fn save_as(&mut self, dir: &Path) -> Result<(), FormatError> {
+    /// Saves into a new bundle at `path`, its directory or the project file
+    /// to go in it (see [`Document::save_as`]). A take in progress ends
+    /// first and is saved with the rest: its files belong with the project
+    /// it was started in. The audio recorded so far comes along, so the
+    /// bundle holds what the project plays.
+    pub fn save_as(&mut self, path: &Path) -> Result<(), FormatError> {
         self.stop_recording();
         self.store_plugin_states();
         let was_untitled = self.doc.bundle().is_none();
         // A bundle's audio is copied by the document; an unsaved project's
-        // is brought in from the folder it lived in.
-        let brought = if was_untitled {
-            // Refuses a folder that already holds a project before anything
-            // is put into it.
-            daw_model::Bundle::create(dir)?;
-            recovery::bring_audio(self.unsaved_root(), dir)?
-        } else {
-            Vec::new()
+        // is brought in from the folder it lived in. A project file that is
+        // already there is left for the document to refuse.
+        let brought = match Bundle::target(path)? {
+            Target::New(dir) if was_untitled => {
+                // Refuses a folder that already holds a project before
+                // anything is put into it.
+                Bundle::create(&dir)?;
+                Some((recovery::bring_audio(self.unsaved_root(), &dir)?, dir))
+            }
+            _ => None,
         };
-        if let Err(e) = self.doc.save_as(dir) {
-            recovery::take_back_audio(&brought, dir);
+        if let Err(e) = self.doc.save_as(path) {
+            if let Some((files, dir)) = &brought {
+                recovery::take_back_audio(files, dir);
+            }
             return Err(e);
         }
         self.relock();
