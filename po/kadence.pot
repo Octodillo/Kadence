@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 18:30+0000\n"
+"POT-Creation-Date: 2026-11-18 18:58+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -90,16 +90,6 @@ msgstr ""
 #: crates/daw-app/qml/ArrangePage.qml
 msgctxt "@title:window"
 msgid "Import Audio"
-msgstr ""
-
-#: crates/daw-app/qml/ArrangePage.qml
-msgctxt "@item:inlistbox"
-msgid "Audio files (*.wav *.flac *.ogg *.oga *.mp3 *.aif *.aiff)"
-msgstr ""
-
-#: crates/daw-app/qml/ArrangePage.qml crates/daw-app/qml/RelinkDialog.qml
-msgctxt "@item:inlistbox"
-msgid "All files (*)"
 msgstr ""
 
 #: crates/daw-app/qml/ArrangePage.qml crates/daw-app/qml/EditPage.qml
@@ -240,6 +230,16 @@ msgstr ""
 #: crates/daw-app/qml/ArrangePage.qml
 msgctxt "@action:inmenu"
 msgid "Add Instrument Track"
+msgstr ""
+
+#: crates/daw-app/qml/AudioFileDialog.qml
+msgctxt "@item:inlistbox"
+msgid "Audio files (*.wav *.flac *.ogg *.oga *.mp3 *.aif *.aiff)"
+msgstr ""
+
+#: crates/daw-app/qml/AudioFileDialog.qml
+msgctxt "@item:inlistbox"
+msgid "All files (*)"
 msgstr ""
 
 #: crates/daw-app/qml/AudioSettings.qml
@@ -982,6 +982,16 @@ msgctxt "@label name of a device setting"
 msgid "Width"
 msgstr ""
 
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@action:button"
+msgid "Load Sample…"
+msgstr ""
+
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@title:window"
+msgid "Load Sample"
+msgstr ""
+
 #: crates/daw-app/qml/DevicePanelDrawer.qml crates/daw-app/qml/ExportDialog.qml
 msgctxt "@action:button"
 msgid "Close"
@@ -1062,6 +1072,22 @@ msgstr ""
 #: crates/daw-app/qml/DevicePanelDrawer.qml
 msgctxt "@action:button restart a crashed plugin"
 msgid "Reload Plugin"
+msgstr ""
+
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@info %1 is a file name"
+msgid ""
+"The sample %1 cannot be found. The sampler is silent until you load it again."
+msgstr ""
+
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@info"
+msgid "No sample loaded. The sampler is silent until you load one."
+msgstr ""
+
+#: crates/daw-app/qml/DevicePanelDrawer.qml
+msgctxt "@label %1 is a file name"
+msgid "Sample: %1"
 msgstr ""
 
 #: crates/daw-app/qml/DevicePanelDrawer.qml
@@ -1297,6 +1323,11 @@ msgstr ""
 #: crates/daw-app/qml/EditNames.qml
 msgctxt "@item:inmenu name of an edit"
 msgid "Legato"
+msgstr ""
+
+#: crates/daw-app/qml/EditNames.qml
+msgctxt "@item:inmenu name of an edit"
+msgid "Load Sample"
 msgstr ""
 
 #: crates/daw-app/qml/EditNames.qml
@@ -2579,6 +2610,13 @@ msgid "The file does not say how long it is."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info"
+msgid ""
+"Its name or folder has characters that cannot be saved. Save the project "
+"first, or rename the file."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
 msgctxt "@info %1 is a technical message which may be in English"
 msgid "This is a bug in Kadence; please report it (%1)."
 msgstr ""
@@ -2966,11 +3004,6 @@ msgstr ""
 #: crates/daw-app/qml/RelinkDialog.qml
 msgctxt "@title:window"
 msgid "Locate Audio File"
-msgstr ""
-
-#: crates/daw-app/qml/RelinkDialog.qml
-msgctxt "@item:inlistbox"
-msgid "Audio files (*.wav *.flac *.ogg *.mp3 *.aif *.aiff)"
 msgstr ""
 
 #: crates/daw-app/qml/RelinkDialog.qml
