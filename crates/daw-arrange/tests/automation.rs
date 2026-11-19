@@ -341,7 +341,7 @@ fn shapes_and_curve_bending() {
     r.arrange.set_point_shape(&mut r.doc, PointShape::Step);
     assert!(r.points(lane)[0].step);
     assert_eq!(
-        r.arrange.lanes.selected_shape(r.doc.project()),
+        r.arrange.point_shape(r.doc.project()),
         Some(PointShape::Step)
     );
     r.arrange.set_point_shape(&mut r.doc, PointShape::SlowStart);

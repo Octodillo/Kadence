@@ -1,7 +1,7 @@
 //! Parameter metadata and storage.
 
 use daw_core::event::ParamId;
-use daw_core::plugin::{ParamInfo, Steps};
+use daw_core::plugin::{ParamInfo, Stepped, Steps};
 
 /// How a parameter's values are interpreted.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -143,6 +143,11 @@ impl ParamSpec {
         self.is_discrete()
             .then(|| Steps::whole(self.min, self.max))
             .flatten()
+    }
+
+    /// Its [`steps`](Self::steps) along its range.
+    pub fn stepped(&self) -> Option<Stepped> {
+        self.steps().map(|s| Stepped::new(s, self.min, self.max))
     }
 
     pub fn is_discrete(&self) -> bool {

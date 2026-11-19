@@ -76,8 +76,35 @@ impl Param {
             _ => CURVE_POINTS,
         };
         let last = (points - 1) as f64;
-        let curve = (0..points).map(|i| plain(i as f64 / last)).collect();
-        Param { info, curve }
+        let curve: Vec<f64> = (0..points).map(|i| plain(i as f64 / last)).collect();
+        let mut info = info;
+        info.steps = Self::even_steps(step_count, &curve);
+        Param {
+            info,
+            curve: curve.into(),
+        }
+    }
+
+    /// The steps of a parameter with `step_count` steps, whose plain value
+    /// at each step `curve` holds, if they are evenly spaced in plain values
+    /// too, as they are for the usual parameter types. A stepped parameter
+    /// whose steps aren't (1, 2, 4, 8, say) is taken as continuous: the host
+    /// snaps plain values to even steps, which it would never take. So is
+    /// one with more steps than are sampled.
+    fn even_steps(step_count: i32, curve: &[f64]) -> Option<Steps> {
+        let n = u32::try_from(step_count).ok().filter(|&n| n > 0)?;
+        if curve.len() != n as usize + 1 {
+            return None;
+        }
+        let (first, last) = (curve[0], curve[curve.len() - 1]);
+        let step = (last - first) / f64::from(n);
+        let tolerance = step.abs() * 1e-6;
+        let even = step != 0.0
+            && curve
+                .iter()
+                .enumerate()
+                .all(|(k, &v)| (v - (first + step * k as f64)).abs() <= tolerance);
+        even.then_some(Steps(n))
     }
 
     fn to_plain(&self, normalized: f64) -> f64 {
@@ -943,13 +970,8 @@ impl Vst3Instance {
                         max: 0.0,
                         default,
                         automatable,
-                        // Steps of a VST3 parameter are evenly spaced in
-                        // its normalized range, and for the usual parameter
-                        // types in its plain range too.
-                        steps: u32::try_from(info.stepCount)
-                            .ok()
-                            .filter(|&n| n > 0)
-                            .map(Steps),
+                        // Filled in by `sampled`.
+                        steps: None,
                     },
                     info.stepCount,
                     |n| self.controller.normalizedParamToPlain(info.id, n),
@@ -2290,6 +2312,17 @@ mod tests {
             automatable: true,
             steps: None,
         }
+    }
+
+    #[test]
+    fn evenly_spaced_steps_are_steps() {
+        let p = Param::sampled(info(), 3, |n| 3.0 * n);
+        assert_eq!(p.info.steps, Some(Steps(3)));
+        // Doubling at each step: not steps the host could snap to.
+        let p = Param::sampled(info(), 3, |n| 2f64.powf(3.0 * n));
+        assert_eq!(p.info.steps, None);
+        let p = Param::sampled(info(), 0, |n| n);
+        assert_eq!(p.info.steps, None);
     }
 
     #[test]

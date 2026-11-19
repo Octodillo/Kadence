@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use daw_core::event::ParamId;
 use daw_core::level::{FADER_FLOOR_DB, FADER_MAX_DB, SILENCE_DB};
-use daw_core::plugin::Steps;
+use daw_core::plugin::{Stepped, Steps};
 use daw_core::time::TickTime;
 use daw_model::commands::{AddLane, LaneField, RemoveLane, SetLane};
 use daw_model::{
@@ -67,12 +67,27 @@ impl LaneScale {
         !matches!(self, Self::Range { log: true, .. })
     }
 
+    /// The value nearest `v` that its target takes: `v` itself unless it is
+    /// [stepped](Self::is_stepped). (A point may sit between steps, drawn
+    /// before its parameter was known to be stepped.)
+    pub fn snap(self, v: f64) -> f64 {
+        match self {
+            Self::Range {
+                min,
+                max,
+                steps: Some(s),
+                ..
+            } => Stepped::new(s, min, max).snap(v),
+            _ => v,
+        }
+    }
+
     /// What `lane`, drawn along this scale, plays at `tick`: holding each
-    /// point's value if [stepped](Self::is_stepped), else along each
-    /// segment's shape. `None` without points.
+    /// point's value, on its step, if [stepped](Self::is_stepped), else
+    /// along each segment's shape. `None` without points.
     pub fn lane_value(self, lane: &AutomationLane, tick: TickTime) -> Option<f64> {
         if self.is_stepped() {
-            lane.held_at(tick)
+            lane.held_at(tick).map(|v| self.snap(v))
         } else {
             lane.value_at(tick)
         }
@@ -405,6 +420,14 @@ impl Arrange {
         self.lanes.set_point_shape(doc, frame.as_ref(), shape)
     }
 
+    /// The shape of the segment after the first selected point, for the
+    /// point menu to check; `None` where shapes don't apply (see
+    /// [`LaneEditor::selected_shape`](crate::LaneEditor::selected_shape)).
+    pub fn point_shape(&self, project: &Project) -> Option<PointShape> {
+        let frame = self.lane_frame(project, self.lanes.selected_lane()?);
+        self.lanes.selected_shape(project, frame.as_ref())
+    }
+
     /// The frame of the lane points are selected on, if it shows.
     fn selected_frame(&mut self, project: &Project) -> Option<LaneFrame> {
         self.relayout(project);
@@ -576,5 +599,10 @@ mod tests {
             stepped.lane_value(&AutomationLane::new(AutomationTarget::Pan), TickTime(0)),
             None
         );
+        // A point between steps plays, and shows, on the nearest one.
+        lane.points[1].value = 1.6;
+        assert_eq!(stepped.lane_value(&lane, TickTime(200)), Some(2.0));
+        assert_eq!(stepped.snap(1.4), 1.0);
+        assert_eq!(smooth.snap(0.4), 0.4);
     }
 }

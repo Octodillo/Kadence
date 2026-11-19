@@ -1219,13 +1219,14 @@ impl Session {
     /// would otherwise ramp in linear gain). What plays then follows the
     /// line the arrange view draws.
     ///
-    /// With `hold` (a parameter that takes only some values), every point
-    /// holds its value until the next, whatever its shape.
+    /// For a parameter that takes only some values (`stepped`), every point
+    /// holds its value, put on the nearest step, until the next, whatever
+    /// its shape.
     pub fn playback_lane(
         &self,
         lane: &daw_model::AutomationLane,
         to_value: fn(f64) -> f64,
-        hold: bool,
+        stepped: Option<daw_core::plugin::Stepped>,
     ) -> AutomationLane {
         let dense = lane.target.is_level();
         let floor = lane.target.ramp_floor();
@@ -1233,11 +1234,12 @@ impl Session {
         for (i, p) in lane.points.iter().enumerate() {
             let time = self.ticks_to_samples(p.tick);
             let next = lane.points.get(i + 1);
-            let step = p.step || hold;
+            let step = p.step || stepped.is_some();
             let ramp = !step && next.is_some_and(|n| n.value != p.value);
+            let value = stepped.map_or(p.value, |s| s.snap(p.value));
             out.push(daw_engine::AutomationPoint {
                 time,
-                value: to_value(p.value),
+                value: to_value(value),
                 curve: if step { Curve::Step } else { Curve::Linear },
             });
             let Some(next) = next.filter(|_| ramp && (dense || p.curve != 0.0)) else {

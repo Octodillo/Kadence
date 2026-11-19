@@ -258,7 +258,6 @@ impl Lv2Instance {
         let reports_latency = lilv.new_uri(&format!("{LV2_CORE}reportsLatency"));
         let toggled = lilv.new_uri(&format!("{LV2_CORE}toggled"));
         let integer = lilv.new_uri(&format!("{LV2_CORE}integer"));
-        let enumeration = lilv.new_uri(&format!("{LV2_CORE}enumeration"));
         let params: Vec<ParamInfo> = plugin
             .ports_with_type(PortType::ControlInput)
             .filter_map(|p| {
@@ -283,12 +282,13 @@ impl Lv2Instance {
                         .filter(|v| v.is_finite())
                         .unwrap_or(p.default_value.max(1.0)),
                 );
-                // A toggle is off or on, its minimum or maximum. An
-                // enumeration's scale points are taken as the whole numbers
-                // they nearly always are.
+                // A toggle is off or on, its minimum or maximum; an integer
+                // port takes the whole numbers of its range. (An
+                // enumeration's scale points may be any values: it is
+                // stepped only if it is also an integer port.)
                 let steps = if lp.has_property(&toggled) {
                     Some(Steps(1))
-                } else if lp.has_property(&integer) || lp.has_property(&enumeration) {
+                } else if lp.has_property(&integer) {
                     Steps::whole(min, max)
                 } else {
                     None

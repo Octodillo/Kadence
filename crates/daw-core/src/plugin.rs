@@ -163,6 +163,14 @@ pub struct ParamInfo {
     pub steps: Option<Steps>,
 }
 
+impl ParamInfo {
+    /// Its steps along its range (low end first), if it takes only some
+    /// values.
+    pub fn stepped(&self) -> Option<Stepped> {
+        self.steps.map(|s| Stepped::new(s, self.min, self.max))
+    }
+}
+
 /// A parameter that takes only `self.0 + 1` values, evenly spaced from its
 /// minimum to its maximum: a switch has 1 step, a list of four choices 3.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -194,6 +202,30 @@ impl Steps {
         let k = ((value - min) / span * n).round().clamp(0.0, n);
         // The ends exactly, whatever the rounding in between.
         if k >= n { max } else { min + span * k / n }
+    }
+}
+
+/// The values a stepped parameter takes: its [`Steps`] along its range.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Stepped {
+    pub steps: Steps,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Stepped {
+    /// `steps` from `a` to `b`, whichever way round they are given.
+    pub fn new(steps: Steps, a: f64, b: f64) -> Self {
+        Self {
+            steps,
+            min: a.min(b),
+            max: a.max(b),
+        }
+    }
+
+    /// The value it takes nearest to `value` (see [`Steps::snap`]).
+    pub fn snap(self, value: f64) -> f64 {
+        self.steps.snap(value, self.min, self.max)
     }
 }
 

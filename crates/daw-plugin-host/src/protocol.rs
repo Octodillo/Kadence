@@ -159,7 +159,8 @@ impl From<&WireParam> for ParamInfo {
             max: p.max,
             default: p.default,
             automatable: p.automatable,
-            steps: p.steps.map(Steps),
+            // No steps is no stepped parameter (see `Steps`).
+            steps: p.steps.filter(|&n| n > 0).map(Steps),
         }
     }
 }

@@ -95,6 +95,12 @@ impl LaneFrame {
         self.editable
     }
 
+    /// Its points' shapes (and bends) mean something: it is editable and
+    /// not stepped, which holds whatever the shape.
+    pub fn shapes_points(&self) -> bool {
+        self.editable && !self.scale.is_stepped()
+    }
+
     /// The pointer shape over this lane: `over_point` says whether it is
     /// over one of its points.
     pub fn cursor(&self, over_point: bool) -> Cursor {
@@ -124,9 +130,10 @@ impl LaneFrame {
         ((self.rect.bottom() - self.pad() - y) / self.span()).clamp(0.0, 1.0)
     }
 
-    /// The y of value `v`.
+    /// The y of value `v`, on its step if the target is stepped (as it
+    /// plays).
     pub fn value_y(&self, v: f64) -> f64 {
-        self.norm_to_y(self.scale.to_norm(v))
+        self.norm_to_y(self.scale.to_norm(self.scale.snap(v)))
     }
 
     /// The x of `tick`.
@@ -397,6 +404,9 @@ impl LaneEditor {
                 Outcome::view()
             }
             None if p.alt => {
+                if !frame.shapes_points() {
+                    return Outcome::view();
+                }
                 // Bend the segment under the pointer.
                 let after = orig.partition_point(|q| q.tick <= tick);
                 let Some(index) = after.checked_sub(1).filter(|&i| i + 1 < orig.len()) else {
@@ -608,6 +618,9 @@ impl LaneEditor {
             ControlFlow::Continue(s) => s,
             ControlFlow::Break(o) => return o,
         };
+        if !frame.is_some_and(LaneFrame::shapes_points) {
+            return Outcome::view();
+        }
         let Some((_, l)) = lane_of(doc.project(), lane) else {
             return Outcome::view();
         };
@@ -623,8 +636,14 @@ impl LaneEditor {
     }
 
     /// The shape of the segment after the first selected point, for the
-    /// context menu to check.
-    pub fn selected_shape(&self, project: &Project) -> Option<PointShape> {
+    /// context menu to check, if its lane's `frame` lets it be given one:
+    /// `None` on a stepped lane, which holds whatever the shape.
+    pub fn selected_shape(
+        &self,
+        project: &Project,
+        frame: Option<&LaneFrame>,
+    ) -> Option<PointShape> {
+        frame.filter(|f| f.shapes_points())?;
         let (lane, sel) = self.selection(project)?;
         let p = lane_of(project, *lane)?.1.points.get(*sel.first()?)?;
         Some(PointShape::of(p))
@@ -889,6 +908,45 @@ mod tests {
         assert!(points(&doc, lane).is_empty());
         e.check(doc.project());
         assert!(!e.points_selected(doc.project()));
+    }
+
+    #[test]
+    fn stepped_lanes_have_no_shapes_to_give() {
+        let (mut doc, lane, frame, grid) = rig();
+        let stepped = LaneFrame::new(
+            frame.view,
+            frame.rect,
+            Some(LaneScale::Range {
+                min: -1.0,
+                max: 1.0,
+                log: false,
+                steps: Some(daw_core::plugin::Steps(2)),
+            }),
+        );
+        let mut e = LaneEditor::default();
+        for x in [100.0, 300.0] {
+            let p = Pointer::left(x, stepped.value_y(1.0));
+            e.press(&mut doc, &stepped, &grid, p, lane, None);
+            e.release(&mut doc, p);
+        }
+        let before = points(&doc, lane);
+        assert_eq!(before.len(), 2);
+        // Alt-dragging between the points bends nothing.
+        let mut p = Pointer::left(200.0, stepped.value_y(1.0));
+        p.alt = true;
+        e.press(&mut doc, &stepped, &grid, p, lane, None);
+        p.y -= 40.0;
+        e.drag(&mut doc, Some(&stepped), &grid, p);
+        e.release(&mut doc, p);
+        // The point menu has no shape to check, and setting one does nothing.
+        e.select_point(doc.project(), lane, 0);
+        assert_eq!(e.selected_shape(doc.project(), Some(&stepped)), None);
+        assert_eq!(
+            e.selected_shape(doc.project(), Some(&frame)),
+            Some(PointShape::Linear)
+        );
+        e.set_point_shape(&mut doc, Some(&stepped), PointShape::SlowStart);
+        assert_eq!(points(&doc, lane), before);
     }
 
     #[test]

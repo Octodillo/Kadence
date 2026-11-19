@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use daw_core::level;
 use daw_core::node::{Node, PortLayout, ProcessContext};
+use daw_core::plugin::Stepped;
 use daw_core::time::{TickTime, engine_to_file_frames, file_to_engine_frames};
 use daw_engine::mixer::SoloState;
 use daw_engine::nodes::Strip;
@@ -892,7 +893,7 @@ impl<'a> Builder<'a> {
                         (device_key(device), param, |v| v)
                     }
                 };
-                let hold = self.is_stepped(key, param);
+                let stepped = self.stepped(key, param);
                 let Some(&node) = self.nodes.get(&key) else {
                     continue;
                 };
@@ -917,29 +918,29 @@ impl<'a> Builder<'a> {
                 if let Some(rest) = self.rest_value(key, param) {
                     self.built.rest.insert((key, param), rest);
                 }
-                let lane = self.session.playback_lane(lane, to_value, hold);
+                let lane = self.session.playback_lane(lane, to_value, stepped);
                 self.g.automate(node, param, lane);
             }
         }
     }
 
-    /// Whether the device parameter `param` of the device node `key` takes
-    /// only some values (it has [`Steps`](daw_core::plugin::Steps)), so its
-    /// lane holds each point's value until the next. False for other nodes,
-    /// and for a plugin's parameters while it is not loaded.
-    fn is_stepped(&self, key: NodeKey, param: u32) -> bool {
-        let Some(d) = self.devices.get(&key) else {
-            return false;
-        };
+    /// The values the device parameter `param` of the device node `key`
+    /// takes, if only some, so its lane holds each point's value until the
+    /// next. `None` for other nodes, and for a plugin's parameters while it
+    /// is not loaded.
+    fn stepped(&self, key: NodeKey, param: u32) -> Option<Stepped> {
+        let d = self.devices.get(&key)?;
         match &d.source {
-            DeviceSource::Builtin { kind } => daw_devices::param_specs(kind)
-                .and_then(|specs| specs.iter().find(|s| s.id == param))
-                .is_some_and(|s| s.steps().is_some()),
+            DeviceSource::Builtin { kind } => daw_devices::param_specs(kind)?
+                .iter()
+                .find(|s| s.id == param)?
+                .stepped(),
             DeviceSource::Plugin { .. } => self
                 .session
-                .plugin_params(d.id)
-                .and_then(|params| params.iter().find(|p| p.id == param))
-                .is_some_and(|p| p.steps.is_some()),
+                .plugin_params(d.id)?
+                .iter()
+                .find(|p| p.id == param)?
+                .stepped(),
         }
     }
 
