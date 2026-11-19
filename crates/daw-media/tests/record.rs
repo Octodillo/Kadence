@@ -68,9 +68,24 @@ fn file_is_playable_before_finish() {
     let (rec, mut input) = Recorder::start(&path, 1, 48_000, WavFormat::Pcm16, 1.0).unwrap();
     let block = vec![0.5f32; 4800];
     input.write(&[&block]);
-    // The header is rewritten about once a second.
-    std::thread::sleep(Duration::from_millis(1300));
-    let partial = decode_file(&path).unwrap();
+    // The header is rewritten about once a second, so the file decodes as
+    // a whole take long before the take ends. Polled: on a loaded machine
+    // the writer thread can run late, and until the first rewrite the
+    // header says the file is longer than it is.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let partial = loop {
+        match decode_file(&path) {
+            Ok(data) if data.frames() == 4800 => break data,
+            other => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "never playable: {:?}",
+                    other.map(|d| d.frames())
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
     assert_eq!(partial.frames(), 4800);
     drop(input);
     rec.finish().unwrap();
