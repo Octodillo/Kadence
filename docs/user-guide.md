@@ -22,7 +22,8 @@ If there is no audio server, Kadence still runs and shows a notice; it
 plays silently until you choose a working device. Kadence looks for the
 server's socket before connecting, in the usual places for PipeWire and
 JACK. If your server listens somewhere else, start Kadence with
-`KADENCE_AUDIO=server` to connect anyway.
+`KADENCE_AUDIO=server` to connect anyway. Kadence then cannot tell when a
+server that went away comes back: apply the audio settings to reconnect.
 
 ### MIDI
 

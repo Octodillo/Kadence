@@ -74,7 +74,9 @@ pub struct HostConfig {
     /// ([`daw_backend::server_listening`]); without one, run silent at once.
     /// Opening a client with no server can hang for good under
     /// pipewire-jack, so this is on unless the server's socket lives
-    /// somewhere the probe does not look.
+    /// somewhere the probe does not look. Off, only the open is affected:
+    /// [`AudioHost::server_appeared`] still needs the socket, so after the
+    /// server goes away audio comes back when the user restarts it.
     pub require_socket: bool,
 }
 
