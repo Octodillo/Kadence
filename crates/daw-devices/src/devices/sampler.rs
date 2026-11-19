@@ -523,6 +523,48 @@ impl Sampler {
         }
         Ok(samples)
     }
+
+    /// `data` with each zone's file replaced by what `to` gives for it, as
+    /// saved; files it gives `None` for stay, and so do those it gives a
+    /// path for that is not text, which saved state cannot hold. `None` when no file changes.
+    /// Nothing is read from disk, and everything else in the state stays.
+    pub fn relinked_state(
+        data: &[u8],
+        to: impl Fn(&Path) -> Option<PathBuf>,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        let (values, saved) = load_saved(data)?;
+        let Some(mut saved) = saved else {
+            return Ok(None);
+        };
+        let mut changed = false;
+        for sample in saved.zones.iter_mut().filter_map(|z| z.sample.as_mut()) {
+            if let Some(new) = to(Path::new(sample.as_str()))
+                && let Some(new) = new.to_str().map(str::to_owned)
+            {
+                changed |= new != *sample;
+                *sample = new;
+            }
+        }
+        if !changed {
+            return Ok(None);
+        }
+        let extra = serde_json::to_value(saved).expect("serializing plain data cannot fail");
+        Ok(Some(state::save_with(
+            &INFO,
+            PARAMS,
+            |id| param_value(&values, id),
+            Some(extra),
+        )))
+    }
+}
+
+/// `id`'s value among `values`, which [`load_saved`] gives in [`PARAMS`] order.
+fn param_value(values: &[f64], id: ParamId) -> f64 {
+    PARAMS
+        .iter()
+        .zip(values)
+        .find_map(|(spec, v)| (spec.id == id).then_some(*v))
+        .unwrap_or_default()
 }
 
 /// The parameter values and, if it has one, the zone map of saved state.

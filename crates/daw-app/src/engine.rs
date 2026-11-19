@@ -259,11 +259,23 @@ pub fn use_quiet_audio(purpose: &str) {
     let _ = QUIET.set(format!("kadence-{purpose}-{}", std::process::id()));
 }
 
-/// The configuration the engine starts with: see [`use_quiet_audio`].
+/// The configuration the engine starts with: see [`use_quiet_audio`], and
+/// [`default_engine`] for `KADENCE_AUDIO=server`.
 fn startup_config() -> HostConfig {
-    QUIET
+    let config = QUIET
         .get()
-        .map_or_else(HostConfig::default, |name| HostConfig::quiet(name.as_str()))
+        .map_or_else(HostConfig::default, |name| HostConfig::quiet(name.as_str()));
+    HostConfig {
+        require_socket: audio_override().as_deref() != Some("server"),
+        ..config
+    }
+}
+
+/// `KADENCE_AUDIO`: `stub` for [`StubEngine`]; `server` to open the audio
+/// server even when its socket is not where Kadence looks (see
+/// `HostConfig::require_socket`).
+fn audio_override() -> Option<String> {
+    std::env::var("KADENCE_AUDIO").ok()
 }
 
 /// Starts audio with plugins loading through [`plugin_loader`].
@@ -275,8 +287,10 @@ fn start_host(config: HostConfig) -> AudioHost {
 
 /// The engine the app starts with: the real one, or the stub when the
 /// environment says `KADENCE_AUDIO=stub` (the UI tests do).
+/// `KADENCE_AUDIO=server` keeps the real one but tries the audio server
+/// even when no socket of it was found.
 pub fn default_engine() -> Box<dyn EngineHandle> {
-    if std::env::var("KADENCE_AUDIO").as_deref() == Ok("stub") {
+    if audio_override().as_deref() == Some("stub") {
         Box::new(StubEngine::default())
     } else {
         Box::new(SessionEngine::new())
