@@ -1,14 +1,14 @@
 //! Persistent user settings.
 //!
-//! Values live in KConfig (`~/.config/kadencerc`) through [`KConfigStore`].
-//! The load and save logic is written against [`SettingsStore`] so it can be
-//! tested with an in-memory map.
+//! The load and save logic is written against [`SettingsStore`], which each
+//! front end implements over its own settings system (the Plasma app over
+//! KConfig, `~/.config/kadencerc`), and which tests replace with an
+//! in-memory map.
 
 use daw_session::MetronomeSettings;
 use std::path::{Path, PathBuf};
 
 use crate::engine::AudioConfig;
-use crate::ffi;
 
 /// A flat group/key/value store, like KConfig.
 pub trait SettingsStore {
@@ -17,25 +17,6 @@ pub trait SettingsStore {
     fn write(&mut self, group: &str, key: &str, value: &str);
     /// Make earlier writes durable, all at once.
     fn sync(&mut self) {}
-}
-
-/// The application's KConfig file. Writes reach disk on [`SettingsStore::sync`].
-#[derive(Debug, Default)]
-pub struct KConfigStore;
-
-impl SettingsStore for KConfigStore {
-    fn read(&self, group: &str, key: &str) -> Option<String> {
-        let value = ffi::config_read(group, key);
-        (!value.is_empty()).then_some(value)
-    }
-
-    fn write(&mut self, group: &str, key: &str, value: &str) {
-        ffi::config_write(group, key, value);
-    }
-
-    fn sync(&mut self) {
-        ffi::config_sync();
-    }
 }
 
 const AUDIO: &str = "Audio";

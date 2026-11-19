@@ -7,6 +7,7 @@
 
 pub mod arrange_view;
 pub mod arrangement_bridge;
+pub mod audio;
 pub mod automation_bridge;
 pub mod bridge;
 mod demo;
@@ -21,6 +22,7 @@ pub mod export_bridge;
 mod ffi;
 pub mod instrument;
 pub mod instruments_bridge;
+mod kconfig;
 pub mod lanes;
 pub mod message;
 pub mod mixer;

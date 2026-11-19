@@ -16,9 +16,10 @@ use cxx_qt_lib::{
 use daw_core::plugin::{PluginDescriptor, PluginFormatKind};
 use daw_session::catalog::{FORMATS, Filter, PluginKind};
 
+use crate::kconfig::KConfigStore;
 use crate::model_roles;
 use crate::qt_lists::{ModelRole, row, string_list};
-use crate::settings::{self, KConfigStore};
+use crate::settings;
 use crate::state;
 
 #[cxx_qt::bridge]
