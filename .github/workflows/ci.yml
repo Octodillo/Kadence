@@ -156,6 +156,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: arch
+          # In the cache key (with CARGO*, RUST*, CC* and the like), so a
+          # changed QMAKE makes a new cache instead of restoring Qt build
+          # scripts that would all run again.
+          env-vars: QMAKE
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest
@@ -234,6 +238,10 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: neon
+          # In the cache key (with CARGO*, RUST*, CC* and the like), so a
+          # changed QMAKE makes a new cache instead of restoring Qt build
+          # scripts that would all run again.
+          env-vars: QMAKE
       - if: steps.neon.outputs.available == 'true'
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
