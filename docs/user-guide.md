@@ -19,7 +19,10 @@ Plasma desktop has, or through JACK itself. Open **Configure Kadence…**
   good start; lower it if you play instruments live.
 
 If there is no audio server, Kadence still runs and shows a notice; it
-plays silently until you choose a working device.
+plays silently until you choose a working device. Kadence looks for the
+server's socket before connecting, in the usual places for PipeWire and
+JACK. If your server listens somewhere else, start Kadence with
+`KADENCE_AUDIO=server` to connect anyway.
 
 ### MIDI
 

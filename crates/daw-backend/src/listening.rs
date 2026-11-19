@@ -37,14 +37,17 @@ fn candidates(var: &dyn Fn(&str) -> Option<PathBuf>, uid: u32) -> Vec<PathBuf> {
     } else if let Some(dir) = var("PIPEWIRE_RUNTIME_DIR").or_else(|| var("XDG_RUNTIME_DIR")) {
         paths.push(dir.join(remote));
     }
-    // jackd: JACK2 listens on /dev/shm/jack_<server>_<uid>_0, JACK1 in a
-    // folder of the user's.
+    // jackd: JACK2 listens on /dev/shm/jack_<server>_<uid>_0 (without the
+    // uid when it is shared between users), JACK1 in a folder of the user's.
     let server = var("JACK_DEFAULT_SERVER");
     let server = server
         .as_deref()
         .and_then(Path::to_str)
         .unwrap_or("default");
     paths.push(PathBuf::from(format!("/dev/shm/jack_{server}_{uid}_0")));
+    if var("JACK_PROMISCUOUS_SERVER").is_some() {
+        paths.push(PathBuf::from(format!("/dev/shm/jack_{server}_0")));
+    }
     paths.push(PathBuf::from(format!(
         "/dev/shm/jack-{uid}/{server}/jack_0"
     )));
@@ -94,6 +97,8 @@ mod tests {
         assert_eq!(paths[1], PathBuf::from("/dev/shm/jack_live_7_0"));
         let absolute = candidates(&with(&[("PIPEWIRE_REMOTE", "/srv/pw.sock")]), 7);
         assert_eq!(absolute[0], PathBuf::from("/srv/pw.sock"));
+        let shared = candidates(&with(&[("JACK_PROMISCUOUS_SERVER", "audio")]), 7);
+        assert!(shared.contains(&PathBuf::from("/dev/shm/jack_default_0")));
     }
 
     #[test]
