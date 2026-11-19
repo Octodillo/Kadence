@@ -14,7 +14,8 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use daw_core::time::{PPQ, TickTime};
 
-use crate::settings::{self, ClickSettings, KConfigStore};
+use crate::kconfig::KConfigStore;
+use crate::settings::{self, ClickSettings};
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]

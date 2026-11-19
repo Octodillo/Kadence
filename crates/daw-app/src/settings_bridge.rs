@@ -8,8 +8,9 @@ use std::time::Duration;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList, QUrl};
 
+use crate::kconfig::KConfigStore;
 use crate::qt_lists::{list, string_list};
-use crate::settings::{self, GeneralSettings, KConfigStore, MAX_AUTOSAVE_MINUTES};
+use crate::settings::{self, GeneralSettings, MAX_AUTOSAVE_MINUTES};
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]

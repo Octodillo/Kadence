@@ -767,6 +767,47 @@ impl AppState {
         (!ours && recovery::is_locked(&root)).then_some(root)
     }
 
+    /// One beat of the UI clock, about 30 times a second: runs the engine,
+    /// the touch-write takes and the plugin scan, sends the session an
+    /// update a full player queue refused, picks up drawn peaks, routes
+    /// live MIDI, follows the playhead, polls a take and autosaves. The
+    /// front end refreshes what it shows afterwards.
+    pub fn tick(&mut self) {
+        self.tick_engine();
+        self.tick_mixer();
+        self.tick_plugins();
+        // An update a full player queue refused; the queue has drained.
+        if self
+            .engine
+            .session()
+            .is_some_and(|session| session.wants_sync())
+        {
+            self.resync();
+        }
+        if self.arrange.peaks.poll() {
+            self.touch();
+        }
+        // Live MIDI goes where recording would, while nothing is armed.
+        let focus = crate::recording::input_focus(self);
+        if let Some(session) = self.engine.session_mut() {
+            session.set_input_focus(focus);
+        }
+        if self.engine.is_playing() && self.follow_playhead && !self.arrange.dragging() {
+            let at = self.playhead();
+            if self.arrange.follow(at) {
+                self.touch();
+            }
+        }
+        if self.is_recording() {
+            self.poll_recording();
+            if !self.is_recording() {
+                self.sync();
+                self.touch();
+            }
+        }
+        self.autosave();
+    }
+
     /// Records the touch-write takes in progress at the playhead, and
     /// ends them when playback stops. Called with [`tick_engine`](Self::tick_engine).
     pub fn tick_mixer(&mut self) {

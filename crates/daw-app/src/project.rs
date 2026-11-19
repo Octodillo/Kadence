@@ -12,10 +12,11 @@ use std::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant};
 
+use crate::kconfig::KConfigStore;
 use crate::message::{Context, Fields, Message, Reason};
 use crate::qt_lists::string_list;
 use crate::recovery::Candidate;
-use crate::settings::{self, KConfigStore};
+use crate::settings;
 use crate::state::{self, AppState};
 
 #[cxx_qt::bridge]
@@ -507,40 +508,7 @@ impl qobject::Project {
     }
 
     fn tick(self: Pin<&mut Self>) {
-        state::with(|s| {
-            s.tick_engine();
-            s.tick_mixer();
-            s.tick_plugins();
-            // An update a full player queue refused; the queue has drained.
-            if s.engine
-                .session()
-                .is_some_and(|session| session.wants_sync())
-            {
-                s.resync();
-            }
-            if s.arrange.peaks.poll() {
-                s.touch();
-            }
-            // Live MIDI goes where recording would, while nothing is armed.
-            let focus = crate::recording::input_focus(s);
-            if let Some(session) = s.engine.session_mut() {
-                session.set_input_focus(focus);
-            }
-            if s.engine.is_playing() && s.follow_playhead && !s.arrange.dragging() {
-                let at = s.playhead();
-                if s.arrange.follow(at) {
-                    s.touch();
-                }
-            }
-            if s.is_recording() {
-                s.poll_recording();
-                if !s.is_recording() {
-                    s.sync();
-                    s.touch();
-                }
-            }
-            s.autosave();
-        });
+        state::with(AppState::tick);
         self.refresh(false);
     }
 
