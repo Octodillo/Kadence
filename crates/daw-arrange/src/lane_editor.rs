@@ -686,7 +686,8 @@ impl LaneEditor {
             if xb < left || xa > right {
                 continue;
             }
-            if p.step {
+            // A stepped target's lane holds, as it plays.
+            if p.step || frame.scale.is_stepped() {
                 line(s, xa, ya, xb, ya);
                 line(s, xb, ya, xb, yb);
             } else if (p.curve == 0.0 && frame.scale.is_linear()) || (xb - xa) < 4.0 {

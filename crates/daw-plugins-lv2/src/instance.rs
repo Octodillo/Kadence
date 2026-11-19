@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use daw_core::event::{Event, EventKind, EventList, ParamId, midi};
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
-use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor};
+use daw_core::plugin::{
+    ParamInfo, PluginDescriptor, PluginError, PluginInstance, PluginProcessor, Steps,
+};
 use daw_core::split::{SharedAudio, SplitAudio};
 use daw_plugin_window::EditorTitle;
 use livi::event::{LV2AtomEventBuilder, LV2AtomSequence};
@@ -254,6 +256,9 @@ impl Lv2Instance {
         let designation = lilv.new_uri(&format!("{LV2_CORE}designation"));
         let free_wheeling = lilv.new_uri(&format!("{LV2_CORE}freeWheeling"));
         let reports_latency = lilv.new_uri(&format!("{LV2_CORE}reportsLatency"));
+        let toggled = lilv.new_uri(&format!("{LV2_CORE}toggled"));
+        let integer = lilv.new_uri(&format!("{LV2_CORE}integer"));
+        let enumeration = lilv.new_uri(&format!("{LV2_CORE}enumeration"));
         let params: Vec<ParamInfo> = plugin
             .ports_with_type(PortType::ControlInput)
             .filter_map(|p| {
@@ -266,23 +271,36 @@ impl Lv2Instance {
                 {
                     return None;
                 }
+                // Unbounded ports get a range that at least holds the
+                // default (scaling can also overflow a huge bound).
+                let min = f64::from(
+                    p.min_value
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(p.default_value.min(0.0)),
+                );
+                let max = f64::from(
+                    p.max_value
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(p.default_value.max(1.0)),
+                );
+                // A toggle is off or on, its minimum or maximum. An
+                // enumeration's scale points are taken as the whole numbers
+                // they nearly always are.
+                let steps = if lp.has_property(&toggled) {
+                    Some(Steps(1))
+                } else if lp.has_property(&integer) || lp.has_property(&enumeration) {
+                    Steps::whole(min, max)
+                } else {
+                    None
+                };
                 Some(ParamInfo {
                     id: p.index.0 as ParamId,
                     name: p.name.clone(),
-                    // Unbounded ports get a range that at least holds the
-                    // default (scaling can also overflow a huge bound).
-                    min: f64::from(
-                        p.min_value
-                            .filter(|v| v.is_finite())
-                            .unwrap_or(p.default_value.min(0.0)),
-                    ),
-                    max: f64::from(
-                        p.max_value
-                            .filter(|v| v.is_finite())
-                            .unwrap_or(p.default_value.max(1.0)),
-                    ),
+                    min,
+                    max,
                     default: f64::from(p.default_value),
                     automatable: !lp.has_property(&not_automatic),
+                    steps,
                 })
             })
             .collect();

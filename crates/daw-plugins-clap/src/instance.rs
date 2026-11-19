@@ -17,7 +17,7 @@ use clack_host::prelude::*;
 use clack_host::process::PluginAudioProcessor;
 use daw_core::event::ParamId;
 use daw_core::node::{Node, PortLayout, ProcessContext};
-use daw_core::plugin::{self, ParamInfo, PluginDescriptor, PluginError};
+use daw_core::plugin::{self, ParamInfo, PluginDescriptor, PluginError, Steps};
 use daw_plugin_window::{EditorTitle, HostWindow};
 
 use crate::events;
@@ -261,6 +261,12 @@ impl ClapInstance {
                     default: info.default_value,
                     automatable: info.flags.contains(ParamInfoFlags::IS_AUTOMATABLE)
                         && !info.flags.contains(ParamInfoFlags::IS_READONLY),
+                    // A stepped CLAP parameter takes whole numbers.
+                    steps: info
+                        .flags
+                        .contains(ParamInfoFlags::IS_STEPPED)
+                        .then(|| Steps::whole(info.min_value, info.max_value))
+                        .flatten(),
                 })
             })
             .collect()

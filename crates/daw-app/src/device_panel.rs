@@ -16,6 +16,7 @@
 
 use daw_arrange::{LaneScale, ParamCatalog};
 use daw_core::event::ParamId;
+use daw_core::plugin::Steps;
 use daw_devices::devices::sampler;
 use daw_devices::{ParamKind, ParamSpec, ParamUnit, Sampler, Taper};
 use daw_model::commands::{Batch, DeviceField, MoveDevice, SetDevice, SetParam};
@@ -46,6 +47,9 @@ pub enum ParamControl {
     Toggle,
     /// One of these labels, by index: a combo box.
     Choice(Vec<String>),
+    /// Only these evenly spaced values from `min` to `max`, not whole
+    /// numbers: a slider that stops at each (a plugin's stepped parameter).
+    Steps(Steps),
 }
 
 /// One parameter of a device, as the panel shows it.
@@ -86,9 +90,11 @@ impl ParamDesc {
         }
     }
 
-    /// A plugin parameter: a plain linear slider, as `ParamInfo` says no
-    /// more. A plugin source may refine the control and unit. The range is
-    /// given low end first, whichever way round the plugin gave it.
+    /// A plugin parameter: a plain linear slider, or for a stepped one a
+    /// switch, a spin box or a slider that stops at each step, as
+    /// `ParamInfo` says no more. A plugin source may refine the control and
+    /// unit. The range is given low end first, whichever way round the
+    /// plugin gave it.
     pub fn from_info(info: &daw_core::plugin::ParamInfo) -> Self {
         let (min, max) = Self::info_range(info);
         Self {
@@ -97,7 +103,7 @@ impl ParamDesc {
             min,
             max,
             default: info.default,
-            control: ParamControl::Continuous { log: false },
+            control: Self::info_control(info),
             unit: ParamUnit::None,
             automatable: info.automatable,
         }
@@ -105,6 +111,17 @@ impl ParamDesc {
 
     fn info_range(info: &daw_core::plugin::ParamInfo) -> (f64, f64) {
         (info.min.min(info.max), info.min.max(info.max))
+    }
+
+    /// The control for a plugin parameter's steps.
+    fn info_control(info: &daw_core::plugin::ParamInfo) -> ParamControl {
+        let (min, max) = Self::info_range(info);
+        match info.steps {
+            None => ParamControl::Continuous { log: false },
+            Some(Steps(1)) if (min, max) == (0.0, 1.0) => ParamControl::Toggle,
+            Some(s) if Steps::whole(min, max) == Some(s) => ParamControl::Integer,
+            Some(s) => ParamControl::Steps(s),
+        }
     }
 
     /// Whether this is what [`from_info`](Self::from_info) makes of `info`,
@@ -115,12 +132,25 @@ impl ParamDesc {
             && (self.min, self.max) == Self::info_range(info)
             && self.default == info.default
             && self.automatable == info.automatable
+            && self.control == Self::info_control(info)
     }
 
     /// Whether values can be placed along the range: it is finite and not
     /// empty. (A plugin may describe anything.)
     pub fn has_range(&self) -> bool {
         self.min.is_finite() && self.max.is_finite() && self.min < self.max
+    }
+
+    /// The values it takes, if only some: the whole numbers of an
+    /// integer, toggle or choice, or a plugin's own steps.
+    pub fn steps(&self) -> Option<Steps> {
+        match self.control {
+            ParamControl::Continuous { .. } => None,
+            ParamControl::Steps(s) => Some(s),
+            ParamControl::Integer | ParamControl::Toggle | ParamControl::Choice(_) => {
+                Steps::whole(self.min, self.max)
+            }
+        }
     }
 
     fn is_discrete(&self) -> bool {
@@ -133,14 +163,19 @@ impl ParamDesc {
         self.automatable && !self.is_discrete()
     }
 
-    /// Clamps to the range and rounds discrete parameters. NaN becomes the
-    /// default.
+    /// Clamps to the range and puts discrete parameters on their steps.
+    /// NaN becomes the default.
     pub fn sanitize(&self, value: f64) -> f64 {
         if value.is_nan() {
             return self.default;
         }
         let v = value.clamp(self.min.min(self.max), self.max.max(self.min));
-        if self.is_discrete() { v.round() } else { v }
+        match self.steps() {
+            Some(s) => s.snap(v, self.min, self.max),
+            // A discrete parameter without steps has one value.
+            None if self.is_discrete() => v.round(),
+            None => v,
+        }
     }
 
     /// How values map to a slider or an automation lane's height.
@@ -149,7 +184,7 @@ impl ParamDesc {
             min: self.min,
             max: self.max,
             log: matches!(self.control, ParamControl::Continuous { log: true }),
-            steps: self.is_discrete(),
+            steps: self.steps(),
         }
     }
 
@@ -204,13 +239,14 @@ impl ParamDesc {
     }
 
     /// How QML names the kind of control: "continuous", "integer",
-    /// "toggle" or "choice".
+    /// "toggle", "choice" or "steps".
     pub fn control_name(&self) -> &'static str {
         match self.control {
             ParamControl::Continuous { .. } => "continuous",
             ParamControl::Integer => "integer",
             ParamControl::Toggle => "toggle",
             ParamControl::Choice(_) => "choice",
+            ParamControl::Steps(_) => "steps",
         }
     }
 }
@@ -1319,6 +1355,7 @@ mod tests {
             max: 2000.0,
             default: 0.0,
             automatable: true,
+            steps: None,
         };
         let linear = ParamDesc::from_info(&info);
         assert_eq!(linear.tolerance(), 2.0);
@@ -1338,6 +1375,40 @@ mod tests {
     }
 
     #[test]
+    fn stepped_plugin_parameters_snap_to_their_steps() {
+        let info = |min, max, steps| daw_core::plugin::ParamInfo {
+            id: 1,
+            name: "Mode".into(),
+            min,
+            max,
+            default: min,
+            automatable: true,
+            steps: steps.map(Steps),
+        };
+        let toggle = ParamDesc::from_info(&info(0.0, 1.0, Some(1)));
+        assert_eq!(toggle.control, ParamControl::Toggle);
+        assert_eq!(toggle.sanitize(0.7), 1.0);
+        let modes = ParamDesc::from_info(&info(0.0, 3.0, Some(3)));
+        assert_eq!(modes.control, ParamControl::Integer);
+        assert_eq!(modes.from_normalized(0.4), 1.0);
+        assert!(modes.scale().is_stepped());
+        assert!(!modes.records(), "a step at a time would only click");
+        // Five steps of a quarter: a slider that stops at each.
+        let quarters = ParamDesc::from_info(&info(-1.0, 0.0, Some(4)));
+        assert_eq!(quarters.control, ParamControl::Steps(Steps(4)));
+        assert_eq!(quarters.control_name(), "steps");
+        assert_eq!(quarters.sanitize(-0.3), -0.25);
+        assert_eq!(quarters.from_normalized(0.5), -0.5);
+        assert!(quarters.describes(&info(-1.0, 0.0, Some(4))));
+        assert!(!quarters.describes(&info(-1.0, 0.0, None)));
+        // No steps: continuous, as before.
+        let smooth = ParamDesc::from_info(&info(0.0, 3.0, None));
+        assert_eq!(smooth.control, ParamControl::Continuous { log: false });
+        assert_eq!(smooth.sanitize(1.4), 1.4);
+        assert!(!smooth.scale().is_stepped());
+    }
+
+    #[test]
     fn other_sources_describe_other_devices() {
         struct Fake;
         impl ParamSource for Fake {
@@ -1350,6 +1421,7 @@ mod tests {
                         max: 1.0,
                         default: 0.25,
                         automatable: true,
+                        steps: None,
                     })]
                 })
             }

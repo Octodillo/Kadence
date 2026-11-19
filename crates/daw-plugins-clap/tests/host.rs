@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use daw_core::event::{Event, EventKind, EventList};
 use daw_core::node::{ProcessContext, TransportState};
 use daw_core::plugin::{
-    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance,
+    PluginDescriptor, PluginError, PluginFormat, PluginFormatKind, PluginInstance, Steps,
 };
 use daw_plugins_clap::ClapFormat;
 use daw_test_support::no_alloc::assert_no_alloc;
@@ -170,6 +170,8 @@ fn reports_ports_params_and_latency() {
     assert!(gain.automatable);
     let last = params.iter().find(|p| p.id == LAST_NOTE).unwrap();
     assert!(!last.automatable, "read-only params are not automatable");
+    assert_eq!(last.steps, Some(Steps(127)), "a note number is stepped");
+    assert_eq!(gain.steps, None);
     assert!(plugin.has_editor());
 }
 

@@ -1088,6 +1088,18 @@ impl AutomationLane {
         let x = (tick.0 - p.tick.0) as f64 / (next.tick.0 - p.tick.0) as f64;
         Some(p.towards(next.value, x, self.target.ramp_floor()))
     }
+
+    /// The lane's value at `tick` if every point holds its value until the
+    /// next, as a lane of a parameter that takes only some values plays:
+    /// the value of the last point at or before `tick`, the first point's
+    /// before it. `None` without points.
+    pub fn held_at(&self, tick: TickTime) -> Option<f64> {
+        let after = self.points.partition_point(|p| p.tick <= tick);
+        let p = after
+            .checked_sub(1)
+            .map_or(self.points.first(), |i| self.points.get(i));
+        p.map(|p| p.value)
+    }
 }
 
 /// The strongest bend [`AutomationPoint::curve`] is played with; larger

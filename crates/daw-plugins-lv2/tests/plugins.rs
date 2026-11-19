@@ -325,6 +325,24 @@ fn latency_is_reported() {
 }
 
 #[test]
+fn toggles_are_stepped_and_levels_are_not() {
+    use daw_core::plugin::Steps;
+    let dir = need_plugins!();
+    let p = load(&dir, "dpl.lv2", "http://gareus.org/oss/lv2/dpl#stereo");
+    let params = p.params();
+    // Port 2, "enable": lv2:integer and lv2:toggled.
+    let enable = params
+        .iter()
+        .find(|i| i.id == 2)
+        .expect("dpl's enable switch");
+    assert_eq!(enable.steps, Some(Steps(1)));
+    assert!(
+        params.iter().any(|i| i.steps.is_none()),
+        "dpl's gain and threshold are continuous"
+    );
+}
+
+#[test]
 fn reset_silences_an_instrument() {
     let dir = need_plugins!();
     let mut p = load(&dir, "mda.lv2", &format!("{MDA}EPiano"));

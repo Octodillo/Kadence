@@ -428,7 +428,7 @@ impl PluginMainThreadParams for MainThread<'_> {
             }),
             1 => info.set(&ParamInfo {
                 id: ClapId::new(PARAM_LAST_NOTE),
-                flags: ParamInfoFlags::IS_READONLY,
+                flags: ParamInfoFlags::IS_READONLY | ParamInfoFlags::IS_STEPPED,
                 cookie: Default::default(),
                 name: b"Last note",
                 module: b"",

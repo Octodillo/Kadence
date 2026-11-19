@@ -1771,3 +1771,29 @@ fn moving_the_root_keeps_the_graph() {
     assert_eq!(out[4 * BLOCK - 1], 0.25, "the file in the new place");
     assert_eq!(rig.session.controller().graphs_swapped(), swaps);
 }
+
+#[test]
+fn a_held_lane_steps_at_every_point() {
+    use daw_engine::Curve;
+    use daw_model::{AutomationLane, AutomationPoint, AutomationTarget};
+    let (session, _proc) = Session::new(config());
+    let mut lane = AutomationLane::new(AutomationTarget::Pan);
+    let mut bent = AutomationPoint::new(TickTime(0), 0.0);
+    bent.curve = 1.0;
+    lane.points = vec![
+        bent,
+        AutomationPoint::new(TickTime(PPQ), 1.0),
+        AutomationPoint::new(TickTime(2 * PPQ), 3.0),
+    ];
+    // A stepped parameter's lane holds each value, curved or not.
+    let held = session.playback_lane(&lane, |v| v, true);
+    assert_eq!(
+        held.points().iter().map(|p| p.value).collect::<Vec<_>>(),
+        [0.0, 1.0, 3.0]
+    );
+    assert!(held.points().iter().all(|p| p.curve == Curve::Step));
+    // Otherwise it ramps, the bend in short straight pieces.
+    let ramped = session.playback_lane(&lane, |v| v, false);
+    assert!(ramped.points().len() > 3);
+    assert_eq!(ramped.points()[0].curve, Curve::Linear);
+}

@@ -1218,10 +1218,14 @@ impl Session {
     /// [`FADER_FLOOR_DB`](level::FADER_FLOOR_DB) up, which the engine
     /// would otherwise ramp in linear gain). What plays then follows the
     /// line the arrange view draws.
+    ///
+    /// With `hold` (a parameter that takes only some values), every point
+    /// holds its value until the next, whatever its shape.
     pub fn playback_lane(
         &self,
         lane: &daw_model::AutomationLane,
         to_value: fn(f64) -> f64,
+        hold: bool,
     ) -> AutomationLane {
         let dense = lane.target.is_level();
         let floor = lane.target.ramp_floor();
@@ -1229,11 +1233,12 @@ impl Session {
         for (i, p) in lane.points.iter().enumerate() {
             let time = self.ticks_to_samples(p.tick);
             let next = lane.points.get(i + 1);
-            let ramp = !p.step && next.is_some_and(|n| n.value != p.value);
+            let step = p.step || hold;
+            let ramp = !step && next.is_some_and(|n| n.value != p.value);
             out.push(daw_engine::AutomationPoint {
                 time,
                 value: to_value(p.value),
-                curve: if p.step { Curve::Step } else { Curve::Linear },
+                curve: if step { Curve::Step } else { Curve::Linear },
             });
             let Some(next) = next.filter(|_| ramp && (dense || p.curve != 0.0)) else {
                 continue;

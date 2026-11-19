@@ -12,7 +12,7 @@ use daw_core::event::{Event as DawEvent, EventKind, ParamId, all_notes_off, midi
 use daw_core::node::{Node, PortLayout, ProcessContext, TransportState};
 use daw_core::plugin::{
     BundleScan, ParamInfo, PluginDescriptor, PluginError, PluginFormatKind, PluginInstance,
-    PluginProcessor, ScanBuilder,
+    PluginProcessor, ScanBuilder, Steps,
 };
 use daw_core::split::{SharedAudio, SplitAudio};
 use daw_plugin_window::EditorTitle;
@@ -943,6 +943,13 @@ impl Vst3Instance {
                         max: 0.0,
                         default,
                         automatable,
+                        // Steps of a VST3 parameter are evenly spaced in
+                        // its normalized range, and for the usual parameter
+                        // types in its plain range too.
+                        steps: u32::try_from(info.stepCount)
+                            .ok()
+                            .filter(|&n| n > 0)
+                            .map(Steps),
                     },
                     info.stepCount,
                     |n| self.controller.normalizedParamToPlain(info.id, n),
@@ -2281,6 +2288,7 @@ mod tests {
             max: 0.0,
             default: 0.0,
             automatable: true,
+            steps: None,
         }
     }
 

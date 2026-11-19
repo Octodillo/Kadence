@@ -402,7 +402,7 @@ impl ParamCatalog for Catalog {
             min: 20.0,
             max: 20_000.0,
             log: true,
-            steps: false,
+            steps: None,
         })
     }
     fn default_value(&self, _: &Device, _: ParamId) -> Option<f64> {
