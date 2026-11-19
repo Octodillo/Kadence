@@ -48,6 +48,8 @@ QtObject {
                          "This is a bug in Kadence; please report it (%1).", m.detail);
         case Project.NoteOutsideClip:
             return i18nc("@info", "Notes must start inside the clip.");
+        case Project.LaneNotDescribed:
+            return i18nc("@info", "The range of this parameter is not known while its plugin is not loaded, so its automation cannot be edited.");
         case Project.EngineRefused:
             return i18nc("@info %1 is a message from the audio engine which may be in English",
                          "The audio engine reported: %1", m.detail);

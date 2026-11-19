@@ -234,6 +234,9 @@ pub enum Refusal {
     Edit(ModelError),
     /// A note was drawn past the end of its clip.
     NoteOutsideClip,
+    /// An automation lane's points were to be edited, but nothing describes
+    /// its target's range (a parameter of a plugin that is not loaded).
+    LaneNotDescribed,
 }
 
 impl Outcome {
@@ -252,14 +255,19 @@ impl Outcome {
         }
     }
 
+    /// Nothing changed, for reason `r`.
+    pub fn refused(r: Refusal) -> Self {
+        Self {
+            view: true,
+            error: Some(r),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn from_result(r: Result<(), ModelError>) -> Self {
         match r {
             Ok(()) => Self::document(),
-            Err(e) => Self {
-                view: true,
-                error: Some(Refusal::Edit(e)),
-                ..Default::default()
-            },
+            Err(e) => Self::refused(Refusal::Edit(e)),
         }
     }
 }
@@ -701,8 +709,13 @@ impl Arrange {
                 zone: Zone::Gain, ..
             } => Cursor::ResizeVertical,
             Hit::Clip { .. } => Cursor::ResizeHorizontal,
-            Hit::Automation { point: Some(_), .. } => Cursor::Move,
-            Hit::Automation { lane: Some(_), .. } => Cursor::Crosshair,
+            Hit::Automation {
+                lane: Some(lane),
+                point,
+                ..
+            } => self
+                .lane_frame(project, lane)
+                .map_or(Cursor::Arrow, |f| f.cursor(point.is_some())),
             // A control without a lane: a click starts one.
             Hit::Automation { row, index, .. }
                 if self
@@ -1103,7 +1116,10 @@ impl Arrange {
                 lane: Some(lane),
                 point: Some(i),
                 ..
-            } => self.lanes.delete_point(doc, lane, i),
+            } => match self.lane_frame(doc.project(), lane) {
+                Some(frame) => self.lanes.delete_point(doc, &frame, lane, i),
+                None => Outcome::default(),
+            },
             // Double-clicking a handle resets what it sets.
             Hit::Clip {
                 clip,

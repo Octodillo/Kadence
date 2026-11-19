@@ -73,9 +73,10 @@ pub struct TargetName {
 /// A plugin that is not loaded (missing, or no audio engine) is unknown
 /// here, and so is a parameter whose range a lane can't be drawn along
 /// (not finite, or empty). Their lanes show the parameter's number on a
-/// plain 0 to 1 scale, and their header control is locked
-/// ([`LaneControl::editable`]): a value set along a guessed scale would be
-/// wrong once the plugin is back.
+/// plain 0 to 1 scale, read-only on the timeline
+/// ([`LaneFrame::editable`](daw_arrange::LaneFrame::editable)), and their
+/// header control is locked ([`LaneControl::editable`]): a value set along
+/// a guessed scale would be wrong once the plugin is back.
 #[derive(Debug, Default)]
 pub struct LaneParams {
     builtin: BuiltinParams,

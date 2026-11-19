@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-18 21:06+0000\n"
+"POT-Creation-Date: 2026-11-19 00:25+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -2633,6 +2633,13 @@ msgstr ""
 #: crates/daw-app/qml/ProjectMessageText.qml
 msgctxt "@info"
 msgid "Notes must start inside the clip."
+msgstr ""
+
+#: crates/daw-app/qml/ProjectMessageText.qml
+msgctxt "@info"
+msgid ""
+"The range of this parameter is not known while its plugin is not loaded, so "
+"its automation cannot be edited."
 msgstr ""
 
 #: crates/daw-app/qml/ProjectMessageText.qml

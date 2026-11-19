@@ -279,6 +279,31 @@ Rectangle {
             opacity: rowHeader.mode === Automation.LaneOff ? 0.6 : 1
         }
 
+        // Why the control and its lane can't be edited, in the words the
+        // timeline uses when an edit there is refused. Made only for a
+        // locked row. A tap or press shows it too, for touch.
+        Loader {
+            active: rowHeader.isControl && !rowHeader.editable
+            visible: active
+            Layout.alignment: Qt.AlignVCenter
+            sourceComponent: Kirigami.Icon {
+                implicitWidth: Kirigami.Units.iconSizes.small
+                implicitHeight: Kirigami.Units.iconSizes.small
+                source: "emblem-locked"
+                readonly property string why: messageText.reason({ reason: Project.LaneNotDescribed })
+                ProjectMessageText {
+                    id: messageText
+                }
+                HoverHandler { id: lockedHover }
+                TapHandler { id: lockedTap }
+                QQC2.ToolTip.text: why
+                QQC2.ToolTip.visible: lockedHover.hovered || lockedTap.pressed
+                QQC2.ToolTip.delay: lockedTap.pressed ? 0 : Kirigami.Units.toolTipDelay
+                Accessible.role: Accessible.StaticText
+                Accessible.name: why
+            }
+        }
+
         // The control itself, like the fader, pan knob or parameter
         // slider elsewhere. It follows its lane while the lane plays.
         QQC2.Slider {
