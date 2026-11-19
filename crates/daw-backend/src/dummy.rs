@@ -87,6 +87,9 @@ struct World {
     /// Other clients' ports, as `list_ports` shows them.
     others: Vec<PortInfo>,
     connections: BTreeSet<(String, String)>,
+    /// The rate the pretend server runs at, in Hz, whatever a client asks
+    /// for; `None` while each gets the rate it asks for.
+    rate: Option<u32>,
 }
 
 /// Failures a test asked the pretend system for. The worker reads them
@@ -141,6 +144,28 @@ impl DummySystem {
     /// the backend reports and runs at the new rate.
     pub fn change_sample_rate(&self, rate: u32) {
         self.faults.new_rate.store(rate, Relaxed);
+    }
+
+    /// The pretend server runs at `rate` Hz for the clients opened from now
+    /// on, whatever they ask for, as a JACK server does. Together with
+    /// [`change_sample_rate`](Self::change_sample_rate), a server that
+    /// switched its rate for good.
+    pub fn run_at(&self, rate: u32) {
+        self.world().rate = Some(rate);
+    }
+
+    /// Whether the pretend server is there: not [`shut_down`](Self::shut_down).
+    pub fn is_up(&self) -> bool {
+        !self.faults.server_gone.load(Relaxed)
+    }
+
+    /// Another client of this pretend system, as a program makes when it
+    /// connects to the same server again.
+    pub fn backend(&self, pacing: Pacing) -> DummyBackend {
+        let mut backend = DummyBackend::new(pacing);
+        backend.world = self.world.clone();
+        backend.faults = self.faults.clone();
+        backend
     }
 
     /// Another client's port appears. `name` is the full `client:port`.
@@ -220,6 +245,7 @@ impl DummyBackend {
             world: Arc::new(Mutex::new(World {
                 others: Self::system_ports(),
                 connections: BTreeSet::new(),
+                rate: None,
             })),
             faults: Arc::default(),
             midi_in_rx: None,
@@ -418,7 +444,8 @@ impl AudioBackend for DummyBackend {
                 "the pretend server is shut down".into(),
             ));
         }
-        let rate = cfg.sample_rate.unwrap_or(DEFAULT_RATE);
+        let server_rate = self.world().rate;
+        let rate = server_rate.or(cfg.sample_rate).unwrap_or(DEFAULT_RATE);
         let frames = cfg.buffer_size.unwrap_or(DEFAULT_FRAMES);
         if rate == 0 || frames == 0 {
             return Err(BackendError::Config(
