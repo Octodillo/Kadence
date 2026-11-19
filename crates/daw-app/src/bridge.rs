@@ -1,4 +1,5 @@
-//! `Engine`: the QML-facing wrapper around an [`EngineHandle`].
+//! `Engine`: the QML-facing wrapper around the audio engine
+//! ([`EngineHandle`](crate::engine::EngineHandle)).
 //!
 //! It shows an [`AudioControl`], which decides what starts and what is
 //! wrong, as Qt properties. User-facing wording lives in QML so it goes
@@ -9,7 +10,7 @@ use std::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QList, QString, QStringList};
 
-use crate::audio::{AudioControl, AudioView, Notice, NoticeContext, Problem};
+use crate::audio::{AudioChoice, AudioControl, AudioView, Notice, NoticeContext, Problem};
 use crate::engine::{BackendKind, EngineError};
 use crate::kconfig::KConfigStore;
 use crate::qt_lists::{list, string_list};
@@ -146,6 +147,7 @@ pub struct EngineRust {
 fn error_parts(problem: &Problem) -> (qobject::ErrorKind, i32, &str) {
     use qobject::ErrorKind as K;
     let number = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
+    let clamped = |n: i64| i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX });
     match problem {
         Problem::Engine(EngineError::UnknownDevice(id)) => (K::UnknownDevice, 0, id),
         Problem::Engine(EngineError::UnsupportedSampleRate(rate)) => {
@@ -158,9 +160,9 @@ fn error_parts(problem: &Problem) -> (qobject::ErrorKind, i32, &str) {
         Problem::Engine(EngineError::Crashed) => (K::EngineCrashed, 0, ""),
         Problem::Engine(EngineError::Unstable) => (K::AudioUnstable, 0, ""),
         Problem::Engine(EngineError::Backend(message)) => (K::BackendError, 0, message),
-        Problem::InvalidDeviceChoice(index) => (K::InvalidDeviceChoice, *index, ""),
-        Problem::InvalidSampleRate(rate) => (K::InvalidSampleRate, *rate, ""),
-        Problem::InvalidBufferSize(size) => (K::InvalidBufferSize, *size, ""),
+        Problem::InvalidDeviceChoice(index) => (K::InvalidDeviceChoice, clamped(*index), ""),
+        Problem::InvalidSampleRate(rate) => (K::InvalidSampleRate, clamped(*rate), ""),
+        Problem::InvalidBufferSize(size) => (K::InvalidBufferSize, clamped(*size), ""),
     }
 }
 
@@ -173,6 +175,18 @@ fn error_context(context: NoticeContext) -> qobject::ErrorContext {
         NoticeContext::StartupFailed => C::StartupFailed,
         NoticeContext::AudioFailed => C::AudioFailed,
     }
+}
+
+/// The settings page's combo box values as an [`AudioChoice`], or why
+/// they are none.
+fn choice_from(device: i32, sample_rate: i32, buffer_size: i32) -> Result<AudioChoice, Problem> {
+    Ok(AudioChoice {
+        device: usize::try_from(device).map_err(|_| Problem::InvalidDeviceChoice(device.into()))?,
+        sample_rate: u32::try_from(sample_rate)
+            .map_err(|_| Problem::InvalidSampleRate(sample_rate.into()))?,
+        buffer_size: u32::try_from(buffer_size)
+            .map_err(|_| Problem::InvalidBufferSize(buffer_size.into()))?,
+    })
 }
 
 fn to_qlist(values: &[u32]) -> QList<i32> {
@@ -198,11 +212,12 @@ impl qobject::Engine {
         sample_rate: i32,
         buffer_size: i32,
     ) -> bool {
+        let choice = choice_from(device_index, sample_rate, buffer_size);
         let (ok, view) = {
             let mut rust = self.as_mut().rust_mut();
-            state::with(|s| {
-                rust.control
-                    .apply(s, &mut KConfigStore, device_index, sample_rate, buffer_size)
+            state::with(|s| match choice {
+                Ok(choice) => rust.control.apply(s, &mut KConfigStore, choice),
+                Err(problem) => (false, rust.control.refuse(s, problem)),
             })
         };
         self.show(&view);
@@ -219,9 +234,11 @@ impl qobject::Engine {
         }
     }
 
-    /// Copies `view` and the notice into the properties. Setters skip a
-    /// value that did not change, so QML only rebuilds what did.
+    /// Copies `view` into the properties: the notice first, as it was set
+    /// before the lists were read again. Setters skip a value that did not
+    /// change, so QML only rebuilds what did.
     fn show(mut self: Pin<&mut Self>, view: &AudioView) {
+        self.as_mut().set_notice(view.notice.as_ref());
         let backend = match view.backend {
             BackendKind::Jack => qobject::Backend::JackBackend,
             BackendKind::Silent => qobject::Backend::SilentBackend,
@@ -235,8 +252,6 @@ impl qobject::Engine {
         self.as_mut().set_backend_kind(backend.repr);
         self.as_mut().set_sample_rates(to_qlist(&view.sample_rates));
         self.as_mut().set_buffer_sizes(to_qlist(&view.buffer_sizes));
-        let notice = self.control.notice().cloned();
-        self.as_mut().set_notice(notice.as_ref());
         self.as_mut().set_running(view.running);
         self.as_mut()
             .set_device_index(i32::try_from(view.device_index).unwrap_or(0));
@@ -320,5 +335,26 @@ mod tests {
             // qenums are not Debug, so compare their values.
             assert_eq!((k.repr, n, d), (kind.repr, number, detail), "{problem:?}");
         }
+    }
+
+    #[test]
+    fn negative_combo_values_are_no_choice() {
+        assert_eq!(
+            choice_from(2, 48_000, 256),
+            Ok(AudioChoice {
+                device: 2,
+                sample_rate: 48_000,
+                buffer_size: 256,
+            })
+        );
+        assert_eq!(
+            choice_from(-1, 48_000, 256),
+            Err(Problem::InvalidDeviceChoice(-1))
+        );
+        assert_eq!(choice_from(0, -1, 256), Err(Problem::InvalidSampleRate(-1)));
+        assert_eq!(
+            choice_from(0, 48_000, -2),
+            Err(Problem::InvalidBufferSize(-2))
+        );
     }
 }

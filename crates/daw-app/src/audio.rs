@@ -29,10 +29,22 @@ pub enum NoticeContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
     Engine(EngineError),
-    /// The settings page passed a device index that is not in the list.
-    InvalidDeviceChoice(i32),
-    InvalidSampleRate(i32),
-    InvalidBufferSize(i32),
+    /// The front end passed a device choice that is not in the list: this
+    /// number.
+    InvalidDeviceChoice(i64),
+    /// The front end passed a number that is no sample rate (negative).
+    InvalidSampleRate(i64),
+    /// The front end passed a number that is no buffer size (negative).
+    InvalidBufferSize(i64),
+}
+
+/// The user's choice on the audio settings page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioChoice {
+    /// As in [`AudioView::device_index`], of the view last returned.
+    pub device: usize,
+    pub sample_rate: u32,
+    pub buffer_size: u32,
 }
 
 /// The problem on show, and when it happened.
@@ -56,8 +68,8 @@ impl Notice {
 pub struct AudioView {
     pub backend: BackendKind,
     pub running: bool,
-    /// The devices after the backend's default one; see
-    /// [`AudioControl::apply`] for how they are numbered.
+    /// The devices besides the backend's default one, which a choice
+    /// numbers from 1 (see `device_index`).
     pub devices: Vec<AudioDevice>,
     /// 0 for the default device, else 1 + its place in `devices`.
     pub device_index: usize,
@@ -65,6 +77,8 @@ pub struct AudioView {
     pub sample_rate: u32,
     pub buffer_sizes: Vec<u32>,
     pub buffer_size: u32,
+    /// The problem to show, if any.
+    pub notice: Option<Notice>,
 }
 
 /// The audio settings and the problem on show, over the app's engine.
@@ -78,13 +92,10 @@ pub struct AudioControl {
 }
 
 impl AudioControl {
-    /// The problem to show, if any.
-    pub fn notice(&self) -> Option<&Notice> {
-        self.notice.as_ref()
-    }
-
-    /// Starts audio with the `saved` settings, falling back as
-    /// [`start_audio`] says. Returns the view.
+    /// Starts audio with the `saved` settings. If they are refused it
+    /// falls back to the saved rate and buffer on the default device, then
+    /// to what the engine runs at, then to the defaults, and the notice
+    /// says why the saved settings are not in use. Returns the view.
     pub fn start(&mut self, s: &mut AppState, saved: Option<&AudioConfig>) -> AudioView {
         if let Some((context, e)) = start_audio(s.engine.as_mut(), saved) {
             self.notice = Some(Notice::engine(context, e));
@@ -94,28 +105,22 @@ impl AudioControl {
         self.sync(s)
     }
 
-    /// Applies the user's choice and saves it in `store` if it took:
-    /// `device_index` as in [`AudioView::device_index`], from the view last
-    /// returned. Returns whether it took, and the view; the notice says
-    /// why not.
+    /// Applies the user's `choice` and saves it in `store` if it took.
+    /// Returns whether it took, and the view; its notice says why not.
     pub fn apply(
         &mut self,
         s: &mut AppState,
         store: &mut dyn SettingsStore,
-        device_index: i32,
-        sample_rate: i32,
-        buffer_size: i32,
+        choice: AudioChoice,
     ) -> (bool, AudioView) {
-        let result = self
-            .config_from(device_index, sample_rate, buffer_size)
-            .and_then(|config| {
-                replacing_session(s, |engine| engine.apply_audio_config(&config))
-                    .map_err(Problem::Engine)?;
-                // What runs now, which is not what was asked for when the
-                // audio server came or went during the restart.
-                settings::save_audio_config(store, &s.engine.audio_config());
-                Ok(())
-            });
+        let result = self.config_from(choice).and_then(|config| {
+            replacing_session(s, |engine| engine.apply_audio_config(&config))
+                .map_err(Problem::Engine)?;
+            // What runs now, which is not what was asked for when the audio
+            // server came or went during the restart.
+            settings::save_audio_config(store, &s.engine.audio_config());
+            Ok(())
+        });
         let ok = result.is_ok();
         self.notice = match result {
             // Straight to what `sync` would show, so a front end sees one
@@ -130,6 +135,16 @@ impl AudioControl {
             }),
         };
         (ok, self.sync(s))
+    }
+
+    /// Refuses a choice the front end could not make an [`AudioChoice`]
+    /// of, for `problem`; the settings in use stay. Returns the view.
+    pub fn refuse(&mut self, s: &AppState, problem: Problem) -> AudioView {
+        self.notice = Some(Notice {
+            context: NoticeContext::ApplyingSettings,
+            problem,
+        });
+        self.sync(s)
     }
 
     /// Looks at the audio system again: it may have gone away, come back
@@ -177,37 +192,25 @@ impl AudioControl {
             sample_rate: config.sample_rate,
             buffer_sizes: e.supported_buffer_sizes(),
             buffer_size: config.buffer_size,
+            notice: self.notice.clone(),
         };
         self.status = Some(status);
         view
     }
 
-    /// Turns the settings page's choices into an [`AudioConfig`].
-    fn config_from(
-        &self,
-        device_index: i32,
-        sample_rate: i32,
-        buffer_size: i32,
-    ) -> Result<AudioConfig, Problem> {
-        // Index 0 is the system default; 1.. are `device_ids`.
-        let device = match usize::try_from(device_index) {
-            Ok(0) => None,
-            Ok(i) => Some(
-                self.device_ids
-                    .get(i - 1)
-                    .cloned()
-                    .ok_or(Problem::InvalidDeviceChoice(device_index))?,
-            ),
-            Err(_) => return Err(Problem::InvalidDeviceChoice(device_index)),
+    /// Turns `choice` into an [`AudioConfig`].
+    fn config_from(&self, choice: AudioChoice) -> Result<AudioConfig, Problem> {
+        // Choice 0 is the system default; 1.. are `device_ids`.
+        let device = match choice.device {
+            0 => None,
+            i => Some(self.device_ids.get(i - 1).cloned().ok_or_else(|| {
+                Problem::InvalidDeviceChoice(i64::try_from(i).unwrap_or(i64::MAX))
+            })?),
         };
-        let sample_rate =
-            u32::try_from(sample_rate).map_err(|_| Problem::InvalidSampleRate(sample_rate))?;
-        let buffer_size =
-            u32::try_from(buffer_size).map_err(|_| Problem::InvalidBufferSize(buffer_size))?;
         Ok(AudioConfig {
             device,
-            sample_rate,
-            buffer_size,
+            sample_rate: choice.sample_rate,
+            buffer_size: choice.buffer_size,
         })
     }
 }
@@ -317,6 +320,9 @@ fn status_error(current: Option<NoticeContext>, status: &EngineStatus) -> Status
 mod tests {
     use super::*;
     use crate::engine::StubEngine;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use crate::settings::MemoryStore;
 
     #[test]
@@ -432,77 +438,158 @@ mod tests {
         );
     }
 
+    fn choice(device: usize, sample_rate: u32) -> AudioChoice {
+        AudioChoice {
+            device,
+            sample_rate,
+            buffer_size: 128,
+        }
+    }
+
+    fn refusal(problem: Problem) -> Option<Notice> {
+        Some(Notice {
+            context: NoticeContext::ApplyingSettings,
+            problem,
+        })
+    }
+
     #[test]
     fn applied_settings_are_saved_and_refused_ones_say_why() {
         let mut s = AppState::with_engine(Box::new(StubEngine::default()));
         let mut store = MemoryStore::default();
         let mut control = AudioControl::default();
         let view = control.start(&mut s, None);
-        assert_eq!(control.notice(), None);
+        assert_eq!(view.notice, None);
         let device = view.devices.len();
         assert!(device > 0, "the stub offers devices");
 
-        let (ok, view) = control.apply(&mut s, &mut store, device as i32, 96_000, 128);
+        let (ok, view) = control.apply(&mut s, &mut store, choice(device, 96_000));
         assert!(ok);
         assert_eq!((view.device_index, view.sample_rate), (device, 96_000));
-        assert_eq!(
-            settings::load_audio_config(&store).map(|c| c.sample_rate),
-            Some(96_000)
-        );
+        let saved = settings::load_audio_config(&store);
+        assert_eq!(saved.as_ref().map(|c| c.sample_rate), Some(96_000));
 
-        let (ok, view) = control.apply(&mut s, &mut store, device as i32 + 1, 48_000, 128);
+        // A choice not in the list.
+        let (ok, view) = control.apply(&mut s, &mut store, choice(device + 1, 48_000));
+        assert!(!ok);
+        let number = i64::try_from(device + 1).unwrap();
+        assert_eq!(view.notice, refusal(Problem::InvalidDeviceChoice(number)));
+        // One the engine refuses: the old settings stay, in use and saved.
+        let (ok, view) = control.apply(&mut s, &mut store, choice(device, 12_345));
         assert!(!ok);
         assert_eq!(
-            control.notice(),
-            Some(&Notice {
-                context: NoticeContext::ApplyingSettings,
-                problem: Problem::InvalidDeviceChoice(device as i32 + 1),
-            })
+            view.notice,
+            refusal(Problem::Engine(EngineError::UnsupportedSampleRate(12_345)))
         );
-        // The old settings stay.
         assert_eq!(view.sample_rate, 96_000);
-        let (ok, _) = control.apply(&mut s, &mut store, 0, -1, 128);
-        assert!(!ok);
-        assert_eq!(
-            control.notice().map(|n| &n.problem),
-            Some(&Problem::InvalidSampleRate(-1))
-        );
+        assert_eq!(settings::load_audio_config(&store), saved);
+        // One the front end could not make.
+        let view = control.refuse(&s, Problem::InvalidSampleRate(-1));
+        assert_eq!(view.notice, refusal(Problem::InvalidSampleRate(-1)));
         // A good choice clears it.
-        assert!(control.apply(&mut s, &mut store, 0, 48_000, 256).0);
-        assert_eq!(control.notice(), None);
+        let (ok, view) = control.apply(&mut s, &mut store, choice(0, 48_000));
+        assert!(ok);
+        assert_eq!(view.notice, None);
     }
 
-    /// Runs only at 44.1 kHz, like a JACK server the app cannot change.
-    struct FixedRateEngine(StubEngine);
+    #[test]
+    fn a_new_failure_outranks_a_settings_refusal_and_polls_report_changes_only() {
+        let engine = FakeEngine::default();
+        let status = engine.status.clone();
+        let mut s = AppState::with_engine(Box::new(engine));
+        let mut store = MemoryStore::default();
+        let mut control = AudioControl::default();
+        control.start(&mut s, None);
+        assert_eq!(control.poll(&mut s), None, "nothing changed");
 
-    impl EngineHandle for FixedRateEngine {
+        let (ok, _) = control.apply(&mut s, &mut store, choice(99, 48_000));
+        assert!(!ok);
+        assert_eq!(control.poll(&mut s), None, "the refusal stays on show");
+
+        // Audio fails: that replaces the refusal, which `sync` alone keeps.
+        let lost = EngineError::ServerLost;
+        *status.borrow_mut() = Some(EngineStatus::Failed(lost.clone()));
+        let view = control.poll(&mut s).expect("the status changed");
+        assert_eq!(
+            view.notice,
+            Some(Notice::engine(NoticeContext::AudioFailed, lost))
+        );
+        assert_eq!(control.poll(&mut s), None);
+        // Audio runs again: the failure goes.
+        *status.borrow_mut() = None;
+        let view = control.poll(&mut s).expect("the status changed");
+        assert_eq!(view.notice, None);
+    }
+
+    #[test]
+    fn settings_that_apply_while_audio_stays_failed_show_failed_audio() {
+        let failed = EngineError::Backend("no server".into());
+        let engine = FakeEngine {
+            status: Rc::new(RefCell::new(Some(EngineStatus::Failed(failed.clone())))),
+            ..FakeEngine::default()
+        };
+        let mut s = AppState::with_engine(Box::new(engine));
+        let mut store = MemoryStore::default();
+        let mut control = AudioControl::default();
+        control.start(&mut s, None);
+        let (ok, view) = control.apply(&mut s, &mut store, choice(0, 48_000));
+        assert!(ok);
+        assert_eq!(
+            view.notice,
+            Some(Notice::engine(NoticeContext::AudioFailed, failed))
+        );
+    }
+
+    /// [`StubEngine`] made difficult: running only at `fixed_rate` (like a
+    /// JACK server the app cannot change), refusing every configuration
+    /// (like a machine with no working audio), or reporting `status`.
+    #[derive(Default)]
+    struct FakeEngine {
+        stub: StubEngine,
+        fixed_rate: Option<u32>,
+        refuse_all: bool,
+        /// Shared, so a test can change it while the app holds the engine.
+        status: Rc<RefCell<Option<EngineStatus>>>,
+    }
+
+    impl EngineHandle for FakeEngine {
         fn backend_kind(&self) -> BackendKind {
-            self.0.backend_kind()
+            self.stub.backend_kind()
         }
         fn audio_devices(&self) -> Vec<AudioDevice> {
-            Vec::new()
+            self.stub.audio_devices()
         }
         fn supported_sample_rates(&self) -> Vec<u32> {
-            vec![44_100]
+            self.fixed_rate
+                .map_or_else(|| self.stub.supported_sample_rates(), |r| vec![r])
         }
         fn supported_buffer_sizes(&self) -> Vec<u32> {
-            self.0.supported_buffer_sizes()
+            self.stub.supported_buffer_sizes()
         }
         fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
-            if config.sample_rate != 44_100 {
+            if self.refuse_all {
+                return Err(EngineError::Backend(format!(
+                    "no luck at {}",
+                    config.sample_rate
+                )));
+            }
+            if self.fixed_rate.is_some_and(|r| r != config.sample_rate) {
                 return Err(EngineError::UnsupportedSampleRate(config.sample_rate));
             }
-            self.0.apply_audio_config(config)
+            self.stub.apply_audio_config(config)
         }
         fn audio_config(&self) -> AudioConfig {
-            let config = self.0.audio_config();
+            let config = self.stub.audio_config();
             AudioConfig {
-                sample_rate: 44_100,
+                sample_rate: self.fixed_rate.unwrap_or(config.sample_rate),
                 ..config
             }
         }
         fn status(&self) -> EngineStatus {
-            self.0.status()
+            self.status
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| self.stub.status())
         }
         fn play(&mut self) {}
         fn stop(&mut self) {}
@@ -521,7 +608,10 @@ mod tests {
     fn startup_falls_back_to_the_rate_the_engine_runs_at() {
         // Fresh config (48 kHz) against a 44.1 kHz server: a fallback, not
         // "could not start".
-        let mut engine = FixedRateEngine(StubEngine::default());
+        let mut engine = FakeEngine {
+            fixed_rate: Some(44_100),
+            ..FakeEngine::default()
+        };
         assert_eq!(
             start_audio(&mut engine, Some(&AudioConfig::default())),
             Some((
@@ -532,50 +622,12 @@ mod tests {
         assert_eq!(engine.audio_config().sample_rate, 44_100);
     }
 
-    /// Refuses everything, like a machine with no working audio.
-    struct BrokenEngine(StubEngine);
-
-    impl EngineHandle for BrokenEngine {
-        fn backend_kind(&self) -> BackendKind {
-            self.0.backend_kind()
-        }
-        fn audio_devices(&self) -> Vec<AudioDevice> {
-            self.0.audio_devices()
-        }
-        fn supported_sample_rates(&self) -> Vec<u32> {
-            self.0.supported_sample_rates()
-        }
-        fn supported_buffer_sizes(&self) -> Vec<u32> {
-            self.0.supported_buffer_sizes()
-        }
-        fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
-            Err(EngineError::Backend(format!(
-                "no luck at {}",
-                config.sample_rate
-            )))
-        }
-        fn audio_config(&self) -> AudioConfig {
-            self.0.audio_config()
-        }
-        fn status(&self) -> EngineStatus {
-            self.0.status()
-        }
-        fn play(&mut self) {}
-        fn stop(&mut self) {}
-        fn is_playing(&self) -> bool {
-            false
-        }
-        fn session(&self) -> Option<&daw_session::Session> {
-            None
-        }
-        fn session_mut(&mut self) -> Option<&mut daw_session::Session> {
-            None
-        }
-    }
-
     #[test]
     fn startup_failure_reports_the_last_refusal() {
-        let mut engine = BrokenEngine(StubEngine::default());
+        let mut engine = FakeEngine {
+            refuse_all: true,
+            ..FakeEngine::default()
+        };
         let saved = AudioConfig {
             sample_rate: 96_000,
             ..AudioConfig::default()
