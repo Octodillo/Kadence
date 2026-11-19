@@ -170,7 +170,8 @@ impl PianoRoll {
             return outcome_view();
         };
         let grid = self.lane_grid(project);
-        if p.button == Button::Right {
+        // A lane that can't be edited has no point menu: the press says why.
+        if p.button == Button::Right && frame.editable() {
             self.lane_menu_requested = Some(point.is_some());
         }
         self.lanes.press(doc, &frame, &grid, p, lane, point)

@@ -17,6 +17,7 @@
 //! them all.
 
 use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 
 use daw_core::time::TickTime;
 use daw_midi::grid::Meter;
@@ -67,12 +68,9 @@ pub struct LaneFrame {
     /// width is the timeline's.
     pub rect: Rect,
     pub scale: LaneScale,
-    /// The lane's points can be edited here: its target's scale is known.
-    /// A lane whose target nothing describes (a parameter of a plugin
-    /// that is not loaded) is drawn on [`LaneScale::UNIT`] as read-only,
-    /// since points placed along a guessed scale would mean something
-    /// else once the real one is known.
-    pub editable: bool,
+    /// See [`editable`](Self::editable). Set only by [`new`](Self::new), so
+    /// it can't disagree with `scale`.
+    editable: bool,
 }
 
 impl LaneFrame {
@@ -86,6 +84,15 @@ impl LaneFrame {
             scale: scale.unwrap_or(LaneScale::UNIT),
             editable: scale.is_some(),
         }
+    }
+
+    /// The lane's points can be edited here: its target's scale is known.
+    /// A lane whose target nothing describes (a parameter of a plugin
+    /// that is not loaded) is drawn on [`LaneScale::UNIT`] as read-only,
+    /// since points placed along a guessed scale would mean something
+    /// else once the real one is known.
+    pub fn editable(&self) -> bool {
+        self.editable
     }
 
     /// The pointer shape over this lane: `over_point` says whether it is
@@ -322,13 +329,10 @@ impl LaneEditor {
             return Outcome::default();
         }
         if !frame.editable {
-            // Nothing on it can be selected or changed. A right press still
-            // gets the view's menu (to remove the lane, say).
+            // Nothing on it can be selected or changed, so there is no
+            // point menu either: say why instead.
             self.selection = None;
-            return match p.button {
-                Button::Right => Outcome::view(),
-                _ => Outcome::refused(Refusal::LaneNotDescribed),
-            };
+            return Outcome::refused(Refusal::LaneNotDescribed);
         }
         // The selection belongs to one lane.
         if self.selection.as_ref().is_some_and(|(l, _)| *l != lane) {
@@ -462,7 +466,7 @@ impl LaneEditor {
         grid: &LaneGrid,
         p: Pointer,
     ) -> Outcome {
-        let Some(frame) = frame.filter(|f| f.editable) else {
+        let Some(frame) = frame.filter(|f| f.editable()) else {
             self.end_drag(doc);
             return Outcome::default();
         };
@@ -530,18 +534,27 @@ impl LaneEditor {
     // lane (`None` if it doesn't show), and change nothing on a lane that
     // doesn't show or can't be edited there.
 
-    /// Why a command can't change the points of the lane in `frame`, if it
-    /// can't.
-    fn refusal(&mut self, frame: Option<&LaneFrame>) -> Option<Outcome> {
+    /// The selection, to be changed by a command, if its lane's `frame`
+    /// shows and is editable. Otherwise the selection is dropped and the
+    /// outcome says why nothing changed.
+    fn editable_selection(
+        &mut self,
+        project: &Project,
+        frame: Option<&LaneFrame>,
+    ) -> ControlFlow<Outcome, (LaneId, BTreeSet<usize>)> {
+        self.check(project);
+        let Some(selection) = self.selection.clone() else {
+            return ControlFlow::Break(Outcome::default());
+        };
         match frame {
-            Some(f) if f.editable => None,
+            Some(f) if f.editable => ControlFlow::Continue(selection),
             Some(_) => {
                 self.selection = None;
-                Some(Outcome::refused(Refusal::LaneNotDescribed))
+                ControlFlow::Break(Outcome::refused(Refusal::LaneNotDescribed))
             }
             None => {
                 self.selection = None;
-                Some(Outcome::view())
+                ControlFlow::Break(Outcome::view())
             }
         }
     }
@@ -562,16 +575,11 @@ impl LaneEditor {
     /// Deletes the selected points.
     pub fn delete_points(&mut self, doc: &mut Document, frame: Option<&LaneFrame>) -> Outcome {
         self.end_drag(doc);
-        self.check(doc.project());
-        if self.selection.is_none() {
-            return Outcome::default();
-        }
-        if let Some(o) = self.refusal(frame) {
-            return o;
-        }
-        let Some((lane, sel)) = self.selection.take() else {
-            return Outcome::default();
+        let (lane, sel) = match self.editable_selection(doc.project(), frame) {
+            ControlFlow::Continue(s) => s,
+            ControlFlow::Break(o) => return o,
         };
+        self.selection = None;
         let Some((_, l)) = lane_of(doc.project(), lane) else {
             return Outcome::view();
         };
@@ -596,15 +604,9 @@ impl LaneEditor {
         shape: PointShape,
     ) -> Outcome {
         self.end_drag(doc);
-        self.check(doc.project());
-        if self.selection.is_none() {
-            return Outcome::default();
-        }
-        if let Some(o) = self.refusal(frame) {
-            return o;
-        }
-        let Some((lane, sel)) = self.selection.clone() else {
-            return Outcome::default();
+        let (lane, sel) = match self.editable_selection(doc.project(), frame) {
+            ControlFlow::Continue(s) => s,
+            ControlFlow::Break(o) => return o,
         };
         let Some((_, l)) = lane_of(doc.project(), lane) else {
             return Outcome::view();

@@ -193,10 +193,6 @@ Rectangle {
         id: rowName
     }
 
-    ProjectMessageText {
-        id: messageText
-    }
-
     RowLayout {
         anchors.fill: parent
         // Past the track's colour and expand button, and a step further
@@ -284,20 +280,28 @@ Rectangle {
         }
 
         // Why the control and its lane can't be edited, in the words the
-        // timeline uses when an edit there is refused.
-        Kirigami.Icon {
-            visible: rowHeader.isControl && !rowHeader.editable
-            Layout.preferredWidth: Kirigami.Units.iconSizes.small
-            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+        // timeline uses when an edit there is refused. Made only for a
+        // locked row. A tap or press shows it too, for touch.
+        Loader {
+            active: rowHeader.isControl && !rowHeader.editable
+            visible: active
             Layout.alignment: Qt.AlignVCenter
-            source: "emblem-locked"
-            readonly property string why: messageText.reason({ reason: Project.LaneNotDescribed })
-            HoverHandler { id: lockedHover }
-            QQC2.ToolTip.text: why
-            QQC2.ToolTip.visible: lockedHover.hovered
-            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-            Accessible.role: Accessible.StaticText
-            Accessible.name: why
+            sourceComponent: Kirigami.Icon {
+                implicitWidth: Kirigami.Units.iconSizes.small
+                implicitHeight: Kirigami.Units.iconSizes.small
+                source: "emblem-locked"
+                readonly property string why: messageText.reason({ reason: Project.LaneNotDescribed })
+                ProjectMessageText {
+                    id: messageText
+                }
+                HoverHandler { id: lockedHover }
+                TapHandler { id: lockedTap }
+                QQC2.ToolTip.text: why
+                QQC2.ToolTip.visible: lockedHover.hovered || lockedTap.pressed
+                QQC2.ToolTip.delay: lockedTap.pressed ? 0 : Kirigami.Units.toolTipDelay
+                Accessible.role: Accessible.StaticText
+                Accessible.name: why
+            }
         }
 
         // The control itself, like the fader, pan knob or parameter

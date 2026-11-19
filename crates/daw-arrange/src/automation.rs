@@ -355,6 +355,8 @@ impl Arrange {
             return Outcome::view();
         };
         let grid = self.lane_grid(project);
+        // A lane that can't be edited has no point menu: the press says why.
+        let menu = menu.filter(|_| frame.editable());
         let o = self.lanes.press(doc, &frame, &grid, p, lane, point);
         Outcome {
             context_menu: menu,

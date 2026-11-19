@@ -1156,6 +1156,14 @@ fn lanes_of_an_undescribed_parameter_are_read_only() {
     assert_eq!(o.error, refused);
     assert!(!o.document);
     r.input(Input::Release(Pointer::left(empty.0, empty.1)));
+    // The point menu: there is none, the press says why instead.
+    let right = Pointer {
+        button: daw_arrange::Button::Right,
+        ..Pointer::left(x, y)
+    };
+    let o = r.input(Input::Press(right));
+    assert_eq!((o.error, o.context_menu), (refused.clone(), None));
+    r.input(Input::Release(right));
     // Moving one.
     r.drag((x, y), (x + 50.0, at(&r, 1.0)), |_| {});
     // Deleting one, by a double click or the earlier selection.
