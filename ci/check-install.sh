@@ -2,6 +2,11 @@
 # Configure, build and install with CMake into a staging directory, then
 # check that the desktop integration files land where Plasma looks and pass
 # the freedesktop validators.
+#
+# What is checked is the layout, not the optimised binary (the Packaging
+# workflow builds that), so this builds the dev profile into the workspace's
+# target directory: it reuses the build the tests left there, and leaves
+# target/debug/kadence for the screenshots.
 set -eu
 
 build=${BUILD_DIR:-build-ci}
@@ -10,7 +15,8 @@ build=$(cd "$build" && pwd)
 stage=$build/stage
 id=io.github.octodillo.daw
 
-cmake -S . -B "$build" -DCMAKE_INSTALL_PREFIX=/usr
+cmake -S . -B "$build" -DCMAKE_INSTALL_PREFIX=/usr \
+    -DKADENCE_CARGO_PROFILE=dev -DKADENCE_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}"
 cmake --build "$build"
 DESTDIR="$stage" cmake --install "$build"
 
