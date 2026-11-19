@@ -203,7 +203,10 @@ impl View for PianoRoll {
 
 impl AppState {
     fn new() -> Self {
-        Self::with_engine(default_engine())
+        // Audio starts at the saved settings, which the engine bridge then
+        // applies without another restart.
+        let saved = settings::load_audio_config(&settings::KConfigStore);
+        Self::with_engine(default_engine(saved.as_ref()))
     }
 
     pub(crate) fn with_engine(engine: Box<dyn EngineHandle>) -> Self {

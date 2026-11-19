@@ -227,10 +227,18 @@ fn start_audio(
 /// The take made so far is kept, and the fresh session gets the project
 /// and the play position back (after the tempo map, so the position maps
 /// to the same bar).
+///
+/// A take in progress ends, and the user is told: a restart the settings
+/// page asked for stops it as surely as one the engine made itself.
 fn replacing_session<R>(
     s: &mut state::AppState,
     change: impl FnOnce(&mut dyn EngineHandle) -> R,
 ) -> R {
+    if s.is_recording() {
+        // First, so that a problem with the take itself, reported as
+        // the recording stops, is what stays on show.
+        s.report(Message::Record(RecordProblem::AudioRestarted));
+    }
     s.stop_recording();
     let position = s.playhead();
     let r = change(s.engine.as_mut());
@@ -246,11 +254,6 @@ fn replacing_session<R>(
 /// recording does not survive the restart, and the user is told.
 fn poll_audio(s: &mut state::AppState) -> EngineStatus {
     if s.engine.wants_restart() {
-        if s.is_recording() {
-            // First, so that a problem with the take itself, reported as
-            // the recording stops, is what stays on show.
-            s.report(Message::Record(RecordProblem::AudioRestarted));
-        }
         replacing_session(s, |engine| engine.restart_audio());
     }
     s.engine.status()
@@ -312,8 +315,15 @@ impl qobject::Engine {
             .as_ref()
             .audio_config_from(device_index, sample_rate, buffer_size);
         let result = result.and_then(|config| {
-            state::with(|s| replacing_session(s, |engine| engine.apply_audio_config(&config)))
-                .map_err(Problem::Engine)?;
+            state::with(|s| {
+                let apply = |engine: &mut dyn EngineHandle| engine.apply_audio_config(&config);
+                if s.engine.applying_restarts(&config) {
+                    replacing_session(s, apply)
+                } else {
+                    apply(s.engine.as_mut())
+                }
+            })
+            .map_err(Problem::Engine)?;
             // What runs now, which is not what was asked for when the
             // audio server came or went during the restart.
             let config = state::with(|s| s.engine.audio_config());
