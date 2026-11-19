@@ -40,13 +40,31 @@ set(KADENCE_LICENSE_DIR ${KDE_INSTALL_DATADIR}/licenses/${APP_BINARY}
 # The app itself is built by Cargo.
 find_program(CARGO cargo REQUIRED)
 # cxx-qt and build.rs ask qmake where Qt lives. Distros call it qmake6
-# or qmake-qt6; the Flatpak KDE SDK only has plain qmake.
+# or qmake-qt6; the Flatpak KDE SDK only has plain qmake. A QMAKE in the
+# environment wins, as it does for those build scripts: then a Cargo build
+# outside CMake with the same environment reuses this one's (CI's does).
+if(DEFINED ENV{QMAKE})
+    set(QMAKE $ENV{QMAKE} CACHE FILEPATH "qmake of the Qt 6 to build with")
+endif()
 find_program(QMAKE NAMES qmake6 qmake-qt6 qmake REQUIRED)
-set(CARGO_TARGET_DIR ${CMAKE_BINARY_DIR}/cargo)
-set(APP_EXECUTABLE ${CARGO_TARGET_DIR}/release/${APP_BINARY})
+# Packages build the optimised release profile into the build directory.
+# CI's install layout check (ci/check-install.sh) builds the dev profile into
+# the workspace's target directory instead, reusing the build its tests left.
+set(KADENCE_CARGO_PROFILE release
+    CACHE STRING "Cargo profile kadence is built with")
+set(KADENCE_CARGO_TARGET_DIR ${CMAKE_BINARY_DIR}/cargo
+    CACHE PATH "Cargo target directory")
+# Cargo puts the dev profile's output in debug/, any other profile's in a
+# directory of its name.
+if(KADENCE_CARGO_PROFILE STREQUAL "dev")
+    set(CARGO_PROFILE_DIR debug)
+else()
+    set(CARGO_PROFILE_DIR ${KADENCE_CARGO_PROFILE})
+endif()
+set(APP_EXECUTABLE ${KADENCE_CARGO_TARGET_DIR}/${CARGO_PROFILE_DIR}/${APP_BINARY})
 add_custom_target(cargo_build ALL
-    COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${CARGO_TARGET_DIR} QMAKE=${QMAKE}
-            ${CARGO} build --release --locked -p daw-app
+    COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${KADENCE_CARGO_TARGET_DIR} QMAKE=${QMAKE}
+            ${CARGO} build --profile ${KADENCE_CARGO_PROFILE} --locked -p daw-app
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     USES_TERMINAL
     COMMENT "Building ${APP_BINARY} with Cargo")

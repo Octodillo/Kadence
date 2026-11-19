@@ -54,11 +54,10 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --exclude daw-app --all-targets -- -D warnings
       - name: clippy (release)
-        # cfg(debug_assertions) code can leave items unused in release builds,
-        # which the CMake install checks (Arch and neon jobs) build with
-        # RUSTFLAGS=-D warnings; this catches it in the fast job. All targets,
-        # so a test that only builds in debug is caught too (daw-app, left
-        # out here for Qt, once had one).
+        # cfg(debug_assertions) code can leave items unused in release
+        # builds, which no other job builds with RUSTFLAGS=-D warnings. All
+        # targets, so a test that only builds in debug is caught too
+        # (daw-app, left out here for Qt, once had one).
         run: cargo clippy --release --workspace --exclude daw-app --all-targets -- -D warnings
       - name: tests
         # -noreset: otherwise Xvfb resets when one test process disconnects
@@ -144,6 +143,10 @@ jobs:
     name: Arch Linux
     runs-on: ubuntu-latest
     container: archlinux:latest
+    env:
+      # The same qmake for the tests and for CMake's Cargo build in
+      # ci/check-install.sh: the Qt build scripts rerun when QMAKE changes.
+      QMAKE: qmake6
     steps:
       # Before git is installed, so this is a plain download; nothing
       # below needs the history.
@@ -153,6 +156,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: arch
+          # In the cache key (with CARGO*, RUST*, CC* and the like), so a
+          # changed QMAKE makes a new cache instead of restoring Qt build
+          # scripts that would all run again.
+          env-vars: QMAKE
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest
@@ -178,13 +185,11 @@ jobs:
           name: smoke-song
           path: smoke-song/
           if-no-files-found: warn
+      # Also builds target/debug/kadence for the screenshots, outside their
+      # timeout: building daw-app alone unifies features differently from
+      # the workspace test build, so it recompiles much of the tree.
       - name: CMake install layout
         run: ci/check-install.sh
-      # Built in its own step: building daw-app alone unifies features
-      # differently from the workspace test build, so it recompiles most of
-      # the tree, which can take longer than the screenshot timeout allows.
-      - name: Build kadence (debug)
-        run: cargo build -p daw-app
       - name: Screenshots (Breeze light and dark, 100% and 200%)
         timeout-minutes: 10
         run: |
@@ -204,6 +209,10 @@ jobs:
     name: KDE neon (Ubuntu 24.04)
     runs-on: ubuntu-latest
     container: ubuntu:24.04
+    env:
+      # The same qmake for the tests and for CMake's Cargo build in
+      # ci/check-install.sh: the Qt build scripts rerun when QMAKE changes.
+      QMAKE: qmake6
     steps:
       # Before git is installed, so this is a plain download; nothing
       # below needs the history.
@@ -229,6 +238,10 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: neon
+          # In the cache key (with CARGO*, RUST*, CC* and the like), so a
+          # changed QMAKE makes a new cache instead of restoring Qt build
+          # scripts that would all run again.
+          env-vars: QMAKE
       - if: steps.neon.outputs.available == 'true'
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
