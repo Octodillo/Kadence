@@ -33,6 +33,7 @@ pub mod player;
 pub mod plugins;
 pub mod record;
 mod samples;
+mod state_files;
 mod tempo;
 
 use std::collections::{HashMap, HashSet};
@@ -57,6 +58,7 @@ use player::{LoopPoints, PlayerHandle};
 pub use plugins::{
     LoadError, LoadedPlugin, PluginLoader, PluginState, PluginStatus, Plugins, SandboxLoader,
 };
+pub use state_files::{BuiltinStateFiles, is_sampler};
 pub use tempo::tempo_map;
 
 /// Length of the straight pieces a curved automation segment is played

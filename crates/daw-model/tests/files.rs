@@ -78,7 +78,7 @@ fn lists_each_file_once_with_its_clips() {
         &fx,
         project_with(&[kick.clone(), "audio/a.wav".into(), kick.clone()]),
     );
-    let all = files::audio_files(doc.project(), doc.bundle());
+    let all = files::audio_files(doc.project(), doc.bundle(), &files::ClipsOnly);
     assert_eq!(all.len(), 2);
     assert_eq!(all[0].source, kick);
     assert_eq!(all[0].clips.len(), 2);
@@ -95,10 +95,11 @@ fn finds_missing_files_inside_and_outside_the_bundle() {
         &fx,
         project_with(&[present.clone(), gone.clone(), "audio/lost.wav".into()]),
     );
-    let missing: Vec<PathBuf> = files::missing_audio(doc.project(), doc.bundle())
-        .into_iter()
-        .map(|f| f.source)
-        .collect();
+    let missing: Vec<PathBuf> =
+        files::missing_audio(doc.project(), doc.bundle(), &files::ClipsOnly)
+            .into_iter()
+            .map(|f| f.source)
+            .collect();
     assert_eq!(missing, vec![gone, PathBuf::from("audio/lost.wav")]);
 }
 
@@ -111,6 +112,7 @@ fn external_means_outside_the_bundle_root() {
         source: path.clone(),
         path,
         clips: Vec::new(),
+        devices: Vec::new(),
     };
     assert!(file(fx.outside.join("a.wav")).is_external(Some(bundle)));
     assert!(!file(fx.root.join("audio/a.wav")).is_external(Some(bundle)));
@@ -148,7 +150,13 @@ fn relink_points_every_clip_at_the_new_file_and_undoes() {
         project_with(&[old.clone(), other.clone(), old.clone()]),
     );
     let new = fx.outside.join("new/take.wav");
-    let cmd = files::relink(doc.project(), &[(old.clone(), new.clone())], "Relink Audio").unwrap();
+    let cmd = files::relink(
+        doc.project(),
+        &files::ClipsOnly,
+        &[(old.clone(), new.clone())],
+        "Relink Audio",
+    )
+    .unwrap();
     doc.execute(cmd).unwrap();
     assert_eq!(
         sources(doc.project()),
@@ -161,7 +169,15 @@ fn relink_points_every_clip_at_the_new_file_and_undoes() {
         vec![old.clone(), other, old.clone()]
     );
     // Nothing to change: no edit.
-    assert!(files::relink(doc.project(), &[(old.clone(), old)], "Relink Audio").is_none());
+    assert!(
+        files::relink(
+            doc.project(),
+            &files::ClipsOnly,
+            &[(old.clone(), old)],
+            "Relink Audio"
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -171,6 +187,7 @@ fn relinked_project_saves_and_loads() {
     let mut doc = saved(&fx, project_with(std::slice::from_ref(&old)));
     let cmd = files::relink(
         doc.project(),
+        &files::ClipsOnly,
         &[(old, PathBuf::from("audio/new.wav"))],
         "Relink Audio",
     )
@@ -198,7 +215,7 @@ fn find_in_folder_matches_by_file_name() {
             PathBuf::from("audio/c.wav"),
         ]),
     );
-    let missing = files::missing_audio(doc.project(), doc.bundle());
+    let missing = files::missing_audio(doc.project(), doc.bundle(), &files::ClipsOnly);
     let found = files::find_in_folder(&missing, &moved);
     assert_eq!(
         found,
@@ -234,9 +251,14 @@ fn collect_copies_external_files_into_the_bundle() {
     );
     write(&fx.root.join("audio/inside.wav"), b"inside");
 
-    let collected = files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true)
-        .unwrap()
-        .unwrap();
+    let collected = files::collect_files(
+        doc.project(),
+        doc.bundle().unwrap(),
+        &files::ClipsOnly,
+        |_| true,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(collected.copies.len(), 3);
     doc.execute(collected.command).unwrap();
     let after = sources(doc.project());
@@ -270,9 +292,14 @@ fn collect_copies_external_files_into_the_bundle() {
 
     // Nothing left outside.
     assert!(
-        files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true)
-            .unwrap()
-            .is_none()
+        files::collect_files(
+            doc.project(),
+            doc.bundle().unwrap(),
+            &files::ClipsOnly,
+            |_| true
+        )
+        .unwrap()
+        .is_none()
     );
 
     doc.undo().unwrap();
@@ -296,7 +323,12 @@ fn failed_collect_removes_the_copies_it_made() {
             // Running as root: permissions don't stop the read.
             return;
         }
-        let err = files::collect_files(doc.project(), doc.bundle().unwrap(), |_| true);
+        let err = files::collect_files(
+            doc.project(),
+            doc.bundle().unwrap(),
+            &files::ClipsOnly,
+            |_| true,
+        );
         assert!(matches!(err, Err(FormatError::Io { .. })));
         let left: Vec<_> = fs::read_dir(fx.root.join("audio")).unwrap().collect();
         assert!(left.is_empty(), "copies left behind: {left:?}");
@@ -309,6 +341,7 @@ fn relink_refuses_an_empty_path() {
     let mut doc = saved(&fx, project_with(&["audio/a.wav".into()]));
     let cmd = files::relink(
         doc.project(),
+        &files::ClipsOnly,
         &[(PathBuf::from("audio/a.wav"), PathBuf::new())],
         "Relink Audio",
     )
@@ -344,18 +377,28 @@ fn collect_leaves_out_what_is_not_audio() {
     write(&secret, b"secret");
     let mut doc = saved(&fx, project_with(&[kick, secret.clone()]));
     let is_audio = |p: &Path| p.extension().is_some();
-    let collected = files::collect_files(doc.project(), doc.bundle().unwrap(), is_audio)
-        .unwrap()
-        .unwrap();
+    let collected = files::collect_files(
+        doc.project(),
+        doc.bundle().unwrap(),
+        &files::ClipsOnly,
+        is_audio,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(collected.copies, [fx.root.join("audio/kick.wav")]);
     doc.execute(collected.command).unwrap();
     // The clip still names the file; nothing of it is in the bundle.
     assert_eq!(sources(doc.project())[1], secret);
     assert!(!fx.root.join("audio/id_ed25519").exists());
     assert!(
-        files::collect_files(doc.project(), doc.bundle().unwrap(), is_audio)
-            .unwrap()
-            .is_none()
+        files::collect_files(
+            doc.project(),
+            doc.bundle().unwrap(),
+            &files::ClipsOnly,
+            is_audio
+        )
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -442,7 +485,7 @@ fn save_as_brings_every_file_of_the_bundle_that_plays() {
     let new = fx._tmp.path().join("Song v2");
     doc.save_as(&new).unwrap();
     assert_eq!(doc.bundle().unwrap().root(), new);
-    assert!(files::missing_audio(doc.project(), doc.bundle()).is_empty());
+    assert!(files::missing_audio(doc.project(), doc.bundle(), &files::ClipsOnly).is_empty());
     for s in &sources[..3] {
         let copy = new.join(s);
         assert!(copy.symlink_metadata().unwrap().is_file(), "{s:?}");
@@ -510,4 +553,126 @@ fn failed_save_as_takes_back_the_folders_it_made() {
     assert_eq!(fs::read(blocked.join("samples")).unwrap(), b"a file");
     assert_eq!(doc.bundle().unwrap().root(), fx.root);
     assert!(!blocked.join("Blocked.kadence").exists());
+}
+
+/// Device state that is just the files it plays, one per line: a stand-in
+/// for a sampler's, which only daw-devices reads.
+struct LineFiles;
+
+impl files::StateFiles for LineFiles {
+    fn files(&self, device: &Device) -> Vec<PathBuf> {
+        device.state.as_ref().map_or_else(Vec::new, |s| {
+            String::from_utf8_lossy(&s.0)
+                .lines()
+                .map(PathBuf::from)
+                .collect()
+        })
+    }
+
+    fn relinked(
+        &self,
+        device: &Device,
+        to: &dyn Fn(&Path) -> Option<PathBuf>,
+    ) -> Option<StateBlob> {
+        let before = self.files(device);
+        let after: Vec<PathBuf> = before
+            .iter()
+            .map(|f| to(f).unwrap_or_else(|| f.clone()))
+            .collect();
+        (after != before).then(|| {
+            let text: Vec<_> = after.iter().map(|p| p.to_string_lossy()).collect();
+            StateBlob::from(text.join("\n").into_bytes())
+        })
+    }
+}
+
+/// A project whose one clip plays `clip` and whose instrument's state names
+/// `samples`.
+fn project_with_device(clip: PathBuf, samples: &[PathBuf]) -> (Project, DeviceId) {
+    let mut p = project_with(&[clip]);
+    let mut device = Device::new(
+        "Sampler",
+        DeviceSource::Builtin {
+            kind: "daw.sampler".into(),
+        },
+    );
+    let text: Vec<_> = samples.iter().map(|p| p.to_string_lossy()).collect();
+    device.state = Some(StateBlob::from(text.join("\n").into_bytes()));
+    let id = device.id;
+    std::sync::Arc::make_mut(&mut p.tracks[0])
+        .devices
+        .push(device);
+    (p, id)
+}
+
+fn device_files(doc: &Document, id: DeviceId) -> Vec<PathBuf> {
+    let device = doc
+        .project()
+        .all_tracks()
+        .flat_map(|t| t.devices.iter())
+        .find(|d| d.id == id)
+        .unwrap();
+    files::StateFiles::files(&LineFiles, device)
+}
+
+/// Issue #268: a sampler's samples are missing, relinked and collected like
+/// clips' files.
+#[test]
+fn files_in_device_state_count_like_clips() {
+    let fx = fixture();
+    let shared = fx.outside.join("kick.wav");
+    let own = fx.outside.join("snare.wav");
+    write(&shared, b"kick");
+    let (project, id) = project_with_device(shared.clone(), &[shared.clone(), own.clone()]);
+    let mut doc = saved(&fx, project);
+
+    let all = files::audio_files(doc.project(), doc.bundle(), &LineFiles);
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        (all[0].clips.len(), all[0].devices.as_slice()),
+        (1, &[id][..])
+    );
+    assert_eq!(
+        (all[1].clips.len(), all[1].devices.as_slice()),
+        (0, &[id][..])
+    );
+    let missing = files::missing_audio(doc.project(), doc.bundle(), &LineFiles);
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].source, own);
+    assert!(files::missing_audio(doc.project(), doc.bundle(), &files::ClipsOnly).is_empty());
+
+    // Relinking the sampler's own file changes its state only.
+    let found = fx.outside.join("found/snare.wav");
+    write(&found, b"snare");
+    let cmd = files::relink(
+        doc.project(),
+        &LineFiles,
+        &[(own.clone(), found.clone())],
+        "Relink Audio",
+    )
+    .unwrap();
+    doc.execute(cmd).unwrap();
+    assert_eq!(device_files(&doc, id), [shared.clone(), found.clone()]);
+    assert_eq!(sources(doc.project()), std::slice::from_ref(&shared));
+    doc.undo().unwrap();
+    assert_eq!(device_files(&doc, id), [shared.clone(), own]);
+    doc.redo().unwrap();
+
+    // Collect copies both files in once and points clip and sampler at the
+    // copies.
+    let collected =
+        files::collect_files(doc.project(), doc.bundle().unwrap(), &LineFiles, |_| true)
+            .unwrap()
+            .unwrap();
+    assert_eq!(collected.copies.len(), 2);
+    doc.execute(collected.command).unwrap();
+    assert_eq!(sources(doc.project()), [PathBuf::from("audio/kick.wav")]);
+    assert_eq!(
+        device_files(&doc, id),
+        [
+            PathBuf::from("audio/kick.wav"),
+            PathBuf::from("audio/snare.wav")
+        ]
+    );
+    assert_eq!(fs::read(fx.root.join("audio/snare.wav")).unwrap(), b"snare");
 }

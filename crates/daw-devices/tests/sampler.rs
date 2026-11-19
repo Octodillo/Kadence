@@ -364,6 +364,47 @@ fn saved_samples_lists_each_file_once() {
     assert!(Sampler::saved_samples(&eq).is_err());
 }
 
+/// Issue #268: relinking and collecting rewrite a sampler's files.
+#[test]
+fn relinked_state_moves_only_the_files_given() {
+    use std::path::{Path, PathBuf};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = kit(dir.path());
+    a.set_param(GAIN, -6.0);
+    let blob = a.save_state();
+    let kick = dir.path().join("kick.wav");
+    let moved = Sampler::relinked_state(&blob, |p| {
+        (p == kick).then(|| PathBuf::from("audio/kick.wav"))
+    })
+    .unwrap()
+    .expect("the kick moved");
+    let samples = Sampler::saved_samples(&moved).unwrap();
+    assert_eq!(samples[0], Path::new("audio/kick.wav"));
+    assert_eq!(samples[1], dir.path().join("snare.wav"));
+
+    // Everything else comes back as it was.
+    let mut b = Sampler::new();
+    b.load_state_with(&moved, |_| {
+        Some(Arc::new(SampleBuffer::mono(vec![0.1; 10], 48_000.0)))
+    })
+    .unwrap();
+    let unsourced = |s: &Sampler| -> Vec<Mapping> {
+        mapping(s)
+            .into_iter()
+            .map(|(_, root, lo, hi, vlo, vhi, gain)| (None, root, lo, hi, vlo, vhi, gain))
+            .collect()
+    };
+    assert_eq!(unsourced(&b), unsourced(&a));
+    assert_eq!(b.param_value(GAIN), -6.0);
+    assert_eq!(b.param_value(MODE), MODE_ONE_SHOT);
+
+    let same = |p: &Path| Some(p.to_path_buf());
+    assert!(Sampler::relinked_state(&blob, same).unwrap().is_none());
+    assert!(Sampler::relinked_state(&blob, |_| None).unwrap().is_none());
+    let old = br#"{"device":"daw.sampler","version":1,"params":{"gain":-20.0}}"#;
+    assert!(Sampler::relinked_state(old, same).unwrap().is_none());
+}
+
 #[test]
 fn zone_without_source_is_saved_as_placeholder() {
     let mut a = sampler_with(vec![0.5; 10], 48_000.0);

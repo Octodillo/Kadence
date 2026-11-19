@@ -1,25 +1,59 @@
 //! The audio files a project plays: which are missing, which live outside
 //! the bundle, and the edits that relink or collect them.
+//!
+//! Clips name their files in the model. Devices can name files too, inside
+//! their saved state (a sampler's samples), which only the device's own
+//! crate can read: callers pass a [`StateFiles`] that does.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use crate::bundle::Bundle;
-use crate::commands::{Batch, ClipField, SetClip};
+use crate::commands::{Batch, ClipField, DeviceField, SetClip, SetDevice};
 use crate::error::FormatError;
-use crate::id::ClipId;
-use crate::model::{ClipContent, Project};
+use crate::id::{ClipId, DeviceId};
+use crate::model::{ClipContent, Device, Project, StateBlob};
 
-/// One file that audio clips play, as stored in [`crate::AudioClip::source`].
+/// Reads and rewrites the files named in devices' saved state, which the
+/// model cannot read itself.
+pub trait StateFiles {
+    /// The files `device`'s saved state plays, as saved, each once. Empty
+    /// for a device that names none, or whose state can't be read.
+    fn files(&self, device: &Device) -> Vec<PathBuf>;
+
+    /// `device`'s saved state with each file `to` gives a new name for
+    /// renamed. `None` when nothing changes.
+    fn relinked(&self, device: &Device, to: &dyn Fn(&Path) -> Option<PathBuf>)
+    -> Option<StateBlob>;
+}
+
+/// A [`StateFiles`] that finds no files in any state: only clips' files
+/// count.
+pub struct ClipsOnly;
+
+impl StateFiles for ClipsOnly {
+    fn files(&self, _: &Device) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn relinked(&self, _: &Device, _: &dyn Fn(&Path) -> Option<PathBuf>) -> Option<StateBlob> {
+        None
+    }
+}
+
+/// One file that the project plays, as stored in an audio clip's
+/// [`source`](crate::AudioClip::source) or a device's saved state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioFile {
-    /// As stored in the clips.
+    /// As stored in the clips and devices.
     pub source: PathBuf,
     /// Where it is on disk: resolved against the bundle. A relative source
     /// with no bundle stays relative.
     pub path: PathBuf,
     /// The clips that play it, in project order.
     pub clips: Vec<ClipId>,
+    /// The devices whose saved state plays it (samplers), in project order.
+    pub devices: Vec<DeviceId>,
 }
 
 impl AudioFile {
@@ -35,35 +69,62 @@ impl AudioFile {
     }
 }
 
-/// Every file audio clips play, each once, in the order clips first use it.
-pub fn audio_files(project: &Project, bundle: Option<&Bundle>) -> Vec<AudioFile> {
+/// Every file audio clips and devices (read with `state`) play, each once:
+/// clips' files in the order clips first use them, then the files only
+/// devices play.
+pub fn audio_files(
+    project: &Project,
+    bundle: Option<&Bundle>,
+    state: &dyn StateFiles,
+) -> Vec<AudioFile> {
     let mut files: Vec<AudioFile> = Vec::new();
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
+    let mut entry = |source: &Path| -> usize {
+        *index.entry(source.to_path_buf()).or_insert_with(|| {
+            files.push(AudioFile {
+                source: source.to_path_buf(),
+                path: match bundle {
+                    Some(b) => b.resolve(source),
+                    None => source.to_path_buf(),
+                },
+                clips: Vec::new(),
+                devices: Vec::new(),
+            });
+            files.len() - 1
+        })
+    };
+    let mut clip_uses = Vec::new();
+    let mut device_uses = Vec::new();
     for track in project.all_tracks() {
         for clip in &track.clips {
-            let ClipContent::Audio(a) = &clip.content else {
-                continue;
-            };
-            let i = *index.entry(a.source.clone()).or_insert_with(|| {
-                files.push(AudioFile {
-                    source: a.source.clone(),
-                    path: match bundle {
-                        Some(b) => b.resolve(&a.source),
-                        None => a.source.clone(),
-                    },
-                    clips: Vec::new(),
-                });
-                files.len() - 1
-            });
-            files[i].clips.push(clip.id);
+            if let ClipContent::Audio(a) = &clip.content {
+                clip_uses.push((entry(&a.source), clip.id));
+            }
         }
+    }
+    for track in project.all_tracks() {
+        for device in &track.devices {
+            for source in state.files(device) {
+                device_uses.push((entry(&source), device.id));
+            }
+        }
+    }
+    for (i, clip) in clip_uses {
+        files[i].clips.push(clip);
+    }
+    for (i, device) in device_uses {
+        files[i].devices.push(device);
     }
     files
 }
 
-/// The files clips play that are not on disk.
-pub fn missing_audio(project: &Project, bundle: Option<&Bundle>) -> Vec<AudioFile> {
-    audio_files(project, bundle)
+/// The files the project plays that are not on disk.
+pub fn missing_audio(
+    project: &Project,
+    bundle: Option<&Bundle>,
+    state: &dyn StateFiles,
+) -> Vec<AudioFile> {
+    audio_files(project, bundle, state)
         .into_iter()
         .filter(|f| !f.exists())
         .collect()
@@ -71,8 +132,12 @@ pub fn missing_audio(project: &Project, bundle: Option<&Bundle>) -> Vec<AudioFil
 
 /// The files outside the bundle that are on disk, so
 /// [`collect_files`] can copy them in.
-pub fn external_audio(project: &Project, bundle: &Bundle) -> Vec<AudioFile> {
-    audio_files(project, Some(bundle))
+pub fn external_audio(
+    project: &Project,
+    bundle: &Bundle,
+    state: &dyn StateFiles,
+) -> Vec<AudioFile> {
+    audio_files(project, Some(bundle), state)
         .into_iter()
         .filter(|f| f.is_external(Some(bundle)) && f.exists())
         .collect()
@@ -117,24 +182,36 @@ pub fn source_for(file: &Path, bundle: Option<&Bundle>) -> PathBuf {
         .unwrap_or_else(|| file.to_path_buf())
 }
 
-/// The edit that points every clip playing one of the `from` sources at its
-/// new file. `None` when no clip changes. Undoes as one "Relink Audio" step.
-pub fn relink(project: &Project, changes: &[(PathBuf, PathBuf)], label: &str) -> Option<Batch> {
+/// The edit that points every clip and device (read with `state`) playing
+/// one of the `from` sources at its new file. `None` when nothing changes.
+/// Undoes as one step called `label`.
+pub fn relink(
+    project: &Project,
+    state: &dyn StateFiles,
+    changes: &[(PathBuf, PathBuf)],
+    label: &str,
+) -> Option<Batch> {
     let to: HashMap<&Path, &Path> = changes
         .iter()
         .filter(|(from, to)| from != to)
         .map(|(f, t)| (f.as_path(), t.as_path()))
         .collect();
+    let new_name = |source: &Path| to.get(source).map(|p| p.to_path_buf());
     let mut commands: Vec<Box<dyn crate::Command>> = Vec::new();
     for track in project.all_tracks() {
         for clip in &track.clips {
             if let ClipContent::Audio(a) = &clip.content
-                && let Some(new) = to.get(a.source.as_path())
+                && let Some(new) = new_name(&a.source)
             {
-                commands.push(Box::new(SetClip::new(
-                    clip.id,
-                    ClipField::AudioSource(new.to_path_buf()),
-                )));
+                commands.push(Box::new(SetClip::new(clip.id, ClipField::AudioSource(new))));
+            }
+        }
+        for device in &track.devices {
+            if let Some(blob) = state.relinked(device, &new_name) {
+                commands.push(Box::new(SetDevice {
+                    id: device.id,
+                    field: DeviceField::State(Some(blob)),
+                }));
             }
         }
     }
@@ -156,7 +233,7 @@ pub fn find_in_folder(missing: &[AudioFile], folder: &Path) -> Vec<(PathBuf, Pat
 /// The result of [`collect_files`]: the edit to run and the copies it made.
 #[derive(Debug)]
 pub struct Collected {
-    /// Points the clips at the copies. Undoes as one "Collect Audio Files" step.
+    /// Points the clips and devices at the copies. Undoes as one "Collect Audio Files" step.
     pub command: Batch,
     /// The copies in the bundle's `audio/` folder. If running `command`
     /// fails, remove them with [`remove_copies`].
@@ -171,8 +248,8 @@ pub fn remove_copies(copies: &[PathBuf]) {
     }
 }
 
-/// Copies every external file clips play into the bundle's `audio/` folder
-/// and returns the edit that points the clips at the copies. `None` when
+/// Copies every external file clips and devices play into the bundle's
+/// `audio/` folder and returns the edit that points them at the copies. `None` when
 /// there is nothing to copy. All or nothing: if one copy fails, the ones
 /// made so far are removed again. Missing files are skipped; relink them
 /// first.
@@ -183,9 +260,10 @@ pub fn remove_copies(copies: &[PathBuf]) {
 pub fn collect_files(
     project: &Project,
     bundle: &Bundle,
+    state: &dyn StateFiles,
     is_audio: impl Fn(&Path) -> bool,
 ) -> Result<Option<Collected>, FormatError> {
-    let mut external = external_audio(project, bundle);
+    let mut external = external_audio(project, bundle, state);
     external.retain(|f| is_audio(&f.path));
     if external.is_empty() {
         return Ok(None);
@@ -212,7 +290,10 @@ pub fn collect_files(
             }
         }
     }
-    let command =
-        relink(project, &changes, "Collect Audio Files").expect("external files have clips");
+    let Some(command) = relink(project, state, &changes, "Collect Audio Files") else {
+        // Only when `state` lists files it then cannot rename.
+        remove_copies(&copies);
+        return Ok(None);
+    };
     Ok(Some(Collected { command, copies }))
 }

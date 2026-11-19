@@ -16,7 +16,6 @@
 
 use daw_arrange::{LaneScale, ParamCatalog};
 use daw_core::event::ParamId;
-use daw_devices::devices::sampler;
 use daw_devices::{ParamKind, ParamSpec, ParamUnit, Sampler, Taper};
 use daw_model::commands::{Batch, DeviceField, MoveDevice, SetDevice, SetParam};
 use std::cell::{Cell, RefCell};
@@ -349,7 +348,7 @@ pub struct SamplerView {
 impl SamplerView {
     /// The sampler part of `device`'s view, `None` for other devices.
     fn of(device: &Device) -> Option<Self> {
-        if !is_sampler(device) {
+        if !daw_session::is_sampler(device) {
             return None;
         }
         let sample = device
@@ -374,10 +373,6 @@ impl SamplerView {
             !path.is_file()
         });
     }
-}
-
-fn is_sampler(device: &Device) -> bool {
-    matches!(&device.source, DeviceSource::Builtin { kind } if kind == sampler::INFO.id)
 }
 
 impl DeviceView {
@@ -1198,7 +1193,7 @@ mod tests {
         let tid = track.id;
         project.tracks = vec![Arc::new(track)];
         let mut doc = Document::new(project);
-        let device = builtin(sampler::INFO.id);
+        let device = builtin(daw_devices::devices::sampler::INFO.id);
         let id = device.id;
         doc.execute(AddDevice {
             track: tid,

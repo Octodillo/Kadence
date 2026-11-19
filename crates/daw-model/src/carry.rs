@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bundle::{Bundle, copy_new};
 use crate::error::FormatError;
-use crate::files::{audio_files, relative_inside, remove_copies};
+use crate::files::{ClipsOnly, audio_files, relative_inside, remove_copies};
 use crate::model::Project;
 
 /// The files and folders a carry made, so a failed Save As can take them
@@ -64,7 +64,9 @@ struct Entry {
 /// clips play files in it, that is an error naming the folder: the new
 /// bundle would be saved without its audio.
 pub(crate) fn audio(project: &Project, old: &Bundle, new: &Bundle) -> Result<Made, FormatError> {
-    let played = audio_files(project, Some(old));
+    // Clips only: a device's files are carried when they are in `audio/`,
+    // where Kadence puts them, and the model cannot read device state.
+    let played = audio_files(project, Some(old), &ClipsOnly);
     let root = match old.root().canonicalize() {
         Ok(root) => root,
         Err(e) if played.iter().any(|f| f.source.is_relative()) => {
