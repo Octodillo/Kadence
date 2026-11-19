@@ -1376,7 +1376,7 @@ mod tests {
 
     #[test]
     fn stepped_plugin_parameters_snap_to_their_steps() {
-        let info = |min, max, steps| daw_core::plugin::ParamInfo {
+        let info = |min, max, steps: Option<u32>| daw_core::plugin::ParamInfo {
             id: 1,
             name: "Mode".into(),
             min,
