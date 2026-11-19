@@ -227,10 +227,18 @@ fn start_audio(
 /// The take made so far is kept, and the fresh session gets the project
 /// and the play position back (after the tempo map, so the position maps
 /// to the same bar).
+///
+/// A take in progress ends, and the user is told: a restart the settings
+/// page asked for stops it as surely as one the engine made itself.
 fn replacing_session<R>(
     s: &mut state::AppState,
     change: impl FnOnce(&mut dyn EngineHandle) -> R,
 ) -> R {
+    if s.is_recording() {
+        // First, so that a problem with the take itself, reported as
+        // the recording stops, is what stays on show.
+        s.report(Message::Record(RecordProblem::AudioRestarted));
+    }
     s.stop_recording();
     let position = s.playhead();
     let r = change(s.engine.as_mut());
@@ -241,16 +249,23 @@ fn replacing_session<R>(
     r
 }
 
+/// Applies audio settings the user chose. When that restarts audio, a
+/// recording ends first and the user is told, as for any restart.
+fn apply_settings(s: &mut state::AppState, config: &AudioConfig) -> Result<(), EngineError> {
+    let plan = s.engine.plan_audio_config(config)?;
+    if plan.restarts() {
+        replacing_session(s, |engine| engine.apply_audio_plan(plan));
+    } else {
+        s.engine.apply_audio_plan(plan);
+    }
+    Ok(())
+}
+
 /// Restarts audio when the engine says that mends it (see
 /// [`EngineHandle::wants_restart`]) and returns the status after that. A
 /// recording does not survive the restart, and the user is told.
 fn poll_audio(s: &mut state::AppState) -> EngineStatus {
     if s.engine.wants_restart() {
-        if s.is_recording() {
-            // First, so that a problem with the take itself, reported as
-            // the recording stops, is what stays on show.
-            s.report(Message::Record(RecordProblem::AudioRestarted));
-        }
         replacing_session(s, |engine| engine.restart_audio());
     }
     s.engine.status()
@@ -312,8 +327,7 @@ impl qobject::Engine {
             .as_ref()
             .audio_config_from(device_index, sample_rate, buffer_size);
         let result = result.and_then(|config| {
-            state::with(|s| replacing_session(s, |engine| engine.apply_audio_config(&config)))
-                .map_err(Problem::Engine)?;
+            state::with(|s| apply_settings(s, &config)).map_err(Problem::Engine)?;
             // What runs now, which is not what was asked for when the
             // audio server came or went during the restart.
             let config = state::with(|s| s.engine.audio_config());
@@ -478,7 +492,7 @@ impl qobject::Engine {
 mod tests {
     use super::qobject::{ErrorContext, ErrorKind};
     use super::*;
-    use crate::engine::StubEngine;
+    use crate::engine::{AudioPlan, StubEngine};
 
     #[test]
     fn a_lost_audio_server_shows_and_is_mended_by_the_next_poll() {
@@ -502,6 +516,114 @@ mod tests {
         assert_eq!(s.tempo_at_playhead().0, 90.0);
         let session = s.engine.session().unwrap();
         assert_eq!(session.tempo().segments()[0].bpm, 90.0);
+    }
+
+    /// The stub, but every applied setting restarts audio, as on a server
+    /// whose buffer size changes.
+    struct RestartingEngine(StubEngine);
+
+    impl EngineHandle for RestartingEngine {
+        fn backend_kind(&self) -> BackendKind {
+            self.0.backend_kind()
+        }
+        fn audio_devices(&self) -> Vec<crate::engine::AudioDevice> {
+            self.0.audio_devices()
+        }
+        fn supported_sample_rates(&self) -> Vec<u32> {
+            self.0.supported_sample_rates()
+        }
+        fn supported_buffer_sizes(&self) -> Vec<u32> {
+            self.0.supported_buffer_sizes()
+        }
+        fn plan_audio_config(&self, config: &AudioConfig) -> Result<AudioPlan, EngineError> {
+            self.0.plan_audio_config(config)?;
+            Ok(AudioPlan::new(config.clone(), true))
+        }
+        fn apply_audio_plan(&mut self, plan: AudioPlan) {
+            self.0.apply_audio_plan(plan)
+        }
+        fn audio_config(&self) -> AudioConfig {
+            self.0.audio_config()
+        }
+        fn status(&self) -> EngineStatus {
+            self.0.status()
+        }
+        fn play(&mut self) {
+            self.0.play()
+        }
+        fn stop(&mut self) {
+            self.0.stop()
+        }
+        fn is_playing(&self) -> bool {
+            self.0.is_playing()
+        }
+        fn session(&self) -> Option<&daw_session::Session> {
+            self.0.session()
+        }
+        fn session_mut(&mut self) -> Option<&mut daw_session::Session> {
+            self.0.session_mut()
+        }
+    }
+
+    /// A state with an armed audio track, recording a take.
+    fn recording_on(engine: Box<dyn EngineHandle>) -> (state::AppState, daw_model::TrackId) {
+        let mut s = state::AppState::with_engine(engine);
+        let mut track = daw_model::Track::new(daw_model::TrackKind::Audio, "Guitar");
+        track.armed = true;
+        let id = track.id;
+        s.doc
+            .execute(daw_model::commands::AddTrack::new(0, track))
+            .unwrap();
+        s.sync();
+        s.start_recording().unwrap();
+        assert!(s.is_recording(), "{:?}", s.status);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        (s, id)
+    }
+
+    #[test]
+    fn settings_that_restart_audio_end_the_take_and_say_so() {
+        let (mut s, track) = recording_on(Box::new(RestartingEngine(StubEngine::default())));
+        let config = AudioConfig {
+            buffer_size: 512,
+            ..AudioConfig::default()
+        };
+        apply_settings(&mut s, &config).unwrap();
+        assert!(!s.is_recording());
+        assert_eq!(s.doc.project().track(track).unwrap().clips.len(), 1);
+        assert_eq!(
+            s.status,
+            Some(Message::Record(RecordProblem::AudioRestarted).fields())
+        );
+        assert_eq!(s.engine.audio_config(), config);
+    }
+
+    #[test]
+    fn settings_that_restart_nothing_leave_the_take_running() {
+        let (mut s, _) = recording_on(Box::new(StubEngine::default()));
+        let config = AudioConfig {
+            buffer_size: 512,
+            ..AudioConfig::default()
+        };
+        apply_settings(&mut s, &config).unwrap();
+        assert!(s.is_recording());
+        assert_eq!(s.status, None);
+        s.stop_recording();
+    }
+
+    #[test]
+    fn refused_settings_leave_the_take_running() {
+        let (mut s, _) = recording_on(Box::new(RestartingEngine(StubEngine::default())));
+        let config = AudioConfig {
+            buffer_size: 100,
+            ..AudioConfig::default()
+        };
+        assert_eq!(
+            apply_settings(&mut s, &config),
+            Err(EngineError::UnsupportedBufferSize(100))
+        );
+        assert!(s.is_recording());
+        s.stop_recording();
     }
 
     #[test]
@@ -675,11 +797,14 @@ mod tests {
         fn supported_buffer_sizes(&self) -> Vec<u32> {
             self.0.supported_buffer_sizes()
         }
-        fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
+        fn plan_audio_config(&self, config: &AudioConfig) -> Result<AudioPlan, EngineError> {
             if config.sample_rate != 44_100 {
                 return Err(EngineError::UnsupportedSampleRate(config.sample_rate));
             }
-            self.0.apply_audio_config(config)
+            self.0.plan_audio_config(config)
+        }
+        fn apply_audio_plan(&mut self, plan: AudioPlan) {
+            self.0.apply_audio_plan(plan)
         }
         fn audio_config(&self) -> AudioConfig {
             let config = self.0.audio_config();
@@ -735,11 +860,14 @@ mod tests {
         fn supported_buffer_sizes(&self) -> Vec<u32> {
             self.0.supported_buffer_sizes()
         }
-        fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
+        fn plan_audio_config(&self, config: &AudioConfig) -> Result<AudioPlan, EngineError> {
             Err(EngineError::Backend(format!(
                 "no luck at {}",
                 config.sample_rate
             )))
+        }
+        fn apply_audio_plan(&mut self, _: AudioPlan) {
+            unreachable!("nothing is ever planned")
         }
         fn audio_config(&self) -> AudioConfig {
             self.0.audio_config()
