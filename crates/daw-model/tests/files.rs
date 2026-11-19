@@ -676,3 +676,22 @@ fn files_in_device_state_count_like_clips() {
     );
     assert_eq!(fs::read(fx.root.join("audio/snare.wav")).unwrap(), b"snare");
 }
+
+/// Issue #268: Save As carries a file a device plays from elsewhere in the
+/// bundle, as it does a clip's.
+#[test]
+fn save_as_carries_what_devices_play_outside_the_audio_folder() {
+    let fx = fixture();
+    let (project, id) = project_with_device(
+        PathBuf::from("audio/clip.wav"),
+        &[PathBuf::from("Samples/kick.wav")],
+    );
+    let mut doc = saved(&fx, project);
+    write(&fx.root.join("audio/clip.wav"), b"clip");
+    write(&fx.root.join("Samples/kick.wav"), b"kick");
+    let copy = fx.root.with_file_name("Song 2");
+    doc.save_as_with(&copy, &LineFiles).unwrap();
+    assert_eq!(device_files(&doc, id), [PathBuf::from("Samples/kick.wav")]);
+    assert_eq!(fs::read(copy.join("Samples/kick.wav")).unwrap(), b"kick");
+    assert!(files::missing_audio(doc.project(), doc.bundle(), &LineFiles).is_empty());
+}

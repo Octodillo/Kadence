@@ -1134,7 +1134,7 @@ impl AppState {
             }
             _ => None,
         };
-        if let Err(e) = self.doc.save_as(path) {
+        if let Err(e) = self.doc.save_as_with(path, &BuiltinStateFiles) {
             if let Some((files, dir)) = &brought {
                 recovery::take_back_audio(files, dir);
             }

@@ -405,6 +405,21 @@ fn relinked_state_moves_only_the_files_given() {
     assert!(Sampler::relinked_state(old, same).unwrap().is_none());
 }
 
+/// Saved state names files as text, so a file whose name is not text
+/// leaves the zone as it was rather than saving a mangled name.
+#[cfg(unix)]
+#[test]
+fn relinked_state_keeps_a_file_for_a_name_that_is_not_text() {
+    use std::os::unix::ffi::OsStrExt;
+    let blob = Sampler::state_with_sample("audio/hit.wav");
+    let latin1 = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/mnt/caf\xe9.wav"));
+    assert!(
+        Sampler::relinked_state(&blob, |_| Some(latin1.clone()))
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn zone_without_source_is_saved_as_placeholder() {
     let mut a = sampler_with(vec![0.5; 10], 48_000.0);

@@ -351,11 +351,9 @@ impl SamplerView {
         if !daw_session::is_sampler(device) {
             return None;
         }
-        let sample = device
-            .state
-            .as_ref()
-            .and_then(|s| Sampler::saved_samples(&s.0).ok())
-            .and_then(|samples| samples.into_iter().next());
+        let sample = daw_model::files::StateFiles::files(&daw_session::BuiltinStateFiles, device)
+            .into_iter()
+            .next();
         Some(Self {
             sample,
             missing: false,

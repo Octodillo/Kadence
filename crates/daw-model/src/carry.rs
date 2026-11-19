@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bundle::{Bundle, copy_new};
 use crate::error::FormatError;
-use crate::files::{ClipsOnly, audio_files, relative_inside, remove_copies};
+use crate::files::{StateFiles, audio_files, relative_inside, remove_copies};
 use crate::model::Project;
 
 /// The files and folders a carry made, so a failed Save As can take them
@@ -49,7 +49,7 @@ struct Entry {
 
 /// Brings the audio of `old` into `new`: everything in its `audio/` folder,
 /// sub-folders included, and any other file in the bundle that a clip of
-/// `project` plays, except the project files and backups Kadence keeps there. Each file keeps its place, so the clips' sources hold.
+/// `project` or a device (read with `state`) plays, except the project files and backups Kadence keeps there. Each file keeps its place, so the clips' sources hold.
 /// Refuses before copying anything if a file is already at one of those
 /// places, since clips may use it. On failure nothing it made is left.
 ///
@@ -63,10 +63,13 @@ struct Entry {
 /// If the old bundle's folder is gone (moved or renamed while open) and
 /// clips play files in it, that is an error naming the folder: the new
 /// bundle would be saved without its audio.
-pub(crate) fn audio(project: &Project, old: &Bundle, new: &Bundle) -> Result<Made, FormatError> {
-    // Clips only: a device's files are carried when they are in `audio/`,
-    // where Kadence puts them, and the model cannot read device state.
-    let played = audio_files(project, Some(old), &ClipsOnly);
+pub(crate) fn audio(
+    project: &Project,
+    old: &Bundle,
+    new: &Bundle,
+    state: &dyn StateFiles,
+) -> Result<Made, FormatError> {
+    let played = audio_files(project, Some(old), state);
     let root = match old.root().canonicalize() {
         Ok(root) => root,
         Err(e) if played.iter().any(|f| f.source.is_relative()) => {

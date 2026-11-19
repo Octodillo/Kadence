@@ -525,7 +525,8 @@ impl Sampler {
     }
 
     /// `data` with each zone's file replaced by what `to` gives for it, as
-    /// saved; files it gives `None` for stay. `None` when no file changes.
+    /// saved; files it gives `None` for stay, and so do those it gives a
+    /// path for that is not text, which saved state cannot hold. `None` when no file changes.
     /// Nothing is read from disk, and everything else in the state stays.
     pub fn relinked_state(
         data: &[u8],
@@ -537,8 +538,9 @@ impl Sampler {
         };
         let mut changed = false;
         for sample in saved.zones.iter_mut().filter_map(|z| z.sample.as_mut()) {
-            if let Some(new) = to(Path::new(sample.as_str())) {
-                let new = new.to_string_lossy().into_owned();
+            if let Some(new) = to(Path::new(sample.as_str()))
+                && let Some(new) = new.to_str().map(str::to_owned)
+            {
                 changed |= new != *sample;
                 *sample = new;
             }
