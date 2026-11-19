@@ -136,13 +136,14 @@ pub mod qobject {
         #[qproperty(QMap_QString_QVariant, status)]
         /// Folders of recently used projects, newest first.
         #[qproperty(QStringList, recent_projects)]
-        /// How many audio files clips play that are not on disk; see
-        /// `missing_files`, `missing_clip_count` and `relink`.
+        /// How many audio files clips and samplers play that are not on
+        /// disk; see `missing_files`, `missing_clip_count`,
+        /// `missing_sampler_count` and `relink`.
         #[qproperty(i32, missing_count)]
-        /// The missing files, as the clips name them; index them for
-        /// `missing_clip_count` and `relink`.
+        /// The missing files, as the project names them; index them for
+        /// `missing_clip_count`, `missing_sampler_count` and `relink`.
         #[qproperty(QStringList, missing_files)]
-        /// How many audio files clips play from outside the bundle, which
+        /// How many audio files clips and samplers play from outside the bundle, which
         /// `collect_files` copies in.
         #[qproperty(i32, external_count)]
         /// How many earlier sessions left unsaved work; see `recovery_name`.
@@ -202,7 +203,10 @@ pub mod qobject {
         /// How many clips play missing file `index`.
         #[qinvokable]
         fn missing_clip_count(self: &Project, index: i32) -> i32;
-        /// Points the clips playing missing file `index` at the file at
+        /// How many samplers play missing file `index`.
+        #[qinvokable]
+        fn missing_sampler_count(self: &Project, index: i32) -> i32;
+        /// Points the clips and samplers playing missing file `index` at the file at
         /// `url`, and other missing files found next to it by name, as one
         /// undoable edit. Returns how many files were relinked.
         #[qinvokable]
@@ -396,6 +400,11 @@ pub fn message_map(f: &Fields) -> QMap<QMapPair_QString_QVariant> {
     map
 }
 
+/// `n` for QML, which counts in `int`.
+fn count(n: usize) -> i32 {
+    i32::try_from(n).unwrap_or(i32::MAX)
+}
+
 fn message_or_empty(fields: Option<&Fields>) -> QMap<QMapPair_QString_QVariant> {
     fields.map_or_else(QMap::default, message_map)
 }
@@ -473,14 +482,13 @@ impl qobject::Project {
                 (seen != Some(at)).then(|| (at, s.missing_files(), s.external_file_count()));
             (recent, files, s.recovery.len())
         });
-        self.as_mut()
-            .set_recovery_count(i32::try_from(recovery).unwrap_or(i32::MAX));
+        self.as_mut().set_recovery_count(count(recovery));
         let list = string_list(&recent);
         if self.recent_projects != list {
             self.as_mut().set_recent_projects(list);
         }
         if let Some((at, missing, external)) = files {
-            let count = i32::try_from(missing.len()).unwrap_or(i32::MAX);
+            let missing_count = count(missing.len());
             {
                 let mut r = self.as_mut().rust_mut();
                 r.files_seen = Some(at);
@@ -488,9 +496,8 @@ impl qobject::Project {
             }
             let names = string_list(self.missing.iter().map(|f| f.source.display().to_string()));
             self.as_mut().set_missing_files(names);
-            self.as_mut().set_missing_count(count);
-            self.as_mut()
-                .set_external_count(i32::try_from(external).unwrap_or(i32::MAX));
+            self.as_mut().set_missing_count(missing_count);
+            self.as_mut().set_external_count(count(external));
         }
     }
 
@@ -668,7 +675,12 @@ impl qobject::Project {
 
     fn missing_clip_count(&self, index: i32) -> i32 {
         self.missing_entry(index)
-            .map_or(0, |f| i32::try_from(f.clips.len()).unwrap_or(i32::MAX))
+            .map_or(0, |f| count(f.clips.len()))
+    }
+
+    fn missing_sampler_count(&self, index: i32) -> i32 {
+        self.missing_entry(index)
+            .map_or(0, |f| count(f.devices.len()))
     }
 
     fn relink(mut self: Pin<&mut Self>, index: i32, url: &QUrl) -> i32 {
@@ -684,16 +696,16 @@ impl qobject::Project {
         };
         let mut n = 0;
         self.as_mut().edit(|s| match s.relink(&source, &file) {
-            Ok(count) => n = count,
+            Ok(relinked) => n = relinked,
             Err(e) => s.report(e),
         });
-        i32::try_from(n).unwrap_or(i32::MAX)
+        count(n)
     }
 
     fn collect_files(mut self: Pin<&mut Self>) -> i32 {
         let mut n = -1;
         self.as_mut().edit(|s| match s.collect_files() {
-            Ok(count) => n = i32::try_from(count).unwrap_or(i32::MAX),
+            Ok(copied) => n = count(copied),
             Err(e) => s.report(e),
         });
         n

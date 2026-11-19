@@ -181,7 +181,14 @@ fn the_first_save_brings_the_takes_into_the_bundle() {
 
     // And the saved project plays it.
     let saved = Document::open(&song).unwrap();
-    assert!(daw_model::files::missing_audio(saved.project(), saved.bundle()).is_empty());
+    assert!(
+        daw_model::files::missing_audio(
+            saved.project(),
+            saved.bundle(),
+            &daw_session::BuiltinStateFiles
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -470,4 +477,40 @@ fn a_sample_that_has_gone_shows_as_missing() {
 
     std::fs::remove_file(&file).unwrap();
     assert!(sampler(&s).missing);
+}
+
+/// Issue #268: a sampler's file is listed, relinked and collected like a
+/// clip's.
+#[test]
+fn a_sampler_file_is_relinked_and_collected() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kick.wav");
+    write_tone(&file);
+    let mut s = state();
+    let panel = add_sampler(&mut s);
+    // Unsaved: the sampler names the file where it is.
+    s.load_sample(&panel, &file).unwrap();
+    assert_eq!(loaded_sample(&s, &panel).as_deref(), Some(file.as_path()));
+
+    let moved = dir.path().join("moved/kick.wav");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(&file, &moved).unwrap();
+    let missing = s.missing_files();
+    assert_eq!(missing.len(), 1);
+    assert_eq!((missing[0].clips.len(), missing[0].devices.len()), (0, 1));
+
+    assert_eq!(s.relink(&file, &moved).unwrap(), 1);
+    assert_eq!(loaded_sample(&s, &panel).as_deref(), Some(moved.as_path()));
+    assert!(s.missing_files().is_empty());
+
+    s.save_as(&dir.path().join("Song")).unwrap();
+    assert_eq!(s.external_file_count(), 1);
+    assert_eq!(s.collect_files().unwrap(), 1);
+    assert_eq!(
+        loaded_sample(&s, &panel),
+        Some(PathBuf::from("audio/kick.wav"))
+    );
+    assert_eq!(s.external_file_count(), 0);
+    s.doc.undo().unwrap();
+    assert_eq!(loaded_sample(&s, &panel).as_deref(), Some(moved.as_path()));
 }

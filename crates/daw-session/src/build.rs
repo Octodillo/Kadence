@@ -27,6 +27,7 @@ use crate::Warning;
 use crate::capture::input_tap;
 use crate::media::{Loaded, Seen};
 use crate::player::{ClipSet, ClipSource, PLAYER_CHANNELS, PlayClip, PlayerHandle, player};
+use crate::state_files::is_sampler_kind;
 use crate::{Built, MetronomeSettings, Session, strip_gain};
 
 /// Every channel strip in the graph is stereo.
@@ -78,11 +79,6 @@ fn tap_key(track: TrackId) -> NodeKey {
 /// that its pre-fader sends tap.
 fn pre_fader_key(track: TrackId) -> NodeKey {
     NodeKey(track.0.as_u128() ^ 4)
-}
-
-/// Whether a built-in device kind is the one whose state names sample files.
-fn is_sampler(kind: &str) -> bool {
-    kind == daw_devices::devices::sampler::INFO.id
 }
 
 /// How many captured input events can wait for the recorder.
@@ -222,7 +218,8 @@ impl Structure {
 
     pub fn has_sampler(&self) -> bool {
         let mut devices = self.tracks.iter().flat_map(|t| t.devices.iter());
-        devices.any(|d| matches!(&d.source, DeviceSource::Builtin { kind } if is_sampler(kind)))
+        devices
+            .any(|d| matches!(&d.source, DeviceSource::Builtin { kind } if is_sampler_kind(kind)))
     }
 }
 
@@ -699,7 +696,7 @@ impl<'a> Builder<'a> {
                     (self.old.structure.device(d.id)).is_some_and(|old| old.same_node(&shape));
                 // A sampler finds relative sample paths in the project
                 // bundle: when that moved, it loads its state again.
-                let keep = same && !(self.session.root_moved && is_sampler(kind));
+                let keep = same && !(self.session.root_moved && is_sampler_kind(kind));
                 match keep.then(|| self.reuse_with_params(key)).flatten() {
                     Some(id) => {
                         self.g.rename(id, &d.name);
