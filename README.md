@@ -35,6 +35,8 @@ CI runs `cargo fmt --check`, `cargo clippy -D warnings` and the tests on
 every pull request.
 [docs/testing.md](docs/testing.md) covers the shared test helpers and the
 environment switches the tests read.
+[docs/toolkit-neutrality.md](docs/toolkit-neutrality.md) says which code is
+tied to Qt and how the rest is kept usable by another front end.
 
 ## License
 
