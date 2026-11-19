@@ -7,7 +7,7 @@ import org.kde.kirigami as Kirigami
 
 import io.github.octodillo.daw
 
-// Lists the audio files the project's clips play that are not on disk
+// Lists the audio files the project's clips and samplers play that are not on disk
 // (Project.missingCount), and lets the user point each at where it is now.
 // Locating one also finds the other missing files in that folder by name.
 Kirigami.Dialog {
@@ -51,8 +51,8 @@ Kirigami.Dialog {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: i18ncp("@info",
-                         "This audio file could not be found, so its clips are silent. Locate it, or close this to leave it missing.",
-                         "These %1 audio files could not be found, so their clips are silent. Locate them, or close this to leave them missing.",
+                         "This audio file could not be found, so what plays it is silent. Locate it, or close this to leave it missing.",
+                         "These %1 audio files could not be found, so what plays them is silent. Locate them, or close this to leave them missing.",
                          Project.missingCount)
         }
 
@@ -88,8 +88,18 @@ Kirigami.Dialog {
                         elide: Text.ElideMiddle
                         font: Kirigami.Theme.smallFont
                         color: Kirigami.Theme.disabledTextColor
-                        text: i18ncp("@info %2 is a file path", "Was at %2, used by %1 clip",
-                                     "Was at %2, used by %1 clips", Project.missingClipCount(row.index), row.file)
+                        readonly property int clips: Project.missingClipCount(row.index)
+                        readonly property int samplers: Project.missingSamplerCount(row.index)
+                        text: samplers === 0
+                              ? i18ncp("@info %2 is a file path", "Was at %2, used by %1 clip",
+                                       "Was at %2, used by %1 clips", clips, row.file)
+                              : clips === 0
+                              ? i18ncp("@info %2 is a file path", "Was at %2, used by %1 sampler",
+                                       "Was at %2, used by %1 samplers", samplers, row.file)
+                              : i18nc("@info %1 is a file path, %2 a number of clips, %3 of samplers",
+                                      "Was at %1, used by %2 and %3", row.file,
+                                      i18ncp("@info used by…", "%1 clip", "%1 clips", clips),
+                                      i18ncp("@info used by…", "%1 sampler", "%1 samplers", samplers))
                     }
                 }
 

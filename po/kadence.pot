@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: kadence\n"
 "Report-Msgid-Bugs-To: https://github.com/Octodillo/Kadence/issues\n"
-"POT-Creation-Date: 2026-11-19 00:25+0000\n"
+"POT-Creation-Date: 2026-11-19 01:13+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -3034,11 +3034,11 @@ msgstr ""
 #: crates/daw-app/qml/RelinkDialog.qml
 msgctxt "@info"
 msgid ""
-"This audio file could not be found, so its clips are silent. Locate it, or "
-"close this to leave it missing."
+"This audio file could not be found, so what plays it is silent. Locate it, "
+"or close this to leave it missing."
 msgid_plural ""
-"These %1 audio files could not be found, so their clips are silent. Locate "
-"them, or close this to leave them missing."
+"These %1 audio files could not be found, so what plays them is silent. "
+"Locate them, or close this to leave them missing."
 msgstr[0] ""
 msgstr[1] ""
 
@@ -3048,6 +3048,32 @@ msgid "Was at %2, used by %1 clip"
 msgid_plural "Was at %2, used by %1 clips"
 msgstr[0] ""
 msgstr[1] ""
+
+#: crates/daw-app/qml/RelinkDialog.qml
+msgctxt "@info %2 is a file path"
+msgid "Was at %2, used by %1 sampler"
+msgid_plural "Was at %2, used by %1 samplers"
+msgstr[0] ""
+msgstr[1] ""
+
+#: crates/daw-app/qml/RelinkDialog.qml
+msgctxt "@info used by…"
+msgid "%1 clip"
+msgid_plural "%1 clips"
+msgstr[0] ""
+msgstr[1] ""
+
+#: crates/daw-app/qml/RelinkDialog.qml
+msgctxt "@info used by…"
+msgid "%1 sampler"
+msgid_plural "%1 samplers"
+msgstr[0] ""
+msgstr[1] ""
+
+#: crates/daw-app/qml/RelinkDialog.qml
+msgctxt "@info %1 is a file path, %2 a number of clips, %3 of samplers"
+msgid "Was at %1, used by %2 and %3"
+msgstr ""
 
 #: crates/daw-app/qml/RelinkDialog.qml
 msgctxt "@action:button"

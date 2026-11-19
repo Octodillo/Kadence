@@ -105,9 +105,10 @@ audio it uses, so it can be copied or backed up as one. **New Project**
   there is no recovery copy, the next start moves the recordings to a
   folder of their own in `recordings` in Kadence's data folder (usually
   `~/.local/share/kadence`).
-- If audio files were moved, **Find Missing Audio Files…** relinks them.
-  **Collect Audio Files** copies audio from outside the project folder into
-  it. Only files that open as audio are copied.
+- If audio files were moved, **Find Missing Audio Files…** relinks them,
+  for clips and samplers alike. **Collect Audio Files** copies the audio
+  clips and samplers play from outside the project folder into it. Only
+  files that open as audio are copied.
 
 Every edit can be undone with Ctrl+Z and redone with Ctrl+Shift+Z.
 
@@ -144,9 +145,9 @@ signature, and the metronome.
   at its recorded pitch on middle C. The file is copied into the project
   like imported audio, and **Undo** brings back the sample before. Files
   up to ten minutes long can be loaded. In a project that has not been
-  saved yet the file stays where it is, and **Collect Audio Files** and
-  **Find Missing Audio Files…** do not look after a sampler's file: if it
-  goes missing, the device panel says so, and loading it again mends it.
+  saved yet the file stays where it is until **Collect Audio Files** copies
+  it in. If it goes missing, the device panel says so, and **Find Missing
+  Audio Files…** finds it like a clip's file.
 - **Bus**, to group tracks or share an effect such as reverb.
 
 Right-click a track header to rename, move, delete or show its automation.

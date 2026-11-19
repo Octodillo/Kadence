@@ -21,6 +21,7 @@ use daw_model::bundle::Target;
 use daw_model::{Bundle, Document, FormatError, Project, TrackId};
 use daw_pianoroll::PianoRoll;
 use daw_plugins::Scanner;
+use daw_session::BuiltinStateFiles;
 use daw_session::catalog::PluginCatalog;
 
 use crate::engine::{EngineHandle, default_engine};
@@ -1133,7 +1134,7 @@ impl AppState {
             }
             _ => None,
         };
-        if let Err(e) = self.doc.save_as(path) {
+        if let Err(e) = self.doc.save_as_with(path, &BuiltinStateFiles) {
             if let Some((files, dir)) = &brought {
                 recovery::take_back_audio(files, dir);
             }
@@ -1193,10 +1194,14 @@ impl AppState {
         self.resync();
     }
 
-    /// The audio files clips play that are not on disk.
+    /// The audio files clips and samplers play that are not on disk.
     pub fn missing_files(&self) -> Vec<daw_model::files::AudioFile> {
         let root = self.media_root();
-        let mut files = daw_model::files::audio_files(self.doc.project(), self.doc.bundle());
+        let mut files = daw_model::files::audio_files(
+            self.doc.project(),
+            self.doc.bundle(),
+            &BuiltinStateFiles,
+        );
         for f in &mut files {
             // Left relative when there is no bundle to resolve it against.
             if f.path.is_relative() {
@@ -1207,14 +1212,15 @@ impl AppState {
         files
     }
 
-    /// How many files clips play from outside the bundle, which Collect
-    /// Files would copy in: those that open as audio. 0 without a bundle.
+    /// How many files clips and samplers play from outside the bundle,
+    /// which Collect Files would copy in: those that open as audio. 0
+    /// without a bundle.
     pub fn external_file_count(&mut self) -> usize {
         let Some(bundle) = self.doc.bundle() else {
             return 0;
         };
         let seen = &mut self.opens_as_audio;
-        daw_model::files::external_audio(self.doc.project(), bundle)
+        daw_model::files::external_audio(self.doc.project(), bundle, &BuiltinStateFiles)
             .into_iter()
             .filter(|f| {
                 *seen
@@ -1224,7 +1230,8 @@ impl AppState {
             .count()
     }
 
-    /// Points the clips playing the missing file `source` at `file`, and
+    /// Points the clips and samplers playing the missing file `source` at
+    /// `file`, and
     /// any other missing file found next to it by name. Returns how many
     /// files were relinked.
     pub fn relink(&mut self, source: &Path, file: &Path) -> Result<usize, Message> {
@@ -1240,7 +1247,12 @@ impl AppState {
                     .map(|(from, to)| (from, files::source_for(&to, bundle))),
             );
         }
-        let Some(cmd) = files::relink(self.doc.project(), &changes, "Relink Audio") else {
+        let Some(cmd) = files::relink(
+            self.doc.project(),
+            &BuiltinStateFiles,
+            &changes,
+            "Relink Audio",
+        ) else {
             return Ok(0);
         };
         self.doc.execute(cmd)?;
@@ -1251,16 +1263,20 @@ impl AppState {
         Ok(changes.len())
     }
 
-    /// Copies every file clips play from outside the bundle into it, if it
-    /// opens as audio. Returns how many files were copied.
+    /// Copies every file clips and samplers play from outside the bundle
+    /// into it, if it opens as audio. Returns how many files were copied.
     pub fn collect_files(&mut self) -> Result<usize, Message> {
         let bundle = self
             .doc
             .bundle()
             .ok_or(Message::File(Context::Collect, FormatError::NoBundle))?;
-        let Some(collected) =
-            daw_model::files::collect_files(self.doc.project(), bundle, opens_as_audio)
-                .map_err(|e| Message::File(Context::Collect, e))?
+        let Some(collected) = daw_model::files::collect_files(
+            self.doc.project(),
+            bundle,
+            &BuiltinStateFiles,
+            opens_as_audio,
+        )
+        .map_err(|e| Message::File(Context::Collect, e))?
         else {
             return Ok(0);
         };

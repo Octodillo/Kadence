@@ -231,7 +231,22 @@ impl Document {
     /// bundle, by its folder or a file in it, is a plain save; another
     /// project's file is refused, since its bundle is not this one's to
     /// write into.
+    ///
+    /// Devices' files outside `audio/` are left behind: use
+    /// [`save_as_with`](Self::save_as_with) for a project whose devices
+    /// name files.
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), FormatError> {
+        self.save_as_with(path, &crate::files::ClipsOnly)
+    }
+
+    /// [`save_as`](Self::save_as), also carrying the other files in the
+    /// old bundle that devices play, as `state` reads them from their saved
+    /// state.
+    pub fn save_as_with(
+        &mut self,
+        path: impl AsRef<Path>,
+        state: &dyn crate::files::StateFiles,
+    ) -> Result<(), FormatError> {
         let path = path.as_ref();
         let own = |root: &Path| {
             let real = |p: &Path| p.canonicalize().ok();
@@ -257,7 +272,7 @@ impl Document {
         };
         let new = Bundle::create(dir)?;
         let carried = match &self.bundle {
-            Some(old) => carry::audio(&self.project, old, &new)?,
+            Some(old) => carry::audio(&self.project, old, &new, state)?,
             None => carry::Made::default(),
         };
         if let Err(e) = new.save(&self.project, Link::Replace) {
