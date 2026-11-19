@@ -978,6 +978,48 @@ fn a_sampler_takes_a_sample_already_decoded() {
     drop(decoded);
 }
 
+/// Issue #268: undo and redo of a sample given to a sampler find the
+/// buffer it played, though no node played it in between, instead of
+/// decoding the file again.
+#[test]
+fn undo_and_redo_of_a_sample_play_the_buffer_decoded_before() {
+    use daw_model::commands::{DeviceField, SetDevice};
+    let (mut rig, track, _) = instrument_rig("daw.sampler");
+    let file = dc_file(rig.dir(), "hit.wav", 2 * BEAT as usize, 0.5);
+    let device = rig.doc.project().track(track).unwrap().devices[0].id;
+    // Not what the file holds, to tell the two apart. Nothing but the
+    // session keeps it.
+    rig.session.hold_sample(
+        file,
+        &std::sync::Arc::new(daw_devices::SampleBuffer::mono(
+            vec![0.25; 2 * BEAT as usize],
+            RATE,
+        )),
+    );
+    let play = |rig: &mut Rig| {
+        rig.sync();
+        rig.session.locate(TickTime(0)).unwrap();
+        rig.session.play().unwrap();
+        let out = rig.run(4 * BEAT as usize);
+        rig.session.stop().unwrap();
+        out
+    };
+    let state = daw_devices::Sampler::state_with_sample("hit.wav");
+    rig.doc
+        .execute(SetDevice {
+            id: device,
+            field: DeviceField::State(Some(state.into())),
+        })
+        .unwrap();
+    let held = |out: &[f32]| out[30_000..70_000].iter().all(|v| (v - 0.2).abs() < 1e-3);
+    assert!(held(&play(&mut rig)), "the buffer handed over plays");
+
+    rig.doc.undo().unwrap();
+    assert!(peak(&play(&mut rig)) < 1e-6, "undo empties the sampler");
+    rig.doc.redo().unwrap();
+    assert!(held(&play(&mut rig)), "redo plays the same buffer again");
+}
+
 #[test]
 fn switching_the_instrument_off_and_on_leaves_no_hanging_note() {
     let (mut rig, track, _) = synth_rig();

@@ -546,8 +546,8 @@ impl Session {
 
     /// Takes `sample` as the file at `path` already decoded, so a sampler
     /// given that file by the next [`sync`](Self::sync) plays this buffer
-    /// instead of reading the file again. Nothing is kept past the
-    /// caller's own hold on `sample` unless a sampler takes it.
+    /// instead of reading the file again. Kept for a while after nothing
+    /// holds it any more, as every sample a sampler plays is.
     pub fn hold_sample(&mut self, path: PathBuf, sample: &Arc<daw_devices::SampleBuffer>) {
         self.samples.hold(path, sample);
     }
@@ -574,6 +574,7 @@ impl Session {
     /// changed on disk, are looked at afresh.
     pub fn reload_media(&mut self) {
         self.media.clear();
+        self.samples.forget_unused();
         if let Some(b) = &mut self.built {
             b.clips.clear();
         }
