@@ -8,6 +8,13 @@ on:
       - "crates/daw-core/**"
       - ".github/workflows/loom.yml"
 
+# A new push to a pull request cancels the run it outdates, which would only
+# hold runners the newer run needs. Every other run (main, schedule, manual)
+# is a group of its own, so none is cancelled or held back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
