@@ -213,7 +213,8 @@ impl PianoRoll {
 
     /// The selected points' shape, if they share one.
     pub fn point_shape(&self, project: &Project) -> Option<PointShape> {
-        self.lanes.selected_shape(project)
+        let frame = self.selected_frame(project);
+        self.lanes.selected_shape(project, frame.as_ref())
     }
 
     /// Deletes the selected points.

@@ -1651,6 +1651,7 @@ mod tests {
             max: 1.0,
             default: 0.5,
             automatable,
+            steps: None,
         };
         let old = [
             TrackedParam {

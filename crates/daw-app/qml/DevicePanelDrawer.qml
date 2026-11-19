@@ -327,6 +327,7 @@ Kirigami.OverlayDrawer {
         required property double minimum
         required property double maximum
         required property string control
+        required property int stepCount
         required property string unit
         required property list<string> choices
         required property bool isDefault
@@ -364,7 +365,7 @@ Kirigami.OverlayDrawer {
                 Accessible.name: i18nc("@info", "Automated")
             }
             QQC2.Label {
-                text: row.control === "continuous" && slider.pressed
+                text: slider.visible && slider.pressed
                       ? ValueText.param(DevicePanel.valueAt(row.index, slider.value), row.control, row.unit, row.choices)
                       : row.valueText
                 font.features: { "tnum": 1 }
@@ -375,12 +376,15 @@ Kirigami.OverlayDrawer {
         QQC2.Slider {
             id: slider
             Layout.fillWidth: true
-            visible: row.control === "continuous"
+            visible: row.control === "continuous" || row.control === "steps"
             // The lane overrides an edit here, so don't offer one, unless
             // a drag during playback writes the lane.
             enabled: !row.automated || row.writable
             from: 0
             to: 1
+            // A stepped parameter's slider stops at each of its values.
+            stepSize: row.stepCount > 0 ? 1 / row.stepCount : 0
+            snapMode: row.stepCount > 0 ? QQC2.Slider.SnapAlways : QQC2.Slider.NoSnap
             value: row.position
             onMoved: DevicePanel.setPosition(row.index, value, pressed)
             onPressedChanged: {

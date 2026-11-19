@@ -158,6 +158,75 @@ pub struct ParamInfo {
     pub max: f64,
     pub default: f64,
     pub automatable: bool,
+    /// The values it takes, if only some: a switch, a list, a whole number.
+    /// `None` for a continuous parameter.
+    pub steps: Option<Steps>,
+}
+
+impl ParamInfo {
+    /// Its steps along its range (low end first), if it takes only some
+    /// values.
+    pub fn stepped(&self) -> Option<Stepped> {
+        self.steps.map(|s| Stepped::new(s, self.min, self.max))
+    }
+}
+
+/// A parameter that takes only `self.0 + 1` values, evenly spaced from its
+/// minimum to its maximum: a switch has 1 step, a list of four choices 3.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Steps(pub u32);
+
+impl Steps {
+    /// The steps of the whole numbers from `min` to `max` (a parameter that
+    /// takes only whole numbers), if both are whole and `min` is below
+    /// `max`.
+    pub fn whole(min: f64, max: f64) -> Option<Self> {
+        let whole = |v: f64| v.is_finite() && v.fract() == 0.0;
+        let span = max - min;
+        (whole(min) && whole(max) && span >= 1.0 && span <= f64::from(u32::MAX))
+            .then_some(Self(span as u32))
+    }
+
+    /// The value of `min..=max` on these steps nearest to `value`. An empty
+    /// range, or no steps, has only `min`; NaN stays NaN.
+    pub fn snap(self, value: f64, min: f64, max: f64) -> f64 {
+        if value.is_nan() {
+            return value;
+        }
+        let span = max - min;
+        // NaN and an empty or reversed range alike.
+        if self.0 == 0 || span.is_nan() || span <= 0.0 || !span.is_finite() {
+            return min;
+        }
+        let n = f64::from(self.0);
+        let k = ((value - min) / span * n).round().clamp(0.0, n);
+        // The ends exactly, whatever the rounding in between.
+        if k >= n { max } else { min + span * k / n }
+    }
+}
+
+/// The values a stepped parameter takes: its [`Steps`] along its range.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Stepped {
+    pub steps: Steps,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Stepped {
+    /// `steps` from `a` to `b`, whichever way round they are given.
+    pub fn new(steps: Steps, a: f64, b: f64) -> Self {
+        Self {
+            steps,
+            min: a.min(b),
+            max: a.max(b),
+        }
+    }
+
+    /// The value it takes nearest to `value` (see [`Steps::snap`]).
+    pub fn snap(self, value: f64) -> f64 {
+        self.steps.snap(value, self.min, self.max)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -294,6 +363,34 @@ pub trait PluginFormat: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steps_snap_to_evenly_spaced_values() {
+        // A switch.
+        assert_eq!(Steps(1).snap(0.4, 0.0, 1.0), 0.0);
+        assert_eq!(Steps(1).snap(0.6, 0.0, 1.0), 1.0);
+        // Four steps of 2.5 from -5, and past the ends.
+        let s = Steps(4);
+        assert_eq!(s.snap(-1.0, -5.0, 5.0), 0.0);
+        assert_eq!(s.snap(1.0, -5.0, 5.0), 0.0);
+        assert_eq!(s.snap(1.5, -5.0, 5.0), 2.5);
+        assert_eq!(s.snap(99.0, -5.0, 5.0), 5.0);
+        assert_eq!(s.snap(-99.0, -5.0, 5.0), -5.0);
+        // Nothing to step along.
+        assert_eq!(Steps(0).snap(3.0, 1.0, 9.0), 1.0);
+        assert_eq!(s.snap(3.0, 2.0, 2.0), 2.0);
+        assert!(s.snap(f64::NAN, 0.0, 1.0).is_nan());
+    }
+
+    #[test]
+    fn whole_number_ranges_have_a_step_per_number() {
+        assert_eq!(Steps::whole(0.0, 127.0), Some(Steps(127)));
+        assert_eq!(Steps::whole(-12.0, 12.0), Some(Steps(24)));
+        assert_eq!(Steps::whole(0.0, 0.5), None);
+        assert_eq!(Steps::whole(3.0, 3.0), None);
+        assert_eq!(Steps::whole(5.0, 1.0), None);
+        assert_eq!(Steps::whole(0.0, f64::INFINITY), None);
+    }
 
     #[test]
     fn a_format_is_found_again_by_its_name() {

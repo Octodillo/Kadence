@@ -13,7 +13,7 @@ use cxx_qt_lib::{QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QUrl, QV
 use daw_plugin_host::Realtime;
 use daw_session::PluginStatus;
 
-use crate::device_panel::{AppDevicePanel, DeviceView, ParamView};
+use crate::device_panel::{AppDevicePanel, DeviceView, ParamControl, ParamView};
 use crate::message::Context;
 use crate::model_roles;
 use crate::qt_lists::{ModelRole, string_list};
@@ -187,8 +187,11 @@ model_roles!(
         DefaultValue => "defaultValue",
         Minimum => "minimum",
         Maximum => "maximum",
-        /// "continuous", "integer", "toggle" or "choice".
+        /// See `ParamDesc::control_name`.
         Control => "control",
+        /// How many steps a "steps" control stops at past its first; 0 for
+        /// other controls.
+        StepCount => "stepCount",
         /// See `ParamDesc::unit_name`.
         Unit => "unit",
         Choices => "choices",
@@ -483,6 +486,10 @@ impl qobject::DevicePanel {
             Role::Minimum => QVariant::from(&d.min),
             Role::Maximum => QVariant::from(&d.max),
             Role::Control => QVariant::from(&QString::from(d.control_name())),
+            Role::StepCount => QVariant::from(&match d.control {
+                ParamControl::Steps(s) => i32::try_from(s.0).unwrap_or(i32::MAX),
+                _ => 0,
+            }),
             Role::Unit => QVariant::from(&QString::from(d.unit_name())),
             Role::Choices => QVariant::from(&string_list(d.choices())),
             Role::IsDefault => QVariant::from(&p.is_default()),

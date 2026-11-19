@@ -494,7 +494,7 @@ impl AppState {
         let following = lane.is_some_and(|l| l.enabled && !l.points.is_empty());
         let value = lane
             .filter(|_| following)
-            .and_then(|l| l.value_at(self.playhead()))
+            .and_then(|l| scale.lane_value(l, self.playhead()))
             .unwrap_or_else(|| static_value(self.arrange.params.as_ref(), t, target));
         Some(LaneControl {
             norm: scale.to_norm(value),
@@ -792,6 +792,7 @@ mod tests {
             max: 20_000.0,
             default: 1_000.0,
             automatable: true,
+            steps: None,
         };
         // One a host may not automate: known, but not listed as a row.
         let meter = ParamInfo {
@@ -861,6 +862,7 @@ mod tests {
             max: 24.0,
             default: 0.0,
             automatable: true,
+            steps: None,
         }];
         let p = LaneParams::default();
         p.set_plugins(std::iter::once(&plugin), |_| Some(&infos[..]));
@@ -897,6 +899,7 @@ mod tests {
             max,
             default: 0.0,
             automatable: true,
+            steps: None,
         };
         let infos = [
             info(1, 1.0, -1.0),

@@ -1078,15 +1078,33 @@ impl AutomationLane {
     /// last one's after it, and in between the segment's shape (see
     /// [`AutomationPoint::shape`]). `None` without points.
     pub fn value_at(&self, tick: TickTime) -> Option<f64> {
-        let after = self.points.partition_point(|p| p.tick <= tick);
-        let Some(p) = after.checked_sub(1).map(|i| &self.points[i]) else {
-            return self.points.first().map(|p| p.value);
-        };
-        let Some(next) = self.points.get(after) else {
-            return Some(p.value);
-        };
-        let x = (tick.0 - p.tick.0) as f64 / (next.tick.0 - p.tick.0) as f64;
-        Some(p.towards(next.value, x, self.target.ramp_floor()))
+        let (i, p) = self.point_before(tick)?;
+        match self.points.get(i + 1) {
+            // Between `p` and the next point (not before the first).
+            Some(next) if p.tick <= tick => {
+                let x = (tick.0 - p.tick.0) as f64 / (next.tick.0 - p.tick.0) as f64;
+                Some(p.towards(next.value, x, self.target.ramp_floor()))
+            }
+            _ => Some(p.value),
+        }
+    }
+
+    /// The lane's value at `tick` if every point holds its value until the
+    /// next, as a lane of a parameter that takes only some values plays:
+    /// the value of the last point at or before `tick`, the first point's
+    /// before it. `None` without points.
+    pub fn held_at(&self, tick: TickTime) -> Option<f64> {
+        self.point_before(tick).map(|(_, p)| p.value)
+    }
+
+    /// The last point at or before `tick` and its index, or the first point
+    /// if all are after it. `None` without points.
+    fn point_before(&self, tick: TickTime) -> Option<(usize, &AutomationPoint)> {
+        let i = self
+            .points
+            .partition_point(|p| p.tick <= tick)
+            .saturating_sub(1);
+        Some((i, self.points.get(i)?))
     }
 }
 

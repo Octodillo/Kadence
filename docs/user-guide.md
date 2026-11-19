@@ -262,7 +262,8 @@ Each control has a row in the timeline beside it. Click there to start
 automating the control: the click adds the first point. Drag points to move
 them, double-click one to delete it, and right-click a point to choose the
 shape of the curve that leaves it. The **−** button on a row removes its
-automation.
+automation. A parameter that takes only some values (a switch, a list, a
+whole number) keeps each point's value until the next point, then jumps.
 
 While a plugin is not loaded (it is missing, or the audio engine is not
 running), Kadence does not know the ranges of its parameters. Their

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use daw_core::event::ParamId;
 use daw_core::node::PortLayout;
-use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError};
+use daw_core::plugin::{ParamInfo, PluginDescriptor, PluginError, Steps};
 use serde::{Deserialize, Serialize};
 
 /// Frames larger than this are refused, so a broken peer cannot make us allocate without bound.
@@ -120,6 +120,9 @@ pub struct WireParam {
     pub max: f64,
     pub default: f64,
     pub automatable: bool,
+    /// See [`ParamInfo::steps`].
+    #[serde(default)]
+    pub steps: Option<u32>,
 }
 
 /// `value` made finite, since JSON has no NaN or infinity: infinities are clamped and NaN
@@ -142,6 +145,7 @@ impl From<&ParamInfo> for WireParam {
             max: finite(p.max, default),
             default,
             automatable: p.automatable,
+            steps: p.steps.map(|s| s.0),
         }
     }
 }
@@ -155,6 +159,8 @@ impl From<&WireParam> for ParamInfo {
             max: p.max,
             default: p.default,
             automatable: p.automatable,
+            // No steps is no stepped parameter (see `Steps`).
+            steps: p.steps.filter(|&n| n > 0).map(Steps),
         }
     }
 }
@@ -353,6 +359,7 @@ mod tests {
             max: f64::INFINITY,
             default: f64::NAN,
             automatable: true,
+            steps: Some(Steps(3)),
         };
         let mut wire = Vec::new();
         let reply = Reply::Params(vec![WireParam::from(&info)]);
@@ -363,5 +370,6 @@ mod tests {
         };
         let p = &params[0];
         assert_eq!((p.min, p.max, p.default), (f64::MIN, f64::MAX, 0.0));
+        assert_eq!(ParamInfo::from(p).steps, Some(Steps(3)));
     }
 }

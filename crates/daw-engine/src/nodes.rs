@@ -3,7 +3,7 @@
 
 use daw_core::event::{EventKind, ParamId};
 use daw_core::node::{Node, PortLayout, ProcessContext};
-use daw_core::plugin::ParamInfo;
+use daw_core::plugin::{ParamInfo, Steps};
 
 /// A channel strip: per-channel linear gain, balance (stereo only) and mute.
 ///
@@ -96,6 +96,7 @@ impl Strip {
             max: f64::from(Self::MAX_GAIN),
             default: 1.0,
             automatable: true,
+            steps: None,
         }];
         if self.has_pan {
             v.push(ParamInfo {
@@ -105,6 +106,7 @@ impl Strip {
                 max: 1.0,
                 default: 0.0,
                 automatable: true,
+                steps: None,
             });
         }
         if self.has_mute {
@@ -115,6 +117,7 @@ impl Strip {
                 max: 1.0,
                 default: 0.0,
                 automatable: true,
+                steps: Some(Steps(1)),
             });
         }
         v

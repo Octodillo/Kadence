@@ -1813,3 +1813,63 @@ fn moving_the_root_keeps_the_graph() {
     assert_eq!(out[4 * BLOCK - 1], 0.25, "the file in the new place");
     assert_eq!(rig.session.controller().graphs_swapped(), swaps);
 }
+
+#[test]
+fn a_held_lane_steps_at_every_point() {
+    use daw_core::plugin::{Stepped, Steps};
+    use daw_engine::Curve;
+    use daw_model::{AutomationLane, AutomationPoint, AutomationTarget};
+    let (session, _proc) = Session::new(config());
+    let mut lane = AutomationLane::new(AutomationTarget::Pan);
+    let mut bent = AutomationPoint::new(TickTime(0), 0.0);
+    bent.curve = 1.0;
+    lane.points = vec![
+        bent,
+        // Drawn before the parameter was known to be stepped.
+        AutomationPoint::new(TickTime(PPQ), 1.4),
+        AutomationPoint::new(TickTime(2 * PPQ), 3.0),
+    ];
+    // A stepped parameter's lane holds each value, curved or not, on its
+    // nearest step.
+    let stepped = Stepped::new(Steps(3), 0.0, 3.0);
+    let held = session.playback_lane(&lane, |v| v, Some(stepped));
+    assert_eq!(
+        held.points().iter().map(|p| p.value).collect::<Vec<_>>(),
+        [0.0, 1.0, 3.0]
+    );
+    assert!(held.points().iter().all(|p| p.curve == Curve::Step));
+    // Otherwise it ramps, the bend in short straight pieces.
+    let ramped = session.playback_lane(&lane, |v| v, None);
+    assert!(ramped.points().len() > 3);
+    assert_eq!(ramped.points()[0].curve, Curve::Linear);
+}
+
+#[test]
+fn a_switch_lane_holds_between_points() {
+    use daw_devices::devices::utility;
+    use daw_model::commands::AddLane;
+    use daw_model::{AutomationLane, AutomationPoint, AutomationTarget};
+    let (mut rig, ids) = effect_rig(&["daw.utility"]);
+    // Off at the start, on four beats later, joined by a straight segment.
+    let mut lane = AutomationLane::new(AutomationTarget::DeviceParam {
+        device: ids[0],
+        param: utility::INVERT_L,
+    });
+    lane.points = vec![
+        AutomationPoint::new(TickTime(0), 0.0),
+        AutomationPoint::new(TickTime(4 * PPQ), 1.0),
+    ];
+    rig.doc
+        .execute(AddLane {
+            track: rig.track,
+            lane,
+        })
+        .unwrap();
+    rig.sync();
+    // Three beats in, a ramp would be past half way and invert the left
+    // channel; the switch is held off until the next point.
+    let out = rig.run(3 * BEAT as usize);
+    assert!(out.iter().all(|&s| s >= 0.0), "inverted before the point");
+    let on = rig.run(2 * BEAT as usize);
+    assert!((on.last().unwrap() + 0.5).abs() < 1e-3, "{:?}", on.last());
+}
