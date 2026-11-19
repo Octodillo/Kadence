@@ -204,6 +204,16 @@ jobs:
           restore-keys: flatpak-downloads-
       - name: Build, install and smoke test in the sandbox
         run: ci/flatpak-package.sh build kadence.flatpak
+      - name: Keep only the downloads this build uses
+        # flatpak-builder files each download under its sha256 and never
+        # removes one; without this the cache would keep every superseded
+        # crate and archive restored from older keys.
+        if: github.ref == 'refs/heads/main' && steps.downloads.outputs.cache-hit != 'true'
+        run: |
+          used=$(grep -ohE '[0-9a-f]{64}' packaging/flatpak/*.yml packaging/flatpak/cargo-sources.json | sort -u)
+          for dir in /tmp/flatpak-state/downloads/*/; do
+            echo "$used" | grep -qx "$(basename "$dir")" || rm -rf "$dir"
+          done
       - if: github.ref == 'refs/heads/main' && steps.downloads.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:

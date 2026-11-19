@@ -143,6 +143,10 @@ jobs:
     name: Arch Linux
     runs-on: ubuntu-latest
     container: archlinux:latest
+    env:
+      # The same qmake for the tests and for CMake's Cargo build in
+      # ci/check-install.sh: the Qt build scripts rerun when QMAKE changes.
+      QMAKE: qmake6
     steps:
       # Before git is installed, so this is a plain download; nothing
       # below needs the history.
@@ -201,6 +205,10 @@ jobs:
     name: KDE neon (Ubuntu 24.04)
     runs-on: ubuntu-latest
     container: ubuntu:24.04
+    env:
+      # The same qmake for the tests and for CMake's Cargo build in
+      # ci/check-install.sh: the Qt build scripts rerun when QMAKE changes.
+      QMAKE: qmake6
     steps:
       # Before git is installed, so this is a plain download; nothing
       # below needs the history.
