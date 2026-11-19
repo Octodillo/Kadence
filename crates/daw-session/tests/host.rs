@@ -3,7 +3,7 @@
 //! that stopped working.
 
 use daw_backend::{DummyBackend, Pacing, PortDirection, PortKind};
-use daw_session::host::{AudioHost, HostConfig, HostHealth, HostKind};
+use daw_session::host::{AudioHost, HostConfig, HostHealth, HostKind, PretendServer};
 
 fn host() -> (AudioHost, daw_backend::DummySystem) {
     let dummy = DummyBackend::new(Pacing::RealTime);
@@ -245,4 +245,30 @@ fn a_server_rate_change_is_reported_while_the_engine_keeps_its_rate() {
     // The engine still runs at the rate it was built for, and says so.
     assert_eq!(host.sample_rate(), 48_000);
     assert_eq!(host.session().sample_rate(), 48_000.0);
+}
+
+/// Restarts go back to the server the host started on: here a pretend one
+/// that goes away and comes back.
+#[test]
+fn restarts_follow_the_server_as_it_goes_and_comes_back() {
+    let system = DummyBackend::new(Pacing::RealTime).system();
+    let server = std::rc::Rc::new(PretendServer(system.clone()));
+    let mut host = AudioHost::start_on(server, HostConfig::quiet("restart-test"));
+    assert_eq!(host.kind(), HostKind::Jack);
+    assert!(!host.server_appeared(), "it is on the server already");
+
+    system.shut_down();
+    wait_for_health(&host, HostHealth::ServerGone);
+    host.restart(host.config().clone());
+    assert_eq!(host.kind(), HostKind::Silent);
+    assert!(host.last_error().is_some());
+    assert!(!host.server_appeared());
+
+    system.restore();
+    assert!(host.server_appeared());
+    system.run_at(44_100);
+    host.restart(host.config().clone());
+    assert_eq!(host.kind(), HostKind::Jack);
+    assert_eq!(host.sample_rate(), 44_100, "the server's rate");
+    assert_eq!(host.health(), HostHealth::Ok);
 }

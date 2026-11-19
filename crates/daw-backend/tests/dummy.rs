@@ -678,6 +678,27 @@ fn a_rate_change_asked_of_one_connection_does_not_reach_the_next() {
 }
 
 #[test]
+fn another_client_of_the_system_meets_its_server_rate_and_faults() {
+    let first = DummyBackend::new(Pacing::Freewheel);
+    let system = first.system();
+    system.run_at(44_100);
+    let mut b = system.backend(Pacing::Freewheel);
+    b.open(cfg(32)).unwrap();
+    assert_eq!(
+        b.sample_rate(),
+        44_100.0,
+        "the server's rate, not the 48 kHz asked"
+    );
+    b.close().unwrap();
+    assert!(system.is_up());
+    system.shut_down();
+    assert!(!system.is_up());
+    assert!(system.backend(Pacing::Freewheel).open(cfg(32)).is_err());
+    system.restore();
+    assert!(system.backend(Pacing::Freewheel).open(cfg(32)).is_ok());
+}
+
+#[test]
 fn close_after_a_panicked_callback_still_closes() {
     let mut b = DummyBackend::new(Pacing::Freewheel);
     b.open(cfg(32)).unwrap();

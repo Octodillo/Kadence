@@ -14,11 +14,12 @@
 //! general `midi_in` port, which every track listening to all inputs hears.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use daw_backend::{
-    AudioBackend, BackendConfig, BackendError, BackendHealth, DummyBackend, JackBackend, Latency,
-    MAIN_MIDI_INPUT, MAIN_MIDI_OUTPUT, MAX_MIDI_INPUTS, MidiInputPort, Pacing, PortDirection,
-    PortFilter, PortKind,
+    AudioBackend, BackendConfig, BackendError, BackendHealth, DummyBackend, DummySystem,
+    JackBackend, Latency, MAIN_MIDI_INPUT, MAIN_MIDI_OUTPUT, MAX_MIDI_INPUTS, MidiInputPort,
+    Pacing, PortDirection, PortFilter, PortKind,
 };
 use daw_core::event::EventList;
 use daw_core::time::TickTime;
@@ -29,9 +30,46 @@ use crate::{Session, SessionConfig};
 /// Largest block the engine processes at once; longer periods are split.
 const MAX_FRAMES: u32 = 1024;
 
+/// The audio server an [`AudioHost`] plays on when it can.
+pub trait AudioServer {
+    /// Whether the server seems to be there, judged without blocking:
+    /// see [`daw_backend::server_listening`].
+    fn listening(&self) -> bool;
+    /// A backend that connects to the server when it is opened.
+    fn backend(&self) -> Box<dyn AudioBackend>;
+}
+
+/// The JACK server: on Plasma, PipeWire through `pipewire-jack`.
+pub struct JackServer;
+
+impl AudioServer for JackServer {
+    fn listening(&self) -> bool {
+        daw_backend::server_listening()
+    }
+
+    fn backend(&self) -> Box<dyn AudioBackend> {
+        Box::new(JackBackend::new())
+    }
+}
+
+/// A pretend server around a [`DummySystem`], which tests shut down, bring
+/// back and switch to another rate. Each start connects a new client to it.
+pub struct PretendServer(pub DummySystem);
+
+impl AudioServer for PretendServer {
+    fn listening(&self) -> bool {
+        self.0.is_up()
+    }
+
+    fn backend(&self) -> Box<dyn AudioBackend> {
+        Box::new(self.0.backend(Pacing::RealTime))
+    }
+}
+
 /// Which kind of backend is running.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum HostKind {
+    /// An [`AudioServer`]'s: JACK, or a pretend one in tests.
     Jack,
     /// No audio server: a silent stand-in that keeps time.
     Silent,
@@ -70,8 +108,8 @@ pub struct HostConfig {
     /// on start: the speakers and the microphone. Off, nothing is heard
     /// until someone patches us in.
     pub auto_connect: bool,
-    /// Open a client only when the server's socket is there
-    /// ([`daw_backend::server_listening`]); without one, run silent at once.
+    /// Open a client only when the server seems to be there
+    /// ([`AudioServer::listening`]); without it, run silent at once.
     /// Opening a client with no server can hang for good under
     /// pipewire-jack, so this is on unless the server's socket lives
     /// somewhere the probe does not look. Off, only the open is affected:
@@ -131,6 +169,8 @@ struct MidiLink {
 
 /// A backend with a session running on it.
 pub struct AudioHost {
+    /// What [`restart`](Self::restart) tries first.
+    server: Rc<dyn AudioServer>,
     backend: Box<dyn AudioBackend>,
     kind: HostKind,
     session: Session,
@@ -159,14 +199,21 @@ fn engine_source(slot: usize) -> usize {
 }
 
 impl AudioHost {
-    /// Starts audio with `config`, falling back to a silent backend.
+    /// Starts audio with `config` on the JACK server, falling back to a
+    /// silent backend.
     pub fn start(config: HostConfig) -> Self {
+        Self::start_on(Rc::new(JackServer), config)
+    }
+
+    /// Starts audio with `config` on `server`, falling back to a silent
+    /// backend. Restarts go to `server` too.
+    pub fn start_on(server: Rc<dyn AudioServer>, config: HostConfig) -> Self {
         let mut last_error = None;
         if config.use_server {
-            let opened = if config.require_socket && !daw_backend::server_listening() {
+            let opened = if config.require_socket && !server.listening() {
                 Err(no_server())
             } else {
-                Self::open(Box::new(JackBackend::new()), HostKind::Jack, &config)
+                Self::open(server.clone(), server.backend(), HostKind::Jack, &config)
             };
             match opened {
                 Ok(host) => return host,
@@ -174,6 +221,7 @@ impl AudioHost {
             }
         }
         let mut host = Self::open(
+            server,
             Box::new(DummyBackend::new(Pacing::RealTime)),
             HostKind::Silent,
             &config,
@@ -185,15 +233,16 @@ impl AudioHost {
 
     /// Runs on `backend` (a [`DummyBackend`] in tests). It counts as
     /// [`HostKind::Silent`], and [`restart`](Self::restart) replaces it with
-    /// the usual choice.
+    /// the usual choice, on the JACK server.
     pub fn with_backend(
         backend: Box<dyn AudioBackend>,
         config: &HostConfig,
     ) -> Result<Self, BackendError> {
-        Self::open(backend, HostKind::Silent, config)
+        Self::open(Rc::new(JackServer), backend, HostKind::Silent, config)
     }
 
     fn open(
+        server: Rc<dyn AudioServer>,
         mut backend: Box<dyn AudioBackend>,
         kind: HostKind,
         config: &HostConfig,
@@ -241,6 +290,7 @@ impl AudioHost {
             daw_backend::connect_physical(backend.as_mut(), false);
         }
         Ok(Self {
+            server,
             backend,
             kind,
             session,
@@ -271,11 +321,10 @@ impl AudioHost {
 
     /// Whether this host runs silent for want of an audio server and one
     /// seems to be there now, so a [`restart`](Self::restart) would bring
-    /// sound back. Only looks for the server's socket
-    /// ([`daw_backend::server_listening`]), so it never blocks; the restart
-    /// tells whether the server really takes a client.
+    /// sound back. Only asks [`AudioServer::listening`], which never
+    /// blocks; the restart tells whether the server really takes a client.
     pub fn server_appeared(&self) -> bool {
-        self.kind == HostKind::Silent && self.config.use_server && daw_backend::server_listening()
+        self.kind == HostKind::Silent && self.config.use_server && self.server.listening()
     }
 
     /// Gives each source in `sources` (full port names, see
@@ -449,7 +498,7 @@ impl AudioHost {
         // Saved while the old engine still plays them; restored at the new rate.
         let plugins = self.session.take_plugins();
         let _ = self.backend.close();
-        *self = Self::start(config);
+        *self = Self::start_on(self.server.clone(), config);
         self.midi_physical = physical;
         self.session.set_plugins(plugins);
         self.set_midi_inputs(&midi);
