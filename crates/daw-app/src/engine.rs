@@ -62,6 +62,39 @@ impl Default for AudioConfig {
     }
 }
 
+/// What applying an audio configuration does, worked out by
+/// [`EngineHandle::plan_audio_config`] and carried out as it says by
+/// [`EngineHandle::apply_audio_plan`]: deciding once means whoever applies
+/// it can prepare for a restart (end a take) knowing one will come.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioPlan {
+    config: AudioConfig,
+    restarts: bool,
+}
+
+impl AudioPlan {
+    /// Applying `config` restarts audio, or not. For engines to make.
+    pub fn new(config: AudioConfig, restarts: bool) -> Self {
+        Self { config, restarts }
+    }
+
+    /// The configuration asked for.
+    pub fn config(&self) -> &AudioConfig {
+        &self.config
+    }
+
+    /// Whether carrying it out restarts audio, which ends a take and
+    /// replaces the session.
+    pub fn restarts(&self) -> bool {
+        self.restarts
+    }
+}
+
+/// The buffer sizes, in frames, every engine offers.
+const BUFFER_SIZES: [u32; 6] = [64, 128, 256, 512, 1024, 2048];
+/// The sample rates, in Hz, an engine without an audio server offers.
+const SILENT_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
 /// Whether audio is flowing, and if not, why.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineStatus {
@@ -123,16 +156,19 @@ pub trait EngineHandle {
     fn audio_devices(&self) -> Vec<AudioDevice>;
     fn supported_sample_rates(&self) -> Vec<u32>;
     fn supported_buffer_sizes(&self) -> Vec<u32>;
-    /// Restart audio with `config`. On error audio keeps running (or stays
-    /// failed) and [`audio_config`](Self::audio_config) says with what.
-    /// So it does after success: the audio system can come or go during
-    /// the restart, and then what runs is not what was asked for.
-    fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError>;
-    /// Whether [`apply_audio_config`](Self::apply_audio_config) with
-    /// `config` would restart audio, and with it end a take and replace
-    /// the session.
-    fn applying_restarts(&self, _config: &AudioConfig) -> bool {
-        false
+    /// Says what applying `config` does, or why it cannot be applied.
+    fn plan_audio_config(&self, config: &AudioConfig) -> Result<AudioPlan, EngineError>;
+    /// Carries out `plan`, restarting audio if and only if it says so.
+    /// [`audio_config`](Self::audio_config) then says what runs, which is
+    /// not always what was asked for: the audio system can come or go
+    /// during a restart, or run at a rate of its own.
+    fn apply_audio_plan(&mut self, plan: AudioPlan);
+    /// Plans `config` and carries the plan out. On error nothing changes:
+    /// audio keeps running (or stays failed).
+    fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
+        let plan = self.plan_audio_config(config)?;
+        self.apply_audio_plan(plan);
+        Ok(())
     }
     /// The configuration in effect.
     fn audio_config(&self) -> AudioConfig;
@@ -267,18 +303,21 @@ pub fn use_quiet_audio(purpose: &str) {
 }
 
 /// The configuration the engine starts with: `saved`'s rate and buffer
-/// size, if there is one, and see [`use_quiet_audio`], and
-/// [`default_engine`] for `KADENCE_AUDIO=server`.
+/// size where the engine offers them (the settings file can hold any
+/// number), and see [`use_quiet_audio`], and [`default_engine`] for
+/// `KADENCE_AUDIO=server`.
 fn startup_config(saved: Option<&AudioConfig>) -> HostConfig {
     let config = QUIET
         .get()
         .map_or_else(HostConfig::default, |name| HostConfig::quiet(name.as_str()));
-    let (sample_rate, buffer_size) = saved.map_or((config.sample_rate, config.buffer_size), |s| {
-        (s.sample_rate, s.buffer_size)
-    });
+    let offered = |value: u32, list: &[u32]| list.contains(&value).then_some(value);
     HostConfig {
-        sample_rate,
-        buffer_size,
+        sample_rate: saved
+            .and_then(|s| offered(s.sample_rate, &SILENT_RATES))
+            .unwrap_or(config.sample_rate),
+        buffer_size: saved
+            .and_then(|s| offered(s.buffer_size, &BUFFER_SIZES))
+            .unwrap_or(config.buffer_size),
         require_socket: audio_override().as_deref() != Some("server"),
         ..config
     }
@@ -392,11 +431,14 @@ impl SessionEngine {
     /// The engine on `server` (a pretend one in tests), started with
     /// `config`.
     fn start_on(server: Rc<dyn AudioServer>, config: HostConfig) -> Self {
+        let buffer_size = config.buffer_size;
         let host = start_host(server, config);
         let config = AudioConfig {
             device: None,
             sample_rate: host.sample_rate(),
-            buffer_size: host.buffer_size(),
+            // A request, as after applying settings: a server that runs
+            // another size does not make the saved one differ.
+            buffer_size,
         };
         Self {
             host,
@@ -441,13 +483,16 @@ impl SessionEngine {
     /// Whether applying `config`, which [`check`](Self::check) allows,
     /// restarts audio. Compared with what runs, not with what was last
     /// asked for: a server may have settled on another rate since. Also
-    /// when nothing changed but audio is down: applying the settings again
-    /// is how the user asks for another try.
+    /// when nothing changed but audio is down and a restart could mend
+    /// it: applying the settings again is how the user asks for another
+    /// try. Silent for want of a server that is still not there, it could
+    /// not.
     fn restarts_for(&self, config: &AudioConfig) -> bool {
+        let could_mend = self.host.kind() == HostKind::Jack || self.host.server_appeared();
         config.sample_rate != self.config.sample_rate
             || config.buffer_size != self.config.buffer_size
             || !self.host.config().use_server
-            || self.is_failed()
+            || (self.is_failed() && could_mend)
     }
 
     fn device(&self) -> AudioDevice {
@@ -487,17 +532,28 @@ impl EngineHandle for SessionEngine {
         match self.host.kind() {
             // The server decides; offer only what it runs at.
             HostKind::Jack => vec![self.host.sample_rate()],
-            HostKind::Silent => vec![44_100, 48_000, 88_200, 96_000],
+            HostKind::Silent => SILENT_RATES.to_vec(),
         }
     }
 
     fn supported_buffer_sizes(&self) -> Vec<u32> {
-        vec![64, 128, 256, 512, 1024, 2048]
+        BUFFER_SIZES.to_vec()
     }
 
-    fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
+    fn plan_audio_config(&self, config: &AudioConfig) -> Result<AudioPlan, EngineError> {
         self.check(config)?;
-        if self.restarts_for(config) {
+        Ok(AudioPlan::new(config.clone(), self.restarts_for(config)))
+    }
+
+    fn apply_audio_plan(&mut self, plan: AudioPlan) {
+        let AudioPlan { config, restarts } = plan;
+        if !restarts && self.is_failed() {
+            // Still a try by the user, though nothing restarts now: the
+            // engine may reconnect by itself again when the server comes.
+            self.recovery
+                .restarted_by_user(self.on_server(), Instant::now());
+        }
+        if restarts {
             let wanted = HostConfig {
                 sample_rate: config.sample_rate,
                 buffer_size: config.buffer_size,
@@ -516,18 +572,13 @@ impl EngineHandle for SessionEngine {
                 // asked for was chosen from the wrong lists. Audio runs,
                 // and `audio_config` says with what.
                 self.config.device = None;
-                return Ok(());
+                return;
             }
             // A server that switched its rate since the list was made runs
             // at its new one. That too is not refused: audio restarted
             // already, and `audio_config` says at what rate.
         }
-        self.config.device.clone_from(&config.device);
-        Ok(())
-    }
-
-    fn applying_restarts(&self, config: &AudioConfig) -> bool {
-        self.check(config).is_ok() && self.restarts_for(config)
+        self.config.device = config.device;
     }
 
     fn wants_restart(&self) -> bool {
@@ -703,14 +754,15 @@ impl EngineHandle for StubEngine {
     }
 
     fn supported_sample_rates(&self) -> Vec<u32> {
-        vec![44_100, 48_000, 88_200, 96_000]
+        SILENT_RATES.to_vec()
     }
 
     fn supported_buffer_sizes(&self) -> Vec<u32> {
-        vec![64, 128, 256, 512, 1024, 2048]
+        BUFFER_SIZES.to_vec()
     }
 
-    fn apply_audio_config(&mut self, config: &AudioConfig) -> Result<(), EngineError> {
+    /// The stub only pretends: nothing restarts.
+    fn plan_audio_config(&self, config: &AudioConfig) -> Result<AudioPlan, EngineError> {
         if let Some(id) = &config.device
             && !Self::DEVICES.iter().any(|(known, _)| known == id)
         {
@@ -722,9 +774,12 @@ impl EngineHandle for StubEngine {
         if !self.supported_buffer_sizes().contains(&config.buffer_size) {
             return Err(EngineError::UnsupportedBufferSize(config.buffer_size));
         }
-        self.config = config.clone();
+        Ok(AudioPlan::new(config.clone(), false))
+    }
+
+    fn apply_audio_plan(&mut self, plan: AudioPlan) {
+        self.config = plan.config;
         self.running = true;
-        Ok(())
     }
 
     fn audio_config(&self) -> AudioConfig {
@@ -896,7 +951,27 @@ mod tests {
         assert_eq!(engine.backend_kind(), BackendKind::Jack);
         assert_eq!(engine.status(), running(44_100, 512));
         // So applying the saved settings after does not restart.
-        assert!(!engine.applying_restarts(&saved));
+        assert!(!engine.plan_audio_config(&saved).unwrap().restarts());
+    }
+
+    #[test]
+    fn saved_settings_no_engine_offers_start_at_the_defaults() {
+        let defaults = startup_config(None);
+        let started = |sample_rate, buffer_size| {
+            let config = startup_config(Some(&AudioConfig {
+                device: None,
+                sample_rate,
+                buffer_size,
+            }));
+            (config.sample_rate, config.buffer_size)
+        };
+        let fresh = (defaults.sample_rate, defaults.buffer_size);
+        assert_eq!(started(0, 0), fresh);
+        assert_eq!(started(u32::MAX, u32::MAX), fresh);
+        assert_eq!(started(12_345, 100), fresh);
+        // What is offered is kept, each on its own.
+        assert_eq!(started(96_000, 0), (96_000, defaults.buffer_size));
+        assert_eq!(started(0, 1024), (defaults.sample_rate, 1024));
     }
 
     #[test]
@@ -944,7 +1019,7 @@ mod tests {
 
         // Applying the settings is the user asking to try again.
         let config = engine.audio_config();
-        assert!(engine.applying_restarts(&config));
+        assert!(engine.plan_audio_config(&config).unwrap().restarts());
         engine.apply_audio_config(&config).unwrap();
         assert_eq!(engine.status(), running(48_000, 256));
     }
@@ -976,7 +1051,7 @@ mod tests {
             sample_rate: 48_000,
             buffer_size: 512,
         };
-        assert!(engine.applying_restarts(&asked));
+        assert!(engine.plan_audio_config(&asked).unwrap().restarts());
         assert_eq!(engine.apply_audio_config(&asked), Ok(()));
         assert_eq!(
             engine.audio_config(),
@@ -1015,10 +1090,13 @@ mod tests {
                 EngineError::UnsupportedBufferSize(100),
             ),
         ] {
-            assert!(!engine.applying_restarts(&config));
+            assert_eq!(engine.plan_audio_config(&config), Err(error.clone()));
             assert_eq!(engine.apply_audio_config(&config), Err(error));
         }
-        assert!(!engine.applying_restarts(&before), "nothing changes");
+        assert!(
+            !engine.plan_audio_config(&before).unwrap().restarts(),
+            "nothing changes"
+        );
         assert_eq!(engine.audio_config(), before);
     }
 
@@ -1028,6 +1106,13 @@ mod tests {
         system.shut_down();
         wait_for_status(&engine, &EngineStatus::Failed(EngineError::ServerLost));
         engine.restart_audio();
+        assert!(
+            !engine
+                .plan_audio_config(&engine.audio_config())
+                .unwrap()
+                .restarts(),
+            "a restart cannot mend audio while the server is away"
+        );
         let config = AudioConfig {
             device: Some(SessionEngine::SILENT.into()),
             sample_rate: 88_200,
