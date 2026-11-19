@@ -11,7 +11,7 @@
 //! never take more than [`MAX_LANES_SHARE`] of the space under the ruler;
 //! many lanes share it in thinner rows, so every lane stays in reach.
 
-use daw_arrange::automation::{lane_scale, static_value};
+use daw_arrange::automation::{static_value, target_scale};
 use daw_arrange::lane_editor::lane_of;
 use daw_arrange::{
     Button, Cursor, LaneFrame, LaneGrid, Outcome, PointShape, Pointer, Prim, Rect, Scene,
@@ -86,11 +86,11 @@ impl PianoRoll {
 
     fn frame_at(&self, track: &Track, index: usize) -> Option<LaneFrame> {
         let lane = track.automation.get(index)?;
-        Some(LaneFrame {
-            view: self.view,
-            rect: self.lane_rect(index),
-            scale: lane_scale(self.params.as_ref(), track, lane.target),
-        })
+        Some(LaneFrame::new(
+            self.view,
+            self.lane_rect(index),
+            target_scale(self.params.as_ref(), track, lane.target),
+        ))
     }
 
     /// The frame `lane` is drawn in, if it shows.
@@ -150,11 +150,10 @@ impl PianoRoll {
 
     /// The pointer shape over the lane rows.
     pub(crate) fn lane_cursor(&self, project: &Project, x: f64, y: f64) -> Cursor {
-        match self.lane_at(project, x, y) {
-            Some((_, _, Some(_))) => Cursor::Move,
-            Some((_, _, None)) => Cursor::Crosshair,
-            None => Cursor::Arrow,
-        }
+        self.lane_at(project, x, y)
+            .map_or(Cursor::Arrow, |(_, frame, point)| {
+                frame.cursor(point.is_some())
+            })
     }
 
     /// A press on the lane rows. It leaves the notes, as a press on a lane
@@ -171,7 +170,8 @@ impl PianoRoll {
             return outcome_view();
         };
         let grid = self.lane_grid(project);
-        if p.button == Button::Right {
+        // A lane that can't be edited has no point menu: the press says why.
+        if p.button == Button::Right && frame.editable() {
             self.lane_menu_requested = Some(point.is_some());
         }
         self.lanes.press(doc, &frame, &grid, p, lane, point)
@@ -190,7 +190,7 @@ impl PianoRoll {
     pub(crate) fn double_click_lane(&mut self, doc: &mut Document, p: Pointer) -> Outcome {
         self.lanes.end_drag(doc);
         match self.lane_at(doc.project(), p.x, p.y) {
-            Some((lane, _, Some(index))) => self.lanes.delete_point(doc, lane, index),
+            Some((lane, frame, Some(index))) => self.lanes.delete_point(doc, &frame, lane, index),
             _ => Outcome::default(),
         }
     }
@@ -207,7 +207,8 @@ impl PianoRoll {
 
     /// Gives the segments after the selected points `shape`.
     pub fn set_point_shape(&mut self, doc: &mut Document, shape: PointShape) -> Outcome {
-        self.lanes.set_point_shape(doc, shape)
+        let frame = self.selected_frame(doc.project());
+        self.lanes.set_point_shape(doc, frame.as_ref(), shape)
     }
 
     /// The selected points' shape, if they share one.
@@ -217,7 +218,13 @@ impl PianoRoll {
 
     /// Deletes the selected points.
     pub fn delete_points(&mut self, doc: &mut Document) -> Outcome {
-        self.lanes.delete_points(doc)
+        let frame = self.selected_frame(doc.project());
+        self.lanes.delete_points(doc, frame.as_ref())
+    }
+
+    /// The frame of the lane points are selected on, if it shows.
+    fn selected_frame(&self, project: &Project) -> Option<LaneFrame> {
+        self.lane_frame(project, self.lanes.selected_lane()?)
     }
 
     // -----------------------------------------------------------------------

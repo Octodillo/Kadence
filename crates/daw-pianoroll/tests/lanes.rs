@@ -272,3 +272,125 @@ fn the_scene_draws_lane_points() {
         .count();
     assert_eq!(points, 1);
 }
+
+/// A catalog that knows every device's parameter 0 on a 0 to 1 scale, only
+/// while `known` (as a plugin's are known only while it is loaded).
+#[derive(Default)]
+struct Unloadable {
+    known: std::sync::atomic::AtomicBool,
+}
+
+impl Unloadable {
+    fn set_known(&self, on: bool) {
+        self.known.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl daw_arrange::ParamCatalog for Unloadable {
+    fn automatable(&self, _: &daw_model::Device) -> Vec<daw_core::event::ParamId> {
+        vec![0]
+    }
+    fn scale(
+        &self,
+        _: &daw_model::Device,
+        param: daw_core::event::ParamId,
+    ) -> Option<daw_arrange::LaneScale> {
+        (param == 0 && self.known.load(std::sync::atomic::Ordering::Relaxed))
+            .then_some(daw_arrange::LaneScale::UNIT)
+    }
+    fn default_value(&self, _: &daw_model::Device, _: daw_core::event::ParamId) -> Option<f64> {
+        Some(0.5)
+    }
+    fn is_instrument(&self, _: &daw_model::Device) -> bool {
+        false
+    }
+}
+
+#[test]
+fn lanes_of_an_undescribed_parameter_are_read_only() {
+    use daw_arrange::{Cursor, Refusal};
+    use daw_model::commands::AddDevice;
+    use daw_model::{Device, DeviceSource};
+
+    let mut r = Rig::new();
+    let track = r.doc.project().tracks[0].id;
+    let device = Device::new(
+        "Plugin",
+        DeviceSource::Builtin {
+            kind: "daw.eq".into(),
+        },
+    );
+    let target = AutomationTarget::DeviceParam {
+        device: device.id,
+        param: 0,
+    };
+    r.doc
+        .execute(AddDevice {
+            track,
+            index: 0,
+            device,
+        })
+        .unwrap();
+    let lane = AutomationLane::new(target);
+    // The rig's lanes are pan's, so `at` and `points` follow this one.
+    r.pan = lane.id;
+    r.doc.execute(AddLane { track, lane }).unwrap();
+    r.doc.seal();
+    let catalog = std::sync::Arc::new(Unloadable::default());
+    catalog.set_known(true);
+    r.pr.params = Some(catalog.clone());
+    r.pr.sync(r.doc.project());
+
+    // While known: two points, the first selected.
+    let (x2, y2) = r.at(2 * Q, 0.25);
+    r.click(x2, y2);
+    let (x, y) = r.at(Q, 0.75);
+    r.click(x, y);
+    let points = r.points();
+    assert_eq!(points.len(), 2);
+    let steps = r.doc.history().undo_len();
+
+    // Unknown: nothing on the lane changes, and the press says why.
+    catalog.set_known(false);
+    let refused = Some(Refusal::LaneNotDescribed);
+    let (x, y) = r.at(Q, points[0].value);
+    assert_eq!(r.pr.cursor(r.doc.project(), x, y), Cursor::Arrow);
+    let (ex, ey) = r.at(3 * Q, 0.5);
+    assert_eq!(r.input(Input::Press(Pointer::left(ex, ey))).error, refused);
+    r.input(Input::Release(Pointer::left(ex, ey)));
+    let right = Pointer {
+        button: Button::Right,
+        ..Pointer::left(x, y)
+    };
+    assert_eq!(r.input(Input::Press(right)).error, refused);
+    r.input(Input::Release(right));
+    assert_eq!(r.pr.take_lane_menu_request(), None, "no point menu");
+    r.press(Pointer::left(x, y));
+    r.input(Input::Motion(Pointer::left(x + 40.0, y - 20.0)));
+    r.input(Input::Release(Pointer::left(x + 40.0, y - 20.0)));
+    assert_eq!(
+        r.input(Input::DoubleClick(Pointer::left(x, y))).error,
+        refused
+    );
+    assert_eq!(r.points(), points);
+
+    // A selection made while known: the point menu and Delete refuse.
+    catalog.set_known(true);
+    r.click(x, y);
+    catalog.set_known(false);
+    assert_eq!(
+        r.pr.set_point_shape(&mut r.doc, PointShape::Step).error,
+        refused
+    );
+    catalog.set_known(true);
+    r.click(x, y);
+    catalog.set_known(false);
+    assert_eq!(r.pr.delete_points(&mut r.doc).error, refused);
+    assert_eq!(r.points(), points);
+    assert_eq!(r.doc.history().undo_len(), steps, "nothing to undo");
+
+    // Known again: editable again.
+    catalog.set_known(true);
+    r.click(ex, ey);
+    assert_eq!(r.points().len(), 3);
+}

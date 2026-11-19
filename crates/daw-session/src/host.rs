@@ -70,6 +70,14 @@ pub struct HostConfig {
     /// on start: the speakers and the microphone. Off, nothing is heard
     /// until someone patches us in.
     pub auto_connect: bool,
+    /// Open a client only when the server's socket is there
+    /// ([`daw_backend::server_listening`]); without one, run silent at once.
+    /// Opening a client with no server can hang for good under
+    /// pipewire-jack, so this is on unless the server's socket lives
+    /// somewhere the probe does not look. Off, only the open is affected:
+    /// [`AudioHost::server_appeared`] still needs the socket, so after the
+    /// server goes away audio comes back when the user restarts it.
+    pub require_socket: bool,
 }
 
 impl Default for HostConfig {
@@ -80,6 +88,7 @@ impl Default for HostConfig {
             use_server: true,
             client_name: daw_core::plugin::HOST_NAME.into(),
             auto_connect: true,
+            require_socket: true,
         }
     }
 }
@@ -136,6 +145,13 @@ pub struct AudioHost {
     midi_physical: HashMap<String, bool>,
 }
 
+/// Why [`AudioHost::start`] did not try the server: it found no socket.
+fn no_server() -> BackendError {
+    BackendError::Connect(
+        "no audio server is running (found neither a PipeWire nor a JACK socket)".into(),
+    )
+}
+
 /// Engine event source 0 is the general `midi_in` port; the port in backend
 /// slot `i` is source `i + 1`.
 fn engine_source(slot: usize) -> usize {
@@ -147,7 +163,12 @@ impl AudioHost {
     pub fn start(config: HostConfig) -> Self {
         let mut last_error = None;
         if config.use_server {
-            match Self::open(Box::new(JackBackend::new()), HostKind::Jack, &config) {
+            let opened = if config.require_socket && !daw_backend::server_listening() {
+                Err(no_server())
+            } else {
+                Self::open(Box::new(JackBackend::new()), HostKind::Jack, &config)
+            };
+            match opened {
                 Ok(host) => return host,
                 Err(e) => last_error = Some(e.to_string()),
             }

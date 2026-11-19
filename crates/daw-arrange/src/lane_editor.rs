@@ -13,8 +13,11 @@
 //! double click or Delete, and given a shape from the context menu.
 //! Alt-dragging between two points bends the segment. Every gesture is one
 //! undoable [`SetLane`] edit (a drag keeps its own in a [`DragStep`]).
+//! A lane whose frame is not [`editable`](LaneFrame::editable) refuses
+//! them all.
 
 use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 
 use daw_core::time::TickTime;
 use daw_midi::grid::Meter;
@@ -26,7 +29,7 @@ use daw_model::{
 use crate::automation::{LaneScale, PointShape};
 use crate::gesture::{DRAG_THRESHOLD, DragStep};
 use crate::scene::{Palette, Prim, Rect, Rgba, Scene};
-use crate::{Button, Cursor, Outcome, Pointer, Snap, TimelineView};
+use crate::{Button, Cursor, Outcome, Pointer, Refusal, Snap, TimelineView};
 
 /// Pixels a point's square is wide.
 pub const POINT_PX: f64 = 7.0;
@@ -65,9 +68,43 @@ pub struct LaneFrame {
     /// width is the timeline's.
     pub rect: Rect,
     pub scale: LaneScale,
+    /// See [`editable`](Self::editable). Set only by [`new`](Self::new), so
+    /// it can't disagree with `scale`.
+    editable: bool,
 }
 
 impl LaneFrame {
+    /// The frame of a lane in `rect`, along `scale` if its target's scale
+    /// is known (see [`target_scale`](crate::automation::target_scale)),
+    /// read-only otherwise.
+    pub fn new(view: TimelineView, rect: Rect, scale: Option<LaneScale>) -> Self {
+        Self {
+            view,
+            rect,
+            scale: scale.unwrap_or(LaneScale::UNIT),
+            editable: scale.is_some(),
+        }
+    }
+
+    /// The lane's points can be edited here: its target's scale is known.
+    /// A lane whose target nothing describes (a parameter of a plugin
+    /// that is not loaded) is drawn on [`LaneScale::UNIT`] as read-only,
+    /// since points placed along a guessed scale would mean something
+    /// else once the real one is known.
+    pub fn editable(&self) -> bool {
+        self.editable
+    }
+
+    /// The pointer shape over this lane: `over_point` says whether it is
+    /// over one of its points.
+    pub fn cursor(&self, over_point: bool) -> Cursor {
+        match (self.editable, over_point) {
+            (false, _) => Cursor::Arrow,
+            (true, true) => Cursor::Move,
+            (true, false) => Cursor::Crosshair,
+        }
+    }
+
     fn pad(&self) -> f64 {
         LANE_PAD.min(self.rect.h / 4.0)
     }
@@ -291,6 +328,12 @@ impl LaneEditor {
         if p.button == Button::Middle {
             return Outcome::default();
         }
+        if !frame.editable {
+            // Nothing on it can be selected or changed, so there is no
+            // point menu either: say why instead.
+            self.selection = None;
+            return Outcome::refused(Refusal::LaneNotDescribed);
+        }
         // The selection belongs to one lane.
         if self.selection.as_ref().is_some_and(|(l, _)| *l != lane) {
             self.selection = None;
@@ -414,7 +457,8 @@ impl LaneEditor {
 
     /// Moves the drag in progress to `p`. `frame` is that of the lane
     /// [`dragging`](Self::dragging) names, or `None` if it no longer shows,
-    /// which ends the drag; moved points snap to `grid`.
+    /// which ends the drag, as does a frame no longer editable; moved
+    /// points snap to `grid`.
     pub fn drag(
         &mut self,
         doc: &mut Document,
@@ -422,7 +466,7 @@ impl LaneEditor {
         grid: &LaneGrid,
         p: Pointer,
     ) -> Outcome {
-        let Some(frame) = frame else {
+        let Some(frame) = frame.filter(|f| f.editable()) else {
             self.end_drag(doc);
             return Outcome::default();
         };
@@ -486,21 +530,56 @@ impl LaneEditor {
     }
 
     // -----------------------------------------------------------------------
-    // Commands on the selected points
+    // Commands on the selected points. They take the frame of the selected
+    // lane (`None` if it doesn't show), and change nothing on a lane that
+    // doesn't show or can't be edited there.
 
-    /// Deletes point `index` of `lane` (a double click on it).
-    pub fn delete_point(&mut self, doc: &mut Document, lane: LaneId, index: usize) -> Outcome {
+    /// The selection, to be changed by a command, if its lane's `frame`
+    /// shows and is editable. Otherwise the selection is dropped and the
+    /// outcome says why nothing changed.
+    fn editable_selection(
+        &mut self,
+        project: &Project,
+        frame: Option<&LaneFrame>,
+    ) -> ControlFlow<Outcome, (LaneId, BTreeSet<usize>)> {
+        self.check(project);
+        let Some(selection) = self.selection.clone() else {
+            return ControlFlow::Break(Outcome::default());
+        };
+        match frame {
+            Some(f) if f.editable => ControlFlow::Continue(selection),
+            Some(_) => {
+                self.selection = None;
+                ControlFlow::Break(Outcome::refused(Refusal::LaneNotDescribed))
+            }
+            None => {
+                self.selection = None;
+                ControlFlow::Break(Outcome::view())
+            }
+        }
+    }
+
+    /// Deletes point `index` of `lane`, drawn in `frame` (a double click on
+    /// it).
+    pub fn delete_point(
+        &mut self,
+        doc: &mut Document,
+        frame: &LaneFrame,
+        lane: LaneId,
+        index: usize,
+    ) -> Outcome {
         self.select_point(doc.project(), lane, index);
-        self.delete_points(doc)
+        self.delete_points(doc, Some(frame))
     }
 
     /// Deletes the selected points.
-    pub fn delete_points(&mut self, doc: &mut Document) -> Outcome {
+    pub fn delete_points(&mut self, doc: &mut Document, frame: Option<&LaneFrame>) -> Outcome {
         self.end_drag(doc);
-        self.check(doc.project());
-        let Some((lane, sel)) = self.selection.take() else {
-            return Outcome::default();
+        let (lane, sel) = match self.editable_selection(doc.project(), frame) {
+            ControlFlow::Continue(s) => s,
+            ControlFlow::Break(o) => return o,
         };
+        self.selection = None;
         let Some((_, l)) = lane_of(doc.project(), lane) else {
             return Outcome::view();
         };
@@ -518,11 +597,16 @@ impl LaneEditor {
     }
 
     /// Gives the segments after the selected points `shape`.
-    pub fn set_point_shape(&mut self, doc: &mut Document, shape: PointShape) -> Outcome {
+    pub fn set_point_shape(
+        &mut self,
+        doc: &mut Document,
+        frame: Option<&LaneFrame>,
+        shape: PointShape,
+    ) -> Outcome {
         self.end_drag(doc);
-        self.check(doc.project());
-        let Some((lane, sel)) = self.selection.clone() else {
-            return Outcome::default();
+        let (lane, sel) = match self.editable_selection(doc.project(), frame) {
+            ControlFlow::Continue(s) => s,
+            ControlFlow::Break(o) => return o,
         };
         let Some((_, l)) = lane_of(doc.project(), lane) else {
             return Outcome::view();
@@ -563,7 +647,8 @@ impl LaneEditor {
     ) {
         let r = frame.rect;
         let (left, right) = (r.x, r.x + r.w);
-        let ink = if lane.enabled {
+        // A lane that can't be edited here is drawn as an off one is.
+        let ink = if lane.enabled && frame.editable {
             pal.background.mix(color, 0.9)
         } else {
             pal.disabled_text
@@ -759,11 +844,11 @@ mod tests {
         let id = lane.id;
         track.automation.push(lane);
         project.tracks.push(Arc::new(track));
-        let frame = LaneFrame {
-            view: TimelineView::default(),
-            rect: Rect::new(0.0, 0.0, 800.0, 100.0),
-            scale: LaneScale::PAN,
-        };
+        let frame = LaneFrame::new(
+            TimelineView::default(),
+            Rect::new(0.0, 0.0, 800.0, 100.0),
+            Some(LaneScale::PAN),
+        );
         let grid = LaneGrid {
             snap: Snap::Off,
             meter: snap::meter(&project.tempo),

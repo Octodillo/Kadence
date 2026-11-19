@@ -46,6 +46,7 @@ All start with `KADENCE_`. The first four are on when set to any value, even
 | `KADENCE_SMOKE_TEST_CONFIG` | Directory in which `kadence --smoke-test` keeps the settings it writes, instead of a throwaway one; see `packaging/README.md`. |
 | `KADENCE_LOG` | The most detailed log level written to stderr: `off`, `error`, `warn` (default), `info`, `debug`, `trace`. Not only for tests; see `daw_core::logging`. |
 | `KADENCE_AUDIO=stub` | Run the app without an audio server (UI tests and screenshots). |
+| `KADENCE_AUDIO=server` | Open the audio server even when Kadence finds no socket of it. Not only for tests: for setups whose PipeWire or JACK socket is somewhere else. |
 
 The JACK tests are `#[ignore]`d; run them against a server with
 `cargo nextest run -p daw-backend -p daw-session --run-ignored only --test-threads 1`,

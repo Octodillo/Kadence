@@ -1056,3 +1056,145 @@ fn a_device_with_many_parameters_folds_the_rest() {
     assert_eq!(params(&r), 1);
     assert_eq!(more(&r), None);
 }
+
+/// A catalog that knows a device's parameters only while `known`, as a
+/// plugin's are known only while it is loaded.
+#[derive(Default)]
+struct Unloadable {
+    known: std::sync::atomic::AtomicBool,
+}
+
+impl Unloadable {
+    fn known(&self) -> bool {
+        self.known.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_known(&self, on: bool) {
+        self.known.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl ParamCatalog for Unloadable {
+    fn automatable(&self, _: &Device) -> Vec<ParamId> {
+        if self.known() { vec![0] } else { Vec::new() }
+    }
+    fn scale(&self, device: &Device, param: ParamId) -> Option<LaneScale> {
+        Catalog.scale(device, param).filter(|_| self.known())
+    }
+    fn default_value(&self, device: &Device, param: ParamId) -> Option<f64> {
+        Catalog
+            .default_value(device, param)
+            .filter(|_| self.known())
+    }
+    fn is_instrument(&self, _: &Device) -> bool {
+        false
+    }
+    fn revision(&self) -> u64 {
+        u64::from(self.known())
+    }
+}
+
+#[test]
+fn lanes_of_an_undescribed_parameter_are_read_only() {
+    use daw_arrange::{Cursor, Refusal};
+
+    let mut r = Rig::new();
+    let track = r.tracks[0];
+    let dev = Device::new(
+        "Plugin",
+        DeviceSource::Builtin {
+            kind: "daw.eq".into(),
+        },
+    );
+    let device = dev.id;
+    r.doc
+        .execute(AddDevice {
+            track,
+            index: 0,
+            device: dev,
+        })
+        .unwrap();
+    let catalog = Arc::new(Unloadable::default());
+    catalog.set_known(true);
+    r.arrange.params = Some(catalog.clone());
+    let lane = r.add_lane(0, AutomationTarget::DeviceParam { device, param: 0 });
+    r.arrange.open.insert((track, Group::Effects));
+    r.arrange.open.insert((track, Group::Device(device)));
+    r.arrange.relayout(r.doc.project());
+
+    // While the plugin is loaded, the lane is edited as any other; the
+    // first point stays selected.
+    r.click(r.x(2 * BAR), r.y(0, 0, 0.25));
+    r.click(r.x(BAR), r.y(0, 0, 0.5));
+    let points = r.points(lane);
+    assert_eq!(points.len(), 2);
+    assert!(r.arrange.lanes.points_selected(r.doc.project()));
+    let steps = r.doc.history().undo_len();
+    let first = |r: &Rig| {
+        let scale = Catalog
+            .scale(&r.doc.project().tracks[0].devices[0], 0)
+            .unwrap();
+        (r.x(BAR), r.y(0, 0, scale.to_norm(points[0].value)))
+    };
+
+    // Its plugin goes away: the range is unknown and the lane is drawn on
+    // a plain 0 to 1 scale, where nothing may change.
+    catalog.set_known(false);
+    r.arrange.relayout(r.doc.project());
+    let refused = Some(Refusal::LaneNotDescribed);
+    let at = |r: &Rig, n: f64| r.y(0, 0, LaneScale::UNIT.to_norm(n));
+    let (x, y) = (r.x(BAR), at(&r, points[0].value));
+    assert_eq!(r.arrange.cursor(r.doc.project(), x, y), Cursor::Arrow);
+    let empty = (r.x(3 * BAR), at(&r, 0.5));
+    assert_eq!(
+        r.arrange.cursor(r.doc.project(), empty.0, empty.1),
+        Cursor::Arrow
+    );
+
+    // Adding a point.
+    let o = r.input(Input::Press(Pointer::left(empty.0, empty.1)));
+    assert_eq!(o.error, refused);
+    assert!(!o.document);
+    r.input(Input::Release(Pointer::left(empty.0, empty.1)));
+    // The point menu: there is none, the press says why instead.
+    let right = Pointer {
+        button: daw_arrange::Button::Right,
+        ..Pointer::left(x, y)
+    };
+    let o = r.input(Input::Press(right));
+    assert_eq!((o.error, o.context_menu), (refused.clone(), None));
+    r.input(Input::Release(right));
+    // Moving one.
+    r.drag((x, y), (x + 50.0, at(&r, 1.0)), |_| {});
+    // Deleting one, by a double click or the earlier selection.
+    let o = r.input(Input::DoubleClick(Pointer::left(x, y)));
+    assert_eq!(o.error, refused);
+    assert!(!r.arrange.lanes.points_selected(r.doc.project()));
+    assert_eq!(r.points(lane), points);
+    assert_eq!(r.doc.history().undo_len(), steps, "nothing to undo");
+
+    // A selection made while it was known, then commands on it.
+    catalog.set_known(true);
+    r.arrange.relayout(r.doc.project());
+    let (x, y) = first(&r);
+    r.click(x, y);
+    assert!(r.arrange.lanes.points_selected(r.doc.project()));
+    catalog.set_known(false);
+    let o = r.arrange.set_point_shape(&mut r.doc, PointShape::Step);
+    assert_eq!(o.error, refused);
+    assert_eq!(r.points(lane), points);
+    // Delete, likewise.
+    catalog.set_known(true);
+    let (x, y) = first(&r);
+    r.click(x, y);
+    catalog.set_known(false);
+    let o = r.arrange.delete_points(&mut r.doc);
+    assert_eq!(o.error, refused);
+    assert_eq!(r.points(lane), points);
+
+    // Back again: editable again.
+    catalog.set_known(true);
+    r.arrange.relayout(r.doc.project());
+    r.click(r.x(3 * BAR), r.y(0, 0, 0.5));
+    assert_eq!(r.points(lane).len(), 3);
+}

@@ -19,7 +19,11 @@ Plasma desktop has, or through JACK itself. Open **Configure Kadence…**
   good start; lower it if you play instruments live.
 
 If there is no audio server, Kadence still runs and shows a notice; it
-plays silently until you choose a working device.
+plays silently until you choose a working device. Kadence looks for the
+server's socket before connecting, in the usual places for PipeWire and
+JACK. If your server listens somewhere else, start Kadence with
+`KADENCE_AUDIO=server` to connect anyway. Kadence then cannot tell when a
+server that went away comes back: apply the audio settings to reconnect.
 
 ### MIDI
 
@@ -258,6 +262,11 @@ automating the control: the click adds the first point. Drag points to move
 them, double-click one to delete it, and right-click a point to choose the
 shape of the curve that leaves it. The **−** button on a row removes its
 automation.
+
+While a plugin is not loaded (it is missing, or the audio engine is not
+running), Kadence does not know the ranges of its parameters. Their
+automation still plays back once the plugin loads, but until then it is
+shown greyed out with a lock beside the control, and cannot be edited.
 
 Closing a group puts away the controls that have no automation and keeps the
 automated ones in view. Closing the track's arrow hides all of its rows.
