@@ -183,21 +183,33 @@ impl PointShape {
 }
 
 /// How `target` on `track` maps to heights; device parameters by `params`.
+/// `None` for a device parameter nothing describes (no catalog, or the
+/// catalog doesn't know it: its plugin is not loaded), whose real range is
+/// unknown.
+pub fn target_scale(
+    params: Option<&Arc<dyn ParamCatalog>>,
+    track: &Track,
+    target: AutomationTarget,
+) -> Option<LaneScale> {
+    match target {
+        AutomationTarget::Volume | AutomationTarget::SendLevel { .. } => Some(LaneScale::LEVEL),
+        AutomationTarget::Pan => Some(LaneScale::PAN),
+        AutomationTarget::DeviceParam { device, param } => track
+            .devices
+            .iter()
+            .find(|d| d.id == device)
+            .and_then(|d| params?.scale(d, param)),
+    }
+}
+
+/// How `target` on `track` is drawn: along its [`target_scale`], or a plain
+/// 0 to 1 scale where that is unknown.
 pub fn lane_scale(
     params: Option<&Arc<dyn ParamCatalog>>,
     track: &Track,
     target: AutomationTarget,
 ) -> LaneScale {
-    match target {
-        AutomationTarget::Volume | AutomationTarget::SendLevel { .. } => LaneScale::LEVEL,
-        AutomationTarget::Pan => LaneScale::PAN,
-        AutomationTarget::DeviceParam { device, param } => track
-            .devices
-            .iter()
-            .find(|d| d.id == device)
-            .and_then(|d| params?.scale(d, param))
-            .unwrap_or(LaneScale::UNIT),
-    }
+    target_scale(params, track, target).unwrap_or(LaneScale::UNIT)
 }
 
 /// The value `target` has when no lane plays: the fader, pan knob, send
@@ -248,11 +260,11 @@ impl Arrange {
         index: usize,
         target: AutomationTarget,
     ) -> LaneFrame {
-        LaneFrame {
-            view: self.view,
-            rect: self.lane_rect(row, index),
-            scale: lane_scale(self.params.as_ref(), track, target),
-        }
+        LaneFrame::new(
+            self.view,
+            self.lane_rect(row, index),
+            target_scale(self.params.as_ref(), track, target),
+        )
     }
 
     /// The grid lane edits snap to.
@@ -357,14 +369,22 @@ impl Arrange {
     /// editor directly, this also ends a clip drag in progress.
     pub fn delete_points(&mut self, doc: &mut Document) -> Outcome {
         self.end_drag(doc);
-        self.lanes.delete_points(doc)
+        let frame = self.selected_frame(doc.project());
+        self.lanes.delete_points(doc, frame.as_ref())
     }
 
     /// Gives the segments after the selected points `shape`. Unlike calling
     /// the lane editor directly, this also ends a clip drag in progress.
     pub fn set_point_shape(&mut self, doc: &mut Document, shape: PointShape) -> Outcome {
         self.end_drag(doc);
-        self.lanes.set_point_shape(doc, shape)
+        let frame = self.selected_frame(doc.project());
+        self.lanes.set_point_shape(doc, frame.as_ref(), shape)
+    }
+
+    /// The frame of the lane points are selected on, if it shows.
+    fn selected_frame(&mut self, project: &Project) -> Option<LaneFrame> {
+        self.relayout(project);
+        self.lane_frame(project, self.lanes.selected_lane()?)
     }
 
     /// Adds an empty lane for `target` on `track`, as its own undo step.

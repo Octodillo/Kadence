@@ -259,6 +259,11 @@ them, double-click one to delete it, and right-click a point to choose the
 shape of the curve that leaves it. The **−** button on a row removes its
 automation.
 
+While a plugin is not loaded (it is missing, or the audio engine is not
+running), Kadence does not know the ranges of its parameters. Their
+automation still plays back once the plugin loads, but until then it is
+shown greyed out with a lock beside the control, and cannot be edited.
+
 Closing a group puts away the controls that have no automation and keeps the
 automated ones in view. Closing the track's arrow hides all of its rows.
 

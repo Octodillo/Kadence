@@ -67,6 +67,9 @@ pub enum Reason {
     EditRefused,
     /// A note was drawn past the end of its clip.
     NoteOutsideClip,
+    /// An automation lane was to be edited, but its parameter's range is
+    /// not known (its plugin is not loaded).
+    LaneNotDescribed,
     /// The audio engine refused the project; `detail`.
     EngineRefused,
     /// Device `name` rejected its saved settings; `detail`.
@@ -404,6 +407,7 @@ impl Message {
             }
             Self::Edit(Refusal::Edit(e)) => Fields::new(C::Edit, R::EditRefused).detail(e),
             Self::Edit(Refusal::NoteOutsideClip) => Fields::new(C::Edit, R::NoteOutsideClip),
+            Self::Edit(Refusal::LaneNotDescribed) => Fields::new(C::Edit, R::LaneNotDescribed),
             Self::Playback(e) => Fields::new(C::Playback, R::EngineRefused).detail(e),
             Self::Record(p) => match p {
                 RecordProblem::NoInstrumentTrack => Fields::new(C::Record, R::NoInstrumentTrack),
@@ -657,6 +661,10 @@ mod tests {
         assert_eq!(
             Message::Edit(Refusal::NoteOutsideClip).fields().reason,
             Reason::NoteOutsideClip
+        );
+        assert_eq!(
+            Message::Edit(Refusal::LaneNotDescribed).fields().reason,
+            Reason::LaneNotDescribed
         );
         let f = Message::from(ModelError::Invalid("x".into())).fields();
         assert_eq!((f.context, f.reason), (Context::Edit, Reason::EditRefused));

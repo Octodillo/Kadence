@@ -188,14 +188,6 @@ fn outcome_document() -> Outcome {
     }
 }
 
-fn outcome_error(e: Refusal) -> Outcome {
-    Outcome {
-        view: true,
-        error: Some(e),
-        ..Outcome::default()
-    }
-}
-
 impl PianoRoll {
     pub fn new() -> Self {
         Self {
@@ -887,7 +879,7 @@ impl PianoRoll {
             self.new_velocity,
         );
         let Some(note) = note.map(glue::new_note).filter(|n| n.start < c.length) else {
-            return outcome_error(Refusal::NoteOutsideClip);
+            return Outcome::refused(Refusal::NoteOutsideClip);
         };
         // A bare `AddNotes`, which takes in the resize that may follow, so
         // the note and its length are one undo step.
@@ -959,7 +951,7 @@ impl PianoRoll {
             Some(c) => {
                 let out = match doc.execute_boxed(c) {
                     Ok(_) => outcome_document(),
-                    Err(e) => outcome_error(Refusal::Edit(e)),
+                    Err(e) => Outcome::refused(Refusal::Edit(e)),
                 };
                 self.sync(doc.project());
                 out
