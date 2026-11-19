@@ -36,7 +36,8 @@ every pull request.
 [docs/testing.md](docs/testing.md) covers the shared test helpers and the
 environment switches the tests read.
 [docs/toolkit-neutrality.md](docs/toolkit-neutrality.md) says which code is
-tied to Qt and how the rest is kept usable by another front end.
+tied to Qt, and the plan to move the rest into a crate another front end
+can use.
 
 ## License
 
