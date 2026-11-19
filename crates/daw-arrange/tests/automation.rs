@@ -341,7 +341,7 @@ fn shapes_and_curve_bending() {
     r.arrange.set_point_shape(&mut r.doc, PointShape::Step);
     assert!(r.points(lane)[0].step);
     assert_eq!(
-        r.arrange.lanes.selected_shape(r.doc.project()),
+        r.arrange.point_shape(r.doc.project()),
         Some(PointShape::Step)
     );
     r.arrange.set_point_shape(&mut r.doc, PointShape::SlowStart);
@@ -402,7 +402,7 @@ impl ParamCatalog for Catalog {
             min: 20.0,
             max: 20_000.0,
             log: true,
-            steps: false,
+            steps: None,
         })
     }
     fn default_value(&self, _: &Device, _: ParamId) -> Option<f64> {

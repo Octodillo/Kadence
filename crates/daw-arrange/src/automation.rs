@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use daw_core::event::ParamId;
 use daw_core::level::{FADER_FLOOR_DB, FADER_MAX_DB, SILENCE_DB};
+use daw_core::plugin::{Stepped, Steps};
 use daw_core::time::TickTime;
 use daw_model::commands::{AddLane, LaneField, RemoveLane, SetLane};
 use daw_model::{
@@ -25,13 +26,14 @@ pub enum LaneScale {
     /// silence ([`SILENCE_DB`]).
     Db { floor: f64, max: f64 },
     /// Plain values from `min` to `max`. `log` spaces them logarithmically
-    /// (`min` must be positive); `steps` rounds to whole numbers (choices,
-    /// toggles).
+    /// (`min` must be positive). A parameter with `steps` (a switch, a
+    /// list, whole numbers) takes only those values, and its lane holds
+    /// each point's value until the next instead of ramping.
     Range {
         min: f64,
         max: f64,
         log: bool,
-        steps: bool,
+        steps: Option<Steps>,
     },
 }
 
@@ -44,19 +46,51 @@ impl LaneScale {
         min: -1.0,
         max: 1.0,
         log: false,
-        steps: false,
+        steps: None,
     };
     pub const UNIT: Self = Self::Range {
         min: 0.0,
         max: 1.0,
         log: false,
-        steps: false,
+        steps: None,
     };
+
+    /// Whether its target takes only some values, so its lane holds
+    /// between points (see [`Range`](Self::Range)).
+    pub fn is_stepped(self) -> bool {
+        matches!(self, Self::Range { steps: Some(_), .. })
+    }
 
     /// Whether heights are proportional to values (in dB for levels), so
     /// a straight ramp is a straight line.
     pub fn is_linear(self) -> bool {
         !matches!(self, Self::Range { log: true, .. })
+    }
+
+    /// The value nearest `v` that its target takes: `v` itself unless it is
+    /// [stepped](Self::is_stepped). (A point may sit between steps, drawn
+    /// before its parameter was known to be stepped.)
+    pub fn snap(self, v: f64) -> f64 {
+        match self {
+            Self::Range {
+                min,
+                max,
+                steps: Some(s),
+                ..
+            } => Stepped::new(s, min, max).snap(v),
+            _ => v,
+        }
+    }
+
+    /// What `lane`, drawn along this scale, plays at `tick`: holding each
+    /// point's value, on its step, if [stepped](Self::is_stepped), else
+    /// along each segment's shape. `None` without points.
+    pub fn lane_value(self, lane: &AutomationLane, tick: TickTime) -> Option<f64> {
+        if self.is_stepped() {
+            lane.held_at(tick).map(|v| self.snap(v))
+        } else {
+            lane.value_at(tick)
+        }
     }
 
     /// `v` as a height from 0 (bottom) to 1 (top).
@@ -109,7 +143,10 @@ impl LaneScale {
                 } else {
                     min + n * (max - min)
                 };
-                if steps { v.round() } else { v }
+                match steps {
+                    Some(s) => s.snap(v, min, max),
+                    None => v,
+                }
             }
         }
     }
@@ -383,6 +420,14 @@ impl Arrange {
         self.lanes.set_point_shape(doc, frame.as_ref(), shape)
     }
 
+    /// The shape of the segment after the first selected point, for the
+    /// point menu to check; `None` where shapes don't apply (see
+    /// [`LaneEditor::selected_shape`](crate::LaneEditor::selected_shape)).
+    pub fn point_shape(&self, project: &Project) -> Option<PointShape> {
+        let frame = self.lane_frame(project, self.lanes.selected_lane()?);
+        self.lanes.selected_shape(project, frame.as_ref())
+    }
+
     /// The frame of the lane points are selected on, if it shows.
     fn selected_frame(&mut self, project: &Project) -> Option<LaneFrame> {
         self.relayout(project);
@@ -507,7 +552,7 @@ mod tests {
             min: 20.0,
             max: 20000.0,
             log: true,
-            steps: false,
+            steps: None,
         };
         assert!((log.from_norm(0.5) - 632.46).abs() < 0.1);
         assert_eq!(log.to_norm(0.0), 0.0);
@@ -515,8 +560,49 @@ mod tests {
             min: 0.0,
             max: 3.0,
             log: false,
-            steps: true,
+            steps: Some(Steps(3)),
         };
         assert_eq!(steps.from_norm(0.4), 1.0);
+        assert!(steps.is_stepped() && !LaneScale::UNIT.is_stepped());
+        // Steps of a half.
+        let halves = LaneScale::Range {
+            min: -1.0,
+            max: 1.0,
+            log: false,
+            steps: Some(Steps(4)),
+        };
+        assert_eq!(halves.from_norm(0.6), 0.0);
+        assert_eq!(halves.from_norm(0.7), 0.5);
+    }
+
+    #[test]
+    fn lanes_of_stepped_targets_hold_between_points() {
+        let mut lane = AutomationLane::new(AutomationTarget::Pan);
+        lane.points = vec![
+            AutomationPoint::new(TickTime(100), 0.0),
+            AutomationPoint::new(TickTime(200), 2.0),
+        ];
+        let stepped = LaneScale::Range {
+            min: 0.0,
+            max: 3.0,
+            log: false,
+            steps: Some(Steps(3)),
+        };
+        let smooth = LaneScale::UNIT;
+        let at = |s: LaneScale, t| s.lane_value(&lane, TickTime(t));
+        assert_eq!(at(smooth, 150), Some(1.0));
+        assert_eq!(at(stepped, 150), Some(0.0));
+        assert_eq!(at(stepped, 50), Some(0.0), "before the first point");
+        assert_eq!(at(stepped, 200), Some(2.0));
+        assert_eq!(at(stepped, 900), Some(2.0), "after the last");
+        assert_eq!(
+            stepped.lane_value(&AutomationLane::new(AutomationTarget::Pan), TickTime(0)),
+            None
+        );
+        // A point between steps plays, and shows, on the nearest one.
+        lane.points[1].value = 1.6;
+        assert_eq!(stepped.lane_value(&lane, TickTime(200)), Some(2.0));
+        assert_eq!(stepped.snap(1.4), 1.0);
+        assert_eq!(smooth.snap(0.4), 0.4);
     }
 }
