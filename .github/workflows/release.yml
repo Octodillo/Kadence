@@ -75,7 +75,7 @@ jobs:
                 ;;
             esac
           fi
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.ref.outputs.ref }}
       - name: Check the tag against every version in the tree
@@ -85,7 +85,7 @@ jobs:
         # A release is the one place this must hold. If an advisory does not
         # apply to Kadence, list it under [advisories] ignore in deny.toml,
         # with the reason.
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
         with:
           command: check advisories
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -93,7 +93,7 @@ jobs:
           toolchain: stable
       - name: Source tarball (vendored crates)
         run: packaging/make-dist.sh dist
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source
           path: dist/kadence-*.tar.gz
@@ -115,7 +115,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed base-devel git github-cli namcap sudo \
             weston xorg-server-xvfb xorg-xauth
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.ref }}
       - name: Source tarball from the source job
@@ -123,7 +123,7 @@ jobs:
       - name: makepkg, namcap, install, smoke test
         # Leaves the package and its PKGBUILD, checksum filled in, in out/.
         run: ci/arch-package.sh release out /tmp/source/kadence-"$VERSION".tar.gz
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: arch
           path: out/*
@@ -145,14 +145,14 @@ jobs:
         run: |
           dnf -y install git gh rpm-build rpmlint dnf-plugins-core \
             weston xorg-x11-server-Xvfb xorg-x11-xauth
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.ref }}
       - name: Source tarball from the source job
         run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n source -D /tmp/source
       - name: rpmbuild, rpmlint, install, smoke test
         run: ci/fedora-package.sh /tmp/source/kadence-"$VERSION".tar.gz out
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fedora
           path: out/*
@@ -171,14 +171,14 @@ jobs:
     steps:
       # Before git is installed, so this is a plain download; nothing
       # below needs the history.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.ref }}
       - name: Install Flatpak and the runtimes
         run: ci/flatpak-package.sh setup
       - name: Build, install and smoke test in the sandbox
         run: ci/flatpak-package.sh build out/kadence-"$VERSION"-x86_64.flatpak
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flatpak
           path: out/*
@@ -200,7 +200,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.ref }}
       - name: Gather the artifacts
